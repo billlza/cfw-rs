@@ -3,7 +3,12 @@
 //! private storage path. These synchronous operations belong on a worker.
 use super::*;
 use crate::{
-    CheckedConfiguration, CheckedStartConfiguration, EngineProcess, WindowsEngineGenerationStore,
+    CheckedConfiguration, CheckedStartConfiguration, EngineProcess, ServiceClientRole,
+    WindowsEngineGenerationStore,
+    authority::{
+        AuthorityChannel, AuthoritySnapshot,
+        wire::{Command, Request, Response},
+    },
     credential_lifecycle::WindowsCredentialLifecycle,
     user_agent::{UserRuntimeStorage, desktop::DesktopUserAgent},
 };
@@ -56,14 +61,41 @@ impl InstalledDesktop {
     pub fn paths(&self) -> &UserPaths {
         &self.paths
     }
+    pub(crate) fn observe_authority(&self, deadline: Instant) -> Result<AuthoritySnapshot> {
+        self.installation.require_desktop_process()?;
+        let mut channel = AuthorityChannel::connect(
+            SERVICE_NAME,
+            ServiceClientRole::Desktop,
+            Arc::clone(&self.image),
+        )
+        .map_err(crate::LineageError::from)?;
+        match channel
+            .request(
+                Request::new(Command::Observe).map_err(crate::LineageError::from)?,
+                deadline.min(Instant::now() + Duration::from_secs(5)),
+            )
+            .map_err(crate::LineageError::from)?
+        {
+            Response::Observed(snapshot) => Ok(snapshot),
+            _ => Err(HostError::State("Authority omitted its status observation")),
+        }
+    }
 
     pub fn prepare_proxy(
         &self,
         request: EngineStartRequest,
         deadline: Instant,
     ) -> Result<DesktopUserAgent> {
+        let request = CheckedStartConfiguration::new(request)?;
+        self.prepare_checked_proxy(request, deadline)
+    }
+    pub(crate) fn prepare_checked_proxy(
+        &self,
+        request: CheckedStartConfiguration,
+        deadline: Instant,
+    ) -> Result<DesktopUserAgent> {
         self.installation.require_desktop_process()?;
-        Ok(DesktopUserAgent::prepare(
+        Ok(DesktopUserAgent::prepare_checked(
             &self.credentials,
             Arc::clone(&self.image),
             request,
@@ -80,11 +112,11 @@ impl InstalledDesktop {
         request: EngineStartRequest,
         deadline: Instant,
     ) -> Result<CheckedConfiguration> {
+        let candidate = CheckedStartConfiguration::new(request)?;
         let deadline = deadline.min(Instant::now() + Duration::from_secs(30));
         remaining(deadline)?;
         self.installation.require_desktop_process()?;
         crate::user_agent::launcher::medium_process()?;
-        let candidate = CheckedStartConfiguration::new(request)?;
         let lineage = self.generations.load_lineage_until(deadline)?;
         if candidate.context().installation_id != lineage.session.installation_id
             || candidate.context().config_epoch != lineage.session.config_epoch

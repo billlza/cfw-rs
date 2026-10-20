@@ -129,6 +129,6 @@ impl UserAgentPlan {
         }
     }
 }
-pub(super) fn hex(bytes: &[u8; 32]) -> String {
+pub(crate) fn hex(bytes: &[u8; 32]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }

@@ -3,6 +3,8 @@
 mod plan;
 pub use plan::UserAgentPlan;
 #[cfg(windows)]
+pub(crate) use plan::hex;
+#[cfg(windows)]
 mod control;
 #[cfg(windows)]
 pub mod desktop;
@@ -30,6 +32,9 @@ pub enum UserAgentError {
     Mode,
     #[error("Windows user-agent control protocol: {0}")]
     Wire(#[from] crate::authority::wire::WireError),
+    #[cfg(windows)]
+    #[error("Windows user-agent live observation channel: {0}")]
+    Observation(Box<launch_channel::LaunchChannelError>),
     #[error("Windows user-agent authority worker: {0}")]
     Control(std::sync::Arc<ControlError>),
     #[error("Windows user-agent native child: {0}")]
@@ -59,6 +64,13 @@ pub enum UserAgentError {
     },
 }
 pub type Result<T> = std::result::Result<T, UserAgentError>;
+
+#[cfg(windows)]
+impl From<launch_channel::LaunchChannelError> for UserAgentError {
+    fn from(error: launch_channel::LaunchChannelError) -> Self {
+        Self::Observation(Box::new(error))
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ControlError {

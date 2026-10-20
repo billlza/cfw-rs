@@ -12,6 +12,7 @@ use std::{
     net::{Ipv4Addr, TcpListener},
     sync::mpsc,
 };
+mod backend;
 mod checks;
 
 /// This fixture is installed as the admitted desktop image in disposable CI.
@@ -135,7 +136,10 @@ pub(super) fn exercise() -> Result<()> {
             .map_err(|e| e.to_string())?;
         let stop = Arc::new(AtomicBool::new(false));
         let (send, receive) = mpsc::sync_channel(1);
-        let (active, off) = thread::scope(|scope| -> Result<_> {
+        let (observer, queries) =
+            cfw_windows_engine::user_agent::desktop::DesktopStatusObserver::channel();
+        let expected_digest = request.config_digest.clone();
+        let (active, off, observations) = thread::scope(|scope| -> Result<_> {
             let worker_stop = Arc::clone(&stop);
             let desktop = &desktop;
             let worker = scope.spawn(move || -> Result<_> {
@@ -143,7 +147,7 @@ pub(super) fn exercise() -> Result<()> {
                     .prepare_proxy(request, Instant::now() + LIMIT)
                     .map_err(|e| e.to_string())?;
                 let completed = operation
-                    .run(
+                    .run_observed(
                         cfw_windows_engine::user_agent::launcher::UserAgentInvocation::installed(
                             SERVICE_NAME,
                         )
@@ -151,6 +155,7 @@ pub(super) fn exercise() -> Result<()> {
                         &diagnostics,
                         worker_stop,
                         send,
+                        queries,
                     )
                     .map_err(|e| e.to_string())?;
                 if completed.reason() != cfw_windows_engine::user_agent::StopReason::Requested
@@ -180,22 +185,43 @@ pub(super) fn exercise() -> Result<()> {
                     return Err("installed runtime Ready scope differs".into());
                 }
                 user_agent::traffic(address)?;
+                let mut observations = Vec::new();
+                for _ in 0..3 {
+                    let fresh = observer
+                        .query_until(Instant::now() + LIMIT)
+                        .map_err(|e| e.to_string())?;
+                    let root = &ready.context().operation.root;
+                    if fresh.runtime.owner != cfw_engine_api::EngineOwner::WindowsUserAgent
+                        || !fresh.runtime.ready
+                        || fresh.runtime.config_digest != expected_digest
+                        || fresh.runtime.context.installation_id != root.installation_id.to_string()
+                        || fresh.runtime.context.config_epoch != root.epoch
+                        || fresh.runtime.context.generation != root.generation
+                        || fresh.engine_process_id == 0
+                    {
+                        return Err("fresh installed runtime observation changed identity".into());
+                    }
+                    observations.push(serde_json::json!({"runtime":fresh.runtime,"engine_process_id":fresh.engine_process_id}));
+                }
                 let changed = storage.proxy().snapshot().map_err(|e| e.to_string())? != original;
                 if changed != (mode == cfw_singbox_config::ProjectionMode::SystemProxy) {
                     return Err("installed runtime proxy settings differ from mode".into());
                 }
-                Ok(ready.authority().clone())
+                Ok((ready.authority().clone(), observations))
             })();
             stop.store(true, Ordering::Release);
             let finished = worker
                 .join()
                 .map_err(|_| "installed Desktop worker panicked")?;
             match (exercised, finished) {
-                (Ok(active), Ok(off)) => Ok((active, off)),
+                (Ok((active, observations)), Ok(off)) => Ok((active, off, observations)),
                 (Err(e), Ok(_)) | (Ok(_), Err(e)) => Err(e),
                 (Err(a), Err(b)) => Err(format!("{a}; installed stop: {b}")),
             }
         })?;
+        if observer.query_until(Instant::now() + LIMIT).is_ok() {
+            return Err("retired Desktop worker returned a cached Active observation".into());
+        }
         if storage.proxy().snapshot().map_err(|e| e.to_string())? != original {
             return Err("installed runtime left system proxy changed".into());
         }
@@ -203,11 +229,12 @@ pub(super) fn exercise() -> Result<()> {
             .map_err(|e| format!("installed mixed listener retained: {e}"))?;
         let _controller = TcpListener::bind(controller_address)
             .map_err(|e| format!("installed controller listener retained: {e}"))?;
-        modes.push(serde_json::json!({"mode":mode,"active":active,"off":off,"http_proxy_traffic":true,"listeners_released":true,"proxy_restored":true,"agent_exit_zero":true}));
+        modes.push(serde_json::json!({"mode":mode,"active":active,"off":off,"observations":observations,"retired_query_rejected":true,"http_proxy_traffic":true,"listeners_released":true,"proxy_restored":true,"agent_exit_zero":true}));
     }
+    let backend = backend::exercise()?;
     println!(
         "{}",
-        serde_json::json!({"source":std::env::var("CFW_NATIVE_SERVICE_SOURCE").map_err(|e|e.to_string())?,"product_service":true,"product_agent":true,"desktop_is_fixture":true,"medium_integrity":true,"configuration_checks":configuration_checks,"modes":modes,"release_accepted":false})
+        serde_json::json!({"source":std::env::var("CFW_NATIVE_SERVICE_SOURCE").map_err(|e|e.to_string())?,"product_service":true,"product_agent":true,"desktop_is_fixture":true,"medium_integrity":true,"configuration_checks":configuration_checks,"modes":modes,"backend":backend,"release_accepted":false})
     );
     Ok(())
 }
@@ -234,6 +261,8 @@ pub(super) fn check_output(directory: &Path, output: &Path, exit: u32) -> Result
         || report["release_accepted"] != false
         || report["configuration_checks"]["authority_unchanged"] != true
         || report["configuration_checks"]["proxy_unchanged"] != true
+        || report["backend"]["shared_engine_backend"] != true
+        || report["backend"]["exited_engine_query_rejected"] != true
         || report["configuration_checks"]["checked_modes"]
             .as_array()
             .is_none_or(|modes| modes.len() != 4)

@@ -2,8 +2,11 @@
 //!
 //! A stopped child is not evidence of globally restored proxy/TUN state. This
 //! layer admits local/SystemProxy data planes and separately journals current-
-//! user WinINet settings. It does not implement `EngineBackend` or manufacture
-//! `NativeEngineStatus::Off`.
+//! user WinINet settings. The installed backend requires independent Authority
+//! cleanup before returning `NativeEngineStatus::Off`.
+
+#[cfg(windows)]
+pub mod backend;
 
 #[cfg(any(windows, test))]
 pub mod authority;

@@ -1,5 +1,6 @@
-//! One inherited launch frame and its decode acknowledgement. This channel
-//! grants no Authority lease and does not report that an engine is running.
+//! An inherited launch frame and its decode acknowledgement. Installed owners
+//! retain the same private channel for fresh, correlated runtime observations.
+//! The launch acknowledgement alone never attests an engine or grants a lease.
 //! Both endpoints run on native workers; cancellation drains kernel I/O before
 //! releasing buffers, so a delayed driver can outlive the requested deadline.
 use super::handoff::{HandoffError, LaunchMessage, MAX_FRAME_BYTES, UserAgentLaunch};
@@ -36,6 +37,8 @@ use windows_sys::Win32::{
 
 const ACK_PREFIX: &[u8] = b"cfw.launch.received.v1\0";
 const ACK_BYTES: usize = ACK_PREFIX.len() + 32;
+mod observation;
+pub(crate) use observation::{ObservationClient, ObservationServer};
 
 #[derive(Debug, thiserror::Error)]
 pub enum LaunchChannelError {
@@ -51,6 +54,8 @@ pub enum LaunchChannelError {
     Identity,
     #[error("Windows launch acknowledgement does not match the sent frame")]
     Acknowledgement,
+    #[error("Windows runtime observation is malformed, stale or unrelated")]
+    Observation,
 }
 pub type Result<T> = std::result::Result<T, LaunchChannelError>;
 
@@ -108,6 +113,14 @@ impl LaunchSender {
         deadline: Instant,
         cancel: &AtomicBool,
     ) -> Result<()> {
+        self.send_observed(message, deadline, cancel).map(|_| ())
+    }
+    pub(crate) fn send_observed(
+        self,
+        message: LaunchMessage,
+        deadline: Instant,
+        cancel: &AtomicBool,
+    ) -> Result<ObservationClient> {
         user()?;
         check_deadline(deadline)?;
         let expected = acknowledgement(message.as_bytes());
@@ -122,7 +135,7 @@ impl LaunchSender {
         if received.as_bytes() != expected {
             return Err(LaunchChannelError::Acknowledgement);
         }
-        Ok(())
+        Ok(ObservationClient::new(self.pipe))
     }
 }
 
@@ -190,6 +203,14 @@ impl LaunchReceiver {
         })
     }
     pub fn receive(self, deadline: Instant, cancel: &AtomicBool) -> Result<UserAgentLaunch> {
+        self.receive_observed(deadline, cancel)
+            .map(|(launch, _)| launch)
+    }
+    pub(crate) fn receive_observed(
+        self,
+        deadline: Instant,
+        cancel: &AtomicBool,
+    ) -> Result<(UserAgentLaunch, ObservationServer)> {
         user()?;
         check_deadline(deadline)?;
         self.parent.verify_pipe_server(&self.pipe)?;
@@ -205,7 +226,7 @@ impl LaunchReceiver {
             ACK_BYTES,
             Some(cancel),
         )?;
-        Ok(launch)
+        Ok((launch, ObservationServer::new(self)))
     }
 }
 

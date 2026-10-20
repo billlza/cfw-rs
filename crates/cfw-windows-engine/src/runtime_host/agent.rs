@@ -16,7 +16,7 @@ pub fn run_agent(installation: InstalledRuntime) -> Result<()> {
     let paths = installation.user_paths()?;
     let expected = Arc::new(installation.desktop()?);
     let input = std::io::stdin().as_handle().try_clone_to_owned()?;
-    let launch = LaunchReceiver::from_inherited(input, expected)?.receive(
+    let (launch, observation) = LaunchReceiver::from_inherited(input, expected)?.receive_observed(
         Instant::now() + Duration::from_secs(15),
         &AtomicBool::new(false),
     )?;
@@ -34,7 +34,7 @@ pub fn run_agent(installation: InstalledRuntime) -> Result<()> {
     let stop = AtomicBool::new(false);
     let (sender, receiver) = mpsc::sync_channel(1);
     thread::scope(|scope| -> Result<()> {
-        let worker = scope.spawn(|| session.run(&stop, sender));
+        let worker = scope.spawn(|| session.run_observed(&stop, sender, observation));
         let readiness = match receiver.recv_timeout(Duration::from_secs(20)) {
             Ok(ready)
                 if ready.context() == &context

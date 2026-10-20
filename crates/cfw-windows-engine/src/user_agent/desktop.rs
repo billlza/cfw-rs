@@ -15,13 +15,16 @@ use crate::{
     credential_lifecycle::{CredentialLifecycleError, WindowsCredentialLifecycle},
     service_transport::check_deadline,
 };
-use cfw_engine_api::{EngineStartRequest, authority_v1::AuthorityState};
+use cfw_engine_api::{
+    EngineCommandContext, EngineOwner, EngineStartRequest, RuntimeIdentity,
+    authority_v1::AuthorityState,
+};
 use std::{
     fs::File,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
-        mpsc::SyncSender,
+        mpsc::{self, Receiver, SyncSender, TryRecvError},
     },
     thread,
     time::{Duration, Instant},
@@ -57,6 +60,8 @@ pub enum DesktopError {
     Response,
     #[error("Windows Desktop readiness receiver is unavailable")]
     ReadyReceiver,
+    #[error("Windows Desktop status request: {0}")]
+    Observation(Arc<Self>),
     #[error("Windows Desktop operation failed ({operation}); cleanup failed ({cleanup})")]
     Cleanup {
         operation: Box<Self>,
@@ -64,6 +69,55 @@ pub enum DesktopError {
     },
 }
 pub type Result<T> = std::result::Result<T, DesktopError>;
+
+#[derive(Debug, Clone)]
+pub struct DesktopLive {
+    pub runtime: RuntimeIdentity,
+    pub engine_process_id: u32,
+}
+struct StatusQuery {
+    deadline: Instant,
+    reply: SyncSender<std::result::Result<DesktopLive, Arc<DesktopError>>>,
+}
+/// Bounded, read-only requests consumed by the owning Desktop native worker.
+/// A timeout says nothing about current runtime state and does not replay work.
+#[derive(Clone)]
+pub struct DesktopStatusObserver {
+    sender: SyncSender<StatusQuery>,
+}
+pub struct DesktopStatusRequests {
+    receiver: Receiver<StatusQuery>,
+}
+impl DesktopStatusObserver {
+    pub fn channel() -> (Self, DesktopStatusRequests) {
+        let (sender, receiver) = mpsc::sync_channel(4);
+        (Self { sender }, DesktopStatusRequests { receiver })
+    }
+    pub fn query_until(&self, deadline: Instant) -> Result<DesktopLive> {
+        let deadline = deadline.min(Instant::now() + Duration::from_secs(30));
+        check_deadline(deadline)?;
+        let (reply, received) = mpsc::sync_channel(1);
+        self.sender
+            .try_send(StatusQuery { deadline, reply })
+            .map_err(|error| match error {
+                mpsc::TrySendError::Full(_) => DesktopError::State("status request queue is full"),
+                mpsc::TrySendError::Disconnected(_) => {
+                    DesktopError::State("runtime worker is unavailable")
+                }
+            })?;
+        received
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .map_err(|error| match error {
+                mpsc::RecvTimeoutError::Timeout => {
+                    DesktopError::Transport(ServiceTransportError::Deadline)
+                }
+                mpsc::RecvTimeoutError::Disconnected => {
+                    DesktopError::State("runtime status was not delivered")
+                }
+            })?
+            .map_err(DesktopError::Observation)
+    }
+}
 
 pub struct DesktopReady {
     context: LeaseContext,
@@ -137,8 +191,16 @@ impl DesktopUserAgent {
         request: EngineStartRequest,
         deadline: Instant,
     ) -> Result<Self> {
-        check_deadline(deadline)?;
         let request = CheckedStartConfiguration::new(request)?;
+        Self::prepare_checked(credentials, agent_image, request, deadline)
+    }
+    pub(crate) fn prepare_checked(
+        credentials: &WindowsCredentialLifecycle,
+        agent_image: Arc<VerifiedExecutable>,
+        request: CheckedStartConfiguration,
+        deadline: Instant,
+    ) -> Result<Self> {
+        check_deadline(deadline)?;
         let current = medium_process()?;
         current
             .require_current_console_session()
@@ -192,6 +254,26 @@ impl DesktopUserAgent {
         stop: Arc<AtomicBool>,
         ready: SyncSender<DesktopReady>,
     ) -> Result<DesktopCompleted> {
+        self.run_inner(invocation, diagnostics, stop, ready, None)
+    }
+    pub fn run_observed(
+        &mut self,
+        invocation: UserAgentInvocation,
+        diagnostics: &File,
+        stop: Arc<AtomicBool>,
+        ready: SyncSender<DesktopReady>,
+        status: DesktopStatusRequests,
+    ) -> Result<DesktopCompleted> {
+        self.run_inner(invocation, diagnostics, stop, ready, Some(status))
+    }
+    fn run_inner(
+        &mut self,
+        invocation: UserAgentInvocation,
+        diagnostics: &File,
+        stop: Arc<AtomicBool>,
+        ready: SyncSender<DesktopReady>,
+        status: Option<DesktopStatusRequests>,
+    ) -> Result<DesktopCompleted> {
         if self.attempted || self.pending.is_none() {
             return Err(DesktopError::State("operation already consumed"));
         }
@@ -199,7 +281,7 @@ impl DesktopUserAgent {
             return Err(DesktopError::State("invocation names a different service"));
         }
         self.attempted = true;
-        let operated = self.operate(invocation, diagnostics, stop, ready);
+        let operated = self.operate(invocation, diagnostics, stop, ready, status);
         let stopped = self.stop(Instant::now() + STOP_LIMIT);
         match (operated, stopped) {
             (Ok(reason), Ok(stopped)) => Ok(DesktopCompleted { reason, stopped }),
@@ -216,6 +298,7 @@ impl DesktopUserAgent {
         diagnostics: &File,
         stop: Arc<AtomicBool>,
         ready: SyncSender<DesktopReady>,
+        status: Option<DesktopStatusRequests>,
     ) -> Result<StopReason> {
         if stop.load(Ordering::Acquire) {
             return Ok(StopReason::Requested);
@@ -285,6 +368,13 @@ impl DesktopUserAgent {
             if stop.load(Ordering::Acquire) {
                 return Ok(StopReason::Requested);
             }
+            if let Some(status) = &status {
+                match status.receiver.try_recv() {
+                    Ok(query) => self.answer_status(query)?,
+                    Err(TryRecvError::Empty) => {}
+                    Err(TryRecvError::Disconnected) => return Ok(StopReason::Requested),
+                }
+            }
             let snapshot = self.observe_owned(Instant::now() + COMMAND_LIMIT)?;
             match snapshot.state {
                 AuthorityState::Active => self
@@ -298,8 +388,67 @@ impl DesktopUserAgent {
                 | AuthorityState::Off => return Ok(StopReason::AuthorityRevoked),
                 _ => return Err(DesktopError::State("authority regressed after Ready")),
             }
-            wait_signal(&stop, Duration::from_secs(1));
+            wait_signal(
+                &stop,
+                if status.is_some() {
+                    Duration::from_millis(50)
+                } else {
+                    Duration::from_secs(1)
+                },
+            );
         }
+    }
+    fn answer_status(&mut self, query: StatusQuery) -> Result<()> {
+        // Queued requests that expired before native admission have no effect.
+        if Instant::now() >= query.deadline {
+            if let Err(retired) = query.reply.send(Err(Arc::new(DesktopError::Transport(
+                ServiceTransportError::Deadline,
+            )))) {
+                drop(retired);
+            }
+            return Ok(());
+        }
+        let observed = self.query_status(query.deadline).map_err(Arc::new);
+        let failed = observed.as_ref().err().cloned();
+        // A caller may abandon a read. Retire its response; a native failure
+        // still propagates to the lifecycle owner and triggers normal cleanup.
+        if let Err(retired) = query.reply.send(observed) {
+            drop(retired);
+        }
+        if let Some(error) = failed {
+            return Err(DesktopError::Observation(error));
+        }
+        Ok(())
+    }
+    pub fn query_status(&mut self, deadline: Instant) -> Result<DesktopLive> {
+        check_deadline(deadline)?;
+        let before = self.observe_owned(deadline)?;
+        if before.state != AuthorityState::Active {
+            return Err(DesktopError::State("runtime is not Active"));
+        }
+        let running = self
+            .child
+            .as_mut()
+            .ok_or(DesktopError::State("missing child"))?
+            .observe_runtime(deadline)?;
+        let after = self.observe_owned(deadline)?;
+        if after != before {
+            return Err(DesktopError::Context);
+        }
+        let root = &self.context.operation.root;
+        Ok(DesktopLive {
+            runtime: RuntimeIdentity {
+                owner: EngineOwner::WindowsUserAgent,
+                context: EngineCommandContext {
+                    installation_id: root.installation_id.to_string(),
+                    config_epoch: root.epoch,
+                    generation: root.generation,
+                },
+                config_digest: running.configuration_digest,
+                ready: true,
+            },
+            engine_process_id: running.process_id,
+        })
     }
     fn observe(&mut self, deadline: Instant) -> Result<AuthoritySnapshot> {
         self.last_authority = None;
@@ -395,7 +544,7 @@ impl DesktopUserAgent {
     /// Agent has exited. This never treats a timeout/recovery state as Off.
     pub fn wait_global_off(&mut self, deadline: Instant) -> Result<AuthoritySnapshot> {
         check_deadline(deadline)?;
-        if self.agent_exit_observation().is_none() {
+        if self.child.is_some() && self.agent_exit_observation().is_none() {
             return Err(DesktopError::State(
                 "Agent has not exited before global cleanup wait",
             ));
@@ -416,6 +565,27 @@ impl DesktopUserAgent {
                 Duration::from_millis(25).min(deadline.saturating_duration_since(Instant::now())),
             );
         }
+    }
+    /// Complete this owner's stop, including a preparation cancelled before an
+    /// Agent existed. Native Off is re-read first; no-child alone proves nothing.
+    pub(crate) fn finish_global_stop(
+        &mut self,
+        proxy: &crate::WindowsSystemProxy,
+        deadline: Instant,
+    ) -> Result<AuthoritySnapshot> {
+        if self.child.is_some() && self.agent_exit_observation().is_none() {
+            return Err(DesktopError::State(
+                "Agent has not exited before global cleanup",
+            ));
+        }
+        let snapshot = self.observe(deadline)?;
+        if snapshot.state == AuthorityState::Off {
+            return Ok(snapshot);
+        }
+        if self.context.operation.mode == cfw_engine_api::authority_v1::AuthorityMode::SystemProxy {
+            self.reconcile_system_proxy_stop(proxy, deadline)?;
+        }
+        self.wait_global_off(deadline)
     }
     /// Finish a normally acknowledged SystemProxy stop on its original
     /// connection. Keep this owner/runtime reference through the final reply;

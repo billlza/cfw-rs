@@ -160,11 +160,27 @@ impl UserAgentSession {
         stop: &AtomicBool,
         ready: SyncSender<ReadyObservation>,
     ) -> Result<StopReason> {
+        self.run_inner(stop, ready, None)
+    }
+    pub(crate) fn run_observed(
+        &mut self,
+        stop: &AtomicBool,
+        ready: SyncSender<ReadyObservation>,
+        observation: super::launch_channel::ObservationServer,
+    ) -> Result<StopReason> {
+        self.run_inner(stop, ready, Some(observation))
+    }
+    fn run_inner(
+        &mut self,
+        stop: &AtomicBool,
+        ready: SyncSender<ReadyObservation>,
+        observation: Option<super::launch_channel::ObservationServer>,
+    ) -> Result<StopReason> {
         if self.attempted {
             return Err(UserAgentError::State);
         }
         self.attempted = true;
-        let operation = self.operate(stop, ready);
+        let operation = self.operate(stop, ready, observation);
         let operation = classify_revocation(operation, self.cancel.load(Ordering::Acquire), || {
             self.control().and_then(ControlSession::failure)
         });
@@ -238,6 +254,7 @@ impl UserAgentSession {
         &mut self,
         stop: &AtomicBool,
         ready: SyncSender<ReadyObservation>,
+        mut observation: Option<super::launch_channel::ObservationServer>,
     ) -> Result<StopReason> {
         if stop.load(Ordering::Acquire) {
             return Ok(StopReason::Requested);
@@ -339,7 +356,21 @@ impl UserAgentSession {
             if stop.load(Ordering::Acquire) {
                 return Ok(StopReason::Requested);
             }
-            self.observe()?;
+            let probe = observation
+                .as_mut()
+                .map(|endpoint| endpoint.poll(&self.context, &self.cancel))
+                .transpose()?
+                .flatten();
+            // Accept the nonce before observing. An earlier health check or
+            // Ready report can never satisfy this Desktop request.
+            let process_id = self.observe()?;
+            if let Some(probe) = probe {
+                observation.as_mut().ok_or(UserAgentError::State)?.report(
+                    probe,
+                    process_id,
+                    &self.cancel,
+                )?;
+            }
             thread::sleep(OBSERVE_INTERVAL);
         }
     }

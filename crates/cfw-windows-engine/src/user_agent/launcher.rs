@@ -3,7 +3,7 @@
 //! is not global cleanup, and resumed agents are never force-killed here.
 use super::{
     handoff::UserAgentLaunch,
-    launch_channel::{LaunchChannelError, LaunchSender},
+    launch_channel::{LaunchChannelError, LaunchSender, ObservationClient},
 };
 use crate::{
     NativePeerProcess, PeerIdentityError, ServiceAuthorizationError, VerifiedExecutable,
@@ -162,7 +162,8 @@ pub struct UserAgentChild {
     context: LeaseContext,
     _executable: Arc<VerifiedExecutable>,
     peer: Option<NativePeerProcess>,
-    worker: Option<JoinHandle<std::result::Result<(), LaunchChannelError>>>,
+    worker: Option<JoinHandle<std::result::Result<ObservationClient, LaunchChannelError>>>,
+    observation: Option<ObservationClient>,
     cancel: Arc<AtomicBool>,
     delivery: Delivery,
     exit: Option<AgentExit>,
@@ -260,6 +261,7 @@ impl UserAgentChild {
             _executable: executable,
             peer: None,
             worker: None,
+            observation: None,
             cancel,
             delivery: Delivery::Absent,
             exit: None,
@@ -279,7 +281,7 @@ impl UserAgentChild {
             owner.worker = Some(
                 thread::Builder::new()
                     .name("cfw-user-agent-launch".into())
-                    .spawn(move || sender.send(message, deadline, &signal))?,
+                    .spawn(move || sender.send_observed(message, deadline, &signal))?,
             );
             owner.delivery = Delivery::Pending;
             owner.wait_handoff(deadline)
@@ -307,6 +309,16 @@ impl UserAgentChild {
         peer.revalidate()?;
         peer.verify_executable(&self._executable)?;
         Ok(())
+    }
+    pub(crate) fn observe_runtime(&mut self, deadline: Instant) -> Result<crate::RunningChild> {
+        self.verify_live()?;
+        let mut endpoint = self.observation.take().ok_or(LaunchError::State)?;
+        let observed = endpoint
+            .observe(&self.context, deadline, &self.cancel)
+            .map_err(|error| LaunchError::Handoff(Arc::new(error)))?;
+        self.verify_live()?;
+        self.observation = Some(endpoint);
+        Ok(observed)
     }
     pub fn cancel_handoff(&self) {
         self.cancel.store(true, Ordering::Release);
@@ -375,7 +387,10 @@ impl UserAgentChild {
         }
         if let Some(worker) = self.worker.take() {
             self.delivery = match worker.join() {
-                Ok(Ok(())) => Delivery::Accepted,
+                Ok(Ok(endpoint)) => {
+                    self.observation = Some(endpoint);
+                    Delivery::Accepted
+                }
                 Ok(Err(error)) => Delivery::Failed(Arc::new(error)),
                 Err(_) => Delivery::Panicked,
             };
@@ -399,7 +414,7 @@ impl Drop for UserAgentChild {
         if let Some(worker) = self.worker.take() {
             if worker.is_finished() {
                 match worker.join() {
-                    Ok(Ok(())) => {}
+                    Ok(Ok(_)) => {}
                     Ok(Err(error)) => eprintln!("UserAgent handoff retirement failed: {error}"),
                     Err(_) => eprintln!("UserAgent handoff worker panicked"),
                 }

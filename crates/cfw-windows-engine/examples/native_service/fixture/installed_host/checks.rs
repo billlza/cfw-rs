@@ -200,7 +200,7 @@ pub(super) fn exercise(desktop: &InstalledDesktop) -> Result<serde_json::Value> 
         "native_parser_rejected_invalid_candidate":true,"foreign_epoch_rejected":true,"expired_check_rejected":true}),
     )
 }
-fn candidate(
+pub(super) fn candidate(
     profile: &ValidatedSingBoxProfile,
     id: &str,
     mode: ProjectionMode,
@@ -236,7 +236,7 @@ fn outcome(
         Err(error) => error.to_string(),
     }
 }
-fn snapshot() -> Result<cfw_windows_engine::authority::AuthoritySnapshot> {
+pub(super) fn snapshot() -> Result<cfw_windows_engine::authority::AuthoritySnapshot> {
     let installed = InstalledRuntime::open().map_err(|e| e.to_string())?;
     let mut channel = AuthorityChannel::connect(
         SERVICE_NAME,

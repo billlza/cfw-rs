@@ -106,7 +106,7 @@ try {
                 $raw = & $desktopPath --installed-host-probe
                 if ($LASTEXITCODE -ne 0) { throw 'Installed post-runtime probe failed' }
                 $probe = $raw | ConvertFrom-Json
-                if ($probe.lineage.generation -ne 2) { throw 'Installed runtime did not retain both generations' }
+                if ($probe.lineage.generation -ne 5) { throw 'Installed runtime did not retain all five validated generations' }
                 $cases.Add('product_service_and_agent_run_both_proxy_modes')
             }
             $probes += $probe

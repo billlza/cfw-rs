@@ -1683,8 +1683,40 @@ Desktop→Agent 准备入口，CI 中两种代理生命周期改为使用这个�
 凭据拒绝、原生非法配置拒绝、异 epoch 拒绝和过期截止时间。TUN 预检通过不等于
 Windows TUN 数据面已实现。默认及全 feature Windows cross-Clippy、全工作区格式检查、
 107 项 portable tests 通过；新增安装验收由
-[39367715770](https://github.com/billlza/cfw-rs/actions/runs/39367715770) 验证，
-目前 directory job 完成，其余排队。完整 EngineBackend 和 Tauri 接线尚未完成。
+[39367715770](https://github.com/billlza/cfw-rs/actions/runs/39367715770) 四个 jobs 全部通过。
+源码 `8a1e64c` 的日志确认 611 项 Rust、311 项 UI tests，均无失败或跳过。
+engine artifact `12240198072`（SHA-256
+`eda3aac96451d9c2935749b33623793393df0af5b399b3d9c4f92a6261294b45`）和 SCM artifact
+`12239844153`（SHA-256
+`713b301a9d83335975349d0e294238d28d1649bbe6a7e02cd080c3a5530a1185`）均已下载并通过
+完整源码/哈希/回执核验。四种模式的真实预检、凭据 audience 和非法配置等反例均通过；
+检查前后 Authority、代理设置、端口占用和 generation 均符合上述约束。
+
+### 共享 EngineBackend 的 Windows 代理实现
+
+新增 `WindowsEngineBackend`，以受保护的 `InstalledDesktop` 接共享 `EngineBackend`。
+LocalProxy/SystemProxy 的配置检查、启动、查询、停止调用实际产品 service/Agent；
+配置检查有独立容量，不持有运行状态互斥锁。异步请求和原生线程有界，取消后仍由原有
+线程负责清理；原生连接不跨线程转移。失败保留原操作和 Runtime Job 引用，直到重新
+观察到独立 Off 并退出原线程；未成功 Prepare 的请求可在旧 generation 的已验证 Off
+下释放，但原拒绝仍作为错误返回。
+
+每次运行状态查询经已有继承的双向管道发送新 nonce，Agent 收到后重新观察真实引擎、
+监听和 WinINet。Desktop 在回复前后确认实际 Agent 和同一 Authority lease/snapshot。
+启动 ACK、旧 Ready、单纯心跳均不作为新鲜运行证明；超时、失联和上下文变化返回错误。
+该私有观察协议为 v1，不更改 Authority wire v6、journal schema 6 或已发布的 Mac 协议。
+管道使用已存在的 overlapped handle；轮询遵循
+[PeekNamedPipe 的异步句柄说明](https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-peeknamedpipe)。
+
+新增安装验收：两种直接宿主模式各三次新鲜查询与退休后查询拒绝；共享 backend 两种模式的
+真实流量、精确上下文停止、重复停止；错误 epoch 的 Prepare 拒绝和可继续启动；以及保持
+实际进程句柄后终止真实引擎，再验证查询不能返回旧 Active、原失败保留、独立恢复到 Off。
+最后一项是故障注入，仅在显式 opt-in 的临时 Windows runner 中执行。五个实际运行
+generation 包括原两种宿主模式、两种 backend 模式和一次真实引擎退出反例。
+
+本节为新增实现及验收代码，原生 CI 尚待运行；不能引用 `8a1e64c` 的通过结果证明它。
+TUN 入口仍显式不可用，尚需完整 TUN/合并模式、backend 的服务重启恢复衔接、应用诊断
+接线、Tauri Windows factory/startup/build、实际 UI 和发布验收。此实现没有关闭这些缺口。
 
 ## 官方资料
 

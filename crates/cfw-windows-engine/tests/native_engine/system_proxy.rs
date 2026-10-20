@@ -1,8 +1,8 @@
 use super::*;
 use cfw_engine_api::{EngineCommandContext, SystemProxyAuthorization};
 use cfw_windows_engine::{
-    ProxyError, ProxyOwnershipObservation, ProxySettings, WindowsSystemProxy,
-    observe_lan_proxy_ports,
+    LanProxyObservation, ProxyError, ProxyOwnershipObservation, ProxySettings, WindowsSystemProxy,
+    observe_lan_proxy_ports, observe_lan_proxy_state,
 };
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},
@@ -347,6 +347,7 @@ async fn actual_system_proxy_carries_wininet_http_and_restores_before_engine_sto
     let authority = WindowsSystemProxy::new(&root.path().join("proxy")).unwrap();
     let before = authority.snapshot().unwrap();
     let ports_before = observe_lan_proxy_ports().unwrap();
+    let diagnostics_before = observe_lan_proxy_state().unwrap();
     assert_eq!(authority.snapshot().unwrap(), before);
     assert!(
         !before.explicit_proxy_enabled(),
@@ -410,6 +411,14 @@ async fn actual_system_proxy_carries_wininet_http_and_restores_before_engine_sto
             }
         );
         let owned_settings = authority.snapshot().unwrap();
+        assert_eq!(
+            observe_lan_proxy_state().unwrap(),
+            LanProxyObservation {
+                manual_proxy_enabled: true,
+                auto_config_enabled: false,
+                auto_detect_enabled: false,
+            }
+        );
         let owned_endpoint = config.system_proxy_endpoint().unwrap();
         assert_eq!(
             observe_lan_proxy_ports().unwrap(),
@@ -468,6 +477,7 @@ async fn actual_system_proxy_carries_wininet_http_and_restores_before_engine_sto
     stopped.unwrap();
     upstream_result.unwrap();
     assert_eq!(observe_lan_proxy_ports().unwrap(), ports_before);
+    assert_eq!(observe_lan_proxy_state().unwrap(), diagnostics_before);
     assert_eq!(authority.snapshot().unwrap(), before);
     if let Err(failure) = result {
         std::panic::resume_unwind(failure);

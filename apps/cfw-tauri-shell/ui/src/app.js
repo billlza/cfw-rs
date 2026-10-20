@@ -6,6 +6,7 @@ import { createNativePromptDialog, promptDialogFrame } from "./native-prompt-dia
 import { createWindowGlass } from "./window-glass.js";
 import { navIcon } from "./nav-icons.js";
 import { platformPresentation, proxyEnvironmentCommands } from "./platform-presentation.js";
+import { networkDiagnosticsView } from "./network-diagnostics.js";
 import { t, setLocale, getLocale, SUPPORTED_LOCALES, LANGUAGE_OPTIONS } from "./i18n.js";
 import {
   PAGES,
@@ -1775,19 +1776,16 @@ function renderGlassOverlays() {
         </div>
       `);
     } else if (dialog.kind === "network-services") {
-      const rows = (dialog.payload ?? []).map((row) => `
-        <tr>
-          <td>${escapeHtml(row.display_name ?? row.service_id ?? "unknown")}</td>
-          <td>${escapeHtml(String(row.order ?? "—"))}</td>
-          <td>${escapeHtml(serviceProxyLabel(row))}</td>
-        </tr>`).join("");
+      const presentation = networkDiagnosticsView(dialog.payload, serviceProxyLabel);
+      const rows = presentation.rows.map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(cell)}</td>`).join("")}</tr>`).join("");
       parts.push(`
         <div class="glass-dialog-backdrop" data-glass-dismiss></div>
-        <div class="glass-dialog glass-dialog-wide" role="dialog" aria-label="${escapeHtml(t("Network services"))}">
-          <h3>${escapeHtml(t("Network services"))}</h3>
-          <p class="glass-dialog-copy">${escapeHtml(t("Read from SystemConfiguration only. The default-route interface, hardware port and BSD device are not reported: the child-process tools that supplied them are gone."))}</p>
-          <div class="glass-table-wrap"><table class="glass-table"><thead><tr><th>${escapeHtml(t("Service"))}</th><th>${escapeHtml(t("Order"))}</th><th>${escapeHtml(t("Proxy"))}</th></tr></thead><tbody>${rows || `<tr><td colspan="3">${escapeHtml(t("No services"))}</td></tr>`}</tbody></table></div>
-          ${dialog.unavailable?.length ? `<p class="glass-dialog-copy">${escapeHtml(t("Unavailable fields"))}: ${escapeHtml(dialog.unavailable.join(", "))}</p>` : ""}
+        <div class="glass-dialog glass-dialog-wide" role="dialog" aria-label="${escapeHtml(presentation.title)}">
+          <h3>${escapeHtml(presentation.title)}</h3>
+          <p class="glass-dialog-copy">${escapeHtml(presentation.description)}</p>
+          ${dialog.payload.platform === "windows" ? `<p class="glass-dialog-copy">${escapeHtml(presentation.summary[0][0])}: ${escapeHtml(presentation.summary[0][1])}</p>` : ""}
+          <div class="glass-table-wrap"><table class="glass-table"><thead><tr>${presentation.columns.map((column) => `<th>${escapeHtml(column)}</th>`).join("")}</tr></thead><tbody>${rows || `<tr><td colspan="3">${escapeHtml(presentation.empty)}</td></tr>`}</tbody></table></div>
+          ${presentation.unavailable.length ? `<p class="glass-dialog-copy">${escapeHtml(t("Unavailable fields"))}: ${escapeHtml(presentation.unavailable.join(", "))}</p>` : ""}
           <div class="glass-dialog-actions"><button type="button" class="glass-btn ghost" data-glass-dismiss>${escapeHtml(t("Close"))}</button></div>
         </div>
       `);
@@ -3671,11 +3669,11 @@ export async function handleAction(action) {
   if (action === "show-network-interfaces") {
     try {
       const diagnostics = await invoke("network_diagnostics");
+      networkDiagnosticsView(diagnostics, serviceProxyLabel);
       state.networkDiagnostics = diagnostics;
       state.glassDialog = {
         kind: "network-services",
-        payload: diagnostics?.services ?? [],
-        unavailable: diagnostics?.unavailable ?? [],
+        payload: diagnostics,
       };
       renderGlassOverlays();
       return;
@@ -4366,10 +4364,12 @@ async function refreshStartupLoginItemStatus(expectedSettings) {
 
 async function loadNetworkDiagnostics() {
   try {
-    state.networkDiagnostics = await invoke("network_diagnostics");
+    const diagnostics = await invoke("network_diagnostics");
+    networkDiagnosticsView(diagnostics, serviceProxyLabel);
+    state.networkDiagnostics = diagnostics;
   } catch (error) {
     state.networkDiagnostics = null;
-    appendLog("error", "network", t("Unable to inspect macOS network services: {error}", { error: errorText(error) }));
+    appendLog("error", "network", t("Unable to inspect network settings: {error}", { error: errorText(error) }));
   }
 }
 

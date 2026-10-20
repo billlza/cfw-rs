@@ -1,4 +1,5 @@
 use super::*;
+use std::ptr::null_mut;
 
 #[test]
 fn real_adapter_observation_never_fabricates_an_active_interface() {

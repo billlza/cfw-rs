@@ -1,4 +1,5 @@
 import { t, LANGUAGE_OPTIONS } from "./i18n.js";
+import { networkDiagnosticsView } from "./network-diagnostics.js";
 // Settings and read-only network diagnostics rendering. Commands and
 // transactional settings dialogs own all mutations.
 export function createSettingsView({ state, defaultSettingsSnapshot, defaultSettings, engineIsOff, launchAtLoginPresentation, escapeHtml, renderToggle, THEME_OPTIONS, FONT_OPTIONS, REASONS, engineStateLabel, serviceProxyLabel }) {
@@ -179,29 +180,12 @@ function renderNetworkDiagnostics() {
   const diagnostics = state.networkDiagnostics;
   if (!diagnostics) {
     return renderSettingsGroup(t("Network Diagnostics"), [
-      renderSettingValue(t("Services"), t("Unavailable"), "macOS network services could not be observed."),
+      renderSettingValue(t("Network Diagnostics"), t("Unavailable"), t("Network diagnostics could not be read.")),
     ]);
   }
-  const services = diagnostics.services ?? [];
-  const proxied = diagnostics.proxied_services ?? [];
-  const unavailable = diagnostics.unavailable ?? [];
-  const rows = [
-    renderSettingValue(
-      t("Service order"),
-      services.length ? t("{count} service(s)", { count: services.length }) : "none",
-      t("Read from SystemConfiguration only; no child process is spawned."),
-    ),
-    renderSettingValue(
-      t("Services carrying a proxy"),
-      proxied.length ? proxied.join(", ") : "none",
-      t("Any service with a proxy setting enabled, whoever owns it. Ownership is not reported."),
-    ),
-    ...services.map((service) => renderSettingValue(
-      service.display_name ?? service.service_id ?? t("unknown"),
-      serviceProxyLabel(service),
-      t("set order {value1}", { value1: service.order ?? "-" }),
-    )),
-  ];
+  const presentation = networkDiagnosticsView(diagnostics, serviceProxyLabel);
+  const unavailable = presentation.unavailable;
+  const rows = presentation.summary.map((row) => renderSettingValue(...row));
   if (unavailable.length) {
     rows.push(renderSettingValue(
       t("Unavailable fields"),

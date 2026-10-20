@@ -1,7 +1,9 @@
 //! Windows observations use native OS APIs, without executing Mac tools or
 //! changing registration, network, language or machine-wide timer settings.
 use anyhow::{Context, bail};
+pub(super) mod diagnostics;
 pub(super) mod network;
+pub(super) mod shell;
 use windows_sys::{
     Wdk::System::SystemServices::RtlGetVersion,
     Win32::{

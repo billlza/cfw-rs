@@ -1,5 +1,18 @@
 use super::*;
 
+#[test]
+fn public_proxy_diagnostics_have_only_native_flags_without_private_strings() {
+    let settings = record().before;
+    assert_eq!(
+        serde_json::to_value(settings.public_observation()).unwrap(),
+        serde_json::json!({
+            "manual_proxy_enabled": false, "auto_config_enabled": false, "auto_detect_enabled": true,
+        })
+    );
+    let encoded = serde_json::to_string(&settings.public_observation()).unwrap();
+    assert!(!encoded.contains("private") && !encoded.contains("pac_url"));
+}
+
 pub(super) fn context() -> EngineCommandContext {
     EngineCommandContext {
         installation_id: uuid::Uuid::new_v4().to_string(),

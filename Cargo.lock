@@ -565,6 +565,7 @@ dependencies = [
  "objc2-system-configuration",
  "serde",
  "serde_json",
+ "url",
  "windows",
  "windows-sys 0.61.2",
 ]
@@ -674,6 +675,7 @@ version = "0.5.0"
 dependencies = [
  "cfw-application",
  "cfw-engine-api",
+ "cfw-platform",
  "cfw-singbox-config",
  "cfw-windows-credentials",
  "cfw-windows-storage",

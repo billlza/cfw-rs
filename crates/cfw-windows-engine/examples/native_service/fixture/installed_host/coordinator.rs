@@ -8,6 +8,8 @@ use cfw_windows_engine::runtime_host::InstalledDesktop;
 
 // Compile and exercise the application's actual platform assembly. This
 // intentionally contains no Tauri/WebView substitute and makes no GUI claim.
+#[path = "../../../../../../apps/cfw-tauri-shell/src/commands/network_diagnostics.rs"]
+mod network_diagnostics;
 #[path = "../../../../../../apps/cfw-tauri-shell/src/platform_runtime.rs"]
 mod platform_runtime;
 #[path = "../../../../../../apps/cfw-tauri-shell/src/release_observation.rs"]
@@ -25,6 +27,8 @@ pub(super) fn exercise(progress: &mut Progress) -> Result<serde_json::Value> {
         .snapshot()
         .map_err(|e| e.to_string())?;
     let process_observation = super::super::desktop_process::observe()?;
+    let initial_diagnostics =
+        serde_json::to_value(network_diagnostics::collect()?).map_err(|e| e.to_string())?;
     let prepared = platform_runtime::PlatformRuntime::load(&desktop.paths().root)?.prepare()?;
     if !prepared.services.proxy_available
         || prepared.services.tunnel_available
@@ -191,9 +195,21 @@ pub(super) fn exercise(progress: &mut Progress) -> Result<serde_json::Value> {
                     &active,
                     settings.enable_ipv6,
                 )?;
+                let proxy_before_diagnostics = desktop.storage().proxy().snapshot()
+                    .map_err(|e| e.to_string())?;
+                let diagnostics = serde_json::to_value(network_diagnostics::collect()?)
+                    .map_err(|e| e.to_string())?;
+                let expected_proxy = if mode == EngineMode::SystemProxy {
+                    serde_json::json!({"manual_proxy_enabled":true,"auto_config_enabled":false,"auto_detect_enabled":false})
+                } else { initial_diagnostics["user_proxy"].clone() };
+                if diagnostics["platform"] != "windows" || diagnostics["user_proxy"] != expected_proxy
+                    || desktop.storage().proxy().snapshot().map_err(|e| e.to_string())? != proxy_before_diagnostics {
+                    return Err("native diagnostics do not match the current user proxy scope".into());
+                }
                 modes.push(
                     serde_json::json!({"snapshot":active,"native":native,"traffic":true,
                     "observation_sequence":sequence,
+                    "network_diagnostics":diagnostics,
                     "same_mode_preserved_generation":true,"proxy_changed":proxy_changed}),
                 );
                 progress.record("coordinator_active", generation)?;
@@ -238,6 +254,12 @@ pub(super) fn exercise(progress: &mut Progress) -> Result<serde_json::Value> {
         }
         progress.record("coordinator_off", 8)?;
         let final_sequence = release_observation::emit_engine_snapshot_with_sequence(&off, false)?;
+        let final_diagnostics = serde_json::to_value(network_diagnostics::collect()?)
+            .map_err(|e| e.to_string())?;
+        if final_diagnostics["user_proxy"] != initial_diagnostics["user_proxy"]
+            || desktop.storage().proxy().snapshot().map_err(|e| e.to_string())? != original_proxy {
+            return Err("diagnostics did not observe the restored user proxy settings".into());
+        }
         Ok(
             serde_json::json!({"shared_desktop_assembly":true,"shared_mode_coordinator":true,
             "prepared_without_starting":true,"credentials_and_probes_connected":true,
@@ -246,6 +268,7 @@ pub(super) fn exercise(progress: &mut Progress) -> Result<serde_json::Value> {
             "proxy_restored":true,"coordinator_retired":true,"gui_exercised":false,
             "process_observation":process_observation,
             "final_observation_sequence":final_sequence,
+            "initial_network_diagnostics":initial_diagnostics,"final_network_diagnostics":final_diagnostics,
             "tunnel_available":false,"legacy_cutover_available":false}),
         )
     })

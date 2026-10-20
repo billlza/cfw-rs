@@ -164,7 +164,9 @@ async fn open_available_update_inner(
         return Err(UpdateError::ReleaseRejected);
     }
     let release_url = release_page_url(&update)?;
-    open_trusted_external_url(&release_url).map_err(|_| UpdateError::OpenReleasePage)?;
+    open_trusted_external_url(&release_url)
+        .await
+        .map_err(|_| UpdateError::OpenReleasePage)?;
     Ok(serde_json::json!({
         "opened": true,
         "installed": false,

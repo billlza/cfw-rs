@@ -435,7 +435,7 @@ pub(crate) async fn reveal_profile(
         existing_profile_path(repository, &id)
     })
     .await?;
-    open_path(&path, true)
+    crate::startup_state::prepare_off_main(move || open_path(&path, true)).await
 }
 
 /// Opens the stored profile envelope with the user's default application.
@@ -451,7 +451,7 @@ pub(crate) async fn open_profile_externally(
         existing_profile_path(repository, &id)
     })
     .await?;
-    open_path(&path, false)
+    crate::startup_state::prepare_off_main(move || open_path(&path, false)).await
 }
 
 /// Parses and validates a document, and proves it projects for both modes before

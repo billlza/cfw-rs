@@ -117,6 +117,21 @@ jobs:
           cargo run --locked -p cfw-windows-engine --features native-service-validation --example native-service-fixture -- --desktop-process-validation 2>&1 |
             Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-medium-process-tests.log')
           if ($LASTEXITCODE -ne 0) { throw 'Windows medium-integrity desktop process observation failed' }
+      - name: Verify native shell dispatch
+        env:
+          CFW_NATIVE_SHELL_TESTS: '1'
+          CFW_NATIVE_SHELL_SOURCE: ${{ github.sha }}
+        run: |
+          cargo clippy --locked -p cfw-platform --all-targets --features native-shell-validation -- -D warnings 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-shell-clippy.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Windows native shell Clippy failed' }
+          cargo build --locked -p cfw-platform --example native-shell-dispatch-fixture --features native-shell-validation 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-shell-build.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Windows native shell recipient build failed' }
+          $env:CFW_NATIVE_SHELL_FIXTURE = Join-Path $PWD 'target/debug/examples/native-shell-dispatch-fixture.exe'
+          cargo test --locked -p cfw-platform --test native_shell_dispatch --features native-shell-validation -- --test-threads=1 --nocapture 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-shell-tests.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Windows native shell dispatch validation failed' }
       - name: Check the complete Windows desktop target
         run: |
           cargo check --locked -p cfw-tauri-shell --bin clash-for-mac 2>&1 |

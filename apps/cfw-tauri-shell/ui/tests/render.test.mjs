@@ -867,6 +867,29 @@ test("General exposes IPv6 as a direct switch rather than a settings-dialog butt
   assert.doesNotMatch(row, /data-action="open-runtime-settings"/u);
 });
 
+test("Windows network details keep user proxy settings separate and escape adapter names", async () => {
+  const original = { response: responses.network_diagnostics, diagnostics: state.networkDiagnostics, dialog: state.glassDialog };
+  try {
+    responses.network_diagnostics = {
+      platform: "windows", adapters: [{ index: 5, display_name: "Office <adapter>", interface_type: 6, operational_status: 1 }],
+      user_proxy: { manual_proxy_enabled: true, auto_config_enabled: false, auto_detect_enabled: false },
+    };
+    await appModule.handleAction("show-network-interfaces");
+    assert.match(glassRoot.innerHTML, /Network adapters/u);
+    assert.match(glassRoot.innerHTML, /Current user proxy: Manual proxy/u);
+    assert.match(glassRoot.innerHTML, /Office &lt;adapter&gt;/u);
+    assert.doesNotMatch(glassRoot.innerHTML, /Office <adapter>|SystemConfiguration|<th>Order<\/th>|<th>Proxy<\/th>/u);
+    state.glassDialog = null;
+    const settings = await renderPage("settings");
+    assert.match(settings, /Current user proxy/u);
+    assert.match(settings, /Office &lt;adapter&gt;/u);
+  } finally {
+    responses.network_diagnostics = original.response;
+    state.networkDiagnostics = original.diagnostics;
+    state.glassDialog = original.dialog;
+  }
+});
+
 test("About and Feedback retain the host's Windows version and architecture", async () => {
   const original = { product: state.payload.product, dialog: state.glassDialog, page: state.activePage };
   try {
@@ -3028,7 +3051,7 @@ test("every glass dialog renders", async () => {
     ["delete", { kind: "delete", id: PROFILE_ID }, "Delete profile"],
     ["reset-settings", { kind: "reset-settings" }, "Reset all settings"],
     ["preview-config", { kind: "preview-config", payload: PROJECTION }, "Projected configuration"],
-    ["network-services", { kind: "network-services", payload: DIAGNOSTICS.services, unavailable: DIAGNOSTICS.unavailable }, "Network services"],
+    ["network-services", { kind: "network-services", payload: DIAGNOSTICS }, "Network services"],
     ["dns-query", { kind: "dns-query", payload: { name: "a.test", type: "A", result: "" } }, "Resolve through the running engine"],
     ["info", { kind: "info", payload: { title: "System DNS", body: "never written" } }, "System DNS"],
     ["product-about", { kind: "product-about", payload: { phase: "idle", update: { available: true, version: "0.4.1" } } }, "Open Download"],

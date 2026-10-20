@@ -37,6 +37,12 @@ mod system_version;
 pub use system_version::operating_system_version;
 #[cfg(windows)]
 mod windows;
+#[cfg(windows)]
+pub use windows::diagnostics::{WindowsAdapterObservation, observe_windows_adapters};
+#[cfg(windows)]
+pub use windows::shell::{
+    open_windows_external_url, open_windows_path, open_windows_startup_settings,
+};
 
 #[cfg(target_os = "macos")]
 mod sysproxy_sc;

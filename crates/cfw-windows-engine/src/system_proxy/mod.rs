@@ -19,6 +19,21 @@ const MAX_STRING_UNITS: usize = 8192;
 const MAX_JOURNAL_BYTES: usize = 512 * 1024;
 const JOURNAL: &str = "system-proxy-v1.json";
 
+/// Read-only UI summary of this user's WinINet LAN options. Raw proxy/PAC
+/// strings, bypass rules and ownership records never enter this payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct LanProxyObservation {
+    pub manual_proxy_enabled: bool,
+    pub auto_config_enabled: bool,
+    pub auto_detect_enabled: bool,
+}
+
+pub fn observe_lan_proxy_state() -> Result<LanProxyObservation, ProxyError> {
+    cfw_windows_storage::require_process_identity()?;
+    user_identity()?;
+    Ok(native::observe_read_only()?.public_observation())
+}
+
 /// Read this interactive process user's WinINet LAN manual-proxy reservations.
 /// This never opens a journal, requests mutation rights, evaluates PAC/WPAD,
 /// resolves a hostname, or reports global runtime ownership.
@@ -110,6 +125,14 @@ impl fmt::Debug for ProxySettings {
     }
 }
 impl ProxySettings {
+    fn public_observation(&self) -> LanProxyObservation {
+        LanProxyObservation {
+            manual_proxy_enabled: self.flags & PROXY_TYPE_PROXY != 0,
+            auto_config_enabled: self.flags & PROXY_TYPE_AUTO_PROXY_URL != 0,
+            auto_detect_enabled: self.flags & PROXY_TYPE_AUTO_DETECT != 0,
+        }
+    }
+
     fn validate(&self) -> Result<(), ProxyError> {
         let known = PROXY_TYPE_DIRECT
             | PROXY_TYPE_PROXY

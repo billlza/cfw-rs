@@ -76,8 +76,9 @@ pub use process::{
 };
 #[cfg(windows)]
 pub use system_proxy::{
-    ProxyError, ProxyOwnershipObservation, ProxyRestorationObservation, ProxySettings,
-    ProxySettingsReceipt, ProxySettingsRestored, WindowsSystemProxy, observe_lan_proxy_ports,
+    LanProxyObservation, ProxyError, ProxyOwnershipObservation, ProxyRestorationObservation,
+    ProxySettings, ProxySettingsReceipt, ProxySettingsRestored, WindowsSystemProxy,
+    observe_lan_proxy_ports, observe_lan_proxy_state,
 };
 
 #[derive(Debug, thiserror::Error)]

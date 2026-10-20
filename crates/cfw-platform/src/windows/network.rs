@@ -6,7 +6,7 @@ use std::{
     collections::BTreeSet,
     mem::{align_of, size_of},
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
-    ptr::{null, null_mut},
+    ptr::null,
 };
 use windows_sys::{
     Win32::{
@@ -28,7 +28,6 @@ use windows_sys::{
             IpDadStateTentative as IP_DAD_STATE_TENTATIVE, SOCKADDR_IN, SOCKADDR_IN6,
             SOCKET_ADDRESS,
         },
-        UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
     },
     core::GUID,
 };
@@ -303,24 +302,7 @@ pub(crate) fn current_network_context() -> anyhow::Result<Option<NetworkContext>
 }
 
 pub(crate) fn request_wifi_name_access() -> anyhow::Result<()> {
-    let uri: Vec<u16> = "ms-settings:privacy-location\0".encode_utf16().collect();
-    let verb: Vec<u16> = "open\0".encode_utf16().collect();
-    // Fixed OS settings URI, used only by the visible permission button.
-    // Acceptance does not claim that the user granted location permission.
-    let result = unsafe {
-        ShellExecuteW(
-            null_mut(),
-            verb.as_ptr(),
-            uri.as_ptr(),
-            null(),
-            null(),
-            SW_SHOWNORMAL,
-        )
-    } as isize;
-    if result <= 32 {
-        bail!("Windows could not open location privacy settings (code {result})");
-    }
-    Ok(())
+    super::shell::open_location_settings()
 }
 
 fn with_connection_profiles<T>(

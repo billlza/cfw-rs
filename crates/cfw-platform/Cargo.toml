@@ -4,6 +4,9 @@ version = "0.5.0"
 edition = "2024"
 license.workspace = true
 
+[features]
+native-shell-validation = []
+
 [dependencies]
 anyhow.workspace = true
 libc.workspace = true
@@ -20,6 +23,7 @@ objc2-system-configuration = "0.3.2"
 objc2-core-foundation = { version = "0.3.2", features = ["CFDictionary", "CFString", "CFNumber", "CFArray"] }
 
 [target.'cfg(windows)'.dependencies]
+url.workspace = true
 windows = { version = "=0.62.2", features = ["Networking_Connectivity", "Foundation_Collections", "Win32_System_WinRT"] }
 windows-sys = { version = "=0.61.2", features = [
   "Wdk_System_SystemServices",
@@ -27,9 +31,24 @@ windows-sys = { version = "=0.61.2", features = [
   "Win32_Globalization",
   "Win32_System_SystemInformation",
   "Win32_System_Diagnostics_Debug",
+  "Win32_System_Com",
+  "Win32_System_Registry",
   "Win32_NetworkManagement_IpHelper",
   "Win32_NetworkManagement_Ndis",
   "Win32_Networking_WinSock",
   "Win32_UI_Shell",
+  "Win32_UI_Shell_Common",
   "Win32_UI_WindowsAndMessaging",
 ] }
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_Security"] }
+
+[[test]]
+name = "native_shell_dispatch"
+required-features = ["native-shell-validation"]
+
+[[example]]
+name = "native-shell-dispatch-fixture"
+path = "examples/native_shell_dispatch.rs"
+required-features = ["native-shell-validation"]

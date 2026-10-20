@@ -60,6 +60,7 @@ windows-sys = { version = "=0.61.2", features = [
 
 [dev-dependencies]
 cfw-application = { path = "../cfw-application" }
+cfw-platform = { path = "../cfw-platform" }
 cfw-engine-api = { path = "../cfw-engine-api" }
 sha2.workspace = true
 subtle = "=2.6.1"

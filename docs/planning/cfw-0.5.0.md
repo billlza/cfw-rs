@@ -2,13 +2,14 @@
 
 评估日期：2026-10-18。状态：开发中，尚无经过验证的 Windows 产品。
 
-最新组件证据（2026-10-20）：`11945b4` 的 Windows CI 四项作业及下载产物核验通过，
-含 614 项 Rust、311 项 UI、11 项原生引擎、35 项 SCM 检查。产品服务/Agent 的
+最新组件证据（2026-10-20）：`4c199f1` 的 Windows CI 四项作业及下载产物核验通过，
+含 620 项 Rust、311 项 UI、14 项原生引擎、35 项 SCM 检查。产品服务/Agent 的
 安装、四种模式的非激活预检、共享 EngineBackend 的 LocalProxy/SystemProxy 启停与
 新鲜状态查询，以及真实引擎退出后的查询拒绝和独立 Off 已验证。安装客户端聚合超时
 已定位并通过拆分有界验收关闭；服务崩溃恢复仍要求独立观察者保留运行 Job。
 SystemProxyAuthorization 的运行前、运行中和停止后检查，以及同一保留进程句柄的
-退出观察回归均通过。共享 ProfileDelayBackend 已新增，原生测速验收尚待执行。
+退出观察回归均通过。共享 ProfileDelayBackend 的实际凭据认证、取消/超时、较大结果
+和资源退休，以及安装客户端不改变 Authority、generation 和代理设置均已验证。
 完整 Tauri 桌面、TUN、视觉一致性及发布验收仍未完成。
 
 ## 基线与完成条件
@@ -1824,6 +1825,27 @@ TCP 对端关闭只接受 EOF 或明确的远端 reset，接收超时不作为�
 本地 113 项 portable tests、22 项 Go host pass events、10 项源码/构建契约测试通过；
 Windows 默认/全 feature cross-Clippy（warnings denied）及工作区格式通过。新增 Go
 host 已按 GA 固定工具链交叉构建 Windows x64 字节，仍需托管 Windows 原生运行核验。
+
+测速源码 `4c199f1f3e4e9adefdded69b067710df0c22cb0e` 的
+[39379588113](https://github.com/billlza/cfw-rs/actions/runs/39379588113) 四项作业通过；
+620 项 Rust、311 项 UI、14 项真实引擎测试、35 项 SCM 场景和 480 个 Go pass events
+均已核对，没有失败或跳过。engine artifact `12244784504`（SHA-256
+`8920e469855005b32380e091196a1a8acba1aee01306be3be8607381e7b7b9a6`）与 SCM artifact
+`12244872611`（SHA-256
+`665ef146c654568b30fee6c0136022db988d15be653c2a47e55f479334bd5011`）已下载并通过完整核验。
+宿主二进制为 36,115,968 字节、SHA-256
+`ebeab89a76460b4495b75e696d8e1651d8de4354d155ee10f31dc5930b5f9689`，与本地独立
+交叉构建一致；79 个组件、118 个许可证文件及清单内容与独立收集结果一致。
+
+三个安装客户端分别耗时 32.463/55.830/7.877 秒，仍各受 60 秒限制。测速回执确认实际
+SOCKS 凭据与 HEAD/204 探测，错误 audience 被拒绝，已发出请求后的取消释放资源且
+槽可再用。32 个长名称的有序结果为 17,687 字节；运行前后均为同一 installation 的
+Off、generation 5、revision 35，lineage/WinINet 未变化。取消时另外保留的真实子进程
+句柄已观察到退出。此结果不证明九页 GUI、TUN、睡眠唤醒或完整发布已完成。
+
+随后状态码语法直接复用 `cfw-singbox-config::validate_expected_status`，移除 Windows
+侧重复解析器；6 项相关测试、全 feature Windows cross-Clippy 和格式检查通过，
+更新头的完整 CI 另行记录，不能把上述源码的产物核验自动套用到后续提交。
 代理 backend 上述限定的原生验收已通过；异步取消和异常恢复的最终应用验收尚未完成。
 TUN 入口仍显式不可用，尚需完整 TUN/合并模式、backend 的服务重启恢复衔接、应用诊断
 接线、Tauri Windows factory/startup/build、实际 UI 和发布验收。此实现没有关闭这些缺口。

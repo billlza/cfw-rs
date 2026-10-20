@@ -158,26 +158,8 @@ impl CheckedProbeConfiguration {
             }
         }
         let expected = request.expected_status.as_deref().unwrap_or("");
-        if expected.len() > 128 {
-            return Err(Error::Configuration("invalid probe expected status"));
-        }
-        if !expected.is_empty() {
-            for item in expected.split('/') {
-                let codes = item
-                    .split('-')
-                    .map(|part| {
-                        if part.len() != 3 || !part.bytes().all(|b| b.is_ascii_digit()) {
-                            return None;
-                        }
-                        part.parse::<u16>().ok().filter(|n| (100..=599).contains(n))
-                    })
-                    .collect::<Option<Vec<_>>>()
-                    .ok_or(Error::Configuration("invalid probe expected status"))?;
-                if !(1..=2).contains(&codes.len()) || codes.len() == 2 && codes[0] > codes[1] {
-                    return Err(Error::Configuration("invalid probe expected status"));
-                }
-            }
-        }
+        cfw_singbox_config::validate_expected_status(expected)
+            .map_err(|_| Error::Configuration("invalid probe expected status"))?;
         Ok(())
     }
     pub fn resolve<'a>(

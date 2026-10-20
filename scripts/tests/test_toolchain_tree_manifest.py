@@ -1391,7 +1391,7 @@ LIBBOX_VET_PACKAGES=(".")
         self.assertLess(first_verification, first_build)
         self.assertGreater(second_verification, first_build)
 
-        host_build = (REPOSITORY / "apps/cfw-tauri-shell/build.rs").read_text(
+        host_build = (REPOSITORY / "apps/cfw-tauri-shell/build_support/macos.rs").read_text(
             encoding="utf-8"
         )
         for fragment in (

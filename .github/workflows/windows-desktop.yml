@@ -1,0 +1,106 @@
+name: Windows desktop development build
+
+on:
+  push:
+    branches: [lza/cfw-0.5.0-windows-shell]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  desktop:
+    name: Windows x64 shared desktop application
+    runs-on: windows-2025
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify source and read toolchain pins
+        id: pins
+        env:
+          EXPECTED_SOURCE: ${{ github.sha }}
+        run: |
+          $source = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $source -cne $env:EXPECTED_SOURCE) { throw 'Source identity mismatch' }
+          $pins = Get-Content scripts/dependency_pins.env -Raw
+          foreach ($name in @('RUST_VERSION', 'NODE_VERSION', 'NPM_VERSION', 'NPM_ARCHIVE_SHA256')) {
+            $pinMatches = [regex]::Matches($pins, "(?m)^${name}=([A-Za-z0-9.]+)\r?`$")
+            if ($pinMatches.Count -ne 1) { throw "Missing or ambiguous pin: $name" }
+            "$name=$($pinMatches[0].Groups[1].Value)" >> $env:GITHUB_OUTPUT
+          }
+          New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence') -ErrorAction Stop | Out-Null
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: ${{ steps.pins.outputs.RUST_VERSION }}
+          components: clippy,rustfmt
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ steps.pins.outputs.NODE_VERSION }}
+      - name: Prepare pinned npm and shared UI
+        env:
+          CFW_NPM_VERSION: ${{ steps.pins.outputs.NPM_VERSION }}
+          CFW_NPM_ARCHIVE_SHA256: ${{ steps.pins.outputs.NPM_ARCHIVE_SHA256 }}
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'cfw-desktop-npm'
+          New-Item -ItemType Directory -Path $root -ErrorAction Stop | Out-Null
+          $archive = Join-Path $root 'npm.tgz'
+          Invoke-WebRequest "https://registry.npmjs.org/npm/-/npm-$($env:CFW_NPM_VERSION).tgz" -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:CFW_NPM_ARCHIVE_SHA256) { throw 'npm archive digest mismatch' }
+          tar -xzf $archive -C $root
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot extract pinned npm' }
+          $npmCli = Join-Path $root 'package/bin/npm-cli.js'
+          if ((node $npmCli --version) -cne $env:CFW_NPM_VERSION -or $LASTEXITCODE -ne 0) { throw 'npm version mismatch' }
+          Push-Location apps/cfw-tauri-shell
+          try {
+            node $npmCli ci --ignore-scripts=false --install-links=true
+            if ($LASTEXITCODE -ne 0) { throw 'Locked UI dependency installation failed' }
+          } finally { Pop-Location }
+          ./scripts/build_ui_windows.ps1
+      - name: Check the complete Windows desktop target
+        run: |
+          cargo check --locked -p cfw-tauri-shell --bin clash-for-mac 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/check.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Windows desktop type check failed' }
+      - name: Deny desktop warnings and check formatting
+        run: |
+          cargo fmt --all -- --check
+          if ($LASTEXITCODE -ne 0) { throw 'Formatting differs' }
+          cargo clippy --locked -p cfw-tauri-shell --all-targets -- -D warnings 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/clippy.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Windows desktop Clippy failed' }
+      - name: Build the desktop development executable
+        run: |
+          cargo build --locked -p cfw-tauri-shell --bin clash-for-mac 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/build.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Windows desktop build failed' }
+          $binary = Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/Clash for Windows.exe'
+          Copy-Item -LiteralPath 'target/debug/clash-for-mac.exe' -Destination $binary -ErrorAction Stop
+          [ordered]@{
+            source = (git rev-parse HEAD)
+            target = 'x86_64-pc-windows-msvc'
+            profile = 'debug'
+            filename = 'Clash for Windows.exe'
+            bytes = (Get-Item -LiteralPath $binary).Length
+            sha256 = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
+            native_gui_exercised = $false
+            installed_runtime_exercised = $false
+            release_accepted = $false
+          } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/build-receipt.json') -Encoding utf8NoBOM
+      - name: Preserve desktop build output and diagnostics
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: cfw-desktop-development-windows-x64
+          path: ${{ runner.temp }}/cfw-desktop-evidence/
+          if-no-files-found: error
+          retention-days: 14

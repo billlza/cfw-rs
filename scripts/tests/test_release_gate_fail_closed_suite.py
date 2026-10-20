@@ -152,6 +152,7 @@ _AUTHORITY_GATE_INPUTS = (
     "native/macos/Sources/CFWSharedProtocol/AuthorityClients.swift",
     "native/macos/Sources/CFWSharedProtocol/ServiceCodeHash.swift",
     "apps/cfw-tauri-shell/build.rs",
+    "apps/cfw-tauri-shell/build_support/macos.rs",
 )
 
 
@@ -202,16 +203,20 @@ class AuthorityGateWholeTreeIntegration(unittest.TestCase):
                 verify_authority(root)
 
     def test_injected_insecure_override_fails_closed(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = _copy_authority_gate_tree(Path(tmp))
-            build_rs = root / "apps/cfw-tauri-shell/build.rs"
-            build_rs.write_text(
-                build_rs.read_text(encoding="utf-8")
-                + '\nconst OVERRIDE: &str = "CFW_ALLOW_INSECURE_AUTHORITY";\n',
-                encoding="utf-8",
-            )
-            with self.assertRaisesRegex(AuthorityGateContractError, "insecure"):
-                verify_authority(root)
+        for relative in (
+            "apps/cfw-tauri-shell/build.rs",
+            "apps/cfw-tauri-shell/build_support/macos.rs",
+        ):
+            with self.subTest(path=relative), tempfile.TemporaryDirectory() as tmp:
+                root = _copy_authority_gate_tree(Path(tmp))
+                build_rs = root / relative
+                build_rs.write_text(
+                    build_rs.read_text(encoding="utf-8")
+                    + '\nconst OVERRIDE: &str = "CFW_ALLOW_INSECURE_AUTHORITY";\n',
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(AuthorityGateContractError, "insecure"):
+                    verify_authority(root)
 
 
 # ---------------------------------------------------------------------------

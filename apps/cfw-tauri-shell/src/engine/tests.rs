@@ -1015,9 +1015,7 @@ fn engine_with_rights_bridge(bridge: Arc<RestorationRightsBridge>) -> super::Man
             provider_management: true,
         },
         unavailable_reason: None,
-        preflight_backend: Some(Arc::new(cfw_apple_network::AppleNetworkBackend::new(
-            cfw_apple_network::MissingNativeBridge,
-        ))),
+        preflight_backend: None,
         profile_delay_backend: bridge.clone(),
         system_proxy_authorization: bridge,
         cutover: super::cutover::CutoverPreparationGate::default(),

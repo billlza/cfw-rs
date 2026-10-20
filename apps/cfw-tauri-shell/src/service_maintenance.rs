@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 #[cfg(target_os = "macos")]
 use cfw_apple_network::NATIVE_BRIDGE_OUTER_WATCHDOG;
+#[cfg(target_os = "macos")]
 use cfw_apple_network::NativeFrameworkBridge;
 use cfw_engine_api::{
     NativeServiceEngineStatus, NativeServiceMaintenanceAction, NativeServiceMaintenanceResult,
@@ -77,6 +78,7 @@ impl MaintenanceReceipt {
     }
 }
 
+#[cfg(target_os = "macos")]
 pub(crate) fn run(action: ServiceMaintenanceAction) -> Result<(), String> {
     let bridge = NativeFrameworkBridge::load();
     if !bridge.is_available() {
@@ -164,10 +166,7 @@ fn wait_for_worker(
 }
 
 #[cfg(not(target_os = "macos"))]
-fn run_native_maintenance(
-    _bridge: NativeFrameworkBridge,
-    _action: NativeServiceMaintenanceAction,
-) -> Result<NativeServiceMaintenanceResult, String> {
+pub(crate) fn run(_action: ServiceMaintenanceAction) -> Result<(), String> {
     Err("service maintenance is supported only on macOS".to_owned())
 }
 

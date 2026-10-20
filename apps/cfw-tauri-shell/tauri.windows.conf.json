@@ -1,0 +1,33 @@
+{
+  "productName": "Clash for Windows",
+  "mainBinaryName": "Clash for Windows",
+  "identifier": "com.bill.clashforwindows",
+  "build": {
+    "features": [],
+    "beforeBuildCommand": "powershell -NoProfile -File ../../scripts/build_ui_windows.ps1",
+    "beforeDevCommand": "powershell -NoProfile -File ../../scripts/build_ui_windows.ps1"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Clash for Windows",
+        "width": 1100,
+        "height": 760,
+        "minWidth": 850,
+        "minHeight": 603,
+        "decorations": true,
+        "transparent": true,
+        "resizable": true,
+        "visible": false,
+        "center": true
+      }
+    ]
+  },
+  "bundle": {
+    "active": false,
+    "targets": [],
+    "createUpdaterArtifacts": false,
+    "icon": ["icons/platforms/windows/icon.ico"]
+  }
+}

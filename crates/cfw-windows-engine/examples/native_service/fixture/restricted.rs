@@ -673,7 +673,7 @@ pub(super) fn require_medium_user_context() -> Result<NativePeerProcess> {
 }
 
 fn client_body(name: &str, hex: &str, case: ClientCase) -> Result<()> {
-    let identity = require_medium_user_context()?;
+    require_medium_user_context()?;
     if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("invalid fixture executable identity".into());
     }

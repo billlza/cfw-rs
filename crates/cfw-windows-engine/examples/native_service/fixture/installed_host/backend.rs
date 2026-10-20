@@ -13,30 +13,43 @@ use windows_sys::Win32::{
     },
 };
 
-pub(super) fn exercise(progress: &mut Progress) -> Result<serde_json::Value> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Suite {
+    Modes,
+    EngineExit,
+}
+impl Suite {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Modes => "modes",
+            Self::EngineExit => "engine-exit",
+        }
+    }
+}
+
+pub(super) fn exercise(progress: &mut Progress, suite: Suite) -> Result<serde_json::Value> {
     progress.record("backend_open", 0)?;
     let desktop = Arc::new(InstalledDesktop::open().map_err(|e| e.to_string())?);
     let diagnostics = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(
-            desktop
-                .paths()
-                .root
-                .join("installed-validation-backend.log"),
-        )
+        .open(desktop.paths().root.join(format!(
+            "installed-validation-backend-{}.log",
+            suite.label()
+        )))
         .map_err(|e| e.to_string())?;
     let backend = WindowsEngineBackend::new(Arc::clone(&desktop), diagnostics);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|e| e.to_string())?;
-    runtime.block_on(exercise_async(&desktop, &backend, progress))
+    runtime.block_on(exercise_async(&desktop, &backend, progress, suite))
 }
 async fn exercise_async(
     desktop: &InstalledDesktop,
     backend: &WindowsEngineBackend,
     progress: &mut Progress,
+    suite: Suite,
 ) -> Result<serde_json::Value> {
     if backend.runtime_platform() != cfw_engine_api::EngineRuntimePlatform::Windows
         || backend.query_status().await.map_err(|e| e.to_string())? != NativeEngineStatus::Off
@@ -48,20 +61,33 @@ async fn exercise_async(
         .proxy()
         .snapshot()
         .map_err(|e| e.to_string())?;
-    let mut authorizations = vec![authorize_unchanged(desktop, backend, progress, 2).await?];
+    let initial_generation = if suite == Suite::Modes { 2 } else { 4 };
+    if desktop
+        .generations()
+        .load_lineage()
+        .map_err(|e| e.to_string())?
+        .generation
+        != initial_generation
+    {
+        return Err("backend suite began with a different persisted generation".into());
+    }
+    let mut authorizations = Vec::new();
+    if suite == Suite::Modes {
+        authorizations.push(authorize_unchanged(desktop, backend, progress, 2).await?);
+    }
     let profile =
         ValidatedSingBoxProfile::parse(r#"{"outbounds":[{"type":"direct","tag":"direct"}]}"#)
             .map_err(|e| e.to_string())?;
     let mut modes = Vec::new();
     let mut failure_case = None;
-    for (index, mode) in [
-        ProjectionMode::LocalProxy,
-        ProjectionMode::SystemProxy,
-        ProjectionMode::LocalProxy,
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    let cases: &[(usize, ProjectionMode)] = match suite {
+        Suite::Modes => &[
+            (0, ProjectionMode::LocalProxy),
+            (1, ProjectionMode::SystemProxy),
+        ],
+        Suite::EngineExit => &[(2, ProjectionMode::LocalProxy)],
+    };
+    for &(index, mode) in cases {
         let mixed = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(|e| e.to_string())?;
         let controller = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(|e| e.to_string())?;
         let address = mixed.local_addr().map_err(|e| e.to_string())?;
@@ -294,11 +320,18 @@ async fn exercise_async(
         let _controller = TcpListener::bind(controller_address)
             .map_err(|e| format!("backend controller remained: {e}"))?;
     }
-    authorizations.push(authorize_unchanged(desktop, backend, progress, 5).await?);
-    Ok(
-        serde_json::json!({"shared_engine_backend":true,"unlaunched_rejection_retired":true,"modes":modes,"failure_case":failure_case.ok_or("missing actual engine-exit case")?,
-        "exited_engine_query_rejected":true,"proxy_restored":true,"listeners_released":true,"authorizations":authorizations,"release_accepted":false}),
-    )
+    match suite {
+        Suite::Modes => Ok(serde_json::json!({"shared_engine_backend":true,
+            "unlaunched_rejection_retired":true,"modes":modes,"proxy_restored":true,
+            "listeners_released":true,"authorizations":authorizations,"release_accepted":false})),
+        Suite::EngineExit => {
+            authorizations.push(authorize_unchanged(desktop, backend, progress, 5).await?);
+            Ok(serde_json::json!({"shared_engine_backend":true,
+                "failure_case":failure_case.ok_or("missing actual engine-exit case")?,
+                "exited_engine_query_rejected":true,"proxy_restored":true,"listeners_released":true,
+                "authorizations":authorizations,"release_accepted":false}))
+        }
+    }
 }
 
 async fn authorize_unchanged(

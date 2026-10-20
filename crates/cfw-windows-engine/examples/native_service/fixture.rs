@@ -119,6 +119,7 @@ pub(super) fn main() -> Result<()> {
             args[1].as_str(),
             "--installed-host-client"
                 | "--installed-backend-client"
+                | "--installed-backend-exit-client"
                 | "--installed-profile-client"
                 | "--installed-coordinator-client"
         )
@@ -129,6 +130,7 @@ pub(super) fn main() -> Result<()> {
         return match args[1].as_str() {
             "--installed-host-client" => installed_host::exercise(),
             "--installed-backend-client" => installed_host::exercise_backend(),
+            "--installed-backend-exit-client" => installed_host::exercise_backend_exit(),
             "--installed-coordinator-client" => installed_host::exercise_coordinator(),
             _ => installed_host::exercise_profile(),
         };

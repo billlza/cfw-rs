@@ -23,6 +23,7 @@ use progress::Progress;
 pub(super) enum InstalledSuite {
     Host,
     Backend,
+    BackendExit,
     Profile,
     Coordinator,
 }
@@ -31,6 +32,7 @@ impl InstalledSuite {
         match self {
             Self::Host => "installed-host",
             Self::Backend => "installed-host-backend",
+            Self::BackendExit => "installed-host-backend-exit",
             Self::Profile => "installed-host-profile",
             Self::Coordinator => "installed-host-coordinator",
         }
@@ -278,13 +280,27 @@ pub(super) fn exercise_backend() -> Result<()> {
     require_opt_in()?;
     let mut progress = Progress::new()?;
     progress.record("open_desktop", 0)?;
-    let backend = backend::exercise(&mut progress)?;
+    let backend = backend::exercise(&mut progress, backend::Suite::Modes)?;
+    progress.record("complete", 4)?;
+    println!(
+        "{}",
+        serde_json::json!({"source":std::env::var("CFW_NATIVE_SERVICE_SOURCE").map_err(|e|e.to_string())?,
+        "product_service":true,"product_agent":true,"desktop_is_fixture":true,"medium_integrity":true,
+        "backend_modes":backend,"release_accepted":false})
+    );
+    Ok(())
+}
+pub(super) fn exercise_backend_exit() -> Result<()> {
+    require_opt_in()?;
+    let mut progress = Progress::new()?;
+    progress.record("open_desktop", 0)?;
+    let backend = backend::exercise(&mut progress, backend::Suite::EngineExit)?;
     progress.record("complete", 5)?;
     println!(
         "{}",
         serde_json::json!({"source":std::env::var("CFW_NATIVE_SERVICE_SOURCE").map_err(|e|e.to_string())?,
         "product_service":true,"product_agent":true,"desktop_is_fixture":true,"medium_integrity":true,
-        "backend":backend,"release_accepted":false})
+        "backend_exit":backend,"release_accepted":false})
     );
     Ok(())
 }
@@ -339,8 +355,15 @@ pub(super) fn check_output(
     }
     let (report, phases) = progress::decode(&bytes)?;
     let valid_case = if suite == InstalledSuite::Backend {
-        report["backend"]["shared_engine_backend"] == true
-            && report["backend"]["exited_engine_query_rejected"] == true
+        report["backend_modes"]["shared_engine_backend"] == true
+            && report["backend_modes"]["unlaunched_rejection_retired"] == true
+            && report["backend_modes"]["modes"]
+                .as_array()
+                .is_some_and(|rows| rows.len() == 2)
+    } else if suite == InstalledSuite::BackendExit {
+        report["backend_exit"]["shared_engine_backend"] == true
+            && report["backend_exit"]["exited_engine_query_rejected"] == true
+            && report["backend_exit"]["failure_case"]["exact_engine_exit_observed"] == true
     } else if suite == InstalledSuite::Profile {
         report["profile_probes"]["shared_profile_delay_backend"] == true
             && report["profile_probes"]["cancellation_observed"] == true
@@ -447,8 +470,57 @@ pub(super) fn combine_reports(directory: &Path) -> Result<()> {
         serde_json::from_slice(&bytes).map_err(|e| e.to_string())
     }
     let mut direct = read(&directory.join("installed-host-lifecycle.json"))?;
+    let modes = read(&directory.join("installed-host-backend-lifecycle.json"))?;
+    let exited = read(&directory.join("installed-host-backend-exit-lifecycle.json"))?;
+    for (report, key) in [(&modes, "backend_modes"), (&exited, "backend_exit")] {
+        if report["source"] != direct["source"]
+            || report["release_accepted"] != false
+            || report[key]["shared_engine_backend"] != true
+            || report[key]["proxy_restored"] != true
+            || report[key]["listeners_released"] != true
+        {
+            return Err("backend suites do not share verified source and cleanup".into());
+        }
+    }
+    let mut backend = modes["backend_modes"].clone();
+    let combined = backend
+        .as_object_mut()
+        .ok_or("missing normal backend evidence")?;
+    if combined
+        .insert(
+            "failure_case".into(),
+            exited["backend_exit"]["failure_case"].clone(),
+        )
+        .is_some()
+        || combined
+            .insert(
+                "exited_engine_query_rejected".into(),
+                exited["backend_exit"]["exited_engine_query_rejected"].clone(),
+            )
+            .is_some()
+    {
+        return Err("backend failure evidence was already combined".into());
+    }
+    combined
+        .get_mut("authorizations")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or("missing normal authorization evidence")?
+        .extend(
+            exited["backend_exit"]["authorizations"]
+                .as_array()
+                .ok_or("missing final authorization evidence")?
+                .iter()
+                .cloned(),
+        );
+    if direct
+        .as_object_mut()
+        .ok_or("installed report is not an object")?
+        .insert("backend".into(), backend)
+        .is_some()
+    {
+        return Err("backend evidence was already combined".into());
+    }
     for (suite, key, proof) in [
-        (InstalledSuite::Backend, "backend", "shared_engine_backend"),
         (
             InstalledSuite::Profile,
             "profile_probes",

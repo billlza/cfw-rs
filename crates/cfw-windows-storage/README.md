@@ -57,6 +57,16 @@ the old value remains. Pre-publication cleanup failures retain both errors.
 The file snapshot identity covers the volume, the complete 128-bit file ID and
 the bytes; equal bytes in a replacement file still invalidate a stale revision.
 
+`begin_stream` holds a write transaction while receiving bounded chunks into a
+fresh private temporary. Its open excludes data readers and writers. Any write
+failure makes the stream unpublishable; `commit` flushes and atomically publishes
+without replacing an existing destination. Discard and Drop delete the held
+object, never a pathname that another file may have replaced. Directory-flush
+failure after publication remains `CommitUncertain`. The updater invokes commit
+only after its full Minisign verification; this storage API does not authenticate
+payloads or grant permission to run an installer. Process termination can leave
+an unpublished temporary; the caller's staging recovery owns its later cleanup.
+
 Repositories can publish with their canonical UUID temporary names, retaining
 their existing crash-recovery rules. `Publication::CreateNew` refuses to replace
 an existing destination in the native rename operation. Opened private files

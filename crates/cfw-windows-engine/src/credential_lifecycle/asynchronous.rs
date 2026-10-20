@@ -266,6 +266,7 @@ fn map_error(error: Error, admitted: bool) -> VaultError {
             }
             Storage::InvalidName
             | Storage::InvalidLimit
+            | Storage::IncompleteStream
             | Storage::UnexpectedDirectory
             | Storage::InvalidMutexParameters => VaultError::Internal,
         },

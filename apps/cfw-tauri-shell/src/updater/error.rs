@@ -138,6 +138,13 @@ pub(super) enum UpdateError {
         stage: &'static str,
         kind: std::io::ErrorKind,
     },
+    #[cfg(windows)]
+    #[error("private Windows update storage failed during {stage}: {source}")]
+    WindowsStorage {
+        stage: &'static str,
+        #[source]
+        source: cfw_windows_storage::Error,
+    },
     #[error(transparent)]
     Archive(#[from] UpdateArchiveError),
     #[error(transparent)]
@@ -253,6 +260,8 @@ impl UpdateError {
             }
             Self::SignatureVerification => ("signature_mismatch", Category::Authenticity),
             Self::Staging { .. } => ("staging_io", Category::Storage),
+            #[cfg(windows)]
+            Self::WindowsStorage { .. } => ("staging_io", Category::Storage),
             Self::Archive(error) => (error.code(), Category::Package),
             Self::StagedBundle(error) => (error.code(), error.category()),
             Self::Services(error) => (error.code(), error.category()),

@@ -12,12 +12,14 @@ mod locking;
 mod mutex;
 mod registry;
 mod security;
+mod streaming;
 mod wait;
 pub use exclusive::{ExclusiveDocument, ExclusiveWriteFailure};
 pub use legacy::{LegacyReadDirectory, LegacyReadError};
 pub use mutex::PrivateUserMutex;
 pub use registry::{MachineRecordError, MachineRecordGuard, PrivateMachineRecord};
 pub use security::require_process_identity;
+pub use streaming::StreamedFile;
 pub use wait::{WaitOutcome, wait_until};
 
 use std::fs::{File, OpenOptions};
@@ -63,6 +65,8 @@ pub enum Error {
     InvalidName,
     #[error("private storage read limit is invalid")]
     InvalidLimit,
+    #[error("private storage stream failed and cannot be published")]
+    IncompleteStream,
     #[error("private storage directory exceeds its {maximum}-entry limit")]
     TooManyEntries { maximum: usize },
     #[error("private storage directory enumeration returned invalid or incomplete data")]

@@ -1,7 +1,12 @@
+#[cfg(target_os = "macos")]
 use std::fs::{self, File};
+#[cfg(target_os = "macos")]
 use std::io::Write as _;
+#[cfg(target_os = "macos")]
 use std::os::unix::fs::OpenOptionsExt as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(target_os = "macos")]
+use std::path::PathBuf;
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -187,10 +192,15 @@ where
 /// The archive file while it is still unauthenticated. Dropping it without
 /// `commit` removes the file, so no failed transfer leaves bytes behind.
 struct PartialArchive {
+    #[cfg(target_os = "macos")]
     path: PathBuf,
+    #[cfg(target_os = "macos")]
     file: Option<File>,
+    #[cfg(windows)]
+    stream: Option<cfw_windows_storage::StreamedFile>,
 }
 
+#[cfg(target_os = "macos")]
 impl PartialArchive {
     fn create(path: &Path) -> Result<Self> {
         let file = fs::OpenOptions::new()
@@ -226,6 +236,7 @@ impl PartialArchive {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl Drop for PartialArchive {
     fn drop(&mut self) {
         if self.file.take().is_some()
@@ -236,6 +247,69 @@ impl Drop for PartialArchive {
     }
 }
 
+#[cfg(windows)]
+impl PartialArchive {
+    fn create(path: &Path) -> Result<Self> {
+        let parent = path.parent().ok_or_else(|| {
+            storage_error("create-archive")(cfw_windows_storage::Error::InvalidName)
+        })?;
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                storage_error("create-archive")(cfw_windows_storage::Error::InvalidName)
+            })?;
+        // Staging owns creation and admission of the transaction directory.
+        // A missing or unsafe parent is never silently created by a download.
+        let directory = cfw_windows_storage::PrivateDirectory::open_existing(parent)
+            .map_err(storage_error("open-archive-directory"))?
+            .ok_or(UpdateError::Staging {
+                stage: "open-archive-directory",
+                kind: std::io::ErrorKind::NotFound,
+            })?;
+        let temporary = format!(".{name}.{}.tmp", uuid::Uuid::new_v4());
+        let stream = directory
+            .begin_stream(name, &temporary, MAX_UPDATE_ARCHIVE_BYTES as usize)
+            .map_err(storage_error("create-archive"))?;
+        Ok(Self {
+            stream: Some(stream),
+        })
+    }
+
+    fn write(&mut self, chunk: &[u8]) -> Result<()> {
+        self.stream
+            .as_mut()
+            .expect("an uncommitted archive keeps its stream")
+            .write_chunk(chunk)
+            .map_err(storage_error("write-archive"))
+    }
+
+    fn commit(mut self) -> Result<()> {
+        self.stream
+            .take()
+            .expect("an uncommitted archive keeps its stream")
+            .commit()
+            .map_err(storage_error("publish-archive"))
+    }
+}
+
+#[cfg(windows)]
+impl Drop for PartialArchive {
+    fn drop(&mut self) {
+        if let Some(stream) = self.stream.take()
+            && let Err(error) = stream.discard()
+        {
+            eprintln!("failed to remove an unauthenticated update archive: {error}");
+        }
+    }
+}
+
+#[cfg(windows)]
+fn storage_error(stage: &'static str) -> impl Fn(cfw_windows_storage::Error) -> UpdateError {
+    move |source| UpdateError::WindowsStorage { stage, source }
+}
+
+#[cfg(target_os = "macos")]
 fn staging_error(stage: &'static str) -> impl Fn(std::io::Error) -> UpdateError {
     move |error| UpdateError::Staging {
         stage,
@@ -326,6 +400,10 @@ fn decode_base64_utf8(encoded: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    #[cfg(windows)]
+    use std::io::Write as _;
+    #[cfg(target_os = "macos")]
     use std::os::unix::fs::PermissionsExt as _;
 
     use futures_util::stream;
@@ -387,6 +465,19 @@ mod tests {
         )
     }
 
+    fn scratch() -> (tempfile::TempDir, std::path::PathBuf) {
+        let guard = tempfile::tempdir().expect("scratch");
+        #[cfg(target_os = "macos")]
+        let root = guard.path().to_owned();
+        #[cfg(windows)]
+        let root = {
+            let root = guard.path().join("private");
+            cfw_windows_storage::PrivateDirectory::open_or_create(&root).expect("private staging");
+            root
+        };
+        (guard, root)
+    }
+
     async fn receive(
         key: &PublicKey,
         authorization: &UpdateAuthorization,
@@ -408,8 +499,8 @@ mod tests {
 
     #[tokio::test]
     async fn an_archive_matching_its_signature_is_kept_privately() {
-        let scratch = tempfile::tempdir().expect("scratch");
-        let destination = scratch.path().join("archive.tar.gz");
+        let (_guard, scratch) = scratch();
+        let destination = scratch.join("archive.tar.gz");
         let mut progress = Vec::new();
         let received = receive_verified_archive(
             &test_key(),
@@ -428,20 +519,27 @@ mod tests {
         assert_eq!(received, 4);
         assert_eq!(progress, [(2, Some(4)), (4, Some(4))]);
         assert_eq!(fs::read(&destination).expect("archive"), b"test");
-        let mode = fs::metadata(&destination)
-            .expect("metadata")
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o777, 0o600);
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            fs::metadata(&destination)
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        #[cfg(windows)]
+        cfw_windows_storage::validate_private_file(&fs::File::open(&destination).expect("file"))
+            .expect("private archive security");
     }
 
     #[tokio::test]
     async fn altered_truncated_or_extended_bytes_fail_verification_and_leave_no_file() {
-        let scratch = tempfile::tempdir().expect("scratch");
+        let (_guard, scratch) = scratch();
         let key = test_key();
         let cases: [&[&[u8]]; 4] = [&[b"tesT"], &[b"tes"], &[b"test", b"!"], &[b"TEST"]];
         for (index, parts) in cases.into_iter().enumerate() {
-            let destination = scratch.path().join(format!("archive-{index}"));
+            let destination = scratch.join(format!("archive-{index}"));
             let outcome = receive(
                 &key,
                 &authorization("test"),
@@ -463,8 +561,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_signature_for_another_archive_name_is_refused_before_any_byte_is_stored() {
-        let scratch = tempfile::tempdir().expect("scratch");
-        let destination = scratch.path().join("archive");
+        let (_guard, scratch) = scratch();
+        let destination = scratch.join("archive");
         let outcome = receive(
             &test_key(),
             &authorization("Clash.for.Mac_9.9.9_aarch64.app.tar.gz"),
@@ -482,8 +580,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_signature_from_another_key_is_refused() {
-        let scratch = tempfile::tempdir().expect("scratch");
-        let destination = scratch.path().join("archive");
+        let (_guard, scratch) = scratch();
+        let destination = scratch.join("archive");
         let release_key = embedded_public_key().expect("release key");
         let outcome = receive(
             &release_key,
@@ -499,9 +597,9 @@ mod tests {
 
     #[tokio::test]
     async fn size_bounds_are_enforced_before_and_during_the_transfer() {
-        let scratch = tempfile::tempdir().expect("scratch");
+        let (_guard, scratch) = scratch();
         let key = test_key();
-        let destination = scratch.path().join("archive");
+        let destination = scratch.join("archive");
         let tight = ArchiveBounds {
             maximum: 3,
             ..bounds(None)
@@ -568,8 +666,8 @@ mod tests {
 
     #[tokio::test]
     async fn cancellation_and_transfer_errors_remove_the_partial_file() {
-        let scratch = tempfile::tempdir().expect("scratch");
-        let destination = scratch.path().join("archive");
+        let (_guard, scratch) = scratch();
+        let destination = scratch.join("archive");
         let cancellation = DownloadCancellation::new();
         cancellation.cancel();
         let cancelled = receive_verified_archive(
@@ -618,8 +716,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_transfer_that_stops_delivering_bytes_is_a_timeout_and_leaves_nothing() {
-        let scratch = tempfile::tempdir().expect("scratch");
-        let destination = scratch.path().join("archive");
+        let (_guard, scratch) = scratch();
+        let destination = scratch.join("archive");
         let stalled = stream::iter(vec![Ok(b"te".to_vec())]).chain(stream::pending());
         let started = std::time::Instant::now();
         let outcome = receive_verified_archive(
@@ -652,9 +750,20 @@ mod tests {
 
     #[tokio::test]
     async fn an_existing_destination_is_never_overwritten() {
-        let scratch = tempfile::tempdir().expect("scratch");
-        let destination = scratch.path().join("archive");
+        let (_guard, scratch) = scratch();
+        let destination = scratch.join("archive");
+        #[cfg(target_os = "macos")]
         fs::write(&destination, b"earlier").expect("existing file");
+        #[cfg(windows)]
+        cfw_windows_storage::PrivateDirectory::open_existing(&scratch)
+            .expect("directory")
+            .expect("present")
+            .write()
+            .expect("transaction")
+            .create_private_output("archive")
+            .expect("existing file")
+            .write_all(b"earlier")
+            .expect("existing bytes");
         let outcome = receive(
             &test_key(),
             &authorization("test"),
@@ -663,12 +772,21 @@ mod tests {
             &destination,
         )
         .await;
+        #[cfg(target_os = "macos")]
         assert!(matches!(
             outcome,
             Err(UpdateError::Staging {
                 stage: "create-archive",
                 kind: std::io::ErrorKind::AlreadyExists,
             })
+        ));
+        #[cfg(windows)]
+        assert!(matches!(
+            outcome,
+            Err(UpdateError::WindowsStorage {
+                stage: "create-archive",
+                source: cfw_windows_storage::Error::Io(error),
+            }) if error.kind() == std::io::ErrorKind::AlreadyExists
         ));
         assert_eq!(fs::read(&destination).expect("untouched"), b"earlier");
     }

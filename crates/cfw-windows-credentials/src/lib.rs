@@ -286,6 +286,7 @@ fn storage_error(error: cfw_windows_storage::Error) -> Error {
         Storage::CleanupFailed { operation, .. } => storage_error(*operation),
         Storage::InvalidName
         | Storage::InvalidLimit
+        | Storage::IncompleteStream
         | Storage::UnexpectedDirectory
         | Storage::InvalidMutexParameters => Error::Internal,
     }

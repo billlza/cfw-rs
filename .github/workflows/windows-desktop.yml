@@ -114,13 +114,6 @@ jobs:
           cargo run --locked -p cfw-windows-engine --features native-service-validation --example native-service-fixture -- --desktop-process-validation 2>&1 |
             Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-medium-process-tests.log')
           if ($LASTEXITCODE -ne 0) { throw 'Windows medium-integrity desktop process observation failed' }
-      - name: Verify native signed MSI inspection
-        timeout-minutes: 8
-        env:
-          CFW_NATIVE_PACKAGE_TESTS: '1'
-          CFW_PACKAGE_SOURCE: ${{ github.sha }}
-        run: |
-          ./scripts/fixtures/windows_update_package.ps1 -Source $env:CFW_PACKAGE_SOURCE -Evidence (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/package-inspection')
       - name: Check the complete Windows desktop target
         run: |
           cargo check --locked -p cfw-tauri-shell --bin clash-for-mac 2>&1 |
@@ -157,5 +150,48 @@ jobs:
         with:
           name: cfw-desktop-development-windows-x64
           path: ${{ runner.temp }}/cfw-desktop-evidence/
+          if-no-files-found: error
+          retention-days: 14
+
+  package-inspection:
+    name: Windows native update package inspection
+    runs-on: windows-2025
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify package source and Rust pin
+        id: pins
+        env:
+          EXPECTED_SOURCE: ${{ github.sha }}
+        run: |
+          $source = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $source -cne $env:EXPECTED_SOURCE) { throw 'Source identity mismatch' }
+          $pins = Get-Content scripts/dependency_pins.env -Raw
+          $pinMatches = [regex]::Matches($pins, '(?m)^RUST_VERSION=([0-9.]+)\r?$')
+          if ($pinMatches.Count -ne 1) { throw 'Missing or ambiguous Rust pin' }
+          "RUST_VERSION=$($pinMatches[0].Groups[1].Value)" >> $env:GITHUB_OUTPUT
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: ${{ steps.pins.outputs.RUST_VERSION }}
+          components: clippy,rustfmt
+      - name: Verify native signed MSI inspection
+        timeout-minutes: 8
+        env:
+          CFW_NATIVE_PACKAGE_TESTS: '1'
+          CFW_PACKAGE_SOURCE: ${{ github.sha }}
+        run: |
+          ./scripts/fixtures/windows_update_package.ps1 -Source $env:CFW_PACKAGE_SOURCE -Evidence (Join-Path $env:RUNNER_TEMP 'cfw-package-evidence')
+      - name: Preserve package inspection output and diagnostics
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: cfw-update-package-inspection-windows-x64
+          path: ${{ runner.temp }}/cfw-package-evidence/
           if-no-files-found: error
           retention-days: 14

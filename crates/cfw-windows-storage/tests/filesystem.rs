@@ -518,9 +518,33 @@ fn concurrent_transactions_do_not_lose_updates() {
         let start = Arc::clone(&start);
         workers.push(std::thread::spawn(move || {
             start.wait();
-            for _ in 0..16 {
+            for update in 0..16 {
                 let directory = PrivateDirectory::open_existing(&path).unwrap().unwrap();
-                let mut transaction = directory.write().unwrap();
+                // Admission is bounded and may refuse contention before a
+                // transaction exists. Retry only that pre-mutation result, at
+                // most three attempts; every read/write failure still fails.
+                // The separate deadline and queued-waiter tests retain their
+                // original bounds. All 32 logical updates remain required.
+                let mut attempts = 0;
+                let mut transaction = loop {
+                    attempts += 1;
+                    let began = Instant::now();
+                    match directory.write() {
+                        Ok(transaction) => break transaction,
+                        Err(Error::Busy) if attempts < 3 => {
+                            eprintln!(
+                                "update {update}: admission attempt {attempts} timed out after {:?}; no transaction was acquired",
+                                began.elapsed()
+                            );
+                        }
+                        Err(error) => {
+                            panic!(
+                                "update {update}: admission attempt {attempts} failed after {:?}: {error}",
+                                began.elapsed()
+                            );
+                        }
+                    }
+                };
                 let snapshot = transaction
                     .read("count", 128, ReadPolicy::Private)
                     .unwrap()

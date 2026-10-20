@@ -25,7 +25,10 @@ pub mod runtime_host;
 #[cfg(any(windows, test))]
 pub mod user_agent;
 #[cfg(any(windows, test))]
-pub use configuration::{CheckedStartConfiguration, PreparedConfig, ResolvedProjection};
+pub use configuration::{
+    CheckedProbeConfiguration, CheckedStartConfiguration, PreparedConfig, ResolvedProbe,
+    ResolvedProjection,
+};
 
 #[cfg(windows)]
 mod lineage;

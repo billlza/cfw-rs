@@ -2,13 +2,13 @@
 
 评估日期：2026-10-18。状态：开发中，尚无经过验证的 Windows 产品。
 
-最新组件证据（2026-10-20）：`9b64004` 的 Windows CI 四项作业及下载产物核验通过，
-含 612 项 Rust、311 项 UI、11 项原生引擎、35 项 SCM 检查。产品服务/Agent 的
+最新组件证据（2026-10-20）：`11945b4` 的 Windows CI 四项作业及下载产物核验通过，
+含 614 项 Rust、311 项 UI、11 项原生引擎、35 项 SCM 检查。产品服务/Agent 的
 安装、四种模式的非激活预检、共享 EngineBackend 的 LocalProxy/SystemProxy 启停与
 新鲜状态查询，以及真实引擎退出后的查询拒绝和独立 Off 已验证。安装客户端聚合超时
 已定位并通过拆分有界验收关闭；服务崩溃恢复仍要求独立观察者保留运行 Job。
-`036cc1d` 新增共享 SystemProxyAuthorization 接口；其 CI 在执行到新增安装验收前，
-遇到服务退出期间映像查询失败。已补同一保留句柄的退出观察，新增原生回归待 CI。
+SystemProxyAuthorization 的运行前、运行中和停止后检查，以及同一保留进程句柄的
+退出观察回归均通过。共享 ProfileDelayBackend 已新增，原生测速验收尚待执行。
 完整 Tauri 桌面、TUN、视觉一致性及发布验收仍未完成。
 
 ## 基线与完成条件
@@ -1784,9 +1784,46 @@ impersonation；沿用有界 worker 容量，不持有运行状态锁。此入�
 进程句柄做零等待观察，只有实际 signaled 才返回 Exited；活进程的权限或映像拒绝仍
 保留原错误。没有扩大崩溃 fixture 的可接受错误名单，没有把 Access denied 本身
 解释为退出。新增原生测试用实际缺少 query 权限的活句柄验证拒绝保留，并用已退出的
-测试子进程验证原句柄退出分类；其 Windows 执行结果待 CI。原失败未保留查询瞬间的
+测试子进程验证原句柄退出分类。原失败未保留查询瞬间的
 退出信号，因此窗口原因仍需结合该回归和完整重跑验证，不能把后来退出反推为当时
 已经 signaled。该处理遵循 [进程终止与等待的边界](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-terminateprocess)。
+
+`11945b452033716e3dc801bb69d8492431b03b96` 的
+[39376793587](https://github.com/billlza/cfw-rs/actions/runs/39376793587) 四项 Windows 作业
+通过，614 项 Rust/311 项 UI 无失败或忽略，两项新增原生句柄回归均实际执行。
+engine artifact `12242924569`（SHA-256
+`198bed368a5fc2919ae46abcaed229f97e2b1bc650c5a88844215d8d5f108a88`）与 SCM artifact
+`12244295076`（SHA-256
+`a5829c19c4819f48c43e456b8ccc623ff563589ed8aa881c269fd26a7312f8d2`）已下载并经完整核验。
+安装客户端 24/41 条阶段记录耗时 19.140/32.913 秒；三次授权分别在 Off/gen2、
+Active/gen4、Off/gen5，Authority、lineage 和 WinINet 均未改变。实际终止引擎后查询
+返回 Recovering，停止保留 OwnerUnresponsive 错误，随后独立 Off revision 35；重启为
+Off revision 36。更新头的 Mac 作业仍排队，不能用 Windows 结果替代。
+
+### 共享节点测速接口
+
+`WindowsEngineBackend` 实现共享 `ProfileDelayBackend`。请求沿用 GA 的 profile audience、
+凭据 slots、节点顺序、100–10,000 ms 超时、目标 URL 与预期 HTTP 状态。受保护安装的
+Desktop 验证无入站/控制器/路由变更的请求后，通过 DPAPI 取得精确 audience 的凭据快照，
+交给独立用户级 engine host；直接调用同一 GA 补丁的 `TestProfileProxiesWithTarget`，
+保留实际协议 HEAD/URL 探测、成功延迟、timeout/not_found/probe_failed 语义。
+
+一次测速不分配运行 generation，不获取 Authority lease，不改变系统代理或路由。
+后台测速只有一个独立槽和跨进程 mutex，不占运行状态锁；取消信号进入原生控制等待，
+槽一直保留到真实子进程、Job、管道和目录资源退休。正常运行回复仍限 4 KiB，只有已提交
+测速请求可读取最多 64 KiB 的测速回复，且验证会话、序号、进程、版本、摘要、节点顺序及
+互斥结果。错误回复和清理失败不能变成空结果或成功延迟。
+
+安装验收新增第三个独立 medium-integrity 客户端，保持每个客户端 60 秒上限。它验证实际
+SOCKS 凭据认证、错误 audience 拒绝、已发出 HEAD 后取消、槽复用、较大有序结果与
+generation/Authority/代理设置不变。该客户端不执行产品 Agent，并明确记录此边界。
+另有真实引擎测试保留原进程句柄，核验成功、取消和超时后的退出与资源清理。
+TCP 对端关闭只接受 EOF 或明确的远端 reset，接收超时不作为清理证明，遵循
+[Winsock recv 契约](https://learn.microsoft.com/en-us/windows/win32/api/winsock/nf-winsock-recv)。
+
+本地 113 项 portable tests、22 项 Go host pass events、10 项源码/构建契约测试通过；
+Windows 默认/全 feature cross-Clippy（warnings denied）及工作区格式通过。新增 Go
+host 已按 GA 固定工具链交叉构建 Windows x64 字节，仍需托管 Windows 原生运行核验。
 代理 backend 上述限定的原生验收已通过；异步取消和异常恢复的最终应用验收尚未完成。
 TUN 入口仍显式不可用，尚需完整 TUN/合并模式、backend 的服务重启恢复衔接、应用诊断
 接线、Tauri Windows factory/startup/build、实际 UI 和发布验收。此实现没有关闭这些缺口。

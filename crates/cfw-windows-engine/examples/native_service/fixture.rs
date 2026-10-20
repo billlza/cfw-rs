@@ -117,16 +117,16 @@ pub(super) fn main() -> Result<()> {
     if args.len() == 4
         && matches!(
             args[1].as_str(),
-            "--installed-host-client" | "--installed-backend-client"
+            "--installed-host-client" | "--installed-backend-client" | "--installed-profile-client"
         )
     {
         if args[2] != cfw_windows_engine::runtime_host::SERVICE_NAME {
             return Err("installed host selector differs".into());
         }
-        return if args[1] == "--installed-host-client" {
-            installed_host::exercise()
-        } else {
-            installed_host::exercise_backend()
+        return match args[1].as_str() {
+            "--installed-host-client" => installed_host::exercise(),
+            "--installed-backend-client" => installed_host::exercise_backend(),
+            _ => installed_host::exercise_profile(),
         };
     }
     if args.len() == 2 && args[1] == "--runtime-job-idle-probe" {

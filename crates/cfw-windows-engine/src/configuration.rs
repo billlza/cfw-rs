@@ -10,6 +10,9 @@ use crate::Error;
 
 mod start_request;
 pub use start_request::CheckedStartConfiguration;
+mod probe;
+pub(crate) use probe::ProbeOptions;
+pub use probe::{CheckedProbeConfiguration, ResolvedProbe};
 
 /// Resolved material for one already validated projection. The identity is the
 /// original projection digest, never a hash of injected vault credentials.

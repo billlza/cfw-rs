@@ -77,6 +77,22 @@ impl WindowsCredentialLifecycle {
         })
     }
 
+    /// One immutable, audience-bound snapshot for a transient profile probe.
+    /// No runtime binding or generation is created; all resolved bytes remain
+    /// in the private native worker and are erased when that snapshot retires.
+    pub(crate) fn resolve_probe_material(
+        &self,
+        request: &crate::CheckedProbeConfiguration,
+        deadline: Instant,
+    ) -> Result<cfw_windows_credentials::ResolvedCredentials> {
+        self.locked(deadline, || {
+            Ok(self.vault().resolve_for_engine(
+                request.credential_audience(),
+                &request.credential_references(),
+            )?)
+        })
+    }
+
     pub fn provision(
         &self,
         request: CredentialProvisionRequest<'_>,

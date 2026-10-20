@@ -27,6 +27,7 @@ use std::{
 use tokio::{runtime::Handle, sync::Semaphore, task::AbortHandle};
 use zeroize::Zeroize;
 mod error;
+mod profile;
 use error::{desktop_error, host_error};
 
 type Result<T> = std::result::Result<T, BackendError>;
@@ -59,6 +60,7 @@ struct Shared {
     state: Mutex<State>,
     capacity: Arc<Semaphore>,
     checks: Arc<Semaphore>,
+    probes: Arc<Semaphore>,
 }
 #[derive(Default)]
 struct State {
@@ -183,6 +185,7 @@ impl WindowsEngineBackend {
                 state: Mutex::new(State::default()),
                 capacity: Arc::new(Semaphore::new(4)),
                 checks: Arc::new(Semaphore::new(1)),
+                probes: Arc::new(Semaphore::new(1)),
             }),
         }
     }

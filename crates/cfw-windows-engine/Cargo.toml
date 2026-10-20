@@ -23,6 +23,7 @@ subtle = "=2.6.1"
 sha2.workspace = true
 tokio = { workspace = true, features = ["rt", "net", "io-util"] }
 uuid.workspace = true
+url.workspace = true
 windows-sys = { version = "=0.61.2", features = [
   "Win32_Foundation",
   "Win32_Security",
@@ -51,6 +52,7 @@ sha2.workspace = true
 subtle = "=2.6.1"
 tempfile.workspace = true
 uuid.workspace = true
+url.workspace = true
 
 [target.'cfg(windows)'.dev-dependencies]
 tokio = { workspace = true, features = ["rt", "net", "io-util"] }

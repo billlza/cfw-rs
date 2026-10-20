@@ -83,6 +83,8 @@ fn channel_kind(error: &LaunchChannelError) -> Kind {
 }
 fn engine_kind(error: &crate::Error) -> Kind {
     match error {
+        crate::Error::Rejected("probe_cleanup_failed") => Kind::CleanupUnproven,
+        crate::Error::Rejected("probe_failed") => Kind::Unavailable,
         crate::Error::Configuration(_) | crate::Error::Rejected(_) => Kind::ConfigurationRejected,
         crate::Error::Protocol(_) => Kind::InvalidMessage,
         crate::Error::Timeout => Kind::Timeout,

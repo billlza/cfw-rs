@@ -70,6 +70,49 @@ impl InstalledDesktop {
         self.storage.proxy().authorize(restoration_only)?;
         Ok(())
     }
+    pub(crate) fn test_profile_delays(
+        &self,
+        request: cfw_engine_api::ProfileDelayTestRequest,
+        cancellation: Arc<std::sync::atomic::AtomicBool>,
+        deadline: Instant,
+    ) -> Result<Vec<cfw_engine_api::ProfileProxyDelay>> {
+        let candidate = crate::CheckedProbeConfiguration::new(request)?;
+        let deadline = deadline.min(Instant::now() + Duration::from_secs(30));
+        remaining(deadline)?;
+        self.installation.require_desktop_process()?;
+        crate::user_agent::launcher::medium_process()?;
+        let lock = cfw_windows_storage::PrivateUserMutex::acquire(
+            "profile-probe-v1",
+            remaining(deadline)?.min(Duration::from_secs(3)),
+        )?;
+        let result = (|| -> Result<Vec<cfw_engine_api::ProfileProxyDelay>> {
+            if cancellation.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(crate::Error::Cancelled.into());
+            }
+            remaining(deadline)?;
+            let material = self
+                .credentials
+                .resolve_probe_material(&candidate, deadline)?;
+            let resolved = candidate.resolve(material.expose_to_engine())?;
+            drop(material);
+            let worker = EngineProcess::spawn_cancellable(
+                self.installation.engine()?,
+                &self.paths.runtime.join("probe-engine-v1"),
+                remaining(deadline)?,
+                Some(cancellation),
+            )?;
+            Ok(worker.probe_until(&resolved, deadline)?)
+        })();
+        let released = lock.release().map_err(HostError::from);
+        match (result, released) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+            (Err(operation), Err(cleanup)) => Err(HostError::Cleanup {
+                operation: Box::new(operation),
+                cleanup: Box::new(cleanup),
+            }),
+        }
+    }
     pub(crate) fn observe_authority(&self, deadline: Instant) -> Result<AuthoritySnapshot> {
         self.installation.require_desktop_process()?;
         let mut channel = AuthorityChannel::connect(

@@ -20,7 +20,7 @@ use std::{
 };
 
 use crate::{
-    Error, PreparedConfig, ResolvedProjection,
+    Error, PreparedConfig, ResolvedProbe, ResolvedProjection,
     protocol::{self, Exchange},
 };
 use cfw_windows_storage::{PrivateDirectory, WaitOutcome, wait_until};
@@ -277,7 +277,18 @@ impl EngineProcess {
         runtime_directory: &Path,
         timeout: Duration,
     ) -> Result<Self, Error> {
-        match Self::spawn_retained(executable, runtime_directory, timeout, None, None) {
+        Self::spawn_cancellable(executable, runtime_directory, timeout, None)
+    }
+    /// Cancellation is checked during native handshake and control waits.
+    /// It reports failure only after the owned child and control I/O retire;
+    /// no runtime/global-Off claim follows from cancellation alone.
+    pub fn spawn_cancellable(
+        executable: VerifiedExecutable,
+        runtime_directory: &Path,
+        timeout: Duration,
+        cancellation: Option<Arc<AtomicBool>>,
+    ) -> Result<Self, Error> {
+        match Self::spawn_retained(executable, runtime_directory, timeout, cancellation, None) {
             Ok(owner) => Ok(owner),
             Err(failure) => {
                 let ChildLaunchFailure { error, owner } = failure;
@@ -417,6 +428,55 @@ impl EngineProcess {
             process_id: self.child.id(),
             configuration_digest: config.digest().to_owned(),
         })
+    }
+
+    /// Isolated application-originated probes. Results are admitted only after
+    /// normal worker exit, drained control I/O, empty Job and released listeners.
+    pub fn probe(
+        mut self,
+        probe: &ResolvedProbe,
+        timeout: Duration,
+    ) -> Result<Vec<cfw_engine_api::ProfileProxyDelay>, Error> {
+        let deadline = match deadline(timeout) {
+            Ok(value) => value,
+            Err(error) => return self.finish_operation(Err(error)),
+        };
+        self.probe_until(probe, deadline)
+    }
+    pub(crate) fn probe_until(
+        mut self,
+        probe: &ResolvedProbe,
+        deadline: Instant,
+    ) -> Result<Vec<cfw_engine_api::ProfileProxyDelay>, Error> {
+        let result = (|| {
+            remaining(deadline)?;
+            if self.closed || self.digest.is_some() || self.child.try_wait()?.is_some() {
+                return Err(Error::Protocol("probe worker is not idle"));
+            }
+            if self.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            let receiver = protocol::submit_probe(
+                self.sender.as_ref().ok_or(Error::Exited)?,
+                &mut self.sequence,
+                &self.session,
+                probe,
+                deadline,
+            )?;
+            let response = self.receive_response(receiver, deadline, true)?;
+            let results = response.validate_probe(
+                &self.session,
+                self.sequence,
+                self.child.id(),
+                &self._executable.version,
+                probe,
+            )?;
+            self.finish_normal_exit(deadline)?;
+            Ok(results)
+        })();
+        let results = self.finish_operation(result)?;
+        self.closed = true;
+        Ok(results)
     }
 
     pub fn start(
@@ -578,6 +638,22 @@ impl EngineProcess {
             config,
             deadline,
         )?;
+        let response = self.receive_response(receiver, deadline, cancellable)?;
+        response.validate(
+            &self.session,
+            self.sequence,
+            self.child.id(),
+            &self._executable.version,
+            state,
+            digest,
+        )
+    }
+    fn receive_response(
+        &self,
+        receiver: mpsc::Receiver<Result<protocol::Response, Error>>,
+        deadline: Instant,
+        cancellable: bool,
+    ) -> Result<protocol::Response, Error> {
         let response = loop {
             if cancellable && self.is_cancelled() {
                 return Err(Error::Cancelled);
@@ -599,14 +675,7 @@ impl EngineProcess {
         if cancellable && self.is_cancelled() {
             return Err(Error::Cancelled);
         }
-        response.validate(
-            &self.session,
-            self.sequence,
-            self.child.id(),
-            &self._executable.version,
-            state,
-            digest,
-        )
+        Ok(response)
     }
     fn is_cancelled(&self) -> bool {
         self.cancellation

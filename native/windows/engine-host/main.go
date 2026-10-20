@@ -23,6 +23,7 @@ import (
 const protocol = 1
 const maxConfig = 4 * 1024 * 1024
 const maxRequest = maxConfig + 4096
+const maxProbeRequest = maxConfig + 65536
 
 type request struct {
 	Protocol int             `json:"protocol"`
@@ -31,17 +32,19 @@ type request struct {
 	Op       string          `json:"op"`
 	Digest   string          `json:"digest,omitempty"`
 	Config   json.RawMessage `json:"config,omitempty"`
+	Probe    json.RawMessage `json:"probe,omitempty"`
 }
 
 type response struct {
-	Protocol int    `json:"protocol"`
-	Session  string `json:"session"`
-	ID       uint64 `json:"id"`
-	PID      int    `json:"pid"`
-	Version  string `json:"version"`
-	State    string `json:"state"`
-	Digest   string `json:"digest"`
-	Error    string `json:"error"`
+	Protocol int             `json:"protocol"`
+	Session  string          `json:"session"`
+	ID       uint64          `json:"id"`
+	PID      int             `json:"pid"`
+	Version  string          `json:"version"`
+	State    string          `json:"state"`
+	Digest   string          `json:"digest"`
+	Error    string          `json:"error"`
+	Results  json.RawMessage `json:"results,omitempty"`
 }
 
 func readRequest(r io.Reader) (request, error) {
@@ -50,7 +53,7 @@ func readRequest(r io.Reader) (request, error) {
 		return request{}, err
 	}
 	size := binary.LittleEndian.Uint32(header[:])
-	if size == 0 || size > maxRequest {
+	if size == 0 || size > maxProbeRequest {
 		return request{}, errors.New("frame_size")
 	}
 	data := make([]byte, size)
@@ -79,7 +82,7 @@ func readRequest(r io.Reader) (request, error) {
 			return request{}, errors.New("envelope_duplicate")
 		}
 		switch name {
-		case "protocol", "session", "id", "op", "digest", "config":
+		case "protocol", "session", "id", "op", "digest", "config", "probe":
 		default:
 			return request{}, errors.New("envelope_field")
 		}
@@ -102,12 +105,20 @@ func readRequest(r io.Reader) (request, error) {
 		clear(result.Config)
 		return request{}, errors.New("envelope_trailing")
 	}
+	if size > maxRequest && (result.Op != "probe" || len(result.Probe) == 0) {
+		clear(result.Config)
+		return request{}, errors.New("frame_size")
+	}
 	return result, nil
 }
 
 func writeResponse(w io.Writer, value response) error {
 	data, err := json.Marshal(value)
-	if err != nil || len(data) > 4096 {
+	limit := 4096
+	if value.State == "probed" && value.Error == "" && len(value.Results) != 0 {
+		limit = 65536
+	}
+	if err != nil || len(data) > limit {
 		return errors.New("response_encoding")
 	}
 	var header [4]byte
@@ -159,6 +170,11 @@ func run(input io.Reader, output io.Writer) int {
 		}
 		errorCode := ""
 		terminal := false
+		var results json.RawMessage
+		if message.Op != "probe" && len(message.Probe) != 0 {
+			clear(message.Config)
+			return 2
+		}
 		switch message.Op {
 		case "hello":
 			if len(message.Config) != 0 || message.Digest != "" {
@@ -208,6 +224,16 @@ func run(input io.Reader, output io.Writer) int {
 				break
 			}
 			state, digest = "running", message.Digest
+		case "probe":
+			if state != "idle" || len(message.Config) == 0 || len(message.Config) > maxConfig || !canonicalHex(message.Digest, 32) {
+				errorCode = "invalid_probe"
+				break
+			}
+			results, errorCode = probeProfile(message.Config, message.Probe)
+			if errorCode == "" {
+				state, digest = "probed", message.Digest
+				terminal = true
+			}
 		case "observe":
 			if state != "running" || len(message.Config) != 0 || message.Digest != digest {
 				errorCode = "invalid_observation"
@@ -231,7 +257,7 @@ func run(input io.Reader, output io.Writer) int {
 			errorCode = "invalid_operation"
 		}
 		clear(message.Config)
-		reply := response{protocol, session, sequence, os.Getpid(), C.Version, state, digest, errorCode}
+		reply := response{protocol, session, sequence, os.Getpid(), C.Version, state, digest, errorCode, results}
 		if writeResponse(output, reply) != nil || errorCode != "" {
 			return 2
 		}

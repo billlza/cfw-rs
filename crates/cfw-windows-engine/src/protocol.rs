@@ -8,15 +8,35 @@ use std::{
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-use crate::{Error, ResolvedProjection, configuration::serialize_bounded};
+use crate::{
+    Error, ResolvedProbe, ResolvedProjection,
+    configuration::{ProbeOptions, serialize_bounded},
+};
 
 const PROTOCOL: u32 = 1;
 const MAX_REQUEST: usize = cfw_singbox_config::MAX_ENGINE_CONFIG_BYTES + 4096;
 const MAX_RESPONSE: usize = 4096;
+const MAX_PROBE_RESPONSE: usize = 65536;
+const MAX_PROBE_REQUEST: usize = cfw_singbox_config::MAX_ENGINE_CONFIG_BYTES + 65536;
+
+#[derive(Clone, Copy)]
+enum ResponseLimit {
+    Runtime,
+    Probe,
+}
+impl ResponseLimit {
+    fn bytes(self) -> usize {
+        match self {
+            Self::Runtime => MAX_RESPONSE,
+            Self::Probe => MAX_PROBE_RESPONSE,
+        }
+    }
+}
 
 pub(crate) struct Exchange {
     pub bytes: Zeroizing<Vec<u8>>,
     pub result: SyncSender<Result<Response, Error>>,
+    response_limit: ResponseLimit,
 }
 
 pub(crate) fn submit(
@@ -32,8 +52,64 @@ pub(crate) fn submit(
         .checked_add(1)
         .ok_or(Error::Protocol("request sequence exhausted"))?;
     let bytes = request(session, next, operation, digest, config)?;
+    enqueue(
+        sender,
+        sequence,
+        next,
+        bytes,
+        ResponseLimit::Runtime,
+        deadline,
+    )
+}
+
+pub(crate) fn submit_probe(
+    sender: &SyncSender<Exchange>,
+    sequence: &mut u64,
+    session: &str,
+    probe: &ResolvedProbe,
+    deadline: Instant,
+) -> Result<Receiver<Result<Response, Error>>, Error> {
+    let next = sequence
+        .checked_add(1)
+        .ok_or(Error::Protocol("request sequence exhausted"))?;
+    let config = serde_json::from_slice::<&serde_json::value::RawValue>(&probe.projection.bytes)
+        .map_err(|_| Error::Configuration("invalid probe configuration"))?;
+    let bytes = serialize_bounded(
+        &Request {
+            protocol: PROTOCOL,
+            session,
+            id: next,
+            op: "probe",
+            digest: Some(probe.projection.digest()),
+            config: Some(config),
+            probe: Some(&probe.options),
+        },
+        MAX_PROBE_REQUEST,
+    )?;
+    enqueue(
+        sender,
+        sequence,
+        next,
+        bytes,
+        ResponseLimit::Probe,
+        deadline,
+    )
+}
+
+fn enqueue(
+    sender: &SyncSender<Exchange>,
+    sequence: &mut u64,
+    next: u64,
+    bytes: Zeroizing<Vec<u8>>,
+    response_limit: ResponseLimit,
+    deadline: Instant,
+) -> Result<Receiver<Result<Response, Error>>, Error> {
     let (result, receiver) = mpsc::sync_channel(1);
-    let mut pending = Exchange { bytes, result };
+    let mut pending = Exchange {
+        bytes,
+        result,
+        response_limit,
+    };
     loop {
         let remaining = deadline
             .checked_duration_since(Instant::now())
@@ -70,7 +146,7 @@ pub(crate) fn run_control(
         let result = if transport_failed {
             Err(Error::Protocol("control transport requires owner recovery"))
         } else {
-            exchange(input, output, &work.bytes)
+            exchange_bounded(input, output, &work.bytes, work.response_limit)
         };
         transport_failed |= result.is_err();
         // An expired per-operation waiter is not owner loss. The owner must
@@ -93,6 +169,16 @@ struct Request<'a> {
     digest: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     config: Option<&'a serde_json::value::RawValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    probe: Option<&'a ProbeOptions>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProbeResult {
+    name: String,
+    delay: Option<u32>,
+    error_kind: Option<cfw_engine_api::ProfileProbeFailure>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -106,6 +192,8 @@ pub(crate) struct Response {
     state: String,
     digest: String,
     error: String,
+    #[serde(default)]
+    results: Option<Vec<ProbeResult>>,
 }
 
 pub(crate) fn request(
@@ -127,15 +215,26 @@ pub(crate) fn request(
             op,
             digest,
             config,
+            probe: None,
         },
         MAX_REQUEST,
     )
 }
 
-pub(crate) fn exchange(
+#[cfg(test)]
+fn exchange(
     writer: &mut impl Write,
     reader: &mut impl Read,
     request: &[u8],
+) -> Result<Response, Error> {
+    exchange_bounded(writer, reader, request, ResponseLimit::Runtime)
+}
+
+fn exchange_bounded(
+    writer: &mut impl Write,
+    reader: &mut impl Read,
+    request: &[u8],
+    limit: ResponseLimit,
 ) -> Result<Response, Error> {
     let length = u32::try_from(request.len()).map_err(|_| Error::Protocol("request size"))?;
     writer.write_all(&length.to_le_bytes())?;
@@ -144,7 +243,7 @@ pub(crate) fn exchange(
     let mut header = [0u8; 4];
     reader.read_exact(&mut header)?;
     let size = u32::from_le_bytes(header) as usize;
-    if size == 0 || size > MAX_RESPONSE {
+    if size == 0 || size > limit.bytes() {
         return Err(Error::Protocol("response size"));
     }
     let mut bytes = Zeroizing::new(vec![0; size]);
@@ -154,6 +253,20 @@ pub(crate) fn exchange(
 
 impl Response {
     pub(crate) fn validate(
+        &self,
+        session: &str,
+        id: u64,
+        pid: u32,
+        version: &str,
+        state: &str,
+        digest: &str,
+    ) -> Result<(), Error> {
+        if self.results.is_some() {
+            return Err(Error::Protocol("runtime reply contains probe results"));
+        }
+        self.validate_identity(session, id, pid, version, state, digest)
+    }
+    fn validate_identity(
         &self,
         session: &str,
         id: u64,
@@ -184,6 +297,10 @@ impl Response {
                 "invalid_stop" => "invalid_stop",
                 "close_failed" => "close_failed",
                 "invalid_operation" => "invalid_operation",
+                "invalid_probe" => "invalid_probe",
+                "probe_failed" => "probe_failed",
+                "probe_cleanup_failed" => "probe_cleanup_failed",
+                "probe_response_invalid" => "probe_response_invalid",
                 _ => return Err(Error::Protocol("unknown rejection code")),
             }));
         }
@@ -191,6 +308,47 @@ impl Response {
             return Err(Error::Protocol("response state"));
         }
         Ok(())
+    }
+    pub(crate) fn validate_probe(
+        self,
+        session: &str,
+        id: u64,
+        pid: u32,
+        version: &str,
+        probe: &ResolvedProbe,
+    ) -> Result<Vec<cfw_engine_api::ProfileProxyDelay>, Error> {
+        self.validate_identity(
+            session,
+            id,
+            pid,
+            version,
+            "probed",
+            probe.projection.digest(),
+        )?;
+        let rows = self
+            .results
+            .ok_or(Error::Protocol("probe results missing"))?;
+        if rows.len() != probe.options.proxies.len() {
+            return Err(Error::Protocol("probe result count differs"));
+        }
+        rows.into_iter()
+            .zip(&probe.options.proxies)
+            .map(|(row, name)| {
+                if row.name != *name
+                    || !matches!(
+                        (row.delay, row.error_kind),
+                        (Some(1..), None) | (None, Some(_))
+                    )
+                {
+                    return Err(Error::Protocol("probe result identity or outcome differs"));
+                }
+                Ok(cfw_engine_api::ProfileProxyDelay {
+                    name: row.name,
+                    delay: row.delay,
+                    error_kind: row.error_kind,
+                })
+            })
+            .collect()
     }
 }
 
@@ -202,6 +360,124 @@ mod tests {
 
     fn reply() -> serde_json::Value {
         json!({"protocol":1,"session":"session","id":1,"pid":123,"version":"1.14.2","state":"running","digest":"digest","error":""})
+    }
+
+    fn probe(names: Vec<String>) -> ResolvedProbe {
+        let profile = cfw_singbox_config::ValidatedSingBoxProfile::direct();
+        let projection = profile
+            .project_proxy_probe(
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                cfw_singbox_config::ProjectionMode::LocalProxy,
+                &cfw_singbox_config::EngineSettings::default(),
+            )
+            .unwrap();
+        crate::CheckedProbeConfiguration::new(cfw_engine_api::ProfileDelayTestRequest {
+            audience: projection.credential_audience().clone(),
+            config_json: projection.as_json().into(),
+            credential_slots: projection.credential_slots().to_vec(),
+            proxies: names,
+            timeout_ms: 100,
+            target_url: None,
+            expected_status: None,
+        })
+        .unwrap()
+        .resolve([])
+        .unwrap()
+    }
+
+    #[test]
+    fn probe_responses_keep_order_outcomes_and_normal_runtime_bounds() {
+        let probe = probe(
+            (0..32)
+                .map(|i| format!("{i}-{}", "n".repeat(500)))
+                .collect(),
+        );
+        let mut value = reply();
+        value["state"] = json!("probed");
+        value["digest"] = json!(probe.projection.digest());
+        value["results"] = json!(
+            probe
+                .options
+                .proxies
+                .iter()
+                .map(|name| json!({"name":name,"delay":null,"error_kind":"not_found"}))
+                .collect::<Vec<_>>()
+        );
+        let bytes = serde_json::to_vec(&value).unwrap();
+        assert!(bytes.len() > 4096 && bytes.len() < 65536);
+        assert!(decode(&bytes).is_err());
+        let mut frame = (bytes.len() as u32).to_le_bytes().to_vec();
+        frame.extend_from_slice(&bytes);
+        let response = exchange_bounded(
+            &mut Vec::new(),
+            &mut Cursor::new(frame),
+            b"request",
+            ResponseLimit::Probe,
+        )
+        .unwrap();
+        assert_eq!(
+            response
+                .validate_probe("session", 1, 123, "1.14.2", &probe)
+                .unwrap()
+                .len(),
+            32
+        );
+        for alter in [
+            |v: &mut serde_json::Value| v["results"][0]["name"] = json!("different"),
+            |v: &mut serde_json::Value| v["results"][0]["delay"] = json!(1),
+            |v: &mut serde_json::Value| v["results"][0]["error_kind"] = json!(null),
+            |v: &mut serde_json::Value| v["results"] = json!([]),
+            |v: &mut serde_json::Value| v["session"] = json!("previous"),
+        ] {
+            let mut changed = value.clone();
+            alter(&mut changed);
+            let response: Response = serde_json::from_value(changed).unwrap();
+            assert!(
+                response
+                    .validate_probe("session", 1, 123, "1.14.2", &probe)
+                    .is_err()
+            );
+        }
+        let response: Response = serde_json::from_value(value.clone()).unwrap();
+        assert!(
+            response
+                .validate(
+                    "session",
+                    1,
+                    123,
+                    "1.14.2",
+                    "probed",
+                    probe.projection.digest()
+                )
+                .is_err()
+        );
+        value["results"][0]["unexpected"] = json!(true);
+        assert!(serde_json::from_value::<Response>(value).is_err());
+    }
+
+    #[test]
+    fn isolated_probe_submission_selects_its_own_bounded_response_channel() {
+        let probe = probe(vec!["direct".into()]);
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let mut sequence = 7;
+        let response = submit_probe(
+            &sender,
+            &mut sequence,
+            "session",
+            &probe,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(sequence, 8);
+        let work = receiver.try_recv().unwrap();
+        assert_eq!(work.response_limit.bytes(), 65536);
+        let value: serde_json::Value = serde_json::from_slice(&work.bytes).unwrap();
+        assert_eq!(value["op"], "probe");
+        assert_eq!(value["id"], 8);
+        assert_eq!(value["probe"]["proxies"], json!(["direct"]));
+        assert_eq!(value["digest"], probe.projection.digest());
+        drop(work);
+        assert!(response.recv().is_err());
     }
 
     fn decode(bytes: &[u8]) -> Result<Response, Error> {

@@ -32,6 +32,11 @@ const PHASES: &[&str] = &[
     "backend_exited_query_rejected",
     "backend_failed_stop",
     "backend_recovery_off",
+    "profile_probe_open",
+    "profile_probe_audience_rejected",
+    "profile_probe_authenticated",
+    "profile_probe_cancellation",
+    "profile_probe_complete",
     "complete",
 ];
 #[derive(Serialize, Deserialize)]

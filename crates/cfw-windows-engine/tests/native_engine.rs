@@ -10,6 +10,8 @@ mod system_proxy;
 
 #[path = "native_engine/inheritance.rs"]
 mod inheritance;
+#[path = "native_engine/probe.rs"]
+mod probe;
 
 use std::{
     io::{Read, Write},

@@ -14,8 +14,25 @@ use std::{
 };
 mod backend;
 mod checks;
+mod profile;
 mod progress;
 use progress::Progress;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum InstalledSuite {
+    Host,
+    Backend,
+    Profile,
+}
+impl InstalledSuite {
+    fn prefix(self) -> &'static str {
+        match self {
+            Self::Host => "installed-host",
+            Self::Backend => "installed-host-backend",
+            Self::Profile => "installed-host-profile",
+        }
+    }
+}
 
 /// This fixture is installed as the admitted desktop image in disposable CI.
 /// It exercises the production service executable and authenticated commands.
@@ -268,11 +285,25 @@ pub(super) fn exercise_backend() -> Result<()> {
     );
     Ok(())
 }
+pub(super) fn exercise_profile() -> Result<()> {
+    require_opt_in()?;
+    let mut progress = Progress::new()?;
+    progress.record("open_desktop", 0)?;
+    let profile_probes = profile::exercise(&mut progress)?;
+    progress.record("complete", 5)?;
+    println!(
+        "{}",
+        serde_json::json!({"source":std::env::var("CFW_NATIVE_SERVICE_SOURCE").map_err(|e|e.to_string())?,
+        "product_service":true,"product_agent":false,"desktop_is_fixture":true,"medium_integrity":true,
+        "profile_probes":profile_probes,"release_accepted":false})
+    );
+    Ok(())
+}
 pub(super) fn check_output(
     directory: &Path,
     output: &Path,
     exit: u32,
-    backend: bool,
+    suite: InstalledSuite,
 ) -> Result<()> {
     let mut bytes = Vec::new();
     std::fs::File::open(output)
@@ -290,9 +321,13 @@ pub(super) fn check_output(
         ));
     }
     let (report, phases) = progress::decode(&bytes)?;
-    let valid_case = if backend {
+    let valid_case = if suite == InstalledSuite::Backend {
         report["backend"]["shared_engine_backend"] == true
             && report["backend"]["exited_engine_query_rejected"] == true
+    } else if suite == InstalledSuite::Profile {
+        report["profile_probes"]["shared_profile_delay_backend"] == true
+            && report["profile_probes"]["cancellation_observed"] == true
+            && report["profile_probes"]["authority_unchanged"] == true
     } else {
         report["configuration_checks"]["authority_unchanged"] == true
             && report["configuration_checks"]["proxy_unchanged"] == true
@@ -307,7 +342,7 @@ pub(super) fn check_output(
     };
     if !valid_case
         || report["product_service"] != true
-        || report["product_agent"] != true
+        || report["product_agent"] != (suite != InstalledSuite::Profile)
         || report["desktop_is_fixture"] != true
         || report["medium_integrity"] != true
         || report["release_accepted"] != false
@@ -320,11 +355,7 @@ pub(super) fn check_output(
     {
         return Err("installed runtime exercise report is incomplete".into());
     }
-    let prefix = if backend {
-        "installed-host-backend"
-    } else {
-        "installed-host"
-    };
+    let prefix = suite.prefix();
     std::fs::write(
         directory.join(format!("{prefix}-phases.json")),
         serde_json::to_vec_pretty(&phases).map_err(|e| e.to_string())?,
@@ -393,20 +424,29 @@ pub(super) fn combine_reports(directory: &Path) -> Result<()> {
         serde_json::from_slice(&bytes).map_err(|e| e.to_string())
     }
     let mut direct = read(&directory.join("installed-host-lifecycle.json"))?;
-    let backend = read(&directory.join("installed-host-backend-lifecycle.json"))?;
-    if direct["source"] != backend["source"]
-        || backend["backend"]["shared_engine_backend"] != true
-        || backend["release_accepted"] != false
-    {
-        return Err("installed suites do not share verified source and scope".into());
-    }
-    if direct
-        .as_object_mut()
-        .ok_or("installed report is not an object")?
-        .insert("backend".into(), backend["backend"].clone())
-        .is_some()
-    {
-        return Err("installed backend report was already combined".into());
+    for (suite, key, proof) in [
+        (InstalledSuite::Backend, "backend", "shared_engine_backend"),
+        (
+            InstalledSuite::Profile,
+            "profile_probes",
+            "shared_profile_delay_backend",
+        ),
+    ] {
+        let report = read(&directory.join(format!("{}-lifecycle.json", suite.prefix())))?;
+        if direct["source"] != report["source"]
+            || report[key][proof] != true
+            || report["release_accepted"] != false
+        {
+            return Err("installed suites do not share verified source and scope".into());
+        }
+        if direct
+            .as_object_mut()
+            .ok_or("installed report is not an object")?
+            .insert(key.into(), report[key].clone())
+            .is_some()
+        {
+            return Err("installed suite report was already combined".into());
+        }
     }
     let bytes = serde_json::to_vec(&direct).map_err(|e| e.to_string())?;
     if bytes.len() > 16384 {

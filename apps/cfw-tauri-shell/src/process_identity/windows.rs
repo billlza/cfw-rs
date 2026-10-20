@@ -69,7 +69,7 @@ impl ProcessIdentity {
 pub(crate) fn current_process_identity(executable: &Path) -> Result<ProcessIdentity, String> {
     let observer = NativePeerProcess::open(std::process::id()).map_err(message)?;
     let expected = canonical_executable(executable)?;
-    observe(&observer, std::process::id(), &expected)?
+    observe(&observer, &observer, &expected)?
         .ok_or_else(|| "this process is not running the expected executable".into())
 }
 
@@ -92,15 +92,15 @@ pub(crate) fn process_identity_exists(expected: &ProcessIdentity) -> Result<bool
     Ok(ProcessIdentity::observed(&process, expected.executable.clone()) == *expected)
 }
 
-/// Only this account's current logon/session, not every user of a machine-wide
-/// installation. Windows package activation must enforce its own wider scope.
+/// Query this executable's users in the current logon/session, not every user
+/// of a machine-wide installation. Package activation needs its own wider scope.
 pub(crate) fn exact_processes(executable: &Path) -> Result<Vec<ProcessIdentity>, String> {
     let expected = canonical_executable(executable)?;
     let observer = NativePeerProcess::open(std::process::id()).map_err(message)?;
-    let pids = observer.current_session_process_ids().map_err(message)?;
+    let processes = observer.processes_using_file(&expected).map_err(message)?;
     let mut matches = Vec::new();
-    for pid in pids {
-        if let Some(identity) = observe(&observer, pid, &expected)? {
+    for process in processes {
+        if let Some(identity) = observe(&observer, &process, &expected)? {
             if matches.len() == 8 {
                 return Err("more than eight exact GUI process identities were observed".into());
             }
@@ -113,12 +113,9 @@ pub(crate) fn exact_processes(executable: &Path) -> Result<Vec<ProcessIdentity>,
 
 fn observe(
     observer: &NativePeerProcess,
-    pid: u32,
+    process: &NativePeerProcess,
     expected: &Path,
 ) -> Result<Option<ProcessIdentity>, String> {
-    let Some(process) = NativePeerProcess::open_if_running(pid).map_err(message)? else {
-        return Ok(None);
-    };
     if process.identity().user_session() != observer.identity().user_session() {
         return Ok(None);
     }
@@ -135,7 +132,7 @@ fn observe(
     }
     match process.observed_image_path() {
         Ok(path) if canonical_executable(&path)? == actual => {
-            Ok(Some(ProcessIdentity::observed(&process, actual)))
+            Ok(Some(ProcessIdentity::observed(process, actual)))
         }
         Ok(_) => Err("Windows process image path changed during observation".into()),
         Err(PeerIdentityError::Exited) => Ok(None),

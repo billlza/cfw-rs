@@ -1,15 +1,10 @@
-//! Read-only desktop observations. They do not grant a service role, attest an
-//! executable's publisher/bytes, or prove that other logons have no processes.
-use super::{NativePeerProcess, PeerIdentityError, native, sid_text};
-use std::{collections::BTreeSet, io, mem::size_of, path::PathBuf, ptr::null_mut};
-use windows_sys::Win32::{
-    Foundation::ERROR_INVALID_PARAMETER,
-    Security::IsValidSid,
-    System::RemoteDesktop::{
-        WTS_CURRENT_SERVER_HANDLE, WTS_PROCESS_INFOW, WTSEnumerateProcessesExW, WTSFreeMemoryExW,
-        WTSTypeProcessInfoLevel0,
-    },
-};
+//! Desktop process observations. They grant no service role and do not attest
+//! an executable's publisher/bytes or prove system-wide process absence.
+use super::{NativePeerProcess, PeerIdentityError};
+use std::path::{Path, PathBuf};
+use windows_sys::Win32::Foundation::ERROR_INVALID_PARAMETER;
+
+mod resources;
 
 impl NativePeerProcess {
     /// Positive PIDs that no longer exist and signalled process handles are
@@ -28,12 +23,12 @@ impl NativePeerProcess {
         Ok(path)
     }
 
-    /// Enumerate this caller's account in its current session. Callers still
-    /// open each candidate and compare its full native logon identity: a PID
-    /// can exit/recycle, and a SID/session can contain more than one logon.
-    /// Never use this list as evidence of system-wide process absence.
-    pub fn current_session_process_ids(&self) -> Result<Vec<u32>, PeerIdentityError> {
-        current_session_process_ids(self)
+    /// Query users of this file and retain only this caller's exact native
+    /// logon. No process is stopped or restarted. The caller must still compare
+    /// each reported process image; opening a data file is not executing it.
+    /// This is not system-wide absence or package replacement authorization.
+    pub fn processes_using_file(&self, file: &Path) -> Result<Vec<Self>, PeerIdentityError> {
+        resources::observe(self, file)
     }
 }
 
@@ -51,176 +46,27 @@ fn classify_open(
     }
 }
 
-fn current_session_process_ids(
-    observer: &NativePeerProcess,
-) -> Result<Vec<u32>, PeerIdentityError> {
-    if observer.process_id() != std::process::id() {
-        return Err(PeerIdentityError::WrongProcess);
-    }
-    observer.revalidate()?;
-    let mut snapshot = ProcessSnapshot::read(observer.identity().session_id())?;
-    let result = (|| {
-        let mut pids = BTreeSet::new();
-        for row in snapshot.rows()? {
-            if row.SessionId != observer.identity().session_id() {
-                return Err(invalid_snapshot(format!(
-                    "process {} belongs to session {}, expected {}",
-                    row.ProcessId,
-                    row.SessionId,
-                    observer.identity().session_id()
-                )));
-            }
-            // The System Idle Process has no user token.
-            if row.ProcessId == 0 {
-                continue;
-            }
-            if belongs_to_caller(observer, row)? && !pids.insert(row.ProcessId) {
-                return Err(invalid_snapshot("duplicate process identity"));
-            }
-        }
-        if !pids.contains(&observer.process_id()) {
-            return Err(invalid_snapshot(
-                "current process is missing from its session",
-            ));
-        }
-        observer.revalidate()?;
-        Ok(pids.into_iter().collect())
-    })();
-    let cleanup = snapshot.release();
-    match (result, cleanup) {
-        (Ok(pids), Ok(())) => Ok(pids),
-        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
-        (Err(error), Err(cleanup)) => Err(PeerIdentityError::Native {
-            operation: "enumerate and release process snapshot",
-            source: io::Error::other(format!("{error}; cleanup: {cleanup}")),
-        }),
-    }
-}
-
-fn belongs_to_caller(
-    observer: &NativePeerProcess,
-    row: &WTS_PROCESS_INFOW,
-) -> Result<bool, PeerIdentityError> {
-    if row.pUserSid.is_null() {
-        // WTS can return a process without its SID to a medium-integrity caller.
-        // Re-observe that PID through a retained native object once. Only a
-        // proven exit or a different observed logon can exclude the candidate;
-        // access denial and invalid native identity remain errors.
-        let Some(process) = NativePeerProcess::open_if_running(row.ProcessId).map_err(|error| {
-            PeerIdentityError::Native {
-                operation: "reobserve process without WTS SID",
-                source: io::Error::other(format!("PID {}: {error}", row.ProcessId)),
-            }
-        })?
-        else {
-            return Ok(false);
-        };
-        return Ok(process.identity().user_session() == observer.identity().user_session());
-    }
-    // SAFETY: WTS owns the record and its non-null SID until snapshot release.
-    if unsafe { IsValidSid(row.pUserSid) } == 0 {
-        return Err(invalid_snapshot(format!(
-            "process {} has an invalid SID",
-            row.ProcessId
-        )));
-    }
-    Ok(sid_text(row.pUserSid)? == observer.identity().user_sid())
-}
-
-struct ProcessSnapshot {
-    pointer: *mut u16,
-    count: u32,
-}
-
-fn invalid_snapshot(message: impl Into<String>) -> PeerIdentityError {
-    PeerIdentityError::Native {
-        operation: "read current-session process snapshot",
-        source: io::Error::new(io::ErrorKind::InvalidData, message.into()),
-    }
-}
-
-impl ProcessSnapshot {
-    fn read(session: u32) -> Result<Self, PeerIdentityError> {
-        let mut pointer = null_mut();
-        let mut count = 0;
-        let mut level = 0;
-        // SAFETY: all output pointers have the SDK layout. WTS allocates and
-        // owns the returned records; release uses the matching level/count.
-        if unsafe {
-            WTSEnumerateProcessesExW(
-                WTS_CURRENT_SERVER_HANDLE,
-                &mut level,
-                session,
-                &mut pointer,
-                &mut count,
-            )
-        } == 0
-        {
-            return Err(native("enumerate current-session processes"));
-        }
-        let value = Self { pointer, count };
-        if level != 0 {
-            return Err(invalid_snapshot("unexpected WTS information level"));
-        }
-        Ok(value)
-    }
-
-    fn rows(&self) -> Result<&[WTS_PROCESS_INFOW], PeerIdentityError> {
-        const MAXIMUM_BYTES: usize = 1024 * 1024;
-        let count = self.count as usize;
-        if count == 0
-            || self.pointer.is_null()
-            || count > MAXIMUM_BYTES / size_of::<WTS_PROCESS_INFOW>()
-        {
-            return Err(invalid_snapshot(
-                "empty, missing or oversized WTS allocation",
-            ));
-        }
-        // SAFETY: a successful level-zero WTS result owns exactly `count`
-        // records. The count is bounded and the allocation is still retained.
-        Ok(unsafe { std::slice::from_raw_parts(self.pointer.cast(), count) })
-    }
-
-    fn release(&mut self) -> Result<(), PeerIdentityError> {
-        if self.pointer.is_null() {
-            return Ok(());
-        }
-        let pointer = std::mem::replace(&mut self.pointer, null_mut());
-        // SAFETY: this is the WTS allocation with its original count and level.
-        if unsafe { WTSFreeMemoryExW(WTSTypeProcessInfoLevel0, pointer.cast(), self.count) } == 0 {
-            return Err(native("release current-session process snapshot"));
-        }
-        Ok(())
-    }
-}
-
-impl Drop for ProcessSnapshot {
-    fn drop(&mut self) {
-        if let Err(error) = self.release() {
-            eprintln!("process snapshot cleanup failed: {error}");
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io;
     use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_GEN_FAILURE};
 
     #[test]
-    fn a_missing_snapshot_sid_requires_a_fresh_native_process_identity() {
+    fn file_process_observation_rejects_non_file_and_ambiguous_paths() {
         let observer = NativePeerProcess::open(std::process::id()).unwrap();
-        let mut row = WTS_PROCESS_INFOW {
-            SessionId: observer.identity().session_id(),
-            ProcessId: observer.process_id(),
-            ..Default::default()
-        };
-        assert!(row.pUserSid.is_null());
-        assert!(belongs_to_caller(&observer, &row).unwrap());
-        row.ProcessId = u32::MAX;
-        assert!(!belongs_to_caller(&observer, &row).unwrap());
-        row.ProcessId = 0;
-        assert!(belongs_to_caller(&observer, &row).is_err());
+        assert!(
+            observer
+                .processes_using_file(Path::new("relative.exe"))
+                .is_err()
+        );
+        assert!(
+            observer
+                .processes_using_file(Path::new("C:\\invalid\0image.exe"))
+                .is_err()
+        );
+        let directory = tempfile::tempdir().unwrap();
+        assert!(observer.processes_using_file(directory.path()).is_err());
     }
 
     #[test]

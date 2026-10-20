@@ -17,7 +17,7 @@ Authority 和协调器，历史维护不适用不能替代网络权限或停止�
 
 进程观察已从旧维护模块提取：Mac 保留原有 UID/PID/启动时间格式及全部原生测试；
 Windows 保存完整 SID、登录标识、会话、FILETIME 与令牌属性，通过保留的原生
-进程对象重新观察。访问拒绝仍是错误。当前会话枚举不能证明其他登录会话没有
+进程对象重新观察。访问拒绝仍是错误。按可执行文件限定的观察不能证明其他登录会话没有
 进程，也不能代替安装包签名或映像字节验证。新增原生测试覆盖实际 Unicode 路径
 子进程、退出、身份变更和数量上限；已安装客户端场景还会验证中等完整性、非管理员
 上下文中的实际应用模块。`6febe7448de0eed1c9726cec7c3c5f4d9a241be2` 的
@@ -25,8 +25,11 @@ Windows 保存完整 SID、登录标识、会话、FILETIME 与令牌属性，�
 已执行 4 项实际进程测试及 2 项观察权限回归，Clippy 禁止 warning；中等完整性
 客户端随后在实际进程观察处报“身份数据无效”，完整引擎作业失败。该失败不能被
 较高权限下的测试通过覆盖。独立的中等完整性进程用例进一步定位到 WTS 某条进程
-记录没有返回 SID；现仅在该条件下，通过保留的原生进程对象重新读取完整身份，
-访问拒绝仍是错误。这项修正尚待普通用户原生复验。48 项存储、4 项启动和 1 项产品身份
+记录没有返回 SID；进一步读取该进程也被拒绝。因此已移除会话全表枚举，改用
+Restart Manager 查询指定可执行文件的使用者，再通过原生句柄核对启动 FILETIME、
+SID、登录及会话。仅允许有界的缓冲区扩容，访问/注册表错误仍失败，不调用停止或
+重启 API。这一方案尚待普通用户原生复验；失败的 WTS 方案及回执保留在 Git 和
+验证记录中。48 项存储、4 项启动和 1 项产品身份
 测试也通过，产物源码及 SHA-256 已核验。
 
 该源码的完整应用仍有 54 个编译错误和 1 个 warning，没有生成 GUI EXE。与上一
@@ -2038,6 +2041,8 @@ macOS 退役交接到 Windows。已提交的文件租约原语与原生回归证
 - [SCM 服务状态与 PID 有效范围](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-queryservicestatusex)
 - [SCM 配置与下次启动](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-queryserviceconfigw)
 - [实际进程映像查询](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-queryfullprocessimagenamew)
+- [Restart Manager 注册文件资源](https://learn.microsoft.com/en-us/windows/win32/api/restartmanager/nf-restartmanager-rmregisterresources)
+- [Restart Manager 查询文件使用者](https://learn.microsoft.com/en-us/windows/win32/api/restartmanager/nf-restartmanager-rmgetlist)
 - [服务终止状态之前完成清理](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-setservicestatus)
 - [受限令牌与继承的句柄权限](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-createrestrictedtoken)
 - [注册表刷新与持久化](https://learn.microsoft.com/en-us/windows/win32/api/winreg/nf-winreg-regflushkey)

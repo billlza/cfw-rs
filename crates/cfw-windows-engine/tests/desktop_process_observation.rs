@@ -134,7 +134,7 @@ fn a_real_unicode_path_child_is_observed_until_the_retained_process_object_signa
     let mut child = OwnedChild::start(&executable);
     let retained = NativePeerProcess::open(child.0.id()).unwrap();
     assert!(matches!(
-        retained.current_session_process_ids(),
+        retained.processes_using_file(&executable),
         Err(PeerIdentityError::WrongProcess)
     ));
     let listed = exact_processes(&executable).unwrap();

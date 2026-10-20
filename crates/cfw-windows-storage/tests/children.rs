@@ -106,6 +106,18 @@ fn retained_parent_cleanup_is_not_redirected_by_a_replaced_parent_path() {
     let path = temporary.path().join("private");
     let moved = temporary.path().join("moved");
     let parent = PrivateDirectory::open_or_create(&path).unwrap();
+    let held = parent.write().unwrap();
+    assert!(
+        matches!(fs::rename(&path, &moved), Err(error) if matches!(error.raw_os_error(), Some(5 | 32)))
+    );
+    absent(&moved);
+    drop(held);
+    // Replace the pathname before acquiring the lifecycle lease. An active
+    // non-delete-shared lock file prevents renaming its parent on NTFS, so
+    // renaming after lease acquisition never reaches the redirection scenario.
+    fs::rename(&path, &moved).unwrap();
+    fs::create_dir_all(path.join("transaction")).unwrap();
+    fs::write(path.join("transaction/keep"), b"replacement").unwrap();
     let mut lease = parent.write().unwrap();
     let child = lease.create_private_child("transaction").unwrap();
     child
@@ -113,9 +125,10 @@ fn retained_parent_cleanup_is_not_redirected_by_a_replaced_parent_path() {
         .unwrap()
         .replace("package", b"owned", 5)
         .unwrap();
-    fs::rename(&path, &moved).unwrap();
-    fs::create_dir_all(path.join("transaction")).unwrap();
-    fs::write(path.join("transaction/keep"), b"replacement").unwrap();
+    assert_eq!(
+        fs::read(moved.join("transaction/package")).unwrap(),
+        b"owned"
+    );
     lease.remove_flat_child("transaction", child, 1).unwrap();
     absent(&moved.join("transaction"));
     assert_eq!(

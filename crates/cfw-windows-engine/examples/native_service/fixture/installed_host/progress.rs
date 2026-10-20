@@ -44,6 +44,7 @@ const PHASES: &[&str] = &[
     "coordinator_active",
     "coordinator_shutdown",
     "coordinator_off",
+    "startup_registration",
     "complete",
 ];
 #[derive(Serialize, Deserialize)]

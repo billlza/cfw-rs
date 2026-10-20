@@ -27,6 +27,7 @@ pub(super) enum InstalledSuite {
     BackendExit,
     Profile,
     Coordinator,
+    Startup,
 }
 impl InstalledSuite {
     fn prefix(self) -> &'static str {
@@ -36,6 +37,7 @@ impl InstalledSuite {
             Self::BackendExit => "installed-host-backend-exit",
             Self::Profile => "installed-host-profile",
             Self::Coordinator => "installed-host-coordinator",
+            Self::Startup => "installed-host-startup",
         }
     }
 }
@@ -333,6 +335,23 @@ pub(super) fn exercise_coordinator() -> Result<()> {
     );
     Ok(())
 }
+
+pub(super) fn exercise_startup() -> Result<()> {
+    require_opt_in()?;
+    let mut progress = Progress::new()?;
+    progress.record("open_desktop", 0)?;
+    progress.record("startup_registration", 0)?;
+    let startup = startup_registration::exercise()?;
+    progress.record("complete", 0)?;
+    println!(
+        "{}",
+        serde_json::json!({"source":std::env::var("CFW_NATIVE_SERVICE_SOURCE").map_err(|e|e.to_string())?,
+        "product_service":false,"product_agent":false,"desktop_is_fixture":true,"medium_integrity":true,
+        "startup_registration":startup,"release_accepted":false})
+    );
+    Ok(())
+}
+
 pub(super) fn check_output(
     directory: &Path,
     output: &Path,
@@ -375,6 +394,24 @@ pub(super) fn check_output(
             && report["coordinator"]["proxy_restored"] == true
             && report["coordinator"]["coordinator_retired"] == true
             && report["coordinator"]["lineage_generation"] == 8
+    } else if suite == InstalledSuite::Startup {
+        let startup = &report["startup_registration"];
+        startup["source"] == report["source"]
+            && startup["document"] == "cfw-windows-startup-registration-v1"
+            && [
+                "registered_and_removed",
+                "idempotent_registration",
+                "failed_enable_restored",
+                "failed_disable_restored",
+                "foreign_command_preserved",
+                "preference_callback_guarded",
+                "changed_registration_preserved",
+                "registration_removed",
+            ]
+            .iter()
+            .all(|key| startup[*key] == true)
+            && startup["os_startup_approval_verified"] == false
+            && startup["sign_in_launch_verified"] == false
     } else {
         report["configuration_checks"]["authority_unchanged"] == true
             && report["configuration_checks"]["proxy_unchanged"] == true
@@ -388,8 +425,9 @@ pub(super) fn check_output(
             && report["modes"][1]["mode"] == "system_proxy"
     };
     if !valid_case
-        || report["product_service"] != true
-        || report["product_agent"] != (suite != InstalledSuite::Profile)
+        || report["product_service"] != (suite != InstalledSuite::Startup)
+        || report["product_agent"]
+            != !matches!(suite, InstalledSuite::Profile | InstalledSuite::Startup)
         || report["desktop_is_fixture"] != true
         || report["medium_integrity"] != true
         || report["release_accepted"] != false
@@ -537,6 +575,11 @@ pub(super) fn combine_reports(directory: &Path) -> Result<()> {
             InstalledSuite::Coordinator,
             "coordinator",
             "shared_mode_coordinator",
+        ),
+        (
+            InstalledSuite::Startup,
+            "startup_registration",
+            "registration_removed",
         ),
     ] {
         let report = read(&directory.join(format!("{}-lifecycle.json", suite.prefix())))?;

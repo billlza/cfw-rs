@@ -141,6 +141,7 @@ pub(super) fn main() -> Result<()> {
                 | "--installed-backend-exit-client"
                 | "--installed-profile-client"
                 | "--installed-coordinator-client"
+                | "--installed-startup-client"
         )
     {
         if args[2] != cfw_windows_engine::runtime_host::SERVICE_NAME {
@@ -151,6 +152,7 @@ pub(super) fn main() -> Result<()> {
             "--installed-backend-client" => installed_host::exercise_backend(),
             "--installed-backend-exit-client" => installed_host::exercise_backend_exit(),
             "--installed-coordinator-client" => installed_host::exercise_coordinator(),
+            "--installed-startup-client" => installed_host::exercise_startup(),
             _ => installed_host::exercise_profile(),
         };
     }

@@ -22,6 +22,7 @@ pub(super) enum ClientCase {
     InstalledBackendExitDesktop,
     InstalledProfileDesktop,
     InstalledCoordinatorDesktop,
+    ProcessObservation,
     RejectedRuntime,
 }
 impl ClientCase {
@@ -42,6 +43,7 @@ impl ClientCase {
             Self::InstalledBackendExitDesktop => "--installed-backend-exit-client",
             Self::InstalledProfileDesktop => "--installed-profile-client",
             Self::InstalledCoordinatorDesktop => "--installed-coordinator-client",
+            Self::ProcessObservation => "--desktop-process-client",
             Self::RejectedRuntime => "--rejected-agent-runtime",
         }
     }
@@ -62,11 +64,15 @@ impl ClientCase {
             Self::InstalledBackendExitDesktop => "installed-host-backend-exit".into(),
             Self::InstalledProfileDesktop => "installed-host-profile".into(),
             Self::InstalledCoordinatorDesktop => "installed-host-coordinator".into(),
+            Self::ProcessObservation => format!("{name}-process"),
             Self::RejectedRuntime => format!("{name}-runtime-rejected"),
         }
     }
     fn report(self) -> serde_json::Value {
         match self {
+            Self::ProcessObservation => {
+                serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"actual_desktop_process_observation":true})
+            }
             Self::UserAgent => {
                 serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"query_only_service_process":true,"desktop_role_rejected":true,"pipe_instance_creation_rejected":true,"live_console_authorized":true,"missing_lease_rejected":true,"foreign_lease_rejected":true,"unleased_observation_admitted":true,"machine_record_access_denied":true,"zero_access_job_keeper_isolated":true,"job_keeper_prevents_name_loss":true,"job_keeper_release_observed":true,"keeper_object_identity_checked":true,"unrelated_keeper_handle_preserved":true})
             }
@@ -585,6 +591,35 @@ pub(super) fn run_installed_host(image: &Path, expected: [u8; 32]) -> Result<()>
     ))
 }
 
+pub(super) fn run_desktop_process_observation() -> Result<()> {
+    if std::env::var("CFW_NATIVE_PROCESS_OBSERVATION_TESTS").as_deref() != Ok("1") {
+        return Err("desktop process observation requires disposable CI opt-in".into());
+    }
+    let image = std::env::current_exe().map_err(|e| e.to_string())?;
+    let name = format!("CFW-scm-fixture-process-{}", std::process::id());
+    let case = ClientCase::ProcessObservation;
+    run_case(&image, &name, digest(&image)?, case, None)?;
+    // check_report already bounded this output and required a successful exit.
+    let bytes = std::fs::read(
+        image
+            .parent()
+            .ok_or("missing fixture image parent")?
+            .join(format!("{}-client-output.txt", case.report_prefix(&name))),
+    )
+    .map_err(|error| error.to_string())?;
+    let observation: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    println!(
+        "{}",
+        serde_json::json!({
+            "source": std::env::var("CFW_NATIVE_SERVICE_SOURCE").map_err(|e| e.to_string())?,
+            "process_observation": observation,
+            "release_accepted": false,
+        })
+    );
+    Ok(())
+}
+
 pub(super) fn check_report(
     parent: &Path,
     report_prefix: &str,
@@ -682,11 +717,24 @@ fn client_body(name: &str, hex: &str, case: ClientCase) -> Result<()> {
         *value =
             u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).map_err(|e| e.to_string())?;
     }
-    let (image, installed_digest) = transport::service_image()?;
+    let (image, installed_digest) = if matches!(case, ClientCase::ProcessObservation) {
+        if std::env::var("CFW_NATIVE_PROCESS_OBSERVATION_TESTS").as_deref() != Ok("1") {
+            return Err("desktop process client requires disposable CI opt-in".into());
+        }
+        let image = std::env::current_exe().map_err(|e| e.to_string())?;
+        let digest = digest(&image)?;
+        (image, digest)
+    } else {
+        transport::service_image()?
+    };
     if expected != installed_digest {
         return Err("fixture service digest differs from installation".into());
     }
     match case {
+        ClientCase::ProcessObservation => {
+            println!("{}", desktop_process::observe()?);
+            return Ok(());
+        }
         ClientCase::InstalledHostDesktop
         | ClientCase::InstalledBackendDesktop
         | ClientCase::InstalledBackendExitDesktop

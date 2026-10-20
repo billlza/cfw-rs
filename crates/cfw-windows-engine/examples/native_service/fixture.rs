@@ -30,6 +30,7 @@ mod authority_journal;
 mod authority_state;
 mod authority_wire;
 mod desktop;
+mod desktop_process;
 mod installed_host;
 mod job_keeper;
 mod machine_record;
@@ -107,6 +108,16 @@ impl Drop for Descriptor {
 
 pub(super) fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().collect();
+    if args.len() == 2 && args[1] == "--desktop-process-validation" {
+        return restricted::run_desktop_process_observation();
+    }
+    if args.len() == 4 && args[1] == "--desktop-process-client" {
+        return restricted::client(
+            &args[2],
+            &args[3],
+            restricted::ClientCase::ProcessObservation,
+        );
+    }
     if args.len() == 2 && args[1] == "--installed-host-probe" {
         return installed_host::probe();
     }

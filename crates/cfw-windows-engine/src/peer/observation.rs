@@ -63,24 +63,40 @@ fn current_session_process_ids(
         let mut pids = BTreeSet::new();
         for row in snapshot.rows()? {
             if row.SessionId != observer.identity().session_id() {
-                return Err(PeerIdentityError::InvalidIdentity);
+                return Err(invalid_snapshot(format!(
+                    "process {} belongs to session {}, expected {}",
+                    row.ProcessId,
+                    row.SessionId,
+                    observer.identity().session_id()
+                )));
             }
             // The System Idle Process has no user token.
             if row.ProcessId == 0 {
                 continue;
             }
             // SAFETY: WTS owns every record and its SID until release.
-            if row.pUserSid.is_null() || unsafe { IsValidSid(row.pUserSid) } == 0 {
-                return Err(PeerIdentityError::InvalidIdentity);
+            if row.pUserSid.is_null() {
+                return Err(invalid_snapshot(format!(
+                    "process {} has no observable SID",
+                    row.ProcessId
+                )));
+            }
+            if unsafe { IsValidSid(row.pUserSid) } == 0 {
+                return Err(invalid_snapshot(format!(
+                    "process {} has an invalid SID",
+                    row.ProcessId
+                )));
             }
             if sid_text(row.pUserSid)? == observer.identity().user_sid()
                 && !pids.insert(row.ProcessId)
             {
-                return Err(PeerIdentityError::InvalidIdentity);
+                return Err(invalid_snapshot("duplicate process identity"));
             }
         }
         if !pids.contains(&observer.process_id()) {
-            return Err(PeerIdentityError::InvalidIdentity);
+            return Err(invalid_snapshot(
+                "current process is missing from its session",
+            ));
         }
         observer.revalidate()?;
         Ok(pids.into_iter().collect())
@@ -99,6 +115,13 @@ fn current_session_process_ids(
 struct ProcessSnapshot {
     pointer: *mut u16,
     count: u32,
+}
+
+fn invalid_snapshot(message: impl Into<String>) -> PeerIdentityError {
+    PeerIdentityError::Native {
+        operation: "read current-session process snapshot",
+        source: io::Error::new(io::ErrorKind::InvalidData, message.into()),
+    }
 }
 
 impl ProcessSnapshot {
@@ -122,7 +145,7 @@ impl ProcessSnapshot {
         }
         let value = Self { pointer, count };
         if level != 0 {
-            return Err(PeerIdentityError::InvalidIdentity);
+            return Err(invalid_snapshot("unexpected WTS information level"));
         }
         Ok(value)
     }
@@ -134,7 +157,9 @@ impl ProcessSnapshot {
             || self.pointer.is_null()
             || count > MAXIMUM_BYTES / size_of::<WTS_PROCESS_INFOW>()
         {
-            return Err(PeerIdentityError::InvalidIdentity);
+            return Err(invalid_snapshot(
+                "empty, missing or oversized WTS allocation",
+            ));
         }
         // SAFETY: a successful level-zero WTS result owns exactly `count`
         // records. The count is bounded and the allocation is still retained.

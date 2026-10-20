@@ -64,6 +64,8 @@ pub(super) enum UpdateError {
     AuthorizationChanged,
     #[error("updater state lock failed")]
     StateLock,
+    #[error("updater state lost ownership of its staged resources")]
+    StateOwnership,
     #[error("updater state counter is exhausted")]
     StateCounterExhausted,
     #[error("an update check or release-page authorization is already in progress")]
@@ -145,6 +147,12 @@ pub(super) enum UpdateError {
         #[source]
         source: cfw_windows_storage::Error,
     },
+    #[cfg(windows)]
+    #[error(transparent)]
+    WindowsStaging(#[from] cfw_windows_engine::update_package::StagingError),
+    #[cfg(windows)]
+    #[error(transparent)]
+    WindowsPackage(#[from] cfw_windows_engine::update_package::PackageError),
     #[error(transparent)]
     Archive(#[from] UpdateArchiveError),
     #[error(transparent)]
@@ -224,9 +232,10 @@ impl UpdateError {
             Self::Contract(_) => ("metadata_contract", Category::Package),
             Self::MissingAuthorization => ("missing_authorization", Category::State),
             Self::AuthorizationChanged => ("authorization_changed", Category::State),
-            Self::StateLock | Self::StateCounterExhausted | Self::PreviousAttemptUnreviewed => {
-                ("updater_state", Category::Internal)
-            }
+            Self::StateLock
+            | Self::StateOwnership
+            | Self::StateCounterExhausted
+            | Self::PreviousAttemptUnreviewed => ("updater_state", Category::Internal),
             Self::Busy => ("busy", Category::Busy),
             Self::TlsProviderUnavailable => ("tls_unavailable", Category::Internal),
             Self::Network { .. } => ("network", Category::Network),
@@ -262,6 +271,34 @@ impl UpdateError {
             Self::Staging { .. } => ("staging_io", Category::Storage),
             #[cfg(windows)]
             Self::WindowsStorage { .. } => ("staging_io", Category::Storage),
+            #[cfg(windows)]
+            Self::WindowsStaging(_) => ("staging_io", Category::Storage),
+            #[cfg(windows)]
+            Self::WindowsPackage(error) => {
+                use cfw_windows_engine::update_package::{PackageError, WorkerFailureCategory};
+                // Cleanup failure must not erase a prior authentication refusal.
+                let mut error = error;
+                while let PackageError::Cleanup { operation, .. } = error {
+                    error = operation;
+                }
+                match error {
+                    PackageError::Signature(_)
+                    | PackageError::PublisherMismatch
+                    | PackageError::WorkerRejected {
+                        category: WorkerFailureCategory::Authenticity,
+                        ..
+                    } => ("signature_mismatch", Category::Authenticity),
+                    PackageError::File(cfw_windows_engine::Error::Cancelled) => {
+                        ("download_cancelled", Category::State)
+                    }
+                    PackageError::PublisherUnavailable(_)
+                    | PackageError::WorkerRejected {
+                        category: WorkerFailureCategory::Environment,
+                        ..
+                    } => ("windows_publisher_unavailable", Category::Environment),
+                    _ => ("windows_package_invalid", Category::Package),
+                }
+            }
             Self::Archive(error) => (error.code(), Category::Package),
             Self::StagedBundle(error) => (error.code(), error.category()),
             Self::Services(error) => (error.code(), error.category()),

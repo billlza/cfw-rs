@@ -8,6 +8,9 @@ use cfw_windows_engine::{
 use std::io::Read as _;
 use uuid::Uuid;
 
+#[path = "../../../../../apps/cfw-tauri-shell/src/updater/windows_staged.rs"]
+mod windows_staged;
+
 pub(super) fn observe() -> Result<serde_json::Value> {
     let native = restricted::require_medium_user_context()?;
     let installed = InstalledRuntime::open().map_err(|e| e.to_string())?;
@@ -88,8 +91,37 @@ pub(super) fn observe() -> Result<serde_json::Value> {
         return Err("ordinary Desktop lost the signed package identity".into());
     }
     let signature_key = package.publisher().spki_sha256();
-    drop(package);
-    staging.remove().map_err(|e| e.to_string())?;
+    let resources =
+        windows_staged::WindowsStagedResources::new(staging, package).map_err(|e| e.to_string())?;
+    // The actual desktop owner must retain both the native candidate and the
+    // lifecycle lease while it waits for install/cancel. A path-only state
+    // would let either operation below replace or remove verified bytes.
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .open(&staged_candidate)
+    {
+        Err(error) if error.raw_os_error() == Some(32) => {}
+        Err(error) => return Err(format!("staged write failed for another reason: {error}")),
+        Ok(_) => return Err("staged desktop candidate allowed writes".into()),
+    }
+    match std::fs::rename(
+        &staged_candidate,
+        staged_candidate.with_extension("replaced"),
+    ) {
+        Err(error) if error.raw_os_error() == Some(32) => {}
+        Err(error) => return Err(format!("staged rename failed for another reason: {error}")),
+        Ok(()) => return Err("staged desktop candidate allowed replacement".into()),
+    }
+    if !matches!(
+        UpdateStaging::recover(&staging_home),
+        Err(cfw_windows_engine::update_package::StagingError::Storage {
+            operation: "acquire lifecycle lease",
+            source: cfw_windows_storage::Error::Busy,
+        })
+    ) {
+        return Err("staged desktop resources did not retain the lifecycle lease".into());
+    }
+    resources.discard().map_err(|e| e.to_string())?;
     if staged_candidate.try_exists().map_err(|e| e.to_string())?
         || UpdateStaging::recover(&staging_home).map_err(|e| e.to_string())? != 0
     {
@@ -145,6 +177,7 @@ pub(super) fn observe() -> Result<serde_json::Value> {
         "installed_desktop_identity": true, "protected_manifest_write_denied": true,
         "signed_msi_verified": true, "different_publisher_rejected": true,
         "private_staged_copy_inspected": true, "staging_cleanup_observed": true,
+        "desktop_staging_owner_retained": true,
         "precreation_cancellation_observed": true, "release": release,
         "publisher_spki_sha256": signature_key,
         "pid": native.process_id(), "creation_filetime": native.identity().process_creation_time(),

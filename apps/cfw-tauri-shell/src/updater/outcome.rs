@@ -8,8 +8,16 @@ use super::journal::{
     InstallJournal, InstallPhase, InstallRecord, Recorded, UpdateInstallLease,
     UpdateInstallLeaseError,
 };
+#[cfg(target_os = "macos")]
 use super::staging::remove_all;
 use crate::process_identity::ProcessIdentity;
+
+#[cfg(windows)]
+fn remove_all(app_home: &Path) -> std::io::Result<()> {
+    cfw_windows_engine::update_package::UpdateStaging::recover(app_home)
+        .map(|_| ())
+        .map_err(std::io::Error::other)
+}
 
 /// What the last installation attempt left behind, reported once to the
 /// dashboard that starts after it.

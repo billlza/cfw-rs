@@ -11,6 +11,13 @@ mod services;
 mod staged_bundle;
 mod staging;
 mod state;
+#[cfg(windows)]
+mod windows_staged;
+
+#[cfg(windows)]
+type StagedResources = windows_staged::WindowsStagedResources;
+#[cfg(target_os = "macos")]
+type StagedResources = ();
 
 use std::fs::File;
 use std::os::unix::process::CommandExt as _;
@@ -19,7 +26,9 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use cfw_core::DiagnosticTopic;
-use cfw_platform::{ReleaseSignedComponent, operating_system_version};
+use cfw_platform::ReleaseSignedComponent;
+#[cfg(target_os = "macos")]
+use cfw_platform::operating_system_version;
 use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
@@ -29,6 +38,7 @@ use crate::process_identity::{current_process_identity, process_identity_exists}
 use admission::{
     BundleIdentity, InstallAdmissionError, admit_running_installation, runs_from_installed_location,
 };
+#[cfg(target_os = "macos")]
 use archive::extract_bundle;
 use contract::UpdateAuthorization;
 use download::download_verified_archive;
@@ -39,12 +49,14 @@ use outcome::{InstallOutcome, ReviewError, review_previous_attempt};
 use services::require_removable_services;
 use staged_bundle::{StagedBundleError, StagedExpectation, verify_staged_bundle};
 use staging::StagingArea;
-use state::{Cancelled, DownloadCancellation, StagedUpdate};
+#[cfg(target_os = "macos")]
+use state::DownloadCancellation;
+use state::{Cancelled, StagedUpdate};
 
 use crate::launch::FINISH_UPDATE_FLAG;
 pub(crate) use finisher::run as run_update_finisher;
 pub(crate) use journal::UpdateInstallLease;
-pub(crate) use state::UpdaterSecurityState;
+pub(crate) type UpdaterSecurityState = state::UpdaterSecurityState<StagedResources>;
 
 const PROGRESS_EVENT: &str = "cfw://update-progress";
 const INSTALLER_LOG: &str = "update-installer.log";
@@ -117,6 +129,7 @@ fn install_support(release_rejected: bool) -> serde_json::Value {
 /// release would have to share with it.
 fn admission_refusal() -> Result<()> {
     admit_running_installation()?;
+    #[cfg(target_os = "macos")]
     if !staging::on_installed_volume(&app_home()?, ReleaseSignedComponent::Application.path())? {
         return Err(InstallAdmissionError::StagingVolumeMismatch.into());
     }
@@ -217,54 +230,64 @@ async fn prepare_update_install_inner(
     if security.is_rejected(&authorization)? {
         return Err(UpdateError::ReleaseRejected);
     }
-    blocking(require_removable_services).await??;
-    if lease.cancellation.is_cancelled() {
-        return Err(UpdateError::DownloadCancelled);
+    #[cfg(windows)]
+    {
+        prepare_windows_release(app, installed, authorization, lease).await
     }
-    let transaction = Uuid::new_v4();
-    let staging = StagingArea::create(
-        &app_home()?,
-        &transaction,
-        ReleaseSignedComponent::Application.path(),
-    )?;
 
-    let staged = stage_release(
-        app,
-        &authorization,
-        &staging,
-        &installed,
-        &lease.cancellation,
-    )
-    .await;
-    let recorded = staged.and_then(|staged| {
-        lease.stage(StagedUpdate {
-            transaction,
-            installed,
-            staged: staged.clone(),
-        })?;
-        Ok(staged)
-    });
-    match recorded {
-        Ok(staged) => Ok(serde_json::json!({ "version": staged.version })),
-        Err(error) => {
-            if error.failure().category == FailureCategory::Authenticity {
-                security.reject_release(&authorization)?;
+    #[cfg(target_os = "macos")]
+    {
+        blocking(require_removable_services).await??;
+        if lease.cancellation.is_cancelled() {
+            return Err(UpdateError::DownloadCancelled);
+        }
+        let transaction = Uuid::new_v4();
+        let staging = StagingArea::create(
+            &app_home()?,
+            &transaction,
+            ReleaseSignedComponent::Application.path(),
+        )?;
+
+        let staged = stage_release(
+            app,
+            &authorization,
+            &staging,
+            &installed,
+            &lease.cancellation,
+        )
+        .await;
+        let recorded = staged.and_then(|staged| {
+            lease.stage(StagedUpdate {
+                transaction,
+                installed,
+                staged: staged.clone(),
+                resources: (),
+            })?;
+            Ok(staged)
+        });
+        match recorded {
+            Ok(staged) => Ok(serde_json::json!({ "version": staged.version })),
+            Err(error) => {
+                if error.failure().category == FailureCategory::Authenticity {
+                    security.reject_release(&authorization)?;
+                }
+                if let Err(removal) = staging.remove() {
+                    // The next review removes what is left. The user is told why
+                    // the preparation failed, not that its leftovers remain.
+                    crate::diagnostics::record(
+                        app,
+                        DiagnosticTopic::Update,
+                        "staging_discard_failed",
+                        &format!("{:?}", removal.kind()),
+                    );
+                }
+                Err(error)
             }
-            if let Err(removal) = staging.remove() {
-                // The next review removes what is left. The user is told why
-                // the preparation failed, not that its leftovers remain.
-                crate::diagnostics::record(
-                    app,
-                    DiagnosticTopic::Update,
-                    "staging_discard_failed",
-                    &format!("{:?}", removal.kind()),
-                );
-            }
-            Err(error)
         }
     }
 }
 
+#[cfg(target_os = "macos")]
 async fn stage_release(
     app: &AppHandle,
     authorization: &UpdateAuthorization,
@@ -324,6 +347,114 @@ async fn stage_release(
     Ok(staged)
 }
 
+#[cfg(windows)]
+async fn prepare_windows_release(
+    app: &AppHandle,
+    installed: BundleIdentity,
+    authorization: UpdateAuthorization,
+    lease: state::PreparationLease<StagedResources>,
+) -> Result<serde_json::Value> {
+    use cfw_windows_engine::{runtime_host::InstalledRuntime, update_package::UpdateStaging};
+    let home = app_home()?;
+    let transaction = Uuid::new_v4();
+    let staging = UpdateStaging::create(&home, transaction)?;
+    let prepared: Result<serde_json::Value> = async {
+        let version = authorization.version.as_str();
+        emit_progress(app, "downloading", version, 0, None)?;
+        let mut last_percent = None;
+        download_verified_archive(
+            &authorization,
+            &staging.package(),
+            &lease.cancellation,
+            |downloaded, total| {
+                let percent = total
+                    .filter(|total| *total > 0)
+                    .map(|total| downloaded.saturating_mul(100) / total);
+                if percent.is_some() && last_percent == percent {
+                    return Ok(());
+                }
+                last_percent = percent;
+                emit_progress(app, "downloading", version, downloaded, total)
+            },
+        )
+        .await?;
+        if lease.cancellation.is_cancelled() {
+            return Err(UpdateError::DownloadCancelled);
+        }
+        emit_progress(app, "verifying", version, 0, None)?;
+        let requested = authorization.version.clone();
+        let expected = installed.clone();
+        let cancellation = lease.cancellation.clone();
+        let (identity, resources) = blocking(move || -> Result<_> {
+            // The installed worker, publisher and build floor are re-observed
+            // from the protected installation, never from downloaded claims.
+            let current = InstalledRuntime::open().map_err(|e| {
+                InstallAdmissionError::WindowsInstallationUnavailable(e.to_string())
+            })?;
+            current.require_desktop_process().map_err(|e| {
+                InstallAdmissionError::WindowsInstallationUnavailable(e.to_string())
+            })?;
+            let release = current.release();
+            if release.version != expected.version || release.build != expected.build {
+                return Err(InstallAdmissionError::InstalledIdentityInvalid.into());
+            }
+            let inspector = current.package_inspector().map_err(|e| {
+                InstallAdmissionError::WindowsInstallationUnavailable(e.to_string())
+            })?;
+            let package = inspector.inspect(
+                &staging.package(),
+                &requested,
+                staging.root(),
+                Duration::from_secs(30),
+                || cancellation.is_cancelled(),
+            )?;
+            let identity = BundleIdentity {
+                version: package.identity().version.clone(),
+                build: package.identity().build,
+            };
+            let resources = StagedResources::new(staging, package)?;
+            Ok((identity, resources))
+        })
+        .await??;
+        let version = identity.version.clone();
+        lease.stage(StagedUpdate {
+            transaction,
+            installed,
+            staged: identity,
+            resources,
+        })?;
+        Ok(serde_json::json!({"version":version}))
+    }
+    .await;
+    match prepared {
+        Ok(result) => Ok(result),
+        Err(error) => {
+            // Every moved owner has retired before reopening this exact UUID.
+            // Keep both the original error and any failed cleanup diagnostic.
+            if error.failure().category == FailureCategory::Authenticity {
+                app.state::<UpdaterSecurityState>()
+                    .reject_release(&authorization)?;
+            }
+            let cleanup =
+                UpdateStaging::open_existing(&home, transaction).and_then(
+                    |staging| match staging {
+                        Some(staging) => staging.remove(),
+                        None => Ok(()),
+                    },
+                );
+            if let Err(cleanup) = cleanup {
+                crate::diagnostics::record(
+                    app,
+                    DiagnosticTopic::Update,
+                    "staging_discard_failed",
+                    &cleanup.to_string(),
+                );
+            }
+            Err(error)
+        }
+    }
+}
+
 /// Stops a running download or discards a staged release, and says which.
 #[tauri::command]
 pub(crate) async fn cancel_update_install(
@@ -333,20 +464,26 @@ pub(crate) async fn cancel_update_install(
 }
 
 fn cancel_update_install_inner(app: &AppHandle) -> Result<serde_json::Value> {
+    #[cfg(target_os = "macos")]
     let app_home = app_home()?;
     let cancelled = match app.state::<UpdaterSecurityState>().cancel_install()? {
         Cancelled::Nothing => "nothing",
         Cancelled::Preparation => "preparation",
-        Cancelled::Staged(transaction) => {
-            // The release is no longer staged either way; the next review
-            // removes what a failed removal left.
-            if let Err(removal) = StagingArea::path(&app_home, &transaction).remove() {
-                crate::diagnostics::record(
-                    app,
-                    DiagnosticTopic::Update,
-                    "staging_discard_failed",
-                    &format!("{:?}", removal.kind()),
-                );
+        Cancelled::Staged(staged) => {
+            #[cfg(windows)]
+            staged.resources.discard()?;
+            #[cfg(target_os = "macos")]
+            {
+                // The release is no longer staged either way; the next review
+                // removes what a failed removal left.
+                if let Err(removal) = StagingArea::path(&app_home, &staged.transaction).remove() {
+                    crate::diagnostics::record(
+                        app,
+                        DiagnosticTopic::Update,
+                        "staging_discard_failed",
+                        &format!("{:?}", removal.kind()),
+                    );
+                }
             }
             "staged"
         }
@@ -369,9 +506,14 @@ pub(crate) async fn commit_update_install(
         .state::<UpdaterSecurityState>()
         .begin_commit(&expected_version)
         .map_err(|error| report(&app, &error))?;
-    match hand_off(&app, commit.staged()).await {
+    match hand_off(&app, commit.staged().map_err(|error| report(&app, &error))?).await {
         Ok(HandOff::Started) => {
-            let version = commit.staged().staged.version.clone();
+            let version = commit
+                .staged()
+                .map_err(|error| report(&app, &error))?
+                .staged
+                .version
+                .clone();
             commit.handed_off();
             let exiting = app.clone();
             tauri::async_runtime::spawn(async move {

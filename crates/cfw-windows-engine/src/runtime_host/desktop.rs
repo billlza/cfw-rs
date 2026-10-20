@@ -61,6 +61,15 @@ impl InstalledDesktop {
     pub fn paths(&self) -> &UserPaths {
         &self.paths
     }
+    /// Read-only authorization before a shared application mode transition.
+    /// An owned proxy may be restored; a foreign proxy or changed journal is
+    /// never taken over. Activation still rechecks policy under its own lock.
+    pub(crate) fn authorize_system_proxy(&self, restoration_only: bool) -> Result<()> {
+        self.installation.require_desktop_process()?;
+        crate::user_agent::launcher::medium_process()?;
+        self.storage.proxy().authorize(restoration_only)?;
+        Ok(())
+    }
     pub(crate) fn observe_authority(&self, deadline: Instant) -> Result<AuthoritySnapshot> {
         self.installation.require_desktop_process()?;
         let mut channel = AuthorityChannel::connect(

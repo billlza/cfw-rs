@@ -1,5 +1,8 @@
 use super::*;
-use cfw_engine_api::{BackendErrorKind, EngineBackend, EngineCommandContext, NativeEngineStatus};
+use cfw_engine_api::{
+    BackendErrorKind, EngineBackend, EngineCommandContext, NativeEngineStatus,
+    SystemProxyAuthorization,
+};
 use cfw_singbox_config::{EngineSettings, ProjectionMode, ValidatedSingBoxProfile};
 use cfw_windows_engine::{backend::WindowsEngineBackend, runtime_host::InstalledDesktop};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
@@ -45,6 +48,7 @@ async fn exercise_async(
         .proxy()
         .snapshot()
         .map_err(|e| e.to_string())?;
+    let mut authorizations = vec![authorize_unchanged(desktop, backend, progress, 2).await?];
     let profile =
         ValidatedSingBoxProfile::parse(r#"{"outbounds":[{"type":"direct","tag":"direct"}]}"#)
             .map_err(|e| e.to_string())?;
@@ -172,6 +176,9 @@ async fn exercise_async(
             }
         }
         progress.record("backend_queries_complete", generation)?;
+        if mode == ProjectionMode::SystemProxy {
+            authorizations.push(authorize_unchanged(desktop, backend, progress, generation).await?);
+        }
         user_agent::traffic(address)?;
         progress.record("backend_traffic_complete", generation)?;
         let mut wrong = context.clone();
@@ -287,8 +294,55 @@ async fn exercise_async(
         let _controller = TcpListener::bind(controller_address)
             .map_err(|e| format!("backend controller remained: {e}"))?;
     }
+    authorizations.push(authorize_unchanged(desktop, backend, progress, 5).await?);
     Ok(
         serde_json::json!({"shared_engine_backend":true,"unlaunched_rejection_retired":true,"modes":modes,"failure_case":failure_case.ok_or("missing actual engine-exit case")?,
-        "exited_engine_query_rejected":true,"proxy_restored":true,"listeners_released":true,"release_accepted":false}),
+        "exited_engine_query_rejected":true,"proxy_restored":true,"listeners_released":true,"authorizations":authorizations,"release_accepted":false}),
+    )
+}
+
+async fn authorize_unchanged(
+    desktop: &InstalledDesktop,
+    backend: &WindowsEngineBackend,
+    progress: &mut Progress,
+    generation: u64,
+) -> Result<serde_json::Value> {
+    progress.record("backend_authorization", generation)?;
+    let before = checks::snapshot()?;
+    let lineage = desktop
+        .generations()
+        .load_lineage()
+        .map_err(|e| e.to_string())?;
+    let proxy = desktop
+        .storage()
+        .proxy()
+        .snapshot()
+        .map_err(|e| e.to_string())?;
+    for restoration_only in [false, true] {
+        backend
+            .authorize_system_proxy(restoration_only)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    if checks::snapshot()? != before
+        || desktop
+            .generations()
+            .load_lineage()
+            .map_err(|e| e.to_string())?
+            != lineage
+        || desktop
+            .storage()
+            .proxy()
+            .snapshot()
+            .map_err(|e| e.to_string())?
+            != proxy
+    {
+        return Err("proxy authorization changed runtime, lineage or native settings".into());
+    }
+    progress.record("backend_authorization_complete", generation)?;
+    Ok(
+        serde_json::json!({"snapshot":before,"lineage":{"installation_id":lineage.session.installation_id,
+        "config_epoch":lineage.session.config_epoch,"generation":lineage.generation},"activation_allowed":true,
+        "restoration_allowed":true,"authority_unchanged":true,"lineage_unchanged":true,"proxy_unchanged":true}),
     )
 }

@@ -14,6 +14,7 @@ pub(super) fn host_error(error: HostError) -> BackendError {
         HostError::Executable(error) => engine_kind(error),
         HostError::Desktop(error) => desktop_kind(error),
         HostError::Credentials(error) => credential_kind(error),
+        HostError::Proxy(error) => proxy_kind(error),
         HostError::Lineage(crate::LineageError::Authority(error)) => wire_kind(error),
         HostError::Lineage(crate::LineageError::Conflict { .. }) => Kind::StaleOperation,
         HostError::Lineage(_)
@@ -46,25 +47,28 @@ fn desktop_kind(error: &DesktopError) -> Kind {
             | LaunchError::Identity
             | LaunchError::Invocation => Kind::IdentityRejected,
         },
-        DesktopError::Proxy(error) => match error {
-            crate::ProxyError::ExistingProxy => Kind::ExistingSystemProxy,
-            crate::ProxyError::PolicyDenied | crate::ProxyError::UnsafeUser => {
-                Kind::PermissionDenied
-            }
-            crate::ProxyError::InvalidJournal | crate::ProxyError::InvalidRestorationRecord => {
-                Kind::SystemProxyJournalFailed
-            }
-            crate::ProxyError::SettingsChanged | crate::ProxyError::OwnershipConflict => {
-                Kind::CompensationConflict
-            }
-            _ => Kind::CleanupUnproven,
-        },
+        DesktopError::Proxy(error) => proxy_kind(error),
         DesktopError::Observation(error) => desktop_kind(error),
         DesktopError::Cleanup { .. } | DesktopError::CleanupScope(_) => Kind::CleanupUnproven,
         DesktopError::Context => Kind::IdentityRejected,
         DesktopError::Response | DesktopError::Handoff(_) => Kind::InvalidMessage,
         DesktopError::ReadyReceiver => Kind::GlobalAuthorityInterrupted,
         DesktopError::State(_) => Kind::OwnerUnresponsive,
+    }
+}
+fn proxy_kind(error: &crate::ProxyError) -> Kind {
+    match error {
+        crate::ProxyError::ExistingProxy => Kind::ExistingSystemProxy,
+        crate::ProxyError::PolicyDenied
+        | crate::ProxyError::UnsafeUser
+        | crate::ProxyError::Identity(_) => Kind::PermissionDenied,
+        crate::ProxyError::InvalidJournal | crate::ProxyError::InvalidRestorationRecord => {
+            Kind::SystemProxyJournalFailed
+        }
+        crate::ProxyError::SettingsChanged | crate::ProxyError::OwnershipConflict => {
+            Kind::CompensationConflict
+        }
+        _ => Kind::CleanupUnproven,
     }
 }
 fn channel_kind(error: &LaunchChannelError) -> Kind {

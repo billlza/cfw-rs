@@ -1751,7 +1751,15 @@ backend generation 3/4 于 42.825/55.824 秒。第五次在 57.554 秒才开始�
 安装验收现分为直接宿主客户端（预检和 generation 1/2）与共享 backend 客户端
 （generation 3/4/5），按顺序使用同一安装和服务。每个客户端保持原有 60 秒限制、
 全部产品操作超时和断言；后台三次运行仍共用一个 backend 实例。各自阶段与报告必须
-独立验证后才能合并，最终报告仍限 16 KiB。此次调整的原生 CI 结果待核验。
+独立验证后才能合并，最终报告仍限 16 KiB。源码 `9b64004ceb13ce02fbf8211f95b427ac9bd97298`
+由 [39375075507](https://github.com/billlza/cfw-rs/actions/runs/39375075507) 验证，原生结果待核验。
+
+共享 backend 同时实现 `SystemProxyAuthorization`，复用现有 WinINet 策略和所有权日志
+检查。安装身份与 medium-integrity 用户检查仍在原生边界，异步入口在切换线程前拒绝
+impersonation；沿用有界 worker 容量，不持有运行状态锁。此入口只检查权限与可恢复性，
+不申请 lease、不修改设置，激活阶段仍独立重查策略。安装验收增加运行前、SystemProxy
+运行中、最终 Off 后的完整/仅恢复授权，并核对 Authority、lineage 和代理设置不变。
+本地全 feature Windows cross-Clippy 与格式检查通过；该增量的原生验收待运行。
 新的 backend 尚无完整原生验收；异步取消和异常恢复的最终应用验收也尚未完成。
 TUN 入口仍显式不可用，尚需完整 TUN/合并模式、backend 的服务重启恢复衔接、应用诊断
 接线、Tauri Windows factory/startup/build、实际 UI 和发布验收。此实现没有关闭这些缺口。

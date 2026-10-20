@@ -11,7 +11,7 @@ use crate::{
 use cfw_engine_api::{
     BackendError, BackendErrorKind as Kind, BackendFuture, EngineBackend, EngineCommandContext,
     EngineRuntimePlatform, EngineStartRequest, NativeEngineStatus, RuntimeIdentity,
-    TunnelInstallOutcome, authority_v1::AuthorityState,
+    SystemProxyAuthorization, TunnelInstallOutcome, authority_v1::AuthorityState,
 };
 use cfw_singbox_config::ProjectionMode;
 use std::{
@@ -613,6 +613,20 @@ fn unavailable_request<T: Send + 'static>(
         let _pending = pending;
         tunnel_unavailable().await
     })
+}
+impl SystemProxyAuthorization for WindowsEngineBackend {
+    fn authorize_system_proxy(&self, restoration_only: bool) -> BackendFuture<'_, ()> {
+        // Reuse the installed user's native policy/journal check. Worker
+        // admission rejects caller impersonation before crossing threads;
+        // capacity remains held until the read actually completes. No runtime
+        // state lock or ownership lease is needed for this read-only decision.
+        Box::pin(self.worker(&self.shared.capacity, move |shared, _, _| {
+            shared
+                .desktop
+                .authorize_system_proxy(restoration_only)
+                .map_err(host_error)
+        }))
+    }
 }
 impl EngineBackend for WindowsEngineBackend {
     fn runtime_platform(&self) -> EngineRuntimePlatform {

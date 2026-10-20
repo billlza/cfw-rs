@@ -515,7 +515,7 @@ impl WindowsSystemProxy {
         })
     }
 
-    fn authorize(&self, restoration_only: bool) -> Result<(), ProxyError> {
+    pub(crate) fn authorize(&self, restoration_only: bool) -> Result<(), ProxyError> {
         self.locked(|transaction| {
             let record = Record::read(transaction, self.identity.user_sid())?;
             if restoration_only && record.is_none() {

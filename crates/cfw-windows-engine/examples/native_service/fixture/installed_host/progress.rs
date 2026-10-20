@@ -14,6 +14,8 @@ const PHASES: &[&str] = &[
     "host_stop",
     "host_off",
     "backend_open",
+    "backend_authorization",
+    "backend_authorization_complete",
     "backend_check",
     "backend_check_complete",
     "backend_rejected_prepare",

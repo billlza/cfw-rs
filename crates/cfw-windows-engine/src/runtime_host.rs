@@ -56,6 +56,9 @@ pub enum HostError {
     #[error("Windows runtime Agent: {0}")]
     Agent(#[from] crate::user_agent::UserAgentError),
     #[cfg(windows)]
+    #[error("Windows runtime proxy authorization: {0}")]
+    Proxy(#[from] crate::ProxyError),
+    #[cfg(windows)]
     #[error("Windows runtime Desktop: {0}")]
     Desktop(#[from] crate::user_agent::desktop::DesktopError),
     #[cfg(windows)]

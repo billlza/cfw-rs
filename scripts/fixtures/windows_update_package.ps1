@@ -26,6 +26,7 @@ $cleanupErrors = [System.Collections.Generic.List[string]]::new()
 $cases = [System.Collections.Generic.List[string]]::new()
 $priorFixtures = $env:CFW_NATIVE_PACKAGE_FIXTURES
 $inspectionPassed = $false
+$signTool = Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe'
 
 function Write-Stage([string]$Phase, [string]$Case) {
     [ordered]@{ source=$Source; phase=$Phase; case=$Case; recorded_utc=[DateTime]::UtcNow.ToString('o') } |
@@ -91,11 +92,17 @@ function New-Database([string]$Path, [hashtable]$Overrides, [string]$Template = 
     } finally { Release-Msi $summary; Release-Msi $database; Release-Msi $installer }
 }
 function Sign-File([string]$Path, [object]$Certificate, [bool]$RequireTrusted = $true) {
-    $signature = Set-AuthenticodeSignature -LiteralPath $Path -Certificate $Certificate -HashAlgorithm SHA256
+    & $signTool sign /fd SHA256 /s My /sha1 $Certificate.Thumbprint $Path
+    if ($LASTEXITCODE -ne 0) { throw "SDK package signing failed: $Path" }
+    $signature = Get-AuthenticodeSignature -LiteralPath $Path
     if ($null -eq $signature.SignerCertificate -or $signature.SignerCertificate.Thumbprint -cne $Certificate.Thumbprint) {
         throw "Fixture signing did not use the requested certificate: $Path"
     }
     if ($RequireTrusted -and $signature.Status -ne 'Valid') { throw "Fixture signature failed: $($signature.StatusMessage)" }
+    if ($RequireTrusted) {
+        & $signTool verify /pa /all $Path
+        if ($LASTEXITCODE -ne 0) { throw "SDK signature verification failed: $Path" }
+    }
 }
 function New-SignedDatabase([string]$Name, [hashtable]$Overrides = @{}, [string]$Template = 'x64;1033', [string]$PackageCode = '{E58D1FC6-A003-4849-900C-45D6861E75D9}') {
     $path = Join-Path $root $Name
@@ -106,6 +113,15 @@ function New-SignedDatabase([string]$Name, [hashtable]$Overrides = @{}, [string]
     $cases.Add($Name)
 }
 try {
+    Write-Stage 'verify-sdk-signer' '10.0.26100.0'
+    if (-not (Test-Path -LiteralPath $signTool) -or (Get-AuthenticodeSignature -LiteralPath $signTool).Status -ne 'Valid') {
+        throw 'The pinned Windows SDK signer is missing or untrusted'
+    }
+    [ordered]@{
+        sdk_directory='10.0.26100.0'
+        file_version=(Get-Item -LiteralPath $signTool).VersionInfo.FileVersion
+        sha256=(Get-FileHash -LiteralPath $signTool -Algorithm SHA256).Hash.ToLowerInvariant()
+    } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Evidence 'signer-tool.json') -Encoding utf8NoBOM
     # Three independent keys, with identical subject names. Only two are trusted
     # in this disposable runner's machine root store. The CurrentUser Root
     # provider can display a native confirmation dialog and is unsuitable for
@@ -125,6 +141,43 @@ try {
                 throw 'The temporary root was not imported into the requested store'
             }
         }
+    }
+    # Isolate the original CryptUI/MSI digest failure from package parsing.
+    # Each signer sees the same unsigned bytes in ASCII and Unicode paths.
+    # These are diagnostic inputs, never a fallback installation path.
+    $unsigned = Join-Path $root 'comparison-unsigned.msi'
+    New-Database $unsigned @{}
+    Copy-Item -LiteralPath $unsigned -Destination (Join-Path $Evidence 'comparison-unsigned.msi')
+    $unsignedDigest = (Get-FileHash -LiteralPath $unsigned -Algorithm SHA256).Hash.ToLowerInvariant()
+    $comparison = [System.Collections.Generic.List[object]]::new()
+    Export-Certificate -Cert $certificates[0] -FilePath (Join-Path $Evidence 'fixture-publisher.cer') | Out-Null
+    foreach ($signer in @('cryptui', 'signtool')) {
+        foreach ($label in @('ascii', '中文')) {
+            $name = "comparison-$signer-$label.msi"
+            $path = Join-Path $Evidence $name
+            Copy-Item -LiteralPath $unsigned -Destination $path
+            Write-Stage 'compare-signer' $name
+            $returnedStatus = $null
+            if ($signer -ceq 'cryptui') {
+                $returnedStatus = [string](Set-AuthenticodeSignature -LiteralPath $path -Certificate $certificates[0] -HashAlgorithm SHA256).Status
+            } else {
+                & $signTool sign /fd SHA256 /s My /sha1 $certificates[0].Thumbprint $path
+                if ($LASTEXITCODE -ne 0) { throw 'SDK comparison signing failed' }
+            }
+            $observed = Get-AuthenticodeSignature -LiteralPath $path
+            & $signTool verify /pa /all $path
+            $verifyCode = $LASTEXITCODE
+            $comparison.Add([ordered]@{
+                signer=$signer; path_kind=$label; returned_status=$returnedStatus
+                unsigned_sha256=$unsignedDigest
+                observed_status=[string]$observed.Status; sdk_verification_exit=$verifyCode
+                sha256=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            })
+        }
+    }
+    $comparison.ToArray() | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Evidence 'signer-comparison.json') -Encoding utf8NoBOM
+    if (@($comparison | Where-Object { $_.signer -ceq 'signtool' -and ($_.observed_status -cne 'Valid' -or $_.sdk_verification_exit -ne 0) }).Count -ne 0) {
+        throw 'SDK signatures of the database bytes are invalid; inspect the signer comparison'
     }
     $fixtureSource = Join-Path $root 'publisher.rs'
     'fn main() { println!("package inspection fixture"); }' | Set-Content -LiteralPath $fixtureSource -Encoding utf8NoBOM

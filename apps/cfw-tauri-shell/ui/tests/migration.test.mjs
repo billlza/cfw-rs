@@ -101,6 +101,28 @@ test("boot identity requires an explicit supported operating system without Appl
   }
 });
 
+test("unqualified Windows minimum version is explicit and never substitutes for malformed identity", () => {
+  const payload = bootPayload();
+  payload.product = {
+    ...payload.product, name: "Clash for Windows", operating_system: "windows",
+    architecture: "x64", minimum_os_version: null,
+  };
+  assert.deepEqual(normalizeBootPayload(payload).product, payload.product);
+  for (const invalid of [undefined, "", false, 0, {}, []]) {
+    assert.throws(() => normalizeBootPayload({
+      ...payload, product: { ...payload.product, minimum_os_version: invalid },
+    }), /invalid/u);
+  }
+  for (const field of ["name", "version", "license", "operating_system", "architecture"]) {
+    assert.throws(() => normalizeBootPayload({
+      ...payload, product: { ...payload.product, [field]: null },
+    }), /invalid/u);
+  }
+  assert.throws(() => normalizeBootPayload({
+    ...payload, product: { ...payload.product, operating_system: "macos" },
+  }), /invalid/u);
+});
+
 test("renderer ACK requires the current actionable General migration view and bound handlers", () => {
   const challengeBoot = normalizeBootPayload(bootPayload({
     handoff: true,

@@ -22,7 +22,6 @@ mod private_store;
 #[cfg(test)]
 mod profile_fixtures;
 mod release_observation;
-#[cfg(target_os = "macos")]
 mod service_maintenance;
 mod shell;
 mod startup;

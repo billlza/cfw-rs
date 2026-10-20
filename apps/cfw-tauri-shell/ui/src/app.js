@@ -1904,7 +1904,7 @@ function renderGlassOverlays() {
           <div class="product-about-sub">${escapeHtml(t("Powered by sing-box"))}</div>
           <div class="product-about-meta">
             <div>版本 ${escapeHtml(String(version))}</div>
-            <div>${escapeHtml(product.architecture)} · ${presentation.name} ${escapeHtml(product.minimum_os_version)}+</div>
+            <div>${escapeHtml(product.architecture)} · ${presentation.name}${product.minimum_os_version === null ? "" : ` ${escapeHtml(product.minimum_os_version)}+`}</div>
           </div>
           <div class="product-about-status">${escapeHtml(status)}</div>
           ${notes}
@@ -2565,7 +2565,7 @@ function renderFeedback() {
         <div>
           <p class="label">${escapeHtml(t("About"))}</p>
           <h3>${escapeHtml(product.name)} v${escapeHtml(String(version))}${update?.available && update?.version ? ` → v${escapeHtml(String(update.version))}` : ""}</h3>
-          <p class="muted">${escapeHtml(product.license)} · ${escapeHtml(product.architecture)} · ${presentation.name} ${escapeHtml(product.minimum_os_version)} or later</p>
+          <p class="muted">${escapeHtml(product.license)} · ${escapeHtml(product.architecture)} · ${presentation.name}${product.minimum_os_version === null ? "" : ` ${escapeHtml(product.minimum_os_version)} or later`}</p>
         </div>
         <span class="badge">${escapeHtml(product.operating_system === "macos" ? t("ARM64 macOS only") : `${presentation.name} ${product.architecture}`)}</span>
       </section>

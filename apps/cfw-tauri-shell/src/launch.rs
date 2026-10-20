@@ -6,7 +6,7 @@ use crate::legacy::{LaunchArguments, parse_launch_arguments};
 pub(crate) const STARTUP_USAGE_EXIT_CODE: i32 = 64;
 pub(crate) const STARTUP_ADMISSION_EXIT_CODE: i32 = 78;
 #[cfg(target_os = "macos")]
-pub(crate) const SERVICE_MAINTENANCE_FLAG: &str = "--service-maintenance-v2";
+use crate::service_maintenance::SERVICE_MAINTENANCE_FLAG;
 pub(crate) const FINISH_UPDATE_FLAG: &str = "--finish-update-v1";
 
 #[cfg(all(target_os = "macos", feature = "physical-release-evidence"))]

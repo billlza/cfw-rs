@@ -12,6 +12,11 @@ Rust 重构的首个 Windows 大版本，目前没有可指认的本项目旧 Wi
 在任何启动 I/O 之前报错；常规 dashboard 与精确的更新事务入口仍保留。共享 UI
 及其余历史维护调用点的拆分尚未完成，不能由入口隔离推出完整应用已经可构建。
 
+共享界面的产品元数据改由构建目标提供，Windows 不再沿用 Mac 产品名、系统与
+架构，托盘也使用同一产品名。`minimum_os_version` 在 Windows 开发阶段为显式
+`null`，表示尚未确定经过验收的最低支持版本；About/Feedback 不据此展示版本
+保证。Mac 的既有六字段内容保持一致。此元数据不授予引擎或发布权限。
+
 最新完整组件证据（2026-10-20）：`098fe85` 的 Windows CI 四项作业及下载产物核验通过，
 含 648 项 Rust、311 项 UI、14 项原生引擎、35 项 SCM 检查。产品服务/Agent 的
 安装、四种模式的非激活预检、共享 EngineBackend 的 LocalProxy/SystemProxy 启停与

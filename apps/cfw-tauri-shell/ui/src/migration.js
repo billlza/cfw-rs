@@ -139,7 +139,12 @@ export function normalizeBootPayload(value) {
     throw new TypeError("boot migration role is invalid");
   }
   const product = Object.fromEntries(
-    Object.entries(value.product).map(([key, field]) => [key, boundedProductField(field, `product ${key}`)]),
+    Object.entries(value.product).map(([key, field]) => [
+      key,
+      key === "minimum_os_version" && field === null && value.product.operating_system === "windows"
+        ? null
+        : boundedProductField(field, `product ${key}`),
+    ]),
   );
   platformPresentation(product.operating_system);
   const migrationHandoffStatus = normalizeMigrationHandoffStatus(value.migration_handoff_status);

@@ -82,12 +82,21 @@ jobs:
       - name: Verify Windows launch admission
         run: |
           $tests = Join-Path $env:RUNNER_TEMP 'cfw-desktop-launch-tests.exe'
+          New-Item -ItemType File -Path (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-launch-build.log') -ErrorAction Stop | Out-Null
           rustc --edition=2024 --test apps/cfw-tauri-shell/src/launch.rs -D warnings -o $tests 2>&1 |
             Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-launch-build.log')
           if ($LASTEXITCODE -ne 0) { throw 'Windows desktop launch test build failed' }
           & $tests 2>&1 |
             Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-launch-tests.log')
           if ($LASTEXITCODE -ne 0) { throw 'Windows desktop launch admission tests failed' }
+      - name: Verify native desktop build identity
+        run: |
+          cargo clippy --locked -p cfw-core --all-targets -- -D warnings 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-product-clippy.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Windows desktop product identity Clippy failed' }
+          cargo test --locked -p cfw-core product::tests 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-product-tests.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Windows desktop product identity test failed' }
       - name: Check the complete Windows desktop target
         run: |
           cargo check --locked -p cfw-tauri-shell --bin clash-for-mac 2>&1 |

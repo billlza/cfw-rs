@@ -35,10 +35,9 @@ use journal::{
 };
 
 pub(crate) use admission::require_canonical_handoff_candidate;
-pub(crate) use handoff_ticket::{
-    ConsumedHandoffTicket, LaunchArguments, ProcessIdentity, RendererReadyChallenge,
-    parse_launch_arguments,
-};
+pub(crate) use handoff_ticket::{ConsumedHandoffTicket, ProcessIdentity, RendererReadyChallenge};
+#[cfg(target_os = "macos")]
+pub(crate) use handoff_ticket::{LaunchArguments, parse_launch_arguments};
 pub(crate) use journal::MigrationHandoffLease;
 
 pub use state_gate::LegacyRetirementGate;

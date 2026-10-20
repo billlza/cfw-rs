@@ -6,6 +6,7 @@ mod diagnostics;
 mod legacy_settings;
 #[cfg(windows)]
 mod paths_windows;
+mod product;
 mod runtime_settings;
 mod settings;
 mod settings_storage;
@@ -14,6 +15,7 @@ mod test_support;
 pub use diagnostics::{
     DiagnosticEntry, DiagnosticJournal, DiagnosticTopic, redact_diagnostic_text,
 };
+pub use product::DesktopProductInfo;
 pub use runtime_settings::RuntimeSettingsSnapshot;
 
 #[cfg(target_os = "macos")]

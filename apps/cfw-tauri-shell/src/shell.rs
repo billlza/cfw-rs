@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use cfw_controller::ProxiesSnapshot;
+use cfw_core::PRODUCT_NAME;
 use cfw_engine_api::{EngineEvent, EngineMode, EngineSnapshot, EngineState};
 use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -11,7 +12,6 @@ use crate::commands::controller_client_for_app;
 use crate::lifecycle::request_shutdown;
 use crate::updater::check_for_updates;
 
-const PRODUCT_NAME: &str = "Clash for Mac";
 pub(crate) const TRAY_ID: &str = "cfw-tray";
 const APP_MENU_ABOUT_ID: &str = "about";
 const APP_MENU_CHECK_UPDATE_ID: &str = "check-update";

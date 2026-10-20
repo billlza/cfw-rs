@@ -884,6 +884,15 @@ test("About and Feedback retain the host's Windows version and architecture", as
     const feedback = await renderPage("feedback");
     assert.ok(feedback.includes("x64 · Windows 10.0.26100 or later"));
     assert.doesNotMatch(feedback, /ARM64 macOS only|macOS 15\.0/u);
+    state.payload.product = { ...state.payload.product, minimum_os_version: null };
+    state.glassDialog = { kind: "product-about", payload: { phase: "idle" } };
+    await renderPage("general");
+    assert.ok(glassRoot.innerHTML.includes("x64 · Windows</div>"));
+    assert.doesNotMatch(glassRoot.innerHTML, /null|undefined|Windows\s+15\.0|\d\+/u);
+    state.glassDialog = null;
+    const unqualified = await renderPage("feedback");
+    assert.ok(unqualified.includes("x64 · Windows</p>"));
+    assert.doesNotMatch(unqualified, /Windows.*(?:null|undefined|15\.0|or later)/u);
   } finally {
     state.payload.product = original.product;
     state.glassDialog = original.dialog;

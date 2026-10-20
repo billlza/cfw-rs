@@ -416,20 +416,10 @@ fn schedule_post_parent_window_activation(app: AppHandle) {
     });
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct ProductInfo {
-    name: &'static str,
-    version: &'static str,
-    license: &'static str,
-    operating_system: &'static str,
-    minimum_os_version: &'static str,
-    architecture: &'static str,
-}
-
 #[derive(Clone, Serialize)]
 pub(crate) struct BootPayload {
     native_ui: crate::native_components::NativeUiCapabilities,
-    product: ProductInfo,
+    product: cfw_core::DesktopProductInfo,
     migration_handoff: bool,
     migration_handoff_status: MigrationHandoffStatus,
     migration_handoff_renderer_ready: Option<MigrationHandoffRendererReady>,
@@ -449,14 +439,7 @@ pub(crate) async fn boot_payload(
         .await?;
     Ok(BootPayload {
         native_ui: crate::native_components::NativeUiCapabilities::current(),
-        product: ProductInfo {
-            name: "Clash for Mac",
-            version: env!("CARGO_PKG_VERSION"),
-            license: "GPL-3.0-or-later",
-            operating_system: "macos",
-            minimum_os_version: "15.0",
-            architecture: "arm64",
-        },
+        product: cfw_core::DesktopProductInfo::current(),
         migration_handoff: launch.is_migration_handoff(),
         migration_handoff_status: lifecycle.migration_handoff_status()?,
         migration_handoff_renderer_ready: launch.migration_handoff_renderer_ready()?,

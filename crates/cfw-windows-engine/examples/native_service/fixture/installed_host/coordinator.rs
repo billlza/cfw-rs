@@ -3,9 +3,8 @@ use cfw_engine_api::{
     CredentialPresenceRequest, EngineMode, EngineOwner, EngineSnapshot, EngineState,
     NativeEngineStatus, ProfileDelayTestRequest, ProfileProbeFailure,
 };
-use cfw_singbox_config::{EngineSettings, ProjectionMode, ValidatedSingBoxProfile};
+use cfw_singbox_config::{EngineSettings, ProjectionMode, ValidatedSingBoxProfile, sha256_hex};
 use cfw_windows_engine::runtime_host::InstalledDesktop;
-use sha2::{Digest, Sha256};
 
 // Compile and exercise the application's actual platform assembly. This
 // intentionally contains no Tauri/WebView substitute and makes no GUI claim.
@@ -308,7 +307,7 @@ fn persist_diagnostics(
         .map_err(|e| e.to_string())?;
     std::io::Write::write_all(&mut output, &bytes).map_err(|e| e.to_string())?;
     output.sync_all().map_err(|e| e.to_string())?;
-    Ok(format!("{:x}", Sha256::digest(&bytes)))
+    Ok(sha256_hex(&bytes))
 }
 
 pub(super) fn verify_diagnostics(directory: &Path, expected: &serde_json::Value) -> Result<()> {
@@ -321,7 +320,7 @@ pub(super) fn verify_diagnostics(directory: &Path, expected: &serde_json::Value)
         .take(16385)
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
-    if bytes.len() > 16384 || expected != format!("{:x}", Sha256::digest(&bytes)) {
+    if bytes.len() > 16384 || expected != sha256_hex(&bytes) {
         return Err(
             "native diagnostics receipt differs from the coordinator digest or exceeds its bound"
                 .into(),

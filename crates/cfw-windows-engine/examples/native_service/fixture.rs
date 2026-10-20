@@ -31,6 +31,8 @@ mod authority_state;
 mod authority_wire;
 mod desktop;
 mod desktop_process;
+mod diagnostics;
+use diagnostics::collect_fixture_diagnostics;
 mod installed_host;
 mod job_keeper;
 mod machine_record;
@@ -715,44 +717,6 @@ fn run_validation() -> Result<()> {
         Ok(result) => result,
         Err(payload) => std::panic::resume_unwind(payload),
     }
-}
-
-fn collect_fixture_diagnostics(root: &Path, output: &Path) -> Result<()> {
-    for entry in std::fs::read_dir(root).map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let name = entry.file_name();
-        let Some(text) = name.to_str() else {
-            return Err("non-Unicode fixture diagnostic filename".into());
-        };
-        if !text.ends_with(".failure.txt")
-            && !text.ends_with("-client.json")
-            && !text.ends_with("-client-output.txt")
-            && !text.ends_with(".rejection.json")
-            && !text.ends_with(".journal-validation.json")
-            && !text.ends_with(".authority-validation.json")
-            && !text.ends_with(".wire-validation.json")
-            && !text.ends_with(".stress-validation.json")
-            && !text.ends_with(".off-admission.json")
-            && !(text.starts_with("runtime-restart-") && text.ends_with(".json"))
-            && !(text.starts_with("runtime-stop-") && text.ends_with(".json"))
-        {
-            continue;
-        }
-        if !entry.file_type().map_err(|e| e.to_string())?.is_file()
-            || entry.metadata().map_err(|e| e.to_string())?.len() > 16384
-        {
-            return Err("invalid fixture diagnostic file".into());
-        }
-        let bytes = std::fs::read(entry.path()).map_err(|e| e.to_string())?;
-        let mut target = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(output.join(name))
-            .map_err(|e| e.to_string())?;
-        std::io::Write::write_all(&mut target, &bytes).map_err(|e| e.to_string())?;
-        target.sync_all().map_err(|e| e.to_string())?;
-    }
-    Ok(())
 }
 
 fn run_in_directory(root: &Path, receipt_root: &Path, source: &str) -> Result<()> {

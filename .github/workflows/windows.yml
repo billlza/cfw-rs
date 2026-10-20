@@ -90,6 +90,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Native SCM crash and runtime recovery validation failed" }
           cargo run --locked -p cfw-windows-engine --features native-service-validation --example native-service-fixture -- --runtime-local-restart-validation 2>&1 | Tee-Object -FilePath (Join-Path $artifactRoot 'runtime-local-restart-tests.txt')
           if ($LASTEXITCODE -ne 0) { throw "Native SCM LocalProxy crash recovery validation failed" }
+          cargo build --locked -p cfw-windows-engine --bin cfw-windows-runtime
+          if ($LASTEXITCODE -ne 0) { throw "Product Windows runtime build failed" }
+          ./scripts/fixtures/windows_installed_runtime.ps1 -Runtime (Join-Path $PWD 'target/debug/cfw-windows-runtime.exe') -DesktopFixture (Join-Path $PWD 'target/debug/examples/native-service-fixture.exe') -Engine $env:CFW_ENGINE_HOST_PATH -EngineVersion $env:CFW_ENGINE_HOST_VERSION -Source $receipt.product_source -Receipts $artifactRoot
       - name: Upload the verified unsigned engine component
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:

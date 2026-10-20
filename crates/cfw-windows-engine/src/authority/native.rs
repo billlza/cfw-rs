@@ -22,6 +22,7 @@ mod local_cleanup;
 mod recovery;
 mod runtime_reference;
 mod startup;
+mod supervisor;
 pub use local_cleanup::VerifiedLocalCleanup;
 pub use recovery::ProxyRecoveryObservation;
 pub use startup::VerifiedOffAdmission;
@@ -41,6 +42,7 @@ pub struct WindowsAuthority {
     desktop_reference_confirmed: bool,
     cleanup_context: Option<LeaseContext>,
     proxy_recovery: Option<super::recovery::ProxyRecoveryAdmission>,
+    pub(super) draining: bool,
     #[cfg(feature = "native-service-validation")]
     next_fault: Option<crate::authority_journal::JournalFaultPoint>,
 }
@@ -60,6 +62,7 @@ impl WindowsAuthority {
             desktop_reference_confirmed: false,
             cleanup_context: None,
             proxy_recovery: None,
+            draining: false,
             #[cfg(feature = "native-service-validation")]
             next_fault: None,
         };

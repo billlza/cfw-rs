@@ -159,7 +159,7 @@ impl VerifiedExecutable {
 
 /// Keep every ancestor non-replaceable while a path is consumed by CreateProcess.
 /// Reparse points, hard-linked executables and relative/parent paths are refused.
-fn hold_path(path: &Path, directory: bool) -> Result<Vec<File>, Error> {
+pub(crate) fn hold_path(path: &Path, directory: bool) -> Result<Vec<File>, Error> {
     if !path.is_absolute()
         || path
             .components()

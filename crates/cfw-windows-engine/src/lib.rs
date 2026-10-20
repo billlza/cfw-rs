@@ -18,6 +18,8 @@ pub mod credential_lifecycle;
 #[cfg(any(windows, test))]
 mod protocol;
 #[cfg(any(windows, test))]
+pub mod runtime_host;
+#[cfg(any(windows, test))]
 pub mod user_agent;
 #[cfg(any(windows, test))]
 pub use configuration::{CheckedStartConfiguration, PreparedConfig, ResolvedProjection};

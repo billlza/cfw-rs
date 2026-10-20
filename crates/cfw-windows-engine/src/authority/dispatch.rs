@@ -101,7 +101,13 @@ impl WindowsAuthority {
                     | Command::OwnedLease
             ),
         };
-        let outcome = if allowed {
+        let new_start = matches!(
+            command.command,
+            Command::Prepare(_) | Command::ReserveGeneration(_)
+        );
+        let outcome = if self.draining && new_start {
+            Err(AuthorityError::Recovering)
+        } else if allowed {
             self.execute(&authorization, command.command)
         } else {
             Err(AuthorityError::Identity)

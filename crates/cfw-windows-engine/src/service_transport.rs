@@ -341,6 +341,20 @@ impl LocalServiceConnection {
         &mut self,
         deadline: Instant,
     ) -> Result<AuthenticatedServiceRequest, ServiceTransportError> {
+        self.receive_inner(deadline, None)
+    }
+    pub(crate) fn receive_cancellable(
+        &mut self,
+        deadline: Instant,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<AuthenticatedServiceRequest, ServiceTransportError> {
+        self.receive_inner(deadline, Some(cancel))
+    }
+    fn receive_inner(
+        &mut self,
+        deadline: Instant,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<AuthenticatedServiceRequest, ServiceTransportError> {
         let pipe = self.pipe.take().ok_or(ServiceTransportError::Closed)?;
         let slot = self.slot.take().ok_or(ServiceTransportError::Closed)?;
         let result = (|| {
@@ -352,7 +366,7 @@ impl LocalServiceConnection {
             let next = sequence
                 .checked_add(1)
                 .ok_or(ServiceTransportError::RequestOrder)?;
-            let body = native_io::read(&pipe, deadline)?;
+            let body = native_io::read_bounded(&pipe, deadline, MAX_MESSAGE, cancel)?;
             if self.peer.is_none() {
                 let peer = NativePeerProcess::from_pipe_client(&pipe)?;
                 let identity = peer.identity();

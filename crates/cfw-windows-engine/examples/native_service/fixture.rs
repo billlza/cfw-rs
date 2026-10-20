@@ -30,6 +30,7 @@ mod authority_journal;
 mod authority_state;
 mod authority_wire;
 mod desktop;
+mod installed_host;
 mod job_keeper;
 mod machine_record;
 mod restricted;
@@ -106,6 +107,9 @@ impl Drop for Descriptor {
 
 pub(super) fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().collect();
+    if args.len() == 2 && args[1] == "--installed-host-probe" {
+        return installed_host::probe();
+    }
     if args.len() == 2 && args[1] == "--runtime-job-idle-probe" {
         // Native Job lifetime counterexample only. The parent holds and retires
         // this exact child; the bound also limits lifetime if the parent dies.

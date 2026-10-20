@@ -429,7 +429,7 @@ fn medium_owner(context: &LeaseContext) -> Result<NativePeerProcess> {
     current.require_current_console_session()?;
     Ok(current)
 }
-pub(super) fn medium_process() -> Result<NativePeerProcess> {
+pub(crate) fn medium_process() -> Result<NativePeerProcess> {
     let current = NativePeerProcess::open(std::process::id())?;
     let identity = current.identity();
     if identity.integrity_rid() != 0x2000 || identity.is_app_container() || identity.is_restricted()

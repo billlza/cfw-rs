@@ -47,7 +47,9 @@ use journal::{InstallJournal, InstallRecord, UpdateInstallLeaseError};
 use metadata::check_bounded_update;
 use outcome::{InstallOutcome, ReviewError, review_previous_attempt};
 use services::require_removable_services;
+#[cfg(target_os = "macos")]
 use staged_bundle::{StagedBundleError, StagedExpectation, verify_staged_bundle};
+#[cfg(target_os = "macos")]
 use staging::StagingArea;
 #[cfg(target_os = "macos")]
 use state::DownloadCancellation;

@@ -18,6 +18,7 @@ pub(super) enum ClientCase {
     RuntimeRestartLocal,
     RuntimeLocalRestartDesktop,
     InstalledHostDesktop,
+    InstalledBackendDesktop,
     RejectedRuntime,
 }
 impl ClientCase {
@@ -34,6 +35,7 @@ impl ClientCase {
             Self::RuntimeRestartLocal => "--restart-local-agent-runtime",
             Self::RuntimeLocalRestartDesktop => "--restart-local-runtime-desktop",
             Self::InstalledHostDesktop => "--installed-host-client",
+            Self::InstalledBackendDesktop => "--installed-backend-client",
             Self::RejectedRuntime => "--rejected-agent-runtime",
         }
     }
@@ -50,6 +52,7 @@ impl ClientCase {
             Self::RuntimeRestartLocal => format!("{name}-restart-local"),
             Self::RuntimeLocalRestartDesktop => format!("{name}-restart-desktop"),
             Self::InstalledHostDesktop => "installed-host".into(),
+            Self::InstalledBackendDesktop => "installed-host-backend".into(),
             Self::RejectedRuntime => format!("{name}-runtime-rejected"),
         }
     }
@@ -84,10 +87,16 @@ impl ClientCase {
             Self::RuntimeRestartLocal => {
                 user_agent::restart::agent_report(user_agent::restart::Mode::Local)
             }
-            Self::InstalledHostDesktop => {
+            Self::InstalledHostDesktop | Self::InstalledBackendDesktop => {
                 serde_json::json!({"product_service":true,"product_agent":true,"desktop_is_fixture":true,"release_accepted":false})
             }
         }
+    }
+    fn is_installed(self) -> bool {
+        matches!(
+            self,
+            Self::InstalledHostDesktop | Self::InstalledBackendDesktop
+        )
     }
 }
 
@@ -366,7 +375,7 @@ fn run_case(
         case.flag()
     ));
     let report_prefix = case.report_prefix(name);
-    let installed_receipts = if matches!(case, ClientCase::InstalledHostDesktop) {
+    let installed_receipts = if case.is_installed() {
         let path = PathBuf::from(
             std::env::var_os("CFW_NATIVE_SERVICE_RECEIPTS")
                 .ok_or("missing installed runtime receipts")?,
@@ -460,6 +469,7 @@ fn run_case(
             | ClientCase::RuntimeRestartDesktop
             | ClientCase::RuntimeLocalRestartDesktop
             | ClientCase::InstalledHostDesktop
+            | ClientCase::InstalledBackendDesktop
     ) {
         Duration::from_secs(60)
     } else {
@@ -468,8 +478,8 @@ fn run_case(
     let deadline = Instant::now() + limit;
     let waited = cfw_windows_storage::wait_until(&process, deadline).map_err(|e| e.to_string())?;
     if waited != cfw_windows_storage::WaitOutcome::Signaled {
-        let diagnostic = if matches!(case, ClientCase::InstalledHostDesktop) {
-            installed_host::timeout_snapshot(parent)
+        let diagnostic = if case.is_installed() {
+            installed_host::timeout_snapshot(parent, &report_prefix)
         } else {
             Ok(())
         };
@@ -507,8 +517,13 @@ fn run_case(
     if unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut exit) } == 0 {
         return Err(error("read fixture client exit"));
     }
-    if matches!(case, ClientCase::InstalledHostDesktop) {
-        installed_host::check_output(parent, &output_path, exit)?;
+    if case.is_installed() {
+        installed_host::check_output(
+            parent,
+            &output_path,
+            exit,
+            matches!(case, ClientCase::InstalledBackendDesktop),
+        )?;
     } else {
         check_report(parent, &report_prefix, case, exit)?;
     }
@@ -519,13 +534,25 @@ pub(super) fn run_installed_host(image: &Path, expected: [u8; 32]) -> Result<()>
     if std::env::var("CFW_NATIVE_SERVICE_MUTATION_TESTS").as_deref() != Ok("1") {
         return Err("installed runtime requires disposable CI opt-in".into());
     }
-    run_case(
-        image,
-        cfw_windows_engine::runtime_host::SERVICE_NAME,
-        expected,
+    // Separate independent suites keep the existing per-client 60-second
+    // deadline. Both run in the same installation/service and retain every
+    // generation/assertion; product operation timeouts are unchanged.
+    for case in [
         ClientCase::InstalledHostDesktop,
-        None,
-    )
+        ClientCase::InstalledBackendDesktop,
+    ] {
+        run_case(
+            image,
+            cfw_windows_engine::runtime_host::SERVICE_NAME,
+            expected,
+            case,
+            None,
+        )?;
+    }
+    installed_host::combine_reports(&PathBuf::from(
+        std::env::var_os("CFW_NATIVE_SERVICE_RECEIPTS")
+            .ok_or("missing installed report directory")?,
+    ))
 }
 
 pub(super) fn check_report(
@@ -625,7 +652,7 @@ fn client_body(name: &str, hex: &str, case: ClientCase) -> Result<()> {
         return Err("fixture service digest differs from installation".into());
     }
     match case {
-        ClientCase::InstalledHostDesktop => {
+        ClientCase::InstalledHostDesktop | ClientCase::InstalledBackendDesktop => {
             return Err("installed host client must use its separate test entrypoint".into());
         }
         ClientCase::RuntimeRestartDesktop => {

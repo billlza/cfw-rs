@@ -114,11 +114,20 @@ pub(super) fn main() -> Result<()> {
         let image = std::env::current_exe().map_err(|e| e.to_string())?;
         return restricted::run_installed_host(&image, digest(&image)?);
     }
-    if args.len() == 4 && args[1] == "--installed-host-client" {
+    if args.len() == 4
+        && matches!(
+            args[1].as_str(),
+            "--installed-host-client" | "--installed-backend-client"
+        )
+    {
         if args[2] != cfw_windows_engine::runtime_host::SERVICE_NAME {
             return Err("installed host selector differs".into());
         }
-        return installed_host::exercise();
+        return if args[1] == "--installed-host-client" {
+            installed_host::exercise()
+        } else {
+            installed_host::exercise_backend()
+        };
     }
     if args.len() == 2 && args[1] == "--runtime-job-idle-probe" {
         // Native Job lifetime counterexample only. The parent holds and retires

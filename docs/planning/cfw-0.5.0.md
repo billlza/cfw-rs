@@ -1738,8 +1738,20 @@ Prepare 成功的已知请求在新鲜全局 Off 下完成后续停止；保持�
 安装脚本保存第一次成功查询，并把客户端执行中断后的 Agent 执行状态记为未知，避免
 用未完成的整套测试反推“未执行”。不会通过放宽截止时间或删除断言制造通过。
 诊断源码 `f10f1b43fae1e69cdcd4f839f5ca8c5a4488f979` 由
-[39373122890](https://github.com/billlza/cfw-rs/actions/runs/39373122890) 运行；最新观察为
-shared、SCM、directory jobs 已通过，engine job 正在执行真实引擎及安装验收。
+[39373122890](https://github.com/billlza/cfw-rs/actions/runs/39373122890) 运行：
+shared、SCM、directory jobs 通过，engine job 仍在安装客户端 60 秒截止时间失败。
+失败 artifact `12242048733`（SHA-256
+`05c36caed767710d7266c1df2f2e190c51ed066f1e4d97ff6cbb3aef68f4e7c5`）已下载核验。
+48 条阶段记录确认前四个实际运行均完成到 Off：generation 1/2 于 17.770/26.468 秒，
+backend generation 3/4 于 42.825/55.824 秒。第五次在 57.554 秒才开始；父进程在
+60 秒截止后、终止客户端之前观察到 Authority Preparing、generation 5、revision 31。
+这次失败可归因于五次运行共享原有单客户端截止时间；尚不能据此证明第五次运行完成，
+也不能把该观察冒充早先空输出失败的独立根因证明。
+
+安装验收现分为直接宿主客户端（预检和 generation 1/2）与共享 backend 客户端
+（generation 3/4/5），按顺序使用同一安装和服务。每个客户端保持原有 60 秒限制、
+全部产品操作超时和断言；后台三次运行仍共用一个 backend 实例。各自阶段与报告必须
+独立验证后才能合并，最终报告仍限 16 KiB。此次调整的原生 CI 结果待核验。
 新的 backend 尚无完整原生验收；异步取消和异常恢复的最终应用验收也尚未完成。
 TUN 入口仍显式不可用，尚需完整 TUN/合并模式、backend 的服务重启恢复衔接、应用诊断
 接线、Tauri Windows factory/startup/build、实际 UI 和发布验收。此实现没有关闭这些缺口。

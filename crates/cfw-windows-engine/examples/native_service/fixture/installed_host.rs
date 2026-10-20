@@ -67,7 +67,7 @@ pub(super) fn probe() -> Result<()> {
     Ok(())
 }
 
-pub(super) fn exercise() -> Result<()> {
+fn require_opt_in() -> Result<()> {
     for variable in [
         "CFW_NATIVE_SERVICE_MUTATION_TESTS",
         "CFW_NATIVE_PROXY_MUTATION_TESTS",
@@ -76,6 +76,10 @@ pub(super) fn exercise() -> Result<()> {
             return Err("installed runtime exercise requires both disposable CI opt-ins".into());
         }
     }
+    Ok(())
+}
+pub(super) fn exercise() -> Result<()> {
+    require_opt_in()?;
     let mut progress = Progress::new()?;
     progress.record("open_desktop", 0)?;
     let desktop =
@@ -243,15 +247,33 @@ pub(super) fn exercise() -> Result<()> {
             .map_err(|e| format!("installed controller listener retained: {e}"))?;
         modes.push(serde_json::json!({"mode":mode,"active":active,"off":off,"observations":observations,"retired_query_rejected":true,"http_proxy_traffic":true,"listeners_released":true,"proxy_restored":true,"agent_exit_zero":true}));
     }
+    progress.record("complete", 2)?;
+    println!(
+        "{}",
+        serde_json::json!({"source":std::env::var("CFW_NATIVE_SERVICE_SOURCE").map_err(|e|e.to_string())?,"product_service":true,"product_agent":true,"desktop_is_fixture":true,"medium_integrity":true,"configuration_checks":configuration_checks,"modes":modes,"release_accepted":false})
+    );
+    Ok(())
+}
+pub(super) fn exercise_backend() -> Result<()> {
+    require_opt_in()?;
+    let mut progress = Progress::new()?;
+    progress.record("open_desktop", 0)?;
     let backend = backend::exercise(&mut progress)?;
     progress.record("complete", 5)?;
     println!(
         "{}",
-        serde_json::json!({"source":std::env::var("CFW_NATIVE_SERVICE_SOURCE").map_err(|e|e.to_string())?,"product_service":true,"product_agent":true,"desktop_is_fixture":true,"medium_integrity":true,"configuration_checks":configuration_checks,"modes":modes,"backend":backend,"release_accepted":false})
+        serde_json::json!({"source":std::env::var("CFW_NATIVE_SERVICE_SOURCE").map_err(|e|e.to_string())?,
+        "product_service":true,"product_agent":true,"desktop_is_fixture":true,"medium_integrity":true,
+        "backend":backend,"release_accepted":false})
     );
     Ok(())
 }
-pub(super) fn check_output(directory: &Path, output: &Path, exit: u32) -> Result<()> {
+pub(super) fn check_output(
+    directory: &Path,
+    output: &Path,
+    exit: u32,
+    backend: bool,
+) -> Result<()> {
     let mut bytes = Vec::new();
     std::fs::File::open(output)
         .map_err(|e| e.to_string())?
@@ -268,27 +290,43 @@ pub(super) fn check_output(directory: &Path, output: &Path, exit: u32) -> Result
         ));
     }
     let (report, phases) = progress::decode(&bytes)?;
-    if report["product_service"] != true
+    let valid_case = if backend {
+        report["backend"]["shared_engine_backend"] == true
+            && report["backend"]["exited_engine_query_rejected"] == true
+    } else {
+        report["configuration_checks"]["authority_unchanged"] == true
+            && report["configuration_checks"]["proxy_unchanged"] == true
+            && report["configuration_checks"]["checked_modes"]
+                .as_array()
+                .is_some_and(|modes| modes.len() == 4)
+            && report["modes"]
+                .as_array()
+                .is_some_and(|modes| modes.len() == 2)
+            && report["modes"][0]["mode"] == "local_proxy"
+            && report["modes"][1]["mode"] == "system_proxy"
+    };
+    if !valid_case
+        || report["product_service"] != true
         || report["product_agent"] != true
+        || report["desktop_is_fixture"] != true
         || report["medium_integrity"] != true
         || report["release_accepted"] != false
-        || report["configuration_checks"]["authority_unchanged"] != true
-        || report["configuration_checks"]["proxy_unchanged"] != true
-        || report["backend"]["shared_engine_backend"] != true
-        || report["backend"]["exited_engine_query_rejected"] != true
-        || report["configuration_checks"]["checked_modes"]
-            .as_array()
-            .is_none_or(|modes| modes.len() != 4)
-        || report["modes"]
-            .as_array()
-            .is_none_or(|modes| modes.len() != 2)
-        || report["modes"][0]["mode"] != "local_proxy"
-        || report["modes"][1]["mode"] != "system_proxy"
+        || report["source"].as_str()
+            != Some(
+                std::env::var("CFW_NATIVE_SERVICE_SOURCE")
+                    .map_err(|e| e.to_string())?
+                    .as_str(),
+            )
     {
         return Err("installed runtime exercise report is incomplete".into());
     }
+    let prefix = if backend {
+        "installed-host-backend"
+    } else {
+        "installed-host"
+    };
     std::fs::write(
-        directory.join("installed-host-phases.json"),
+        directory.join(format!("{prefix}-phases.json")),
         serde_json::to_vec_pretty(&phases).map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
@@ -296,13 +334,13 @@ pub(super) fn check_output(directory: &Path, output: &Path, exit: u32) -> Result
     if report.len() > 16384 {
         return Err("installed final report exceeds its original bound".into());
     }
-    std::fs::write(directory.join("installed-host-lifecycle.json"), report)
+    std::fs::write(directory.join(format!("{prefix}-lifecycle.json")), report)
         .map_err(|e| e.to_string())
 }
 
 /// Failure diagnostics only: the expired test remains failed. Query before
 /// terminating the exact client, so loss of that owner cannot erase its phase.
-pub(super) fn timeout_snapshot(directory: &Path) -> Result<()> {
+pub(super) fn timeout_snapshot(directory: &Path, prefix: &str) -> Result<()> {
     let observed = (|| -> Result<serde_json::Value> {
         let installed = InstalledRuntime::open().map_err(|e| e.to_string())?;
         let mut channel = AuthorityChannel::connect(
@@ -334,6 +372,46 @@ pub(super) fn timeout_snapshot(directory: &Path) -> Result<()> {
     if bytes.len() > 16384 {
         return Err("timeout diagnostic exceeds its bound".into());
     }
-    std::fs::write(directory.join("installed-host-timeout-scope.json"), bytes)
+    std::fs::write(
+        directory.join(format!("{prefix}-timeout-scope.json")),
+        bytes,
+    )
+    .map_err(|e| e.to_string())
+}
+
+pub(super) fn combine_reports(directory: &Path) -> Result<()> {
+    fn read(path: &Path) -> Result<serde_json::Value> {
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)
+            .map_err(|e| e.to_string())?
+            .take(16385)
+            .read_to_end(&mut bytes)
+            .map_err(|e| e.to_string())?;
+        if bytes.len() > 16384 {
+            return Err("installed case report exceeds its bound".into());
+        }
+        serde_json::from_slice(&bytes).map_err(|e| e.to_string())
+    }
+    let mut direct = read(&directory.join("installed-host-lifecycle.json"))?;
+    let backend = read(&directory.join("installed-host-backend-lifecycle.json"))?;
+    if direct["source"] != backend["source"]
+        || backend["backend"]["shared_engine_backend"] != true
+        || backend["release_accepted"] != false
+    {
+        return Err("installed suites do not share verified source and scope".into());
+    }
+    if direct
+        .as_object_mut()
+        .ok_or("installed report is not an object")?
+        .insert("backend".into(), backend["backend"].clone())
+        .is_some()
+    {
+        return Err("installed backend report was already combined".into());
+    }
+    let bytes = serde_json::to_vec(&direct).map_err(|e| e.to_string())?;
+    if bytes.len() > 16384 {
+        return Err("combined installed report exceeds its original bound".into());
+    }
+    std::fs::write(directory.join("installed-host-lifecycle.json"), bytes)
         .map_err(|e| e.to_string())
 }

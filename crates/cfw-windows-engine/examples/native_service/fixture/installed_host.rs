@@ -401,6 +401,12 @@ pub(super) fn check_output(
     {
         return Err("installed runtime exercise report is incomplete".into());
     }
+    if suite == InstalledSuite::Coordinator {
+        coordinator::verify_diagnostics(
+            directory,
+            &report["coordinator"]["network_diagnostics_sha256"],
+        )?;
+    }
     let prefix = suite.prefix();
     std::fs::write(
         directory.join(format!("{prefix}-phases.json")),

@@ -5,6 +5,7 @@ use cfw_engine_api::{
 };
 use cfw_singbox_config::{EngineSettings, ProjectionMode, ValidatedSingBoxProfile};
 use cfw_windows_engine::runtime_host::InstalledDesktop;
+use sha2::{Digest, Sha256};
 
 // Compile and exercise the application's actual platform assembly. This
 // intentionally contains no Tauri/WebView substitute and makes no GUI claim.
@@ -135,6 +136,7 @@ pub(super) fn exercise(progress: &mut Progress) -> Result<serde_json::Value> {
             drop(mixed);
             drop(controller);
             let mut modes = Vec::new();
+            let mut diagnostic_modes = Vec::new();
             for (mode, generation) in [(EngineMode::LocalProxy, 6), (EngineMode::SystemProxy, 7)] {
                 progress.record("coordinator_set_mode", generation)?;
                 let active = coordinator
@@ -206,15 +208,15 @@ pub(super) fn exercise(progress: &mut Progress) -> Result<serde_json::Value> {
                     || desktop.storage().proxy().snapshot().map_err(|e| e.to_string())? != proxy_before_diagnostics {
                     return Err("native diagnostics do not match the current user proxy scope".into());
                 }
+                diagnostic_modes.push(diagnostics);
                 modes.push(
                     serde_json::json!({"snapshot":active,"native":native,"traffic":true,
                     "observation_sequence":sequence,
-                    "network_diagnostics":diagnostics,
                     "same_mode_preserved_generation":true,"proxy_changed":proxy_changed}),
                 );
                 progress.record("coordinator_active", generation)?;
             }
-            Ok((initial, modes))
+            Ok((initial, modes, diagnostic_modes))
         }
         .await;
         // Always attempt the actual application's shutdown barrier, including
@@ -226,7 +228,7 @@ pub(super) fn exercise(progress: &mut Progress) -> Result<serde_json::Value> {
             (Err(error), Ok(_)) | (Ok(_), Err(error)) => Err(error),
             (Err(operation), Err(cleanup)) => Err(format!("{operation}; shutdown: {cleanup}")),
         };
-        let ((initial, modes), off) = result?;
+        let ((initial, modes, diagnostic_modes), off) = result?;
         tokio::time::timeout(Duration::from_secs(2), task)
             .await
             .map_err(|_| "application coordinator did not retire after shutdown")?
@@ -260,6 +262,7 @@ pub(super) fn exercise(progress: &mut Progress) -> Result<serde_json::Value> {
             || desktop.storage().proxy().snapshot().map_err(|e| e.to_string())? != original_proxy {
             return Err("diagnostics did not observe the restored user proxy settings".into());
         }
+        let diagnostics_digest = persist_diagnostics(initial_diagnostics, diagnostic_modes, final_diagnostics)?;
         Ok(
             serde_json::json!({"shared_desktop_assembly":true,"shared_mode_coordinator":true,
             "prepared_without_starting":true,"credentials_and_probes_connected":true,
@@ -268,10 +271,63 @@ pub(super) fn exercise(progress: &mut Progress) -> Result<serde_json::Value> {
             "proxy_restored":true,"coordinator_retired":true,"gui_exercised":false,
             "process_observation":process_observation,
             "final_observation_sequence":final_sequence,
-            "initial_network_diagnostics":initial_diagnostics,"final_network_diagnostics":final_diagnostics,
+            "network_diagnostics_sha256":diagnostics_digest,
             "tunnel_available":false,"legacy_cutover_available":false}),
         )
     })
+}
+
+/// The adapter inventory is independent evidence. Keep all four observations
+/// under their own original-sized bound and bind their exact bytes into the
+/// coordinator receipt; do not duplicate them into the combined lifecycle log.
+fn persist_diagnostics(
+    initial: serde_json::Value,
+    modes: Vec<serde_json::Value>,
+    final_observation: serde_json::Value,
+) -> Result<String> {
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "document":"cfw-windows-network-diagnostics-v1",
+        "source":std::env::var("CFW_NATIVE_SERVICE_SOURCE").map_err(|e| e.to_string())?,
+        "initial":initial,"modes":modes,"final":final_observation,
+    }))
+    .map_err(|e| e.to_string())?;
+    if bytes.len() > 16384 {
+        return Err("native diagnostics report exceeds its 16 KiB bound".into());
+    }
+    let directory = std::path::PathBuf::from(
+        std::env::var_os("CFW_NATIVE_SERVICE_RECEIPTS")
+            .ok_or("missing native diagnostics receipt directory")?,
+    );
+    if !directory.is_absolute() || !directory.is_dir() {
+        return Err("native diagnostics receipt directory is invalid".into());
+    }
+    let mut output = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(directory.join("installed-host-network-diagnostics.json"))
+        .map_err(|e| e.to_string())?;
+    std::io::Write::write_all(&mut output, &bytes).map_err(|e| e.to_string())?;
+    output.sync_all().map_err(|e| e.to_string())?;
+    Ok(format!("{:x}", Sha256::digest(&bytes)))
+}
+
+pub(super) fn verify_diagnostics(directory: &Path, expected: &serde_json::Value) -> Result<()> {
+    let expected = expected
+        .as_str()
+        .ok_or("coordinator omitted its diagnostics digest")?;
+    let mut bytes = Vec::new();
+    std::fs::File::open(directory.join("installed-host-network-diagnostics.json"))
+        .map_err(|e| e.to_string())?
+        .take(16385)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() > 16384 || expected != format!("{:x}", Sha256::digest(&bytes)) {
+        return Err(
+            "native diagnostics receipt differs from the coordinator digest or exceeds its bound"
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 fn require_off(snapshot: &EngineSnapshot, generation: u64) -> Result<()> {

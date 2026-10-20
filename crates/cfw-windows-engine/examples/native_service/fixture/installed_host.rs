@@ -14,6 +14,8 @@ use std::{
 };
 mod backend;
 mod checks;
+mod progress;
+use progress::Progress;
 
 /// This fixture is installed as the admitted desktop image in disposable CI.
 /// It exercises the production service executable and authenticated commands.
@@ -74,12 +76,16 @@ pub(super) fn exercise() -> Result<()> {
             return Err("installed runtime exercise requires both disposable CI opt-ins".into());
         }
     }
+    let mut progress = Progress::new()?;
+    progress.record("open_desktop", 0)?;
     let desktop =
         cfw_windows_engine::runtime_host::InstalledDesktop::open().map_err(|e| e.to_string())?;
     let paths = desktop.paths();
     let generations = desktop.generations();
     let storage = desktop.storage();
+    progress.record("configuration_checks", 0)?;
     let configuration_checks = checks::exercise(&desktop)?;
+    progress.record("configuration_checks_complete", 0)?;
     let original = storage.proxy().snapshot().map_err(|e| e.to_string())?;
     let profile = cfw_singbox_config::ValidatedSingBoxProfile::parse(
         r#"{"outbounds":[{"type":"direct","tag":"direct"}]}"#,
@@ -139,6 +145,7 @@ pub(super) fn exercise() -> Result<()> {
         let (observer, queries) =
             cfw_windows_engine::user_agent::desktop::DesktopStatusObserver::channel();
         let expected_digest = request.config_digest.clone();
+        progress.record("host_start", generation)?;
         let (active, off, observations) = thread::scope(|scope| -> Result<_> {
             let worker_stop = Arc::clone(&stop);
             let desktop = &desktop;
@@ -184,9 +191,11 @@ pub(super) fn exercise() -> Result<()> {
                 {
                     return Err("installed runtime Ready scope differs".into());
                 }
+                progress.record("host_ready", generation)?;
                 user_agent::traffic(address)?;
                 let mut observations = Vec::new();
                 for _ in 0..3 {
+                    progress.record("host_query", generation)?;
                     let fresh = observer
                         .query_until(Instant::now() + LIMIT)
                         .map_err(|e| e.to_string())?;
@@ -202,6 +211,7 @@ pub(super) fn exercise() -> Result<()> {
                         return Err("fresh installed runtime observation changed identity".into());
                     }
                     observations.push(serde_json::json!({"runtime":fresh.runtime,"engine_process_id":fresh.engine_process_id}));
+                    progress.record("host_query_complete", generation)?;
                 }
                 let changed = storage.proxy().snapshot().map_err(|e| e.to_string())? != original;
                 if changed != (mode == cfw_singbox_config::ProjectionMode::SystemProxy) {
@@ -210,6 +220,7 @@ pub(super) fn exercise() -> Result<()> {
                 Ok((ready.authority().clone(), observations))
             })();
             stop.store(true, Ordering::Release);
+            progress.record("host_stop", generation)?;
             let finished = worker
                 .join()
                 .map_err(|_| "installed Desktop worker panicked")?;
@@ -219,6 +230,7 @@ pub(super) fn exercise() -> Result<()> {
                 (Err(a), Err(b)) => Err(format!("{a}; installed stop: {b}")),
             }
         })?;
+        progress.record("host_off", generation)?;
         if observer.query_until(Instant::now() + LIMIT).is_ok() {
             return Err("retired Desktop worker returned a cached Active observation".into());
         }
@@ -231,7 +243,8 @@ pub(super) fn exercise() -> Result<()> {
             .map_err(|e| format!("installed controller listener retained: {e}"))?;
         modes.push(serde_json::json!({"mode":mode,"active":active,"off":off,"observations":observations,"retired_query_rejected":true,"http_proxy_traffic":true,"listeners_released":true,"proxy_restored":true,"agent_exit_zero":true}));
     }
-    let backend = backend::exercise()?;
+    let backend = backend::exercise(&mut progress)?;
+    progress.record("complete", 5)?;
     println!(
         "{}",
         serde_json::json!({"source":std::env::var("CFW_NATIVE_SERVICE_SOURCE").map_err(|e|e.to_string())?,"product_service":true,"product_agent":true,"desktop_is_fixture":true,"medium_integrity":true,"configuration_checks":configuration_checks,"modes":modes,"backend":backend,"release_accepted":false})
@@ -242,10 +255,10 @@ pub(super) fn check_output(directory: &Path, output: &Path, exit: u32) -> Result
     let mut bytes = Vec::new();
     std::fs::File::open(output)
         .map_err(|e| e.to_string())?
-        .take(16385)
+        .take(49153)
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
-    if bytes.len() > 16384 {
+    if bytes.len() > 49152 {
         return Err("installed runtime output exceeds its bound".into());
     }
     if exit != 0 {
@@ -254,7 +267,7 @@ pub(super) fn check_output(directory: &Path, output: &Path, exit: u32) -> Result
             String::from_utf8_lossy(&bytes)
         ));
     }
-    let report: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let (report, phases) = progress::decode(&bytes)?;
     if report["product_service"] != true
         || report["product_agent"] != true
         || report["medium_integrity"] != true
@@ -274,6 +287,53 @@ pub(super) fn check_output(directory: &Path, output: &Path, exit: u32) -> Result
     {
         return Err("installed runtime exercise report is incomplete".into());
     }
-    std::fs::write(directory.join("installed-host-lifecycle.json"), &bytes)
+    std::fs::write(
+        directory.join("installed-host-phases.json"),
+        serde_json::to_vec_pretty(&phases).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    let report = serde_json::to_vec(&report).map_err(|e| e.to_string())?;
+    if report.len() > 16384 {
+        return Err("installed final report exceeds its original bound".into());
+    }
+    std::fs::write(directory.join("installed-host-lifecycle.json"), report)
+        .map_err(|e| e.to_string())
+}
+
+/// Failure diagnostics only: the expired test remains failed. Query before
+/// terminating the exact client, so loss of that owner cannot erase its phase.
+pub(super) fn timeout_snapshot(directory: &Path) -> Result<()> {
+    let observed = (|| -> Result<serde_json::Value> {
+        let installed = InstalledRuntime::open().map_err(|e| e.to_string())?;
+        let mut channel = AuthorityChannel::connect(
+            SERVICE_NAME,
+            ServiceClientRole::Desktop,
+            Arc::new(installed.runtime().map_err(|e| e.to_string())?),
+        )
+        .map_err(|e| e.to_string())?;
+        let response = channel
+            .request(
+                Request::new(Command::ReadRuntimeScope).map_err(|e| e.to_string())?,
+                Instant::now() + Duration::from_secs(5),
+            )
+            .map_err(|e| e.to_string())?;
+        let Response::RuntimeScope(scope) = response else {
+            return Err("timeout diagnostic omitted runtime scope".into());
+        };
+        Ok(serde_json::json!({"snapshot":scope.snapshot(),"operation":scope.operation()}))
+    })();
+    let observation = match observed {
+        Ok(scope) => serde_json::json!({"status":"observed","scope":scope}),
+        Err(error) => serde_json::json!({"status":"observation_failed","error":error}),
+    };
+    let bytes = serde_json::to_vec_pretty(&serde_json::json!({
+        "product_source":std::env::var("CFW_NATIVE_SERVICE_SOURCE").map_err(|e|e.to_string())?,
+        "test_deadline_exceeded":true,"observation":observation,"release_accepted":false,
+    }))
+    .map_err(|e| e.to_string())?;
+    if bytes.len() > 16384 {
+        return Err("timeout diagnostic exceeds its bound".into());
+    }
+    std::fs::write(directory.join("installed-host-timeout-scope.json"), bytes)
         .map_err(|e| e.to_string())
 }

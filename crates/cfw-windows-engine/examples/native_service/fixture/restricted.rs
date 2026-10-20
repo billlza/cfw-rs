@@ -468,6 +468,11 @@ fn run_case(
     let deadline = Instant::now() + limit;
     let waited = cfw_windows_storage::wait_until(&process, deadline).map_err(|e| e.to_string())?;
     if waited != cfw_windows_storage::WaitOutcome::Signaled {
+        let diagnostic = if matches!(case, ClientCase::InstalledHostDesktop) {
+            installed_host::timeout_snapshot(parent)
+        } else {
+            Ok(())
+        };
         if unsafe { TerminateProcess(process.as_raw_handle(), 3) } == 0 {
             return Err(error("terminate expired fixture client"));
         }
@@ -485,7 +490,12 @@ fn run_case(
                 "unprivileged fixture client exceeded its deadline; handoff writer: {written:?}"
             ));
         }
-        return Err("unprivileged fixture client exceeded its deadline".into());
+        return Err(match diagnostic {
+            Ok(()) => "unprivileged fixture client exceeded its deadline".into(),
+            Err(error) => {
+                format!("unprivileged fixture client exceeded its deadline; diagnostic: {error}")
+            }
+        });
     }
     if let Some(writer) = writer {
         writer

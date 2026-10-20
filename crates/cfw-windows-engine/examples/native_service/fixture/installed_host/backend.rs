@@ -10,7 +10,8 @@ use windows_sys::Win32::{
     },
 };
 
-pub(super) fn exercise() -> Result<serde_json::Value> {
+pub(super) fn exercise(progress: &mut Progress) -> Result<serde_json::Value> {
+    progress.record("backend_open", 0)?;
     let desktop = Arc::new(InstalledDesktop::open().map_err(|e| e.to_string())?);
     let diagnostics = std::fs::OpenOptions::new()
         .write(true)
@@ -27,11 +28,12 @@ pub(super) fn exercise() -> Result<serde_json::Value> {
         .enable_all()
         .build()
         .map_err(|e| e.to_string())?;
-    runtime.block_on(exercise_async(&desktop, &backend))
+    runtime.block_on(exercise_async(&desktop, &backend, progress))
 }
 async fn exercise_async(
     desktop: &InstalledDesktop,
     backend: &WindowsEngineBackend,
+    progress: &mut Progress,
 ) -> Result<serde_json::Value> {
     if backend.runtime_platform() != cfw_engine_api::EngineRuntimePlatform::Windows
         || backend.query_status().await.map_err(|e| e.to_string())? != NativeEngineStatus::Off
@@ -86,10 +88,12 @@ async fn exercise_async(
             &settings,
             context.clone(),
         )?;
+        progress.record("backend_check", generation)?;
         backend
             .check_configuration(request.clone())
             .await
             .map_err(|e| e.to_string())?;
+        progress.record("backend_check_complete", generation)?;
         if index == 0 {
             let rejected = backend
                 .start_system_proxy(request.clone())
@@ -102,11 +106,13 @@ async fn exercise_async(
             let mut foreign = request.clone();
             foreign.context.config_epoch += 1;
             let rejected_context = foreign.context.clone();
+            progress.record("backend_rejected_prepare", generation)?;
             let rejected = backend
                 .start_local_proxy(foreign)
                 .await
                 .err()
                 .ok_or("foreign epoch was accepted")?;
+            progress.record("backend_rejection_received", generation)?;
             if rejected.kind != BackendErrorKind::ReplayRejected {
                 return Err(format!(
                     "foreign epoch lost its native rejection: {rejected}"
@@ -133,14 +139,17 @@ async fn exercise_async(
             if checks::snapshot()? != before {
                 return Err("rejected runtime stop changed the proven Off scope".into());
             }
+            progress.record("backend_rejection_retired", generation)?;
         }
         drop((mixed, controller));
+        progress.record("backend_start", generation)?;
         let started = match mode {
             ProjectionMode::LocalProxy => backend.start_local_proxy(request).await,
             ProjectionMode::SystemProxy => backend.start_system_proxy(request).await,
             _ => return Err("invalid fixture proxy mode".into()),
         }
         .map_err(|e| e.to_string())?;
+        progress.record("backend_ready", generation)?;
         if started.context != context
             || !started.ready
             || started.owner != cfw_engine_api::EngineOwner::WindowsUserAgent
@@ -156,12 +165,15 @@ async fn exercise_async(
                 runtime: started.clone(),
             },
         };
+        progress.record("backend_queries", generation)?;
         for _ in 0..3 {
             if backend.query_status().await.map_err(|e| e.to_string())? != expected {
                 return Err("shared backend status changed its live identity".into());
             }
         }
+        progress.record("backend_queries_complete", generation)?;
         user_agent::traffic(address)?;
+        progress.record("backend_traffic_complete", generation)?;
         let mut wrong = context.clone();
         wrong.generation = wrong
             .generation
@@ -206,10 +218,13 @@ async fn exercise_async(
             {
                 return Err(error("terminate and observe exact test engine exit"));
             }
+            progress.record("backend_engine_exit", generation)?;
             let rejected = backend
                 .query_status()
                 .await
                 .expect_err("exited real engine must not return cached Active");
+            progress.record("backend_exited_query_rejected", generation)?;
+            progress.record("backend_failed_stop", generation)?;
             let stop_result = backend.stop_local_proxy(context.clone()).await;
             // The first failed query may already have observed independent Off
             // and retired this owner. A subsequent exact stop can then succeed.
@@ -232,12 +247,14 @@ async fn exercise_async(
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
+            progress.record("backend_recovery_off", generation)?;
             failure_case = Some(
                 serde_json::json!({"context":context,"engine_process_id":live.engine_process_id,
                 "exact_engine_exit_observed":true,"query_error":rejected.to_string(),"stop_outcome":stop_outcome,
                 "recovery_errors":retained_errors,"off":checks::snapshot()?}),
             );
         } else {
+            progress.record("backend_stop", generation)?;
             match mode {
                 ProjectionMode::LocalProxy => backend.stop_local_proxy(context.clone()).await,
                 _ => backend.stop_system_proxy(context.clone()).await,
@@ -252,6 +269,7 @@ async fn exercise_async(
             if backend.query_status().await.map_err(|e| e.to_string())? != NativeEngineStatus::Off {
                 return Err("shared backend stop omitted native Off".into());
             }
+            progress.record("backend_off", generation)?;
             modes.push(serde_json::json!({"mode":mode,"runtime":started,"active":active,"off":checks::snapshot()?,
                 "http_proxy_traffic":true,"fresh_queries":3,"stale_stop_rejected":true,"idempotent_stop":true}));
         }

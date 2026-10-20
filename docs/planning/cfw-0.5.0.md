@@ -1718,8 +1718,23 @@ generation 包括原两种宿主模式、两种 backend 模式和一次真实引
 本节对应 `9e3f0b67974d189c552e6ca5c3b8c02bf4b3b3ba`，由
 [39370765025](https://github.com/billlza/cfw-rs/actions/runs/39370765025) 验证。
 本地默认/全 feature Windows cross-Clippy（warnings denied）、107 项 portable tests、
-全工作区格式与 PowerShell 解析检查通过；原生 CI 仍在运行，不能引用 `8a1e64c`
-的通过结果证明新的 backend。异步取消和异常恢复的最终应用验收也尚未完成。
+全工作区格式与 PowerShell 解析检查通过。该运行的 shared job 通过 612 项 Rust、
+311 项 UI tests，SCM 和 directory jobs 也通过；engine job 通过原 11 项真实引擎测试后，
+安装测试客户端超过既有 60 秒截止时间，包清理同时遇到 engine host 文件仍被占用。
+失败 artifact `12241407434` 的 SHA-256 为
+`9dcefd5282586e1a59409026d85120c1da410edc0c65cf6456f11a375c91478a`，已下载并核验。
+其客户端输出为空，不能据此判定具体卡在哪一步或认定 Agent 没启动；根因尚未确认。
+
+`18c2e1a` 将本地状态请求检查与原有每秒一次的 Authority watchdog 分开，并允许从未
+Prepare 成功的已知请求在新鲜全局 Off 下完成后续停止；保持已启动运行的精确上下文。
+它由 [39371650203](https://github.com/billlza/cfw-rs/actions/runs/39371650203) 验证，
+不能把这些源码复核修正自动归为前述超时的根因。
+
+诊断增量保持 60 秒失败判定，新增即时刷新的有界阶段记录和超时前只读 Authority scope。
+阶段与最终报告分别验证，最终报告仍限 16 KiB；附加阶段记录使整体诊断流上限为 48 KiB。
+安装脚本保存第一次成功查询，并把客户端执行中断后的 Agent 执行状态记为未知，避免
+用未完成的整套测试反推“未执行”。不会通过放宽截止时间或删除断言制造通过。
+新的 backend 尚无完整原生验收；异步取消和异常恢复的最终应用验收也尚未完成。
 TUN 入口仍显式不可用，尚需完整 TUN/合并模式、backend 的服务重启恢复衔接、应用诊断
 接线、Tauri Windows factory/startup/build、实际 UI 和发布验收。此实现没有关闭这些缺口。
 

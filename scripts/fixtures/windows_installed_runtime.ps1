@@ -23,6 +23,7 @@ $created = $false
 $failure = $null
 $teardownFailure = $null
 $probes = @()
+$agentExecuted = $false
 $cases = [System.Collections.Generic.List[string]]::new()
 
 function Invoke-ServiceCommand([string[]]$Arguments) {
@@ -101,8 +102,14 @@ try {
             $probe = $raw | ConvertFrom-Json
             if ($probe.snapshot.state -cne 'off' -or -not $probe.authenticated_product_service) { throw 'Installed service did not return verified Off' }
             if ($iteration -eq 0) {
+                [ordered]@{ product_source=$Source; probe=$probe } | ConvertTo-Json -Depth 12 |
+                    Set-Content -LiteralPath (Join-Path $Receipts 'installed-host-initial-probe.json') -Encoding utf8NoBOM
+                # A failed client leaves execution unknown until native evidence
+                # resolves it. Null is not evidence that no Agent was launched.
+                $agentExecuted = $null
                 & $desktopPath --installed-host-run
                 if ($LASTEXITCODE -ne 0) { throw 'Installed service/Agent traffic and cleanup exercise failed' }
+                $agentExecuted = $true
                 $raw = & $desktopPath --installed-host-probe
                 if ($LASTEXITCODE -ne 0) { throw 'Installed post-runtime probe failed' }
                 $probe = $raw | ConvertFrom-Json
@@ -128,7 +135,7 @@ finally {
         if (Test-Path -LiteralPath $package) { Remove-Item -LiteralPath $package -Recurse -Force }
         if (@([System.ServiceProcess.ServiceController]::GetServices() | Where-Object ServiceName -CEQ $serviceName).Count -ne 0) { throw 'Temporary product service was not removed' }
     } catch { $teardownFailure = $_.ToString() }
-    [ordered]@{ product_source=$Source; cases=$cases.ToArray(); probes=$probes; failure=$failure; teardown_failure=$teardownFailure; desktop_is_fixture=$true; product_service_executable=$true; product_agent_entrypoint_executed=$cases.Contains('product_service_and_agent_run_both_proxy_modes'); protected_state_retained_until_vm_teardown=$true; release_accepted=$false } |
+    [ordered]@{ product_source=$Source; cases=$cases.ToArray(); probes=$probes; failure=$failure; teardown_failure=$teardownFailure; desktop_is_fixture=$true; product_service_executable=$true; product_agent_entrypoint_executed=$agentExecuted; protected_state_retained_until_vm_teardown=$true; release_accepted=$false } |
         ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $Receipts 'installed-runtime-receipt.json') -Encoding utf8NoBOM
 }
 if ($null -ne $failure -or $null -ne $teardownFailure) { throw "Installed runtime validation failed: $failure; teardown: $teardownFailure" }

@@ -63,7 +63,27 @@ struct Shared {
 #[derive(Default)]
 struct State {
     active: Option<Active>,
-    retired: Option<(EngineCommandContext, ProjectionMode)>,
+    retired: Option<Retired>,
+}
+struct Retired {
+    context: EngineCommandContext,
+    mode: ProjectionMode,
+    prepared: bool,
+}
+impl Retired {
+    fn matches(
+        &self,
+        context: &EngineCommandContext,
+        mode: ProjectionMode,
+        snapshot: &crate::authority::AuthoritySnapshot,
+    ) -> bool {
+        self.context == *context
+            && self.mode == mode
+            && snapshot.state == AuthorityState::Off
+            && snapshot.revision.is_some()
+            && snapshot.root.is_some()
+            && (!self.prepared || off_matches(snapshot, context))
+    }
 }
 struct Active {
     context: EngineCommandContext,
@@ -364,8 +384,10 @@ impl WindowsEngineBackend {
                     .desktop
                     .observe_authority(deadline)
                     .map_err(host_error)?;
-                if state.retired.as_ref() == Some(&(context.clone(), mode))
-                    && off_matches(&snapshot, &context)
+                if state
+                    .retired
+                    .as_ref()
+                    .is_some_and(|retired| retired.matches(&context, mode, &snapshot))
                 {
                     return Ok(());
                 }
@@ -400,7 +422,11 @@ impl WindowsEngineBackend {
                             Err(operation) => Err(combined(operation, retirement)),
                         };
                     }
-                    state.retired = Some((context, mode));
+                    state.retired = Some(Retired {
+                        context,
+                        mode,
+                        prepared: active.owner_prepared != Some(false),
+                    });
                     state.active.take();
                     finished
                 }
@@ -502,7 +528,11 @@ fn query(shared: &Shared, state: &mut State, deadline: Instant) -> Result<Native
                     Err(operation) => Err(combined(operation, retirement)),
                 };
             }
-            state.retired = Some((active.context.clone(), active.mode));
+            state.retired = Some(Retired {
+                context: active.context.clone(),
+                mode: active.mode,
+                prepared: active.owner_prepared != Some(false),
+            });
             state.active.take();
             result?;
         }

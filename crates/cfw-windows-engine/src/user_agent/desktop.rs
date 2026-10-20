@@ -364,6 +364,7 @@ impl DesktopUserAgent {
             check_deadline(deadline)?;
             wait_signal(&stop, Duration::from_millis(100));
         }
+        let mut next_watch = Instant::now();
         loop {
             if stop.load(Ordering::Acquire) {
                 return Ok(StopReason::Requested);
@@ -375,18 +376,24 @@ impl DesktopUserAgent {
                     Err(TryRecvError::Disconnected) => return Ok(StopReason::Requested),
                 }
             }
-            let snapshot = self.observe_owned(Instant::now() + COMMAND_LIMIT)?;
-            match snapshot.state {
-                AuthorityState::Active => self
-                    .child
-                    .as_ref()
-                    .ok_or(DesktopError::State("missing child"))?
-                    .verify_live()?,
-                AuthorityState::Stopping
-                | AuthorityState::Recovering
-                | AuthorityState::Quarantined
-                | AuthorityState::Off => return Ok(StopReason::AuthorityRevoked),
-                _ => return Err(DesktopError::State("authority regressed after Ready")),
+            // Fast local request admission must not multiply idle SCM/pipe
+            // observations. Preserve the existing once-per-second watchdog;
+            // an actual status request always performs its own fresh checks.
+            if Instant::now() >= next_watch {
+                let snapshot = self.observe_owned(Instant::now() + COMMAND_LIMIT)?;
+                match snapshot.state {
+                    AuthorityState::Active => self
+                        .child
+                        .as_ref()
+                        .ok_or(DesktopError::State("missing child"))?
+                        .verify_live()?,
+                    AuthorityState::Stopping
+                    | AuthorityState::Recovering
+                    | AuthorityState::Quarantined
+                    | AuthorityState::Off => return Ok(StopReason::AuthorityRevoked),
+                    _ => return Err(DesktopError::State("authority regressed after Ready")),
+                }
+                next_watch = Instant::now() + Duration::from_secs(1);
             }
             wait_signal(
                 &stop,

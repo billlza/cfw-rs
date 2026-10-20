@@ -101,6 +101,7 @@ async fn exercise_async(
             let before = checks::snapshot()?;
             let mut foreign = request.clone();
             foreign.context.config_epoch += 1;
+            let rejected_context = foreign.context.clone();
             let rejected = backend
                 .start_local_proxy(foreign)
                 .await
@@ -124,6 +125,13 @@ async fn exercise_async(
                 return Err(
                     "rejected preparation could not retire against unchanged native Off".into(),
                 );
+            }
+            backend
+                .stop_local_proxy(rejected_context)
+                .await
+                .map_err(|e| e.to_string())?;
+            if checks::snapshot()? != before {
+                return Err("rejected runtime stop changed the proven Off scope".into());
             }
         }
         drop((mixed, controller));

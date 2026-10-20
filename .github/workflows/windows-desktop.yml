@@ -71,6 +71,14 @@ jobs:
             } finally { Pop-Location }
             ./scripts/build_ui_windows.ps1
           } finally { Stop-Transcript -ErrorAction Stop }
+      - name: Verify native desktop file boundaries
+        run: |
+          cargo clippy --locked -p cfw-windows-storage --all-targets -- -D warnings 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-storage-clippy.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Windows desktop storage Clippy failed' }
+          cargo test --locked -p cfw-windows-storage --all-targets 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-storage-tests.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Windows desktop native storage tests failed' }
       - name: Check the complete Windows desktop target
         run: |
           cargo check --locked -p cfw-tauri-shell --bin clash-for-mac 2>&1 |

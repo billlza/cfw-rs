@@ -1915,7 +1915,29 @@ ICO 和独立桌面构建工作流。`e51a7a7` 的
 已存在的源目录，不创建锁文件或改写源数据；普通只读授权可接受，外部写入授权、
 重解析点和硬链接被拒绝。读取同时禁止其他数据写入句柄，并比较读取前后的文件
 身份、长度、写入/变更时间和权限。此批本地通过 13 项迁移回归、macOS 全目标
-Clippy 及 Windows 存储交叉 Clippy；新增 6 项原生迁移源测试尚待托管执行。
+Clippy 及 Windows 存储交叉 Clippy。
+
+`098fe856c9f337c7e2f88535708d0f86dcdac075` 的
+[39398485302](https://github.com/billlza/cfw-rs/actions/runs/39398485302)
+四项 Windows 作业通过，包含上述 6 项原生迁移源测试：648 项 Rust、311 项 UI、
+14 项真实引擎测试、35 项 SCM 场景和 480 个 Go pass events。engine `12254332072`
+（SHA-256 `ea85dd8526e31b2964ea8022889c446f416ca61ab7c442b9a8636b92d39f8f56`）
+和 SCM `12254380053`（SHA-256
+`a797ddfaa978c393fd245b9ad8bb7908f1edda2ecca866a19d7a49eb9078b2e6`）均已核验。
+同一源码的完整桌面检查仍失败，剩余 171 个错误和 1 个既有 warning；旧配置读取
+模块的 22 个错误已消除，没有生成应用 EXE。
+
+随后交接票据存储分离平台实现，保留共同的票据格式、消费、失效清扫及失败隔离协议。
+Windows 使用创建/打开时即生效的排他数据访问，保留同一原生对象的引用；消费时通过
+另一个已核对文件 ID 的删除句柄移除名字，旧对象仍可由消费方持有。发布和清理均失败
+时保留排他句柄，防止就绪读取器误认成功。25 项现有 Mac 交接回归及本地 Clippy
+通过；6 项新增 Windows 原生票据测试仍待执行。桌面构建工作流增加实际文件边界的
+原生检查，保留完整应用检查和原有全套 Windows 契约工作流。Windows 进程身份与
+交接整体生命周期尚未完成，不能由文件测试推出完整交接验收。
+
+用户已将 Windows 迁移来源限定为本项目的内部构建。必须从对应内部版本的源码或
+构建产物确认数据目录、进程身份、服务名与控制协议；目前尚未定位到可核验的旧
+Windows 应用构建，不能根据 macOS 发行版或第三方同名软件推定这些契约。
 
 完整 GUI、五类原生呈现、TUN/合并模式、安装/更新/签名、迁移以及物理 Windows
 睡眠唤醒等验收保持开放。用户尚未确定物理测试机，当前继续代码及托管 CI。
@@ -1937,6 +1959,7 @@ Clippy 及 Windows 存储交叉 Clippy；新增 6 项原生迁移源测试尚待
 - [Windows I/O 取消与完成](https://learn.microsoft.com/en-us/windows/win32/fileio/canceling-pending-i-o-operations)
 - [Go 官方下载元数据](https://go.dev/dl/?mode=json&include=all)
 - [Windows CreateFile 访问权限与共享约束](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew)
+- [Windows POSIX 文件删除与保留句柄](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddk/ns-ntddk-_file_disposition_information_ex)
 - [Windows accept 继承监听 socket 属性](https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-accept)
 - [Windows Credential Manager 写入契约](https://learn.microsoft.com/en-us/windows/win32/api/wincred/nf-wincred-credwritew)
 - [Credential Manager 记录与持久化范围](https://learn.microsoft.com/en-us/windows/win32/api/wincred/ns-wincred-credentialw)

@@ -6,12 +6,14 @@
 #![cfg(windows)]
 
 mod entries;
+mod exclusive;
 mod legacy;
 mod locking;
 mod mutex;
 mod registry;
 mod security;
 mod wait;
+pub use exclusive::{ExclusiveDocument, ExclusiveWriteFailure};
 pub use legacy::{LegacyReadDirectory, LegacyReadError};
 pub use mutex::PrivateUserMutex;
 pub use registry::{MachineRecordError, MachineRecordGuard, PrivateMachineRecord};
@@ -168,6 +170,8 @@ struct DirectoryInner {
 enum Access {
     Read,
     ReadSnapshot,
+    ExclusiveRead,
+    ExclusiveWrite,
     Write,
     Delete,
     Lock,
@@ -262,6 +266,33 @@ impl PrivateDirectory {
     pub fn write(&self) -> Result<WriteTransaction, Error> {
         Ok(WriteTransaction {
             read: self.lock(true)?,
+        })
+    }
+
+    /// Open or create one private child relative to this retained directory.
+    pub fn open_or_create_child(&self, name: &str) -> Result<Self, Error> {
+        self.inner
+            .security
+            .verify(&self.inner.file, ReadPolicy::Private, true)?;
+        let security = Security::current()?;
+        security.verify(&self.inner.file, ReadPolicy::Private, true)?;
+        let file = open_relative(
+            &self.inner.file,
+            name,
+            FILE_OPEN_IF,
+            true,
+            Access::Write,
+            Some(&security),
+        )?;
+        verify_kind(&file, true)?;
+        security.verify(&file, ReadPolicy::Private, true)?;
+        self.inner.file.sync_all().map_err(Error::CommitUncertain)?;
+        Ok(Self {
+            inner: Arc::new(DirectoryInner {
+                file,
+                security,
+                enumeration: Mutex::new(()),
+            }),
         })
     }
 
@@ -713,6 +744,8 @@ fn open_relative_units(
     };
     let (mut rights, share_delete) = match access {
         Access::Read | Access::ReadSnapshot => (FILE_GENERIC_READ, true),
+        Access::ExclusiveRead => (FILE_GENERIC_READ | DELETE, true),
+        Access::ExclusiveWrite => (FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE, true),
         // A retained directory needs to create/flush child entries, not delete
         // itself. DELETE here prevents a caller from pinning that directory
         // without FILE_SHARE_DELETE, even in the same process. File publication
@@ -745,13 +778,20 @@ fn open_relative_units(
         } else {
             0
         };
-    let sharing = FILE_SHARE_READ
-        | if matches!(access, Access::ReadSnapshot) {
-            0
-        } else {
-            FILE_SHARE_WRITE
-        }
-        | if share_delete { FILE_SHARE_DELETE } else { 0 };
+    let sharing = if matches!(access, Access::ExclusiveRead | Access::ExclusiveWrite) {
+        // Atomically deny another reader/writer at open, including the window
+        // between creating a new file and writing its first byte. Delete-only
+        // handles permit exact-object POSIX unlink while the lease stays live.
+        FILE_SHARE_DELETE
+    } else {
+        FILE_SHARE_READ
+            | if matches!(access, Access::ReadSnapshot) {
+                0
+            } else {
+                FILE_SHARE_WRITE
+            }
+            | if share_delete { FILE_SHARE_DELETE } else { 0 }
+    };
     let mut handle = null_mut();
     let mut status_block = IO_STATUS_BLOCK::default();
     // SAFETY: all inputs and their backing allocations remain live through the

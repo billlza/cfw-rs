@@ -112,6 +112,60 @@ function New-SignedDatabase([string]$Name, [hashtable]$Overrides = @{}, [string]
     Sign-File $path $certificates[0]
     $cases.Add($Name)
 }
+function New-WixControl {
+    # A fully authored package distinguishes an incomplete native-database
+    # fixture from signing-provider behavior. It is never installed.
+    $tools = Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'WiX Toolset v3.14\bin'
+    $candle = Join-Path $tools 'candle.exe'
+    $light = Join-Path $tools 'light.exe'
+    if (-not (Test-Path -LiteralPath $candle) -or -not (Test-Path -LiteralPath $light)) {
+        throw 'The hosted image WiX 3.14 control-package tools are missing'
+    }
+    $payload = Join-Path $root 'control-payload.txt'
+    'Native MSI inspection control; not the CFW product.' | Set-Content -LiteralPath $payload -Encoding utf8NoBOM
+    $escapedPayload = [Security.SecurityElement]::Escape($payload)
+    $definition = Join-Path $Evidence 'wix-control.wxs'
+    @"
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="{E66ACF84-7639-4707-BC01-0A370C9B2E3E}" Name="Clash for Windows" Language="1033" Version="0.5.0" Manufacturer="CFW validation fixture" UpgradeCode="{7ECD99B2-CFE4-51EA-868B-544E2A12E25D}">
+    <Package Id="{E58D1FC6-A003-4849-900C-45D6861E75D9}" InstallerVersion="500" Compressed="yes" InstallScope="perMachine" Platform="x64" />
+    <MediaTemplate EmbedCab="yes" />
+    <Property Id="CFW_PRODUCT_ID" Value="com.bill.clashforwindows" />
+    <Property Id="CFW_RELEASE_VERSION" Value="0.5.0" />
+    <Property Id="CFW_BUILD_NUMBER" Value="2" />
+    <Property Id="CFW_MINIMUM_WINDOWS_VERSION" Value="10.0.19041" />
+    <Property Id="MSIRESTARTMANAGERCONTROL" Value="DisableShutdown" />
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="CFW Package Inspection Fixture">
+          <Component Id="Fixture" Guid="{F5818D2D-EBF9-4B5E-9326-41BCD6B3C476}" Win64="yes">
+            <File Id="FixtureFile" Source="$escapedPayload" KeyPath="yes" />
+          </Component>
+        </Directory>
+      </Directory>
+    </Directory>
+    <Feature Id="Main" Level="1"><ComponentRef Id="Fixture" /></Feature>
+  </Product>
+</Wix>
+"@ | Set-Content -LiteralPath $definition -Encoding utf8NoBOM
+    $object = Join-Path $root 'wix-control.wixobj'
+    $package = Join-Path $Evidence 'wix-control.msi'
+    Write-Stage 'build-wix-control' 'compile'
+    & $candle -nologo -wx -arch x64 -out $object $definition
+    if ($LASTEXITCODE -ne 0) { throw 'WiX control compilation failed' }
+    Write-Stage 'build-wix-control' 'link-and-validate'
+    & $light -nologo -wx -out $package $object
+    if ($LASTEXITCODE -ne 0) { throw 'WiX control link/validation failed' }
+    Write-Stage 'sign-wix-control' 'signtool'
+    Sign-File $package $certificates[0]
+    [ordered]@{
+        source=$Source
+        package_sha256=(Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash.ToLowerInvariant()
+        authenticode_status=[string](Get-AuthenticodeSignature -LiteralPath $package).Status
+        installed=$false
+    } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Evidence 'wix-control.json') -Encoding utf8NoBOM
+}
 try {
     Write-Stage 'verify-sdk-signer' '10.0.26100.0'
     if (-not (Test-Path -LiteralPath $signTool) -or (Get-AuthenticodeSignature -LiteralPath $signTool).Status -ne 'Valid') {
@@ -142,6 +196,8 @@ try {
             }
         }
     }
+    Export-Certificate -Cert $certificates[0] -FilePath (Join-Path $Evidence 'fixture-publisher.cer') | Out-Null
+    New-WixControl
     # Isolate the original CryptUI/MSI digest failure from package parsing.
     # Each signer sees the same unsigned bytes in ASCII and Unicode paths.
     # These are diagnostic inputs, never a fallback installation path.
@@ -150,7 +206,6 @@ try {
     Copy-Item -LiteralPath $unsigned -Destination (Join-Path $Evidence 'comparison-unsigned.msi')
     $unsignedDigest = (Get-FileHash -LiteralPath $unsigned -Algorithm SHA256).Hash.ToLowerInvariant()
     $comparison = [System.Collections.Generic.List[object]]::new()
-    Export-Certificate -Cert $certificates[0] -FilePath (Join-Path $Evidence 'fixture-publisher.cer') | Out-Null
     foreach ($signer in @('cryptui', 'signtool')) {
         foreach ($label in @('ascii', '中文')) {
             $name = "comparison-$signer-$label.msi"

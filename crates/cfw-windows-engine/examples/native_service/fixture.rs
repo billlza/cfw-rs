@@ -34,6 +34,7 @@ mod desktop_process;
 mod installed_host;
 mod job_keeper;
 mod machine_record;
+mod release_trace;
 mod restricted;
 mod stress;
 mod transport;

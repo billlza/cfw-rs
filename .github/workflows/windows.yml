@@ -84,6 +84,8 @@ jobs:
           $env:CFW_NATIVE_SERVICE_MUTATION_TESTS = '1'
           $env:CFW_NATIVE_SERVICE_SOURCE = $receipt.product_source
           $env:CFW_NATIVE_SERVICE_RECEIPTS = $artifactRoot
+          cargo test --locked -p cfw-windows-engine --features native-service-validation --example native-service-fixture release_observation:: -- --test-threads=1 2>&1 | Tee-Object -FilePath (Join-Path $artifactRoot 'release-observation-tests.txt')
+          if ($LASTEXITCODE -ne 0) { throw "Windows product observation schema tests failed" }
           cargo run --locked -p cfw-windows-engine --features native-service-validation --example native-service-fixture -- --runtime-validation 2>&1 | Tee-Object -FilePath (Join-Path $artifactRoot 'user-agent-runtime-tests.txt')
           if ($LASTEXITCODE -ne 0) { throw "Native UserAgent engine and proxy lifecycle validation failed" }
           cargo run --locked -p cfw-windows-engine --features native-service-validation --example native-service-fixture -- --runtime-restart-validation 2>&1 | Tee-Object -FilePath (Join-Path $artifactRoot 'runtime-restart-tests.txt')
@@ -124,6 +126,7 @@ jobs:
             ${{ runner.temp }}/cfw-windows-engine/artifacts/*.rejection.json
             ${{ runner.temp }}/cfw-windows-engine/artifacts/*.txt
             ${{ runner.temp }}/cfw-windows-engine/artifacts/*.log
+            ${{ runner.temp }}/cfw-windows-engine/artifacts/*.etl
           if-no-files-found: error
           retention-days: 14
       - name: Record the component validation boundary

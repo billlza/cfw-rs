@@ -10,6 +10,8 @@ use cfw_windows_engine::runtime_host::InstalledDesktop;
 // intentionally contains no Tauri/WebView substitute and makes no GUI claim.
 #[path = "../../../../../../apps/cfw-tauri-shell/src/platform_runtime.rs"]
 mod platform_runtime;
+#[path = "../../../../../../apps/cfw-tauri-shell/src/release_observation.rs"]
+mod release_observation;
 
 const PROFILE: &str = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 
@@ -62,6 +64,7 @@ pub(super) fn exercise(progress: &mut Progress) -> Result<serde_json::Value> {
                 .await
                 .map_err(|e| e.to_string())?;
             require_off(&initial, 5)?;
+            release_observation::emit_engine_snapshot(&initial, false)?;
             progress.record("coordinator_initial_off", 5)?;
             let profile = ValidatedSingBoxProfile::parse(
                 r#"{"outbounds":[{"type":"direct","tag":"direct"}]}"#,
@@ -184,8 +187,13 @@ pub(super) fn exercise(progress: &mut Progress) -> Result<serde_json::Value> {
                 if observed != identity || proxy_changed != (mode == EngineMode::SystemProxy) {
                     return Err("coordinator and native identity or proxy settings disagree".into());
                 }
+                let sequence = release_observation::emit_engine_snapshot_with_sequence(
+                    &active,
+                    settings.enable_ipv6,
+                )?;
                 modes.push(
                     serde_json::json!({"snapshot":active,"native":native,"traffic":true,
+                    "observation_sequence":sequence,
                     "same_mode_preserved_generation":true,"proxy_changed":proxy_changed}),
                 );
                 progress.record("coordinator_active", generation)?;
@@ -229,6 +237,7 @@ pub(super) fn exercise(progress: &mut Progress) -> Result<serde_json::Value> {
             return Err("application shutdown did not preserve native cleanup and lineage".into());
         }
         progress.record("coordinator_off", 8)?;
+        let final_sequence = release_observation::emit_engine_snapshot_with_sequence(&off, false)?;
         Ok(
             serde_json::json!({"shared_desktop_assembly":true,"shared_mode_coordinator":true,
             "prepared_without_starting":true,"credentials_and_probes_connected":true,
@@ -236,6 +245,7 @@ pub(super) fn exercise(progress: &mut Progress) -> Result<serde_json::Value> {
             "authority":checks::snapshot()?,"lineage_generation":lineage.generation,
             "proxy_restored":true,"coordinator_retired":true,"gui_exercised":false,
             "process_observation":process_observation,
+            "final_observation_sequence":final_sequence,
             "tunnel_available":false,"legacy_cutover_available":false}),
         )
     })

@@ -1,17 +1,21 @@
 //! Non-sensitive, product-owned observations for physical release validation.
 //!
-//! The signed Host writes a closed event shape to Apple Unified Logging.  The
+//! The installed Host writes a closed event shape to its platform log (Apple
+//! Unified Logging or Windows ETW). The
 //! physical collector may read these events, but it cannot ask the product to
 //! report an arbitrary value or execute an operation.  Credentials, profile
 //! documents, controller secrets, migration tickets and native error text have
 //! no field in this schema.
 
-use std::ffi::{CString, c_char, c_void};
-use std::mem::{MaybeUninit, size_of};
-use std::path::Path;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+#[cfg(target_os = "macos")]
+use std::{
+    ffi::{CString, c_char, c_void},
+    mem::{MaybeUninit, size_of},
+    path::Path,
+};
 
 #[cfg(any(test, feature = "physical-release-evidence"))]
 use cfw_engine_api::EngineMode;
@@ -21,27 +25,56 @@ use cfw_singbox_config::ReleaseDnsEvidenceCase;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
+#[cfg(windows)]
+#[path = "release_observation/windows.rs"]
+mod windows;
+#[cfg(windows)]
+use windows::{current_process_observation, emit_message, read_current_candidate};
+
+#[cfg(target_os = "macos")]
 const DOCUMENT: &str = "cfw-product-observation-event-v1";
+#[cfg(windows)]
+const DOCUMENT: &str = "cfw-windows-product-observation-event-v1";
+#[cfg(target_os = "macos")]
 const MESSAGE_PREFIX: &str = "cfw-release-observation-v1 ";
+#[cfg(windows)]
+const MESSAGE_PREFIX: &str = "cfw-windows-release-observation-v1 ";
+#[cfg(target_os = "macos")]
 const SUBSYSTEM: &[u8] = b"com.bill.clashformac\0";
+#[cfg(target_os = "macos")]
 const CATEGORY: &[u8] = b"release-observation\0";
 const MAX_MESSAGE_BYTES: usize = 8 * 1024;
+
+#[cfg(all(target_os = "macos", any(test, feature = "physical-release-evidence")))]
+const TUNNEL_OWNER: EngineOwner = EngineOwner::PacketTunnelSystemExtension;
+#[cfg(all(windows, any(test, feature = "physical-release-evidence")))]
+const TUNNEL_OWNER: EngineOwner = EngineOwner::WindowsTunnelService;
 
 static EVENT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static BUNDLE_CANDIDATE: OnceLock<Result<CandidateObservation, String>> = OnceLock::new();
 static PROCESS_OBSERVATION: OnceLock<Result<ProcessObservation, String>> = OnceLock::new();
+#[cfg(target_os = "macos")]
 static RELEASE_LOG: OnceLock<Result<usize, String>> = OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct CandidateObservation {
     version: String,
     build_number: String,
+    #[cfg(windows)]
+    msi_product_code: String,
+    #[cfg(windows)]
+    msi_package_code: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 struct ProcessObservation {
     pid: u32,
+    #[cfg(target_os = "macos")]
     start_unix_ms: u64,
+    #[cfg(windows)]
+    creation_filetime: u64,
+    #[cfg(windows)]
+    session_id: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -90,7 +123,7 @@ impl DnsEvidenceSnapshotReceipt {
             || !config_digest
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-            || runtime.owner != EngineOwner::PacketTunnelSystemExtension
+            || runtime.owner != TUNNEL_OWNER
             || runtime.context.generation != snapshot.generation
             || runtime.config_digest != *config_digest
             || !runtime.ready
@@ -229,9 +262,9 @@ fn build_dns_evidence_transaction_message(
         || baseline.phase != "tunnel_active"
         || test.phase != "tunnel_active"
         || restore.phase != "tunnel_active"
-        || baseline.owner != EngineOwner::PacketTunnelSystemExtension
-        || test.owner != EngineOwner::PacketTunnelSystemExtension
-        || restore.owner != EngineOwner::PacketTunnelSystemExtension
+        || baseline.owner != TUNNEL_OWNER
+        || test.owner != TUNNEL_OWNER
+        || restore.owner != TUNNEL_OWNER
         || !baseline.ready
         || !test.ready
         || !restore.ready
@@ -268,6 +301,7 @@ fn build_dns_evidence_transaction_message(
     Ok(message)
 }
 
+#[cfg(target_os = "macos")]
 fn read_bundle_candidate(executable: &Path) -> Result<CandidateObservation, String> {
     let contents = executable
         .parent()
@@ -303,6 +337,14 @@ fn read_bundle_candidate(executable: &Path) -> Result<CandidateObservation, Stri
     })
 }
 
+#[cfg(target_os = "macos")]
+fn read_current_candidate() -> Result<CandidateObservation, String> {
+    std::env::current_exe()
+        .map_err(|error| format!("release observation cannot resolve executable: {error}"))
+        .and_then(|path| read_bundle_candidate(&path))
+}
+
+#[cfg(target_os = "macos")]
 fn current_process_observation() -> Result<ProcessObservation, String> {
     let pid = std::process::id();
     let mut info = MaybeUninit::<libc::proc_bsdinfo>::zeroed();
@@ -342,6 +384,7 @@ fn now_unix_ms() -> Result<u64, String> {
         .map_err(|_| "release observation timestamp exceeds u64".to_owned())
 }
 
+#[cfg(target_os = "macos")]
 fn release_log() -> Result<usize, String> {
     RELEASE_LOG
         .get_or_init(|| {
@@ -361,11 +404,7 @@ fn release_log() -> Result<usize, String> {
 
 fn observation_identity() -> Result<(CandidateObservation, ProcessObservation, u64), String> {
     let candidate = BUNDLE_CANDIDATE
-        .get_or_init(|| {
-            std::env::current_exe()
-                .map_err(|error| format!("release observation cannot resolve executable: {error}"))
-                .and_then(|path| read_bundle_candidate(&path))
-        })
+        .get_or_init(read_current_candidate)
         .as_ref()
         .map_err(Clone::clone)?
         .clone();
@@ -380,6 +419,7 @@ fn observation_identity() -> Result<(CandidateObservation, ProcessObservation, u
     Ok((candidate, process, sequence))
 }
 
+#[cfg(target_os = "macos")]
 fn emit_message(message: String) -> Result<(), String> {
     let message = CString::new(message)
         .map_err(|_| "release observation unexpectedly contains NUL".to_owned())?;
@@ -450,6 +490,7 @@ pub(crate) fn emit_dns_evidence_transaction(
     })
 }
 
+#[cfg(target_os = "macos")]
 #[link(name = "System")]
 unsafe extern "C" {
     fn os_log_create(subsystem: *const c_char, category: *const c_char) -> *mut c_void;
@@ -465,13 +506,22 @@ mod tests {
         CandidateObservation {
             version: "0.4.0".to_owned(),
             build_number: "40005".to_owned(),
+            #[cfg(windows)]
+            msi_product_code: "{11111111-1111-4111-8111-111111111111}".to_owned(),
+            #[cfg(windows)]
+            msi_package_code: "{22222222-2222-4222-8222-222222222222}".to_owned(),
         }
     }
 
     fn process() -> ProcessObservation {
         ProcessObservation {
             pid: 123,
+            #[cfg(target_os = "macos")]
             start_unix_ms: 1_700_000_000_000,
+            #[cfg(windows)]
+            creation_filetime: 133_444_736_000_001_234,
+            #[cfg(windows)]
+            session_id: 2,
         }
     }
 
@@ -481,7 +531,7 @@ mod tests {
             desired_mode: EngineMode::Tunnel,
             state: EngineState::TunnelActive {
                 runtime: RuntimeIdentity {
-                    owner: EngineOwner::PacketTunnelSystemExtension,
+                    owner: TUNNEL_OWNER,
                     context: EngineCommandContext {
                         installation_id: "must-not-be-logged".to_owned(),
                         config_epoch: 7,
@@ -516,7 +566,7 @@ mod tests {
         assert_eq!(value["payload"]["state"]["phase"], "tunnel_active");
         assert_eq!(
             value["payload"]["state"]["owner"],
-            "packet_tunnel_system_extension"
+            serde_json::to_value(TUNNEL_OWNER).unwrap()
         );
         assert_eq!(value["payload"]["state"]["ready"], true);
         assert_eq!(
@@ -574,13 +624,55 @@ mod tests {
         assert_eq!(error, "release observation sequence must be positive");
     }
 
+    #[test]
+    fn dns_snapshot_rejects_a_foreign_platform_owner() {
+        let mut snapshot = tunnel_snapshot(7, 'a');
+        let EngineState::TunnelActive { runtime } = &mut snapshot.state else {
+            panic!("test requires a tunnel snapshot");
+        };
+        runtime.owner = if TUNNEL_OWNER == EngineOwner::WindowsTunnelService {
+            EngineOwner::PacketTunnelSystemExtension
+        } else {
+            EngineOwner::WindowsTunnelService
+        };
+        assert!(DnsEvidenceSnapshotReceipt::from_ready_tunnel(&snapshot).is_err());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_event_preserves_filetime_and_closed_installer_identity() {
+        let message = build_engine_snapshot_message(
+            &EngineSnapshot::default(),
+            false,
+            &candidate(),
+            process(),
+            1,
+            1,
+        )
+        .expect("Windows observation");
+        let event: Value =
+            serde_json::from_str(message.strip_prefix(MESSAGE_PREFIX).unwrap()).unwrap();
+        assert_eq!(
+            event["process"],
+            json!({"pid":123,
+            "creation_filetime":133_444_736_000_001_234_u64,"session_id":2})
+        );
+        assert_eq!(
+            event["candidate"],
+            json!({"version":"0.4.0","build_number":"40005",
+            "msi_product_code":"{11111111-1111-4111-8111-111111111111}",
+            "msi_package_code":"{22222222-2222-4222-8222-222222222222}"})
+        );
+        assert_ne!(DOCUMENT, "cfw-product-observation-event-v1");
+    }
+
     fn tunnel_snapshot(generation: u64, digest: char) -> EngineSnapshot {
         let config_digest = digest.to_string().repeat(64);
         EngineSnapshot {
             desired_mode: EngineMode::Tunnel,
             state: EngineState::TunnelActive {
                 runtime: RuntimeIdentity {
-                    owner: EngineOwner::PacketTunnelSystemExtension,
+                    owner: TUNNEL_OWNER,
                     context: EngineCommandContext {
                         installation_id: "not-in-receipt".to_owned(),
                         config_epoch: 7,

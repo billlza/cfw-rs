@@ -578,6 +578,10 @@ pub(super) fn run_installed_host(image: &Path, expected: [u8; 32]) -> Result<()>
     // Separate independent suites keep the existing per-client 60-second
     // deadline. All run in the same installation/service and retain every
     // generation/assertion; product operation timeouts are unchanged.
+    let directory = PathBuf::from(
+        std::env::var_os("CFW_NATIVE_SERVICE_RECEIPTS")
+            .ok_or("missing installed report directory")?,
+    );
     for case in [
         ClientCase::InstalledHostDesktop,
         ClientCase::InstalledBackendDesktop,
@@ -585,18 +589,22 @@ pub(super) fn run_installed_host(image: &Path, expected: [u8; 32]) -> Result<()>
         ClientCase::InstalledProfileDesktop,
         ClientCase::InstalledCoordinatorDesktop,
     ] {
-        run_case(
-            image,
-            cfw_windows_engine::runtime_host::SERVICE_NAME,
-            expected,
-            case,
-            None,
-        )?;
+        let exercise = || {
+            run_case(
+                image,
+                cfw_windows_engine::runtime_host::SERVICE_NAME,
+                expected,
+                case,
+                None,
+            )
+        };
+        if matches!(case, ClientCase::InstalledCoordinatorDesktop) {
+            release_trace::capture(&directory, exercise)?;
+        } else {
+            exercise()?;
+        }
     }
-    installed_host::combine_reports(&PathBuf::from(
-        std::env::var_os("CFW_NATIVE_SERVICE_RECEIPTS")
-            .ok_or("missing installed report directory")?,
-    ))
+    installed_host::combine_reports(&directory)
 }
 
 pub(super) fn run_desktop_process_observation() -> Result<()> {

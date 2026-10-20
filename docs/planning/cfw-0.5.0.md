@@ -2,11 +2,13 @@
 
 评估日期：2026-10-18。状态：开发中，尚无经过验证的 Windows 产品。
 
-最新组件证据（2026-10-20）：`8a1e64c` 的 Windows CI 四项作业及下载产物核验通过，
-含 611 项 Rust、311 项 UI、11 项原生引擎、35 项 SCM 检查。产品服务/Agent 的
-安装、两种代理运行与清理，以及四种模式的非激活配置预检已验证。服务崩溃恢复
-仍要求独立观察者保留运行 Job。`9e3f0b6` 新增共享 Windows EngineBackend 的两种
-代理实现与按次原生状态查询；两轮新增安装验收出现 60 秒超时，诊断 CI 正在运行。
+最新组件证据（2026-10-20）：`9b64004` 的 Windows CI 四项作业及下载产物核验通过，
+含 612 项 Rust、311 项 UI、11 项原生引擎、35 项 SCM 检查。产品服务/Agent 的
+安装、四种模式的非激活预检、共享 EngineBackend 的 LocalProxy/SystemProxy 启停与
+新鲜状态查询，以及真实引擎退出后的查询拒绝和独立 Off 已验证。安装客户端聚合超时
+已定位并通过拆分有界验收关闭；服务崩溃恢复仍要求独立观察者保留运行 Job。
+`036cc1d` 新增共享 SystemProxyAuthorization 接口；其 CI 在执行到新增安装验收前，
+遇到服务退出期间映像查询失败。已补同一保留句柄的退出观察，新增原生回归待 CI。
 完整 Tauri 桌面、TUN、视觉一致性及发布验收仍未完成。
 
 ## 基线与完成条件
@@ -1752,15 +1754,40 @@ backend generation 3/4 于 42.825/55.824 秒。第五次在 57.554 秒才开始�
 （generation 3/4/5），按顺序使用同一安装和服务。每个客户端保持原有 60 秒限制、
 全部产品操作超时和断言；后台三次运行仍共用一个 backend 实例。各自阶段与报告必须
 独立验证后才能合并，最终报告仍限 16 KiB。源码 `9b64004ceb13ce02fbf8211f95b427ac9bd97298`
-由 [39375075507](https://github.com/billlza/cfw-rs/actions/runs/39375075507) 验证，原生结果待核验。
+由 [39375075507](https://github.com/billlza/cfw-rs/actions/runs/39375075507) 验证，四项作业均通过。
+612 项 Rust、311 项 UI、11 项原生引擎、35 项 SCM 均无失败或跳过。engine artifact
+`12243775451`（SHA-256
+`1fab4c3f7949c53d3fe0c2fc47b7c03c8348f28653af515d61d2db7ecdb5ed8c`）和 SCM artifact
+`12242747545`（SHA-256
+`d382f5ed533273afcb1373d0a4c8b5ea80dcdf63e645236d459baf83ad8c5bbe`）均已下载并通过
+源码、哈希和完整回执核验。两个客户端分别有 24/35 条完整阶段记录，耗时
+17.905/29.983 秒。第五次真实运行确认 PID 8424 的原进程对象退出，后续查询返回
+OwnerUnresponsive，最终 generation 5 的 Off 为 revision 35；服务重新启动后 Off
+为 revision 36，安装身份和 lineage 保持不变。故障没有被改写为旧 Active。
 
 共享 backend 同时实现 `SystemProxyAuthorization`，复用现有 WinINet 策略和所有权日志
 检查。安装身份与 medium-integrity 用户检查仍在原生边界，异步入口在切换线程前拒绝
 impersonation；沿用有界 worker 容量，不持有运行状态锁。此入口只检查权限与可恢复性，
 不申请 lease、不修改设置，激活阶段仍独立重查策略。安装验收增加运行前、SystemProxy
 运行中、最终 Off 后的完整/仅恢复授权，并核对 Authority、lineage 和代理设置不变。
-本地全 feature Windows cross-Clippy 与格式检查通过；该增量的原生验收待运行。
-新的 backend 尚无完整原生验收；异步取消和异常恢复的最终应用验收也尚未完成。
+本地默认/全 feature Windows cross-Clippy 与格式检查通过；该增量
+`036cc1d779083e442cabcfc1d34d72511c82d699` 由
+[39375476319](https://github.com/billlza/cfw-rs/actions/runs/39375476319) 验证，shared
+612 Rust/311 UI、SCM 和 directory 通过；engine 在新增安装验收之前的 LocalProxy
+服务崩溃用例失败。旧服务 PID 9600 已实际退出，新服务 PID 8608 的独立恢复观察已
+取得，但 Desktop 收到映像查询 Access denied 后，测试未将其当作已证退出。
+失败 artifact `12243820966`（SHA-256
+`f8c7c509a33ed60c1abc2964f51c2725640d27dab1d93b9898ee8f009f1fd2a8`）已下载核验；
+该运行没有安装客户端报告，不能声称新增授权案例执行过。
+
+源码中存在前置存活检查与映像查询之间的退出窗口。映像查询现在结束后对同一个保留
+进程句柄做零等待观察，只有实际 signaled 才返回 Exited；活进程的权限或映像拒绝仍
+保留原错误。没有扩大崩溃 fixture 的可接受错误名单，没有把 Access denied 本身
+解释为退出。新增原生测试用实际缺少 query 权限的活句柄验证拒绝保留，并用已退出的
+测试子进程验证原句柄退出分类；其 Windows 执行结果待 CI。原失败未保留查询瞬间的
+退出信号，因此窗口原因仍需结合该回归和完整重跑验证，不能把后来退出反推为当时
+已经 signaled。该处理遵循 [进程终止与等待的边界](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-terminateprocess)。
+代理 backend 上述限定的原生验收已通过；异步取消和异常恢复的最终应用验收尚未完成。
 TUN 入口仍显式不可用，尚需完整 TUN/合并模式、backend 的服务重启恢复衔接、应用诊断
 接线、Tauri Windows factory/startup/build、实际 UI 和发布验收。此实现没有关闭这些缺口。
 

@@ -199,3 +199,67 @@ fn service_acl_allows_queries_but_rejects_untrusted_control_or_ownership() {
         Err(ServicePeerError::UnsafeServiceSecurity)
     ));
 }
+
+fn current_executable() -> VerifiedExecutable {
+    use sha2::{Digest, Sha256};
+    let path = std::env::current_exe().unwrap();
+    let digest: [u8; 32] = Sha256::digest(std::fs::read(&path).unwrap()).into();
+    VerifiedExecutable::open(&path, digest, env!("CARGO_PKG_VERSION")).unwrap()
+}
+
+#[test]
+fn live_image_permission_failure_is_not_reclassified_as_process_exit() {
+    let executable = current_executable();
+    // Real native handles: the positive control has query rights; the negative
+    // control deliberately lacks them while retaining SYNCHRONIZE. No process
+    // DACL, privilege or system policy is changed to manufacture this denial.
+    let open = |access| {
+        let raw = unsafe { OpenProcess(access, 0, std::process::id()) };
+        assert!(!raw.is_null(), "{}", io::Error::last_os_error());
+        unsafe { OwnedHandle::from_raw_handle(raw) }
+    };
+    let full = open(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE);
+    verify_process_image(&executable, &full).unwrap();
+    let limited = open(PROCESS_SYNCHRONIZE);
+    assert_eq!(
+        unsafe { WaitForSingleObject(limited.as_raw_handle(), 0) },
+        WAIT_TIMEOUT
+    );
+    assert!(matches!(verify_process_image(&executable, &limited),
+        Err(ServicePeerError::Executable(crate::Error::Operation { operation: "query live process image", source }))
+        if source.raw_os_error() == Some(5)));
+    assert_eq!(
+        unsafe { WaitForSingleObject(limited.as_raw_handle(), 0) },
+        WAIT_TIMEOUT
+    );
+}
+
+#[test]
+fn exited_process_image_query_requires_the_original_kernel_exit_observation() {
+    use std::os::windows::io::AsHandle;
+    use std::process::{Command, Stdio};
+    let executable = current_executable();
+    // Listing this test binary exits without running another test. Retain its
+    // original process object past wait/reap, just as an admitted SCM peer does.
+    let mut child = Command::new(executable.path())
+        .arg("--list")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let process = child.as_handle().try_clone_to_owned().unwrap();
+    let observed = unsafe { WaitForSingleObject(process.as_raw_handle(), 5000) };
+    if observed != WAIT_OBJECT_0 {
+        child
+            .kill()
+            .expect("retire test child after failed bounded wait");
+        child.wait().expect("reap retired test child");
+        panic!("test child did not produce its native exit observation: {observed:#x}");
+    }
+    assert!(child.wait().unwrap().success());
+    assert!(matches!(
+        verify_process_image(&executable, &process),
+        Err(ServicePeerError::Exited)
+    ));
+}

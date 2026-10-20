@@ -477,8 +477,21 @@ fn verify_process_image(
     executable: &VerifiedExecutable,
     process: &OwnedHandle,
 ) -> Result<(), ServicePeerError> {
-    executable.verify_process_image(process)?;
-    Ok(())
+    let image = executable.verify_process_image(process);
+    // The dedicated service can exit after process_creation's liveness check
+    // but before/during the image query. Even a successful image read cannot
+    // attest a now-retired peer. Classify exit only from the retained kernel
+    // object, never from an AccessDenied code or a replacement process's PID.
+    match unsafe { WaitForSingleObject(process.as_raw_handle(), 0) } {
+        WAIT_OBJECT_0 => Err(ServicePeerError::Exited),
+        WAIT_TIMEOUT => image.map_err(ServicePeerError::from),
+        _ => match image {
+            // Preserve the original image failure if lifetime observation also
+            // fails. Neither path admits a peer or claims it has exited.
+            Err(error) => Err(ServicePeerError::Executable(error)),
+            Ok(()) => Err(native("observe service process after image query")),
+        },
+    }
 }
 
 fn trusted_admin_sid(sid: PSID) -> bool {

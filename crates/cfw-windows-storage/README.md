@@ -67,6 +67,17 @@ only after its full Minisign verification; this storage API does not authenticat
 payloads or grant permission to run an installer. Process termination can leave
 an unpublished temporary; the caller's staging recovery owns its later cleanup.
 
+Managed flat child directories use a parent write transaction as their lifecycle
+lease. Fresh creation uses `FILE_CREATE`; reopening never creates a missing
+child. Removal compares the retained directory's volume and full file ID with
+the exact child opened relative to that parent. It enumerates a bounded file set
+and rejects real subdirectories before deleting anything. Reparse points and
+hard links are unlinked without reading their targets. After child writers have
+retired, cleanup closes its own child transaction and removes that exact lock,
+then the empty directory. Parent publication is flushed; errors retain partial
+cleanup and durability uncertainty. All lifecycle users of such a namespace
+must retain the parent lease until their child work ends.
+
 Repositories can publish with their canonical UUID temporary names, retaining
 their existing crash-recovery rules. `Publication::CreateNew` refuses to replace
 an existing destination in the native rename operation. Opened private files
@@ -95,3 +106,4 @@ API references:
 - [File and directory flush](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers)
 - [Handle-relative directory enumeration](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntquerydirectoryfile)
 - [Security information from an opened handle](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-getsecurityinfo)
+- [Exact-handle unlink while other handles remain open](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddk/ns-ntddk-_file_disposition_information_ex)

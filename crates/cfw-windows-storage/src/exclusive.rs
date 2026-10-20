@@ -215,7 +215,7 @@ impl PrivateDirectory {
     }
 }
 
-fn identity(file: &File) -> Result<(u64, [u8; 16]), Error> {
+pub(super) fn identity(file: &File) -> Result<(u64, [u8; 16]), Error> {
     let mut value = FILE_ID_INFO::default();
     // SAFETY: the live disk file and exact initialized output buffer remain
     // valid through this synchronous native file-identity query.

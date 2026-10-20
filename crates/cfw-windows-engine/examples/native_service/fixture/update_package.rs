@@ -3,8 +3,10 @@ use super::*;
 use cfw_windows_engine::{
     Error as EngineError,
     runtime_host::{InstalledRuntime, MANIFEST_FILE},
-    update_package::{PackageError, WorkerFailureCategory},
+    update_package::{MAX_PACKAGE_BYTES, PackageError, UpdateStaging, WorkerFailureCategory},
 };
+use std::io::Read as _;
+use uuid::Uuid;
 
 pub(super) fn observe() -> Result<serde_json::Value> {
     let native = restricted::require_medium_user_context()?;
@@ -40,13 +42,39 @@ pub(super) fn observe() -> Result<serde_json::Value> {
         return Err("package fixture paths must be absolute".into());
     }
     let candidate = fixtures.join("有效 安装包.msi");
+    let staging_home = receipts.join("staging-home");
+    let staging =
+        UpdateStaging::create(&staging_home, Uuid::new_v4()).map_err(|e| e.to_string())?;
+    let mut input = std::fs::File::open(&candidate).map_err(|e| e.to_string())?;
+    let mut output = staging
+        .directory()
+        .begin_stream(
+            "package.msi",
+            ".package.copy.tmp",
+            MAX_PACKAGE_BYTES as usize,
+        )
+        .map_err(|e| e.to_string())?;
+    let mut chunk = [0; 32 * 1024];
+    loop {
+        let count = input.read(&mut chunk).map_err(|e| e.to_string())?;
+        if count == 0 {
+            break;
+        }
+        output
+            .write_chunk(&chunk[..count])
+            .map_err(|e| e.to_string())?;
+    }
+    // A bounded copy of the signed local test fixture, not a substitute for
+    // the product download's separate release and Minisign authorization.
+    output.commit().map_err(|e| e.to_string())?;
+    let staged_candidate = staging.package();
     let package = installed
         .package_inspector()
         .map_err(|e| e.to_string())?
         .inspect(
-            &candidate,
+            &staged_candidate,
             "0.5.0",
-            &receipts.join("inspection"),
+            staging.root(),
             Duration::from_secs(30),
             || false,
         )
@@ -54,12 +82,20 @@ pub(super) fn observe() -> Result<serde_json::Value> {
     if package.identity().build != 2
         || package.identity().version != "0.5.0"
         || package.sha256() != digest(&candidate)?
+        || package.sha256() != digest(&staged_candidate)?
         || package.publisher().spki_sha256() == [0; 32]
     {
         return Err("ordinary Desktop lost the signed package identity".into());
     }
     let signature_key = package.publisher().spki_sha256();
     drop(package);
+    staging.remove().map_err(|e| e.to_string())?;
+    if staged_candidate.try_exists().map_err(|e| e.to_string())?
+        || UpdateStaging::recover(&staging_home).map_err(|e| e.to_string())? != 0
+    {
+        return Err("ordinary Desktop left a staged package after cleanup".into());
+    }
+    std::fs::remove_dir_all(&staging_home).map_err(|e| e.to_string())?;
     let inspector = InstalledRuntime::open()
         .map_err(|e| e.to_string())?
         .package_inspector()
@@ -108,6 +144,7 @@ pub(super) fn observe() -> Result<serde_json::Value> {
         "medium_integrity": true, "administrator_member": false,
         "installed_desktop_identity": true, "protected_manifest_write_denied": true,
         "signed_msi_verified": true, "different_publisher_rejected": true,
+        "private_staged_copy_inspected": true, "staging_cleanup_observed": true,
         "precreation_cancellation_observed": true, "release": release,
         "publisher_spki_sha256": signature_key,
         "pid": native.process_id(), "creation_filetime": native.identity().process_creation_time(),

@@ -5,6 +5,7 @@
 //! file access and renames remain relative to that same opened directory.
 #![cfg(windows)]
 
+mod children;
 mod entries;
 mod exclusive;
 mod legacy;

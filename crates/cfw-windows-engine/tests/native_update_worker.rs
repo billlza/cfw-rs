@@ -3,7 +3,9 @@
 use cfw_windows_engine::{
     Error,
     runtime_host::{InstalledRuntime, MSI_UPGRADE_CODE},
-    update_package::{AuthenticodePublisher, InspectedMsi, PackageError, WorkerFailureCategory},
+    update_package::{
+        AuthenticodePublisher, InspectedMsi, PackageError, UpdateStaging, WorkerFailureCategory,
+    },
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -56,8 +58,20 @@ fn protected_installed_release_has_a_build_floor_and_distinct_msi_identities() {
 #[test]
 fn the_installed_worker_verifies_a_real_signed_unicode_msi() {
     let temporary = tempfile::tempdir().unwrap();
-    let path = fixture("有效 安装包.msi");
-    let package = inspect(&path, &temporary.path().join("校验 进程")).unwrap();
+    let staged =
+        UpdateStaging::create(&temporary.path().join("校验 进程"), uuid::Uuid::new_v4()).unwrap();
+    let fixture_bytes = fs::read(fixture("有效 安装包.msi")).unwrap();
+    let mut download = staged
+        .directory()
+        .begin_stream("package.msi", ".package.copy.tmp", 192 * 1024 * 1024)
+        .unwrap();
+    for chunk in fixture_bytes.chunks(32 * 1024) {
+        download.write_chunk(chunk).unwrap();
+    }
+    // This is a local fixture copy, not the network/Minisign download boundary.
+    download.commit().unwrap();
+    let path = staged.package();
+    let package = inspect(&path, staged.root()).unwrap();
     assert_eq!(package.path(), path);
     assert_eq!(package.identity().version, "0.5.0");
     assert_eq!(package.identity().build, 2);
@@ -69,6 +83,11 @@ fn the_installed_worker_verifies_a_real_signed_unicode_msi() {
     );
     let digest: [u8; 32] = Sha256::digest(fs::read(&path).unwrap()).into();
     assert_eq!(package.sha256(), digest);
+    let fixture_digest: [u8; 32] = Sha256::digest(&fixture_bytes).into();
+    assert_eq!(digest, fixture_digest);
+    drop(package);
+    staged.remove().unwrap();
+    assert!(!path.try_exists().unwrap());
 }
 
 #[test]

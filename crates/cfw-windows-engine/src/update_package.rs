@@ -17,7 +17,9 @@ use sha2::{Digest, Sha256};
 
 mod msi;
 mod signature;
+mod staging;
 mod worker;
+pub use staging::{StagingError, UpdateStaging};
 pub(crate) use worker::run_stdio;
 pub use worker::{InstalledPackageInspector, WorkerFailureCategory};
 

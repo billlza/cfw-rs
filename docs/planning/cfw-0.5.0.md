@@ -2,11 +2,12 @@
 
 评估日期：2026-10-18。状态：开发中，尚无经过验证的 Windows 产品。
 
-最新组件证据（2026-10-20）：`c6cf67e` 的 Windows CI 四项作业及下载产物核验通过，
-含 610 项 Rust、311 项 UI、11 项原生引擎、35 项 SCM 检查。启动准入、两种代理
-模式正常清理和服务崩溃恢复已验证，恢复仍要求独立观察者保留运行 Job。随后
-`5322e15` 至 `fb2cfde` 已实现正式服务/Agent 可执行入口和安装链路验证，新的
-原生 CI 仍在运行；完整桌面后端、TUN、视觉一致性及发布验收仍未完成。
+最新组件证据（2026-10-20）：`8a1e64c` 的 Windows CI 四项作业及下载产物核验通过，
+含 611 项 Rust、311 项 UI、11 项原生引擎、35 项 SCM 检查。产品服务/Agent 的
+安装、两种代理运行与清理，以及四种模式的非激活配置预检已验证。服务崩溃恢复
+仍要求独立观察者保留运行 Job。`9e3f0b6` 新增共享 Windows EngineBackend 的两种
+代理实现与按次原生状态查询，正在托管 CI 验证；完整 Tauri 桌面、TUN、视觉一致性
+及发布验收仍未完成。
 
 ## 基线与完成条件
 
@@ -1714,7 +1715,11 @@ LocalProxy/SystemProxy 的配置检查、启动、查询、停止调用实际产
 最后一项是故障注入，仅在显式 opt-in 的临时 Windows runner 中执行。五个实际运行
 generation 包括原两种宿主模式、两种 backend 模式和一次真实引擎退出反例。
 
-本节为新增实现及验收代码，原生 CI 尚待运行；不能引用 `8a1e64c` 的通过结果证明它。
+本节对应 `9e3f0b67974d189c552e6ca5c3b8c02bf4b3b3ba`，由
+[39370765025](https://github.com/billlza/cfw-rs/actions/runs/39370765025) 验证。
+本地默认/全 feature Windows cross-Clippy（warnings denied）、107 项 portable tests、
+全工作区格式与 PowerShell 解析检查通过；原生 CI 仍在运行，不能引用 `8a1e64c`
+的通过结果证明新的 backend。异步取消和异常恢复的最终应用验收也尚未完成。
 TUN 入口仍显式不可用，尚需完整 TUN/合并模式、backend 的服务重启恢复衔接、应用诊断
 接线、Tauri Windows factory/startup/build、实际 UI 和发布验收。此实现没有关闭这些缺口。
 

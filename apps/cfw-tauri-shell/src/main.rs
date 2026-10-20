@@ -399,8 +399,9 @@ fn main() {
                 invoke.resolver.reject(format!(
                     "command {command} is unavailable during migration handoff"
                 ));
-                true
-            } else if !startup::command_available_before_ready(invoke.message.command())
+                return true;
+            }
+            if !startup::command_available_before_ready(invoke.message.command())
                 && let Err(error) = invoke
                     .message
                     .webview_ref()

@@ -115,6 +115,7 @@ fn write_renderer_preferences(
     write_preferences(store, preferences)
 }
 
+#[cfg(target_os = "macos")]
 pub(crate) fn sanitize_legacy_preferences(
     store: &SettingsStore,
     preferences: UiPreferences,

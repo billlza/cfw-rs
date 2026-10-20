@@ -90,7 +90,7 @@ pub(crate) fn start_provider_refresh(app: AppHandle) -> Result<(), String> {
                 }
                 update_resources(
                     &engine,
-                    &handle.state::<LegacyRetirementGate>(),
+                    &handle.state::<PlatformMaintenanceGate>(),
                     &profiles,
                     &providers,
                     stored,

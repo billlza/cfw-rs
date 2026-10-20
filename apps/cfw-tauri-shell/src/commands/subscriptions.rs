@@ -45,7 +45,7 @@ use super::imported_credentials::{
 use super::profiles::read_repository;
 use super::shell_ops::{open_path, owned_profile_path};
 use crate::engine::{ManagedEngine, apply_profile_change};
-use crate::legacy::LegacyRetirementGate;
+use crate::platform_maintenance::PlatformMaintenanceGate;
 use crate::settings_store;
 use crate::subscription_import::{
     ImportedCredential, MAX_SUBSCRIPTION_DOCUMENT_BYTES, import_subscription_document,
@@ -94,7 +94,7 @@ pub(crate) struct UiSubscriptionUpdateResult {
 #[tauri::command]
 pub(crate) async fn import_profile_url(
     engine: State<'_, ManagedEngine>,
-    retirement: State<'_, LegacyRetirementGate>,
+    retirement: State<'_, PlatformMaintenanceGate>,
     profiles: State<'_, ManagedProfiles>,
     url: String,
     name: Option<String>,
@@ -122,7 +122,7 @@ pub(crate) async fn import_profile_url(
 #[tauri::command]
 pub(crate) async fn import_profile_text(
     engine: State<'_, ManagedEngine>,
-    retirement: State<'_, LegacyRetirementGate>,
+    retirement: State<'_, PlatformMaintenanceGate>,
     profiles: State<'_, ManagedProfiles>,
     name: Option<String>,
     body: String,
@@ -133,7 +133,7 @@ pub(crate) async fn import_profile_text(
 #[tauri::command]
 pub(crate) async fn import_profile_file(
     engine: State<'_, ManagedEngine>,
-    retirement: State<'_, LegacyRetirementGate>,
+    retirement: State<'_, PlatformMaintenanceGate>,
     profiles: State<'_, ManagedProfiles>,
     path: String,
     name: Option<String>,
@@ -150,7 +150,7 @@ pub(crate) async fn import_profile_file(
 
 async fn import_online(
     engine: &ManagedEngine,
-    retirement: &LegacyRetirementGate,
+    retirement: &PlatformMaintenanceGate,
     profiles: &ManagedProfiles,
     body: String,
     name: Option<String>,
@@ -187,7 +187,7 @@ async fn import_online(
 #[tauri::command]
 pub(crate) async fn update_profile(
     engine: State<'_, ManagedEngine>,
-    retirement: State<'_, LegacyRetirementGate>,
+    retirement: State<'_, PlatformMaintenanceGate>,
     profiles: State<'_, ManagedProfiles>,
     id: String,
 ) -> Result<UiSubscriptionUpdateResult, String> {
@@ -317,7 +317,7 @@ pub(crate) async fn read_profile_text(
 #[tauri::command]
 pub(crate) async fn save_profile_text(
     engine: State<'_, ManagedEngine>,
-    retirement: State<'_, LegacyRetirementGate>,
+    retirement: State<'_, PlatformMaintenanceGate>,
     profiles: State<'_, ManagedProfiles>,
     id: String,
     expected_digest: String,

@@ -10,6 +10,8 @@ use cfw_windows_engine::runtime_host::InstalledDesktop;
 // intentionally contains no Tauri/WebView substitute and makes no GUI claim.
 #[path = "../../../../../../apps/cfw-tauri-shell/src/platform_runtime.rs"]
 mod platform_runtime;
+#[path = "../../../../../../apps/cfw-tauri-shell/src/process_identity.rs"]
+mod process_identity;
 
 const PROFILE: &str = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 
@@ -22,6 +24,7 @@ pub(super) fn exercise(progress: &mut Progress) -> Result<serde_json::Value> {
         .proxy()
         .snapshot()
         .map_err(|e| e.to_string())?;
+    let process_observation = observe_desktop_process()?;
     let prepared = platform_runtime::PlatformRuntime::load(&desktop.paths().root)?.prepare()?;
     if !prepared.services.proxy_available
         || prepared.services.tunnel_available
@@ -234,9 +237,43 @@ pub(super) fn exercise(progress: &mut Progress) -> Result<serde_json::Value> {
             "initial":initial,"modes":modes,"shutdown":off,"final_native":final_native,
             "authority":checks::snapshot()?,"lineage_generation":lineage.generation,
             "proxy_restored":true,"coordinator_retired":true,"gui_exercised":false,
+            "process_observation":process_observation,
             "tunnel_available":false,"legacy_cutover_available":false}),
         )
     })
+}
+
+fn observe_desktop_process() -> Result<serde_json::Value> {
+    let native = super::super::restricted::require_medium_user_context()?;
+    let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+    let observed: process_identity::ProcessIdentity =
+        process_identity::current_process_identity(&executable)?;
+    let wire = serde_json::to_value(&observed).map_err(|e| e.to_string())?;
+    let decoded: process_identity::ProcessIdentity =
+        serde_json::from_value(wire.clone()).map_err(|e| e.to_string())?;
+    if !observed.is_this_process()
+        || decoded != observed
+        || !process_identity::process_identity_exists(&decoded)?
+        || !process_identity::exact_processes(&executable)?.contains(&observed)
+        || wire["logon"]["sid"] != native.identity().user_sid()
+        || wire["logon"]["authentication_id"] != native.identity().authentication_id()
+        || wire["logon"]["session_id"] != native.identity().session_id()
+        || wire["creation_filetime"] != native.identity().process_creation_time()
+        || wire.get("uid").is_some()
+    {
+        return Err(
+            "desktop process observer lost native identity or failed current-session enumeration"
+                .into(),
+        );
+    }
+    Ok(serde_json::json!({
+        "medium_integrity": true, "administrator_member": false,
+        "actual_desktop_module": true, "native_logon_and_filetime_preserved": true,
+        "serialized_claim_reobserved": true, "current_session_contains_self": true,
+        "pid": native.process_id(),
+        "creation_filetime": native.identity().process_creation_time(),
+        "system_wide_absence_proven": false,
+    }))
 }
 
 fn require_off(snapshot: &EngineSnapshot, generation: u64) -> Result<()> {

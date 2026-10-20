@@ -12,7 +12,7 @@ use tauri::{AppHandle, State};
 use super::controller::{controller_client, ipc_error};
 use super::settings::{UiSettingsSnapshot, settings_snapshot_with_live_status};
 use crate::engine::{EngineStatusPayload, ManagedEngine};
-use crate::legacy::LegacyRetirementGate;
+use crate::platform_maintenance::PlatformMaintenanceGate;
 use crate::window_state::WindowBoundsManager;
 use crate::{commands::ManagedProfiles, settings_store};
 
@@ -131,7 +131,7 @@ fn tunnel_authority_state(state: &EngineState) -> &'static str {
 #[tauri::command]
 pub(crate) async fn set_system_proxy_enabled(
     engine: State<'_, ManagedEngine>,
-    retirement: State<'_, LegacyRetirementGate>,
+    retirement: State<'_, PlatformMaintenanceGate>,
     profiles: State<'_, ManagedProfiles>,
     enabled: bool,
 ) -> Result<EngineStatusPayload, String> {
@@ -142,7 +142,7 @@ pub(crate) async fn set_system_proxy_enabled(
 #[tauri::command]
 pub(crate) async fn set_tun_enabled(
     engine: State<'_, ManagedEngine>,
-    retirement: State<'_, LegacyRetirementGate>,
+    retirement: State<'_, PlatformMaintenanceGate>,
     profiles: State<'_, ManagedProfiles>,
     enabled: bool,
 ) -> Result<EngineStatusPayload, String> {
@@ -153,7 +153,7 @@ pub(crate) async fn set_tun_enabled(
 #[tauri::command]
 pub(crate) async fn set_core_enabled(
     engine: State<'_, ManagedEngine>,
-    retirement: State<'_, LegacyRetirementGate>,
+    retirement: State<'_, PlatformMaintenanceGate>,
     profiles: State<'_, ManagedProfiles>,
     enabled: bool,
 ) -> Result<EngineStatusPayload, String> {
@@ -164,7 +164,7 @@ pub(crate) async fn set_core_enabled(
 #[tauri::command]
 pub(crate) async fn reconcile_startup_services(
     engine: State<'_, ManagedEngine>,
-    retirement: State<'_, LegacyRetirementGate>,
+    retirement: State<'_, PlatformMaintenanceGate>,
 ) -> Result<EngineStatusPayload, String> {
     crate::engine_controls::reconcile_startup_services(&engine, &retirement).await
 }
@@ -226,7 +226,7 @@ fn normalize_proxy_mode(mode: &str) -> Result<&'static str, String> {
 #[tauri::command]
 pub(crate) async fn set_allow_lan(
     engine: State<'_, ManagedEngine>,
-    retirement: State<'_, LegacyRetirementGate>,
+    retirement: State<'_, PlatformMaintenanceGate>,
     profiles: State<'_, ManagedProfiles>,
     enabled: bool,
 ) -> Result<super::runtime_settings::RuntimeSettingsView, String> {
@@ -240,7 +240,7 @@ pub(crate) async fn set_allow_lan(
 #[tauri::command]
 pub(crate) async fn set_bind_address(
     engine: State<'_, ManagedEngine>,
-    retirement: State<'_, LegacyRetirementGate>,
+    retirement: State<'_, PlatformMaintenanceGate>,
     profiles: State<'_, ManagedProfiles>,
     address: String,
 ) -> Result<super::runtime_settings::RuntimeSettingsView, String> {
@@ -262,7 +262,7 @@ pub(crate) async fn set_bind_address(
 #[tauri::command]
 pub(crate) async fn set_log_level(
     engine: State<'_, ManagedEngine>,
-    retirement: State<'_, LegacyRetirementGate>,
+    retirement: State<'_, PlatformMaintenanceGate>,
     profiles: State<'_, ManagedProfiles>,
     level: String,
 ) -> Result<super::runtime_settings::RuntimeSettingsView, String> {

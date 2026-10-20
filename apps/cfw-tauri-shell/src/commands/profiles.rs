@@ -522,7 +522,7 @@ fn credential_requirements(
 #[tauri::command]
 pub(crate) async fn select_profile(
     engine: State<'_, ManagedEngine>,
-    retirement: State<'_, crate::legacy::LegacyRetirementGate>,
+    retirement: State<'_, crate::platform_maintenance::PlatformMaintenanceGate>,
     profiles: State<'_, ManagedProfiles>,
     id: String,
 ) -> Result<UiProfileRecord, String> {

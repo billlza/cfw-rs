@@ -136,7 +136,7 @@ function renderSettings() {
         ),
       ])}
 
-      ${renderSettingsGroup(t("Legacy maintenance"), [
+      ${state.payload.product.operating_system === "macos" ? renderSettingsGroup(t("Legacy maintenance"), [
         renderSettingAction(
           t("Older Clash for Mac"),
           t("Optional"),
@@ -144,7 +144,7 @@ function renderSettings() {
           "open-legacy-maintenance",
           t("Open maintenance"),
         ),
-      ])}
+      ]) : ""}
 
       ${renderSettingsGroup(t("Paths"), [
         renderSettingAction(t("Home Directory"), t("Application Support"), t("Open the application home directory in Finder."), "open-home-directory", t("Open Folder")),

@@ -1,41 +1,58 @@
+#[cfg(target_os = "macos")]
 use std::future::Future;
+#[cfg(target_os = "macos")]
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+#[cfg(target_os = "macos")]
 use std::time::Duration;
 
+#[cfg(target_os = "macos")]
 use cfw_engine_api::EngineEvent;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
+#[cfg(target_os = "macos")]
+use tauri::{AppHandle, Emitter};
+use tauri::{Manager, State, WebviewWindow};
 
+#[cfg(target_os = "macos")]
 use crate::legacy::{
     ConsumedHandoffTicket, MigrationHandoffLease, ProcessIdentity, RendererReadyChallenge,
 };
 use crate::lifecycle::{AppLifecycle, MigrationHandoffStatus};
 
 const MAIN_WINDOW_LABEL: &str = "main";
+#[cfg(target_os = "macos")]
 const PARENT_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(20);
+#[cfg(target_os = "macos")]
 const PARENT_EXIT_MAX_CHECKS: usize = 1_001;
 const WINDOW_VISIBILITY_DEFAULT: u8 = 0;
 const WINDOW_VISIBILITY_SHOW: u8 = 1;
 const WINDOW_VISIBILITY_HIDE: u8 = 2;
 
 pub(crate) struct LaunchContext {
+    #[cfg(target_os = "macos")]
     migration_handoff: bool,
+    #[cfg(target_os = "macos")]
     handoff_ticket: Option<ConsumedHandoffTicket>,
+    #[cfg(target_os = "macos")]
     _handoff_lease: Option<MigrationHandoffLease>,
     initial_window_presented: AtomicBool,
     requested_visibility: AtomicU8,
+    #[cfg(target_os = "macos")]
     renderer_ready: RendererReadyGate,
 }
 
 impl LaunchContext {
     pub(crate) fn dashboard() -> Self {
         Self {
+            #[cfg(target_os = "macos")]
             migration_handoff: false,
+            #[cfg(target_os = "macos")]
             handoff_ticket: None,
+            #[cfg(target_os = "macos")]
             _handoff_lease: None,
             initial_window_presented: AtomicBool::new(false),
             requested_visibility: AtomicU8::new(WINDOW_VISIBILITY_DEFAULT),
+            #[cfg(target_os = "macos")]
             renderer_ready: RendererReadyGate::default(),
         }
     }
@@ -53,25 +70,32 @@ impl LaunchContext {
     }
 
     pub(crate) const fn is_migration_handoff(&self) -> bool {
-        self.migration_handoff
+        #[cfg(target_os = "macos")]
+        {
+            self.migration_handoff
+        }
+        #[cfg(windows)]
+        {
+            false
+        }
     }
 
     pub(crate) fn note_window_presented(&self) {
-        if !self.migration_handoff {
+        if !self.is_migration_handoff() {
             self.requested_visibility
                 .store(WINDOW_VISIBILITY_SHOW, Ordering::Release);
         }
     }
 
     pub(crate) fn note_window_hidden(&self) {
-        if !self.migration_handoff {
+        if !self.is_migration_handoff() {
             self.requested_visibility
                 .store(WINDOW_VISIBILITY_HIDE, Ordering::Release);
         }
     }
 
     fn claim_initial_window_presentation(&self) -> bool {
-        !self.migration_handoff
+        !self.is_migration_handoff()
             && self
                 .initial_window_presented
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -94,8 +118,9 @@ impl LaunchContext {
         Ok(())
     }
 
+    #[cfg(target_os = "macos")]
     fn require_handoff_ticket(&self) -> Result<&ConsumedHandoffTicket, String> {
-        if !self.migration_handoff {
+        if !self.is_migration_handoff() {
             return Err("dashboard launch cannot acknowledge migration renderer readiness".into());
         }
         self.handoff_ticket
@@ -103,15 +128,17 @@ impl LaunchContext {
             .ok_or_else(|| "migration handoff has no admitted startup ticket".to_owned())
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn mark_renderer_native_ready(&self) -> Result<(), String> {
         self.require_handoff_ticket()?.require_child_identity()?;
         self.renderer_ready.mark_native_ready()
     }
 
+    #[cfg(target_os = "macos")]
     fn migration_handoff_renderer_ready(
         &self,
     ) -> Result<Option<MigrationHandoffRendererReady>, String> {
-        if !self.migration_handoff {
+        if !self.is_migration_handoff() {
             return Ok(None);
         }
         let ticket = self.require_handoff_ticket()?;
@@ -121,6 +148,7 @@ impl LaunchContext {
             .map(Some)
     }
 
+    #[cfg(target_os = "macos")]
     fn acknowledge_renderer_ready(
         &self,
         window_label: &str,
@@ -135,29 +163,35 @@ impl LaunchContext {
         )
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn require_renderer_ready_published(&self) -> Result<(), String> {
         self.require_handoff_ticket()?;
         self.renderer_ready.require_post_parent_window_ready()
     }
 
+    #[cfg(target_os = "macos")]
     fn handoff_parent_absent(&self) -> Result<bool, String> {
         self.require_handoff_ticket()?.parent_absent()
     }
 
+    #[cfg(target_os = "macos")]
     fn mark_post_parent_window_ready(&self) -> Result<(), String> {
         self.require_handoff_ticket()?.require_child_identity()?;
         self.renderer_ready.mark_post_parent_window_ready()
     }
 
+    #[cfg(target_os = "macos")]
     fn post_parent_window_ready(&self) -> Result<bool, String> {
         self.require_handoff_ticket()?;
         self.renderer_ready.post_parent_window_ready()
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn require_handoff_parent_absent(&self) -> Result<(), String> {
         self.require_handoff_ticket()?.require_parent_absent()
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn handoff_parent_identity(&self) -> Option<&ProcessIdentity> {
         self.handoff_ticket
             .as_ref()
@@ -168,10 +202,13 @@ impl LaunchContext {
 #[derive(Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 enum MigrationHandoffRendererReady {
+    #[cfg(target_os = "macos")]
     Challenge { generation: u32, challenge: String },
+    #[cfg(target_os = "macos")]
     Published,
 }
 
+#[cfg(target_os = "macos")]
 impl From<RendererReadyChallenge> for MigrationHandoffRendererReady {
     fn from(value: RendererReadyChallenge) -> Self {
         Self::Challenge {
@@ -181,17 +218,20 @@ impl From<RendererReadyChallenge> for MigrationHandoffRendererReady {
     }
 }
 
+#[cfg(target_os = "macos")]
 #[derive(Default)]
 struct RendererReadyGate {
     inner: Mutex<RendererReadyGateInner>,
 }
 
+#[cfg(target_os = "macos")]
 #[derive(Default)]
 struct RendererReadyGateInner {
     phase: RendererReadyPhase,
     next_challenge: usize,
 }
 
+#[cfg(target_os = "macos")]
 #[derive(Default)]
 enum RendererReadyPhase {
     #[default]
@@ -204,6 +244,7 @@ enum RendererReadyPhase {
     Failed,
 }
 
+#[cfg(target_os = "macos")]
 impl RendererReadyGate {
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, RendererReadyGateInner>, String> {
         self.inner
@@ -345,6 +386,7 @@ impl RendererReadyGate {
     }
 }
 
+#[cfg(target_os = "macos")]
 async fn wait_for_parent_absence_with<Check, Sleep, SleepFuture>(
     mut check: Check,
     mut sleep: Sleep,
@@ -369,6 +411,7 @@ where
     Err("migration dashboard parent did not exit within 20 seconds".into())
 }
 
+#[cfg(target_os = "macos")]
 async fn reactivate_window_after_parent_exit(app: AppHandle) -> Result<(), String> {
     wait_for_parent_absence_with(
         || app.state::<LaunchContext>().handoff_parent_absent(),
@@ -380,6 +423,7 @@ async fn reactivate_window_after_parent_exit(app: AppHandle) -> Result<(), Strin
     app.state::<LaunchContext>().mark_post_parent_window_ready()
 }
 
+#[cfg(target_os = "macos")]
 fn activate_main_window(app: &AppHandle) -> Result<(), String> {
     crate::shell::prepare_migration_handoff_window(app)
 }
@@ -393,6 +437,7 @@ pub(crate) fn reopen_main_window(app: &AppHandle) -> Result<(), String> {
     activate_main_window(app)
 }
 
+#[cfg(target_os = "macos")]
 fn schedule_post_parent_window_activation(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         if let Err(error) = reactivate_window_after_parent_exit(app.clone()).await {
@@ -442,7 +487,10 @@ pub(crate) async fn boot_payload(
         product: cfw_core::DesktopProductInfo::current(),
         migration_handoff: launch.is_migration_handoff(),
         migration_handoff_status: lifecycle.migration_handoff_status()?,
+        #[cfg(target_os = "macos")]
         migration_handoff_renderer_ready: launch.migration_handoff_renderer_ready()?,
+        #[cfg(windows)]
+        migration_handoff_renderer_ready: None,
     })
 }
 
@@ -525,6 +573,7 @@ pub(crate) fn reload_dashboard(window: WebviewWindow) -> Result<(), String> {
     crate::shell::reload_dashboard(window.app_handle())
 }
 
+#[cfg(target_os = "macos")]
 #[tauri::command]
 pub(crate) fn acknowledge_migration_handoff_renderer_ready(
     window: WebviewWindow,
@@ -540,8 +589,10 @@ pub(crate) fn acknowledge_migration_handoff_renderer_ready(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "macos")]
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    #[cfg(target_os = "macos")]
     use std::time::Duration;
 
     use super::*;
@@ -570,6 +621,7 @@ mod tests {
         assert_eq!(calls.load(Ordering::Relaxed), 2);
     }
 
+    #[cfg(target_os = "macos")]
     fn challenges() -> Vec<RendererReadyChallenge> {
         (1..=3)
             .map(|generation| RendererReadyChallenge {
@@ -579,6 +631,7 @@ mod tests {
             .collect()
     }
 
+    #[cfg(target_os = "macos")]
     fn active_challenge(gate: &RendererReadyGate) -> RendererReadyChallenge {
         let MigrationHandoffRendererReady::Challenge {
             generation,
@@ -594,6 +647,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn native_setup_does_not_publish_or_issue_a_renderer_challenge() {
         let gate = RendererReadyGate::default();
         assert!(gate.boot_state(&challenges()).is_err());
@@ -617,6 +671,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn exhausting_parent_bound_generations_is_terminal() {
         let gate = RendererReadyGate::default();
         gate.mark_native_ready().expect("native ready");
@@ -628,6 +683,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn stale_and_wrong_window_acknowledgements_do_not_poison_the_current_generation() {
         let gate = RendererReadyGate::default();
         gate.mark_native_ready().expect("native ready");
@@ -652,6 +708,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn replay_and_publish_failure_are_terminal_and_never_republish() {
         let gate = RendererReadyGate::default();
         gate.mark_native_ready().expect("native ready");
@@ -703,6 +760,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn concurrent_acknowledgements_have_exactly_one_publication_side_effect() {
         let gate = Arc::new(RendererReadyGate::default());
         gate.mark_native_ready().expect("native ready");
@@ -735,6 +793,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn dashboard_and_inconsistent_handoff_roles_have_no_acknowledgement_path() {
         let dashboard = LaunchContext::dashboard();
         assert!(dashboard.require_handoff_ticket().is_err());
@@ -751,6 +810,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(target_os = "macos")]
     async fn parent_exit_wait_is_bounded_and_preserves_observation_errors() {
         let checks = AtomicUsize::new(0);
         let sleeps = AtomicUsize::new(0);

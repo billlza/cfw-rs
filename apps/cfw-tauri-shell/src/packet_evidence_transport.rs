@@ -32,7 +32,7 @@ use crate::engine::packet_evidence::{
     PacketEvidenceSnapshotReceipt, PacketEvidenceStages, PacketEvidenceTestReady,
     PacketEvidenceTransactionError, PacketEvidenceTransactionOutcome,
 };
-use crate::legacy::LegacyRetirementGate;
+use crate::platform_maintenance::PlatformMaintenanceGate;
 
 const CONTROL_FD: RawFd = 3;
 const CONTROL_SOCKET_NAME: &str = ".packet-evidence-control-v5.sock";
@@ -2032,7 +2032,7 @@ async fn serve_control_connection(
     validate_same_executable_peer(peer)?;
     validate_signed_peer(peer)?;
     let engine = app.state::<ManagedEngine>();
-    let retirement = app.state::<LegacyRetirementGate>();
+    let retirement = app.state::<PlatformMaintenanceGate>();
     run_app_protocol(
         AsyncPacketEvidenceChannel::new(stream),
         peer,

@@ -123,6 +123,34 @@ test("unqualified Windows minimum version is explicit and never substitutes for 
   }), /invalid/u);
 });
 
+test("Windows historical maintenance is inapplicable, never cleared or handoff authority", () => {
+  const status = { state: "not_applicable" };
+  assert.deepEqual(normalizeRetirementStatus(status, "windows"), status);
+  assert.equal(migrationRoute(status, false), "none");
+  assert.equal(legacyMaintenanceRoute(status, false, true), "none");
+  assert.throws(() => migrationRoute(status, true), /cannot own/u);
+  assert.throws(() => normalizeRetirementStatus(status, "macos"), /unknown/u);
+  for (const value of [
+    { state: "cleared" }, { state: "awaiting_confirmation" }, { state: "cleaning" },
+    { state: "not_applicable", ready: true }, null, {},
+  ]) {
+    assert.throws(() => normalizeRetirementStatus(value, "windows"), /invalid/u);
+  }
+  assert.throws(() => normalizeRetirementStatus(status), /invalid/u);
+  const payload = bootPayload();
+  payload.product = {
+    ...payload.product, name: "Clash for Windows", operating_system: "windows",
+    architecture: "x64", minimum_os_version: null,
+  };
+  assert.deepEqual(normalizeBootPayload(payload).product, payload.product);
+  for (const invalid of [
+    { ...payload, migration_handoff_status: { state: "in_progress" } },
+    { ...payload, migration_handoff: true, migration_handoff_renderer_ready: { state: "published" } },
+  ]) {
+    assert.throws(() => normalizeBootPayload(invalid), /cannot grant/u);
+  }
+});
+
 test("renderer ACK requires the current actionable General migration view and bound handlers", () => {
   const challengeBoot = normalizeBootPayload(bootPayload({
     handoff: true,
@@ -278,7 +306,7 @@ test("every durable retirement status has one explicit migration route", () => {
     [{ state: "cleared" }, "none", "none"],
   ];
   for (const [raw, dashboard, handoff] of cases) {
-    const normalized = normalizeRetirementStatus(raw);
+    const normalized = normalizeRetirementStatus(raw, "macos");
     assert.equal(migrationRoute(normalized, false), dashboard);
     assert.equal(migrationRoute(normalized, true), handoff);
   }
@@ -319,7 +347,7 @@ test("unknown or structurally ambiguous status fails instead of routing to Prepa
     { state: "manual_cleanup_required", action: "unknown", message: "x" },
     { state: "recovery_start_required", target: "off", message: "x" },
   ]) {
-    assert.throws(() => normalizeRetirementStatus(value), /invalid|unknown/u);
+    assert.throws(() => normalizeRetirementStatus(value, "macos"), /invalid|unknown/u);
   }
 });
 

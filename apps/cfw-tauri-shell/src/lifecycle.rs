@@ -32,13 +32,16 @@ const LIFECYCLE_UPDATE: u8 = 4;
 pub(crate) enum MigrationHandoffStatus {
     #[default]
     Idle,
+    #[cfg(target_os = "macos")]
     InProgress,
+    #[cfg(target_os = "macos")]
     Failed {
         code: &'static str,
         message: &'static str,
     },
 }
 
+#[cfg(target_os = "macos")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MigrationHandoffFailure {
     Admission,
@@ -46,6 +49,7 @@ pub(crate) enum MigrationHandoffFailure {
     UnexpectedTaskEnd,
 }
 
+#[cfg(target_os = "macos")]
 impl MigrationHandoffFailure {
     fn status(self) -> MigrationHandoffStatus {
         match self {
@@ -72,6 +76,7 @@ enum ShutdownAdmission {
     ExitReady,
 }
 
+#[cfg(target_os = "macos")]
 pub(crate) struct HandoffLifecycleLease {
     shared: Arc<LifecycleShared>,
     active: bool,
@@ -132,6 +137,7 @@ impl AppLifecycle {
             .map_err(|_| "startup shutdown lost lifecycle ownership".into())
     }
 
+    #[cfg(target_os = "macos")]
     fn begin_handoff_lease(&self) -> Result<HandoffLifecycleLease, String> {
         self.shared.begin_handoff()?;
         Ok(HandoffLifecycleLease {
@@ -198,6 +204,7 @@ impl AppLifecycle {
 }
 
 impl LifecycleShared {
+    #[cfg(target_os = "macos")]
     fn begin_handoff(&self) -> Result<(), String> {
         let mut status = self
             .handoff_status
@@ -238,6 +245,7 @@ impl LifecycleShared {
             })
     }
 
+    #[cfg(target_os = "macos")]
     fn fail_handoff(&self, failure: MigrationHandoffFailure) -> Result<(), String> {
         let mut status = self
             .handoff_status
@@ -260,10 +268,12 @@ fn lifecycle_owner_name(owner: u8) -> &'static str {
     }
 }
 
+#[cfg(target_os = "macos")]
 pub(crate) fn begin_handoff_lifecycle(app: &AppHandle) -> Result<HandoffLifecycleLease, String> {
     app.state::<AppLifecycle>().begin_handoff_lease()
 }
 
+#[cfg(target_os = "macos")]
 pub(crate) async fn prepare_handoff_exit(
     app: AppHandle,
     lifecycle_lease: &mut HandoffLifecycleLease,
@@ -460,6 +470,7 @@ pub(crate) fn quit_app(app: AppHandle) -> Result<(), String> {
     request_shutdown(app, 0)
 }
 
+#[cfg(target_os = "macos")]
 impl HandoffLifecycleLease {
     pub(crate) fn fail(&mut self, failure: MigrationHandoffFailure) -> Result<(), String> {
         self.shared.fail_handoff(failure)?;
@@ -479,6 +490,7 @@ impl Drop for UpdateLifecycleLease {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl Drop for HandoffLifecycleLease {
     fn drop(&mut self) {
         if !self.active {
@@ -539,6 +551,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn handoff_failure_is_queryable_and_retry_replaces_it_with_in_progress() {
         let lifecycle = AppLifecycle::default();
         let mut lease = lifecycle.begin_handoff_lease().expect("handoff admission");
@@ -547,6 +560,7 @@ mod tests {
             MigrationHandoffStatus::InProgress
         );
         assert!(lifecycle.begin_shutdown().is_err());
+        #[cfg(target_os = "macos")]
         assert!(lifecycle.begin_handoff_lease().is_err());
         lease
             .fail(MigrationHandoffFailure::Operation)
@@ -569,6 +583,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn dropped_handoff_lease_records_unexpected_failure_and_restores_admission() {
         let lifecycle = AppLifecycle::default();
         drop(lifecycle.begin_handoff_lease().expect("handoff admission"));
@@ -590,6 +605,7 @@ mod tests {
         let update = lifecycle.begin_update_lease().expect("update admission");
         assert!(!lifecycle.startup_work_allowed());
         assert!(lifecycle.begin_update_lease().is_err());
+        #[cfg(target_os = "macos")]
         assert!(lifecycle.begin_handoff_lease().is_err());
         let refused = lifecycle
             .begin_shutdown()
@@ -616,6 +632,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn shutdown_is_idempotent_but_remains_mutually_exclusive_with_handoff() {
         let lifecycle = AppLifecycle::default();
         assert_eq!(
@@ -626,6 +643,7 @@ mod tests {
             lifecycle.begin_shutdown().expect("idempotent shutdown"),
             ShutdownAdmission::AlreadyInProgress
         );
+        #[cfg(target_os = "macos")]
         assert!(lifecycle.begin_handoff_lease().is_err());
         lifecycle
             .reset_owner_after_failure(LIFECYCLE_SHUTDOWN)
@@ -638,6 +656,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn simultaneous_handoff_and_shutdown_admit_exactly_one_owner() {
         for _ in 0..64 {
             let lifecycle = Arc::new(AppLifecycle::default());

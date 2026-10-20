@@ -9,7 +9,9 @@ use cfw_singbox_config::{EngineSettings, RuntimePreferences, ValidatedSingBoxPro
 use super::{
     EngineEndpointBinding, ManagedEngine, authorize_proxy_transition, record_endpoint_runtime,
 };
-use crate::{commands::ManagedProfiles, legacy::LegacyRetirementGate, settings_store};
+use crate::{
+    commands::ManagedProfiles, platform_maintenance::PlatformMaintenanceGate, settings_store,
+};
 
 struct PreparedRuntimeSettings {
     previous: RuntimeSettingsSnapshot<RuntimePreferences>,
@@ -24,7 +26,7 @@ struct PreparedRuntimeSettings {
 
 pub(crate) async fn change_runtime_preferences(
     engine: &ManagedEngine,
-    retirement: &LegacyRetirementGate,
+    retirement: &PlatformMaintenanceGate,
     profiles: &ManagedProfiles,
     preferences: RuntimePreferences,
     expected_revision: Option<String>,
@@ -35,7 +37,7 @@ pub(crate) async fn change_runtime_preferences(
         .await
         .map_err(|error| error.to_string())?;
     if mode != EngineMode::Off {
-        crate::legacy::require_network_start_allowed(retirement)?;
+        crate::platform_maintenance::require_start_allowed(retirement)?;
         engine.require_capability(mode)?;
     }
     let coordinator = engine.coordinator.clone();

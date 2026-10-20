@@ -25,8 +25,8 @@ use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
 use crate::commands::open_trusted_external_url;
-use crate::legacy::{current_process_identity, process_identity_exists};
 use crate::lifecycle::{begin_update_lifecycle, prepare_update_exit};
+use crate::process_identity::{current_process_identity, process_identity_exists};
 use admission::{
     BundleIdentity, InstallAdmissionError, admit_running_installation, runs_from_installed_location,
 };

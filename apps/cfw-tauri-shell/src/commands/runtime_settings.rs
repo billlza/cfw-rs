@@ -2,7 +2,7 @@
 use crate::{
     commands::ManagedProfiles,
     engine::{ManagedEngine, change_runtime_preferences},
-    legacy::LegacyRetirementGate,
+    platform_maintenance::PlatformMaintenanceGate,
     settings_store,
 };
 use cfw_core::RuntimeSettingsSnapshot;
@@ -89,7 +89,7 @@ pub(crate) async fn read_runtime_settings_snapshot(
 #[tauri::command]
 pub(crate) async fn write_runtime_settings_snapshot(
     engine: State<'_, ManagedEngine>,
-    retirement: State<'_, LegacyRetirementGate>,
+    retirement: State<'_, PlatformMaintenanceGate>,
     profiles: State<'_, ManagedProfiles>,
     settings: RuntimePreferences,
     revision: Option<String>,
@@ -100,7 +100,7 @@ pub(crate) async fn write_runtime_settings_snapshot(
 
 pub(super) async fn update(
     engine: &ManagedEngine,
-    retirement: &LegacyRetirementGate,
+    retirement: &PlatformMaintenanceGate,
     profiles: &ManagedProfiles,
     change: impl FnOnce(&mut RuntimePreferences) -> Result<(), String>,
 ) -> Result<RuntimeSettingsView, String> {

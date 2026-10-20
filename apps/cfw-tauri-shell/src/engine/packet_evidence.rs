@@ -13,7 +13,7 @@ use futures_util::FutureExt;
 use thiserror::Error;
 
 #[cfg(feature = "physical-release-evidence")]
-pub use crate::legacy::LegacyRetirementGate;
+pub use crate::platform_maintenance::PlatformMaintenanceGate;
 use crate::release_observation::{
     DnsEvidenceSnapshotReceipt, emit_dns_evidence_transaction, emit_engine_snapshot_with_sequence,
 };
@@ -279,7 +279,7 @@ impl ManagedEngine {
     /// cross this boundary. Once admitted, restore outlives caller cancellation.
     pub async fn run_packet_evidence_staged_transaction(
         &self,
-        retirement: &LegacyRetirementGate,
+        retirement: &PlatformMaintenanceGate,
         case: ReleasePacketEvidenceCase,
         stages: PacketEvidenceStages,
     ) -> Result<PacketEvidenceTransactionOutcome, PacketEvidenceTransactionError> {
@@ -288,7 +288,7 @@ impl ManagedEngine {
         let maintenance = self
             .reserve_maintenance()
             .map_err(|error| PacketEvidenceTransactionError::Maintenance(error.to_string()))?;
-        crate::legacy::require_network_start_allowed(retirement)
+        crate::platform_maintenance::require_start_allowed(retirement)
             .map_err(PacketEvidenceTransactionError::LegacyRetirement)?;
         let coordinator = self.coordinator.clone();
         let completion = maintenance.run_to_completion(async move {

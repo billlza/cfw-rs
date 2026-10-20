@@ -534,6 +534,7 @@ fn sid_text(sid: PSID) -> Result<String, PeerIdentityError> {
 mod tests;
 
 mod authorization;
+mod observation;
 pub use authorization::{
     LiveConsoleSession, ServiceAuthorizationError, ServicePeerAuthorization,
     UserAgentLeaseRequirement, authorize_service_request,

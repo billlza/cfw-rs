@@ -22,7 +22,7 @@ use super::journal::{
 use super::services::{self, ServicePair};
 use super::staged_bundle::{StagedExpectation, verify_staged_bundle};
 use super::staging::StagingArea;
-use crate::legacy::{ProcessIdentity, exact_processes, process_identity_exists};
+use crate::process_identity::{ProcessIdentity, exact_processes, process_identity_exists};
 
 const DASHBOARD_EXIT_TIMEOUT: Duration = Duration::from_secs(30);
 const DASHBOARD_EXIT_POLL: Duration = Duration::from_millis(100);

@@ -656,7 +656,7 @@ pub(super) fn client(name: &str, hex: &str, case: ClientCase) -> Result<()> {
     result
 }
 
-fn client_body(name: &str, hex: &str, case: ClientCase) -> Result<()> {
+pub(super) fn require_medium_user_context() -> Result<NativePeerProcess> {
     let identity = NativePeerProcess::open(std::process::id()).map_err(|e| e.to_string())?;
     if identity.identity().integrity_rid() != 0x2000 {
         return Err("fixture client does not have medium integrity".into());
@@ -669,6 +669,11 @@ fn client_body(name: &str, hex: &str, case: ClientCase) -> Result<()> {
     if member != 0 {
         return Err("fixture client still has administrator membership".into());
     }
+    Ok(identity)
+}
+
+fn client_body(name: &str, hex: &str, case: ClientCase) -> Result<()> {
+    let identity = require_medium_user_context()?;
     if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("invalid fixture executable identity".into());
     }

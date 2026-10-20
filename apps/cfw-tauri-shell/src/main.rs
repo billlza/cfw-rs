@@ -8,6 +8,7 @@ mod engine;
 mod engine_controls;
 mod i18n;
 mod launch;
+#[cfg(target_os = "macos")]
 mod legacy;
 mod lifecycle;
 #[cfg(target_os = "macos")]
@@ -17,8 +18,10 @@ mod native_components;
 mod native_dashboard;
 #[cfg(feature = "physical-release-evidence")]
 mod packet_evidence_transport;
+mod platform_maintenance;
 mod platform_runtime;
 mod private_store;
+mod process_identity;
 #[cfg(test)]
 mod profile_fixtures;
 mod release_observation;
@@ -34,11 +37,9 @@ mod window_state;
 #[cfg(feature = "physical-release-evidence")]
 pub use engine::{ManagedEngine, packet_evidence};
 
+use bootstrap::{LaunchContext, boot_payload, reload_dashboard};
 #[cfg(target_os = "macos")]
-use bootstrap::reopen_main_window;
-use bootstrap::{
-    LaunchContext, acknowledge_migration_handoff_renderer_ready, boot_payload, reload_dashboard,
-};
+use bootstrap::{acknowledge_migration_handoff_renderer_ready, reopen_main_window};
 use cfw_core::SettingsStore;
 use cfw_engine_api::EngineEvent;
 use commands::{
@@ -64,14 +65,14 @@ use commands::{
     update_geoip_database, update_profile, update_profile_info, update_proxy_provider,
     update_rule_provider, write_runtime_settings_snapshot, write_settings_snapshot,
 };
-use engine::{engine_snapshot, prepare_legacy_cutover};
+use engine::engine_snapshot;
+#[cfg(target_os = "macos")]
+use engine::prepare_legacy_cutover;
 use launch::{LaunchMode, STARTUP_ADMISSION_EXIT_CODE, STARTUP_USAGE_EXIT_CODE, parse_launch_mode};
 #[cfg(target_os = "macos")]
 use legacy::{ConsumedHandoffTicket, MigrationHandoffLease};
-use legacy::{
-    LegacyRetirementGate, begin_migration_handoff, disable_service_mode, legacy_retirement_status,
-    recover_legacy_cutover,
-};
+#[cfg(target_os = "macos")]
+use legacy::{begin_migration_handoff, disable_service_mode, recover_legacy_cutover};
 use lifecycle::{AppLifecycle, quit_app, request_shutdown};
 use native_components::general_switches::{
     dismiss_native_general_switches, focus_native_general_switch, sync_native_general_switches,
@@ -89,6 +90,7 @@ use native_components::window_glass::{
 use native_components::{
     dismiss_native_profile_menu, present_native_profile_menu, update_native_profile_menu,
 };
+use platform_maintenance::{PlatformMaintenanceGate, legacy_retirement_status};
 use shell::{TrayMenuState, build_app_menu, focus_main_window, handle_app_menu_event};
 use tauri::{Emitter, Manager, RunEvent, WindowEvent};
 use updater::{
@@ -103,6 +105,7 @@ fn settings_store() -> Result<SettingsStore, String> {
 
 type AppInvokeHandler = Box<dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static>;
 
+#[cfg(target_os = "macos")]
 fn migration_handoff_command_allowed(command: &str) -> bool {
     matches!(
         command,
@@ -240,7 +243,7 @@ fn main() {
         .manage(i18n::NativeLanguage::default())
         .manage(startup_state::NativeStartup::default())
         .manage(launch)
-        .manage(LegacyRetirementGate::default())
+        .manage(PlatformMaintenanceGate::default())
         .manage(AppLifecycle::default())
         .manage(LiveStreams::default())
         .manage(commands::ManagedProviders::default())
@@ -264,6 +267,7 @@ fn main() {
         ))
     };
     let invoke_handler: AppInvokeHandler = Box::new(tauri::generate_handler![
+        #[cfg(target_os = "macos")]
         acknowledge_migration_handoff_renderer_ready,
         engine_snapshot,
         reconcile_startup_services,
@@ -279,9 +283,13 @@ fn main() {
         request_wifi_name_access,
         write_settings_snapshot,
         legacy_retirement_status,
+        #[cfg(target_os = "macos")]
         begin_migration_handoff,
+        #[cfg(target_os = "macos")]
         prepare_legacy_cutover,
+        #[cfg(target_os = "macos")]
         disable_service_mode,
+        #[cfg(target_os = "macos")]
         recover_legacy_cutover,
         set_launch_at_login_enabled,
         import_profile_text,
@@ -385,6 +393,7 @@ fn main() {
         .manage(native_components::window_glass::WindowGlassState::default());
     let application = builder
         .invoke_handler(move |invoke: tauri::ipc::Invoke<tauri::Wry>| {
+            #[cfg(target_os = "macos")]
             if migration_handoff && !migration_handoff_command_allowed(invoke.message.command()) {
                 let command = invoke.message.command().to_owned();
                 invoke.resolver.reject(format!(
@@ -503,7 +512,7 @@ fn main() {
     });
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::migration_handoff_command_allowed;
 

@@ -70,18 +70,22 @@ async fn initialize(app: AppHandle) -> Result<(), String> {
     let worker = app.clone();
     prepare_off_main(move || {
         crate::engine::start_engine_event_forwarder(worker.clone());
+        #[cfg(target_os = "macos")]
         worker
             .state::<Diagnostics>()
             .startup_step("launch_preflight", || {
                 crate::legacy::run_launch_preflight(&worker)
-            })
+            })?;
+        Ok(())
     })
     .await?;
 
+    #[cfg(target_os = "macos")]
     if app.state::<crate::LaunchContext>().is_migration_handoff() {
         app.state::<crate::LaunchContext>()
             .mark_renderer_native_ready()?;
-    } else {
+    }
+    if !app.state::<crate::LaunchContext>().is_migration_handoff() {
         on_main(&app, |app| {
             if !app
                 .state::<crate::lifecycle::AppLifecycle>()

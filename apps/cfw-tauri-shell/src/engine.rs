@@ -1,3 +1,4 @@
+#[cfg(target_os = "macos")]
 mod cutover;
 mod endpoints;
 mod maintenance;
@@ -20,6 +21,7 @@ pub(crate) const ENDPOINT_CONFLICT_RETRY_DELAY: std::time::Duration =
 mod tests;
 
 use std::sync::{Arc, RwLock};
+#[cfg(target_os = "macos")]
 use std::time::Instant;
 
 use cfw_application::{EngineControllerAccess, EngineCoordinatorError, EngineModeCoordinator};
@@ -33,13 +35,17 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::commands::ManagedProfiles;
-use crate::legacy::{LegacyRetirementGate, load_replacement_engine_settings};
+#[cfg(target_os = "macos")]
+use crate::legacy::load_replacement_engine_settings;
+use crate::platform_maintenance::PlatformMaintenanceGate;
 use crate::settings_store;
+#[cfg(target_os = "macos")]
 use cutover::CutoverPreparationGate;
 use endpoints::{EndpointCandidateCursor, EndpointRole};
 pub(crate) use maintenance::{EngineMaintenanceError, EngineMaintenanceLease, ProfileControlError};
 use maintenance::{EngineMaintenanceGate, EngineModeChangeIntent, EngineModeChangeLease};
 
+#[cfg(target_os = "macos")]
 pub(crate) use cutover::{
     CutoverAuthority, prepare_legacy_cutover, run_native_preflight, validate_outcome_binding,
 };
@@ -163,6 +169,7 @@ pub struct ManagedEngine {
     preflight_backend: Option<Arc<dyn CutoverPreflightBackend>>,
     system_proxy_authorization: Arc<dyn SystemProxyAuthorization>,
     pub(crate) profile_delay_backend: Arc<dyn cfw_engine_api::ProfileDelayBackend>,
+    #[cfg(target_os = "macos")]
     cutover: CutoverPreparationGate,
     maintenance: EngineMaintenanceGate,
     endpoints: Arc<RwLock<EngineEndpointBinding>>,
@@ -193,6 +200,7 @@ impl StagedEndpointRebind {
 }
 
 impl ManagedEngine {
+    #[cfg(target_os = "macos")]
     pub(crate) fn legacy_preflight(&self) -> Result<&dyn CutoverPreflightBackend, String> {
         self.preflight_backend
             .as_deref()
@@ -369,6 +377,7 @@ impl ManagedEngine {
         }
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn take_cutover_authority(
         &self,
         receipt_id: &str,
@@ -378,9 +387,9 @@ impl ManagedEngine {
 
     pub(crate) fn status_payload(
         &self,
-        retirement: &LegacyRetirementGate,
+        retirement: &PlatformMaintenanceGate,
     ) -> Result<EngineStatusPayload, String> {
-        let retirement_reason = retirement.status()?.start_block_reason();
+        let retirement_reason = crate::platform_maintenance::start_block_reason(retirement)?;
         let capabilities = if retirement_reason.is_some() {
             EngineCapabilities {
                 local_proxy: false,
@@ -391,7 +400,13 @@ impl ManagedEngine {
         } else {
             self.capabilities
         };
+        #[cfg(target_os = "macos")]
         let (cutover_ready, mut cutover_reason) = self.cutover.readiness(Instant::now())?;
+        #[cfg(windows)]
+        let (cutover_ready, mut cutover_reason) = (
+            false,
+            Some("legacy maintenance does not apply to this Windows release".into()),
+        );
         let cutover_ready = cutover_ready && self.preflight_backend.is_some();
         if self.preflight_backend.is_none() {
             cutover_reason = Some("legacy service cutover is unavailable on this platform".into());
@@ -420,29 +435,32 @@ pub(crate) struct PreparedEngine {
     pub(crate) task: cfw_application::CoordinatorTask,
 }
 
+fn configured_engine_settings(
+    store: &cfw_core::SettingsStore,
+) -> Result<(EngineSettings, EndpointCandidateCursor), String> {
+    #[cfg(target_os = "macos")]
+    if let Some(settings) = load_replacement_engine_settings(&store.paths().app_home)? {
+        let cursor = EndpointCandidateCursor::from_persisted(settings.clone())
+            .map_err(|error| format!("persisted engine endpoints are unusable: {error}"))?;
+        return Ok((settings, cursor));
+    }
+    let preferences = store
+        .runtime_settings::<cfw_singbox_config::RuntimePreferences>()
+        .map_err(|error| error.to_string())?
+        .settings;
+    let settings = preferences
+        .apply_to(EngineSettings::default())
+        .map_err(|error| error.to_string())?;
+    endpoints::select_configured_engine_settings(settings, preferences.preferred_mixed_port)
+        .map_err(|error| format!("engine loopback endpoints are unavailable: {error}"))
+}
+
 pub(crate) fn prepare_managed_engine(
     services: crate::platform_runtime::PlatformRuntime,
 ) -> Result<PreparedEngine, String> {
     let store = settings_store()?;
     store.ensure_layout().map_err(|error| error.to_string())?;
-    let (settings, cursor) = match load_replacement_engine_settings(&store.paths().app_home)? {
-        Some(settings) => {
-            let cursor = EndpointCandidateCursor::from_persisted(settings.clone())
-                .map_err(|error| format!("persisted engine endpoints are unusable: {error}"))?;
-            (settings, cursor)
-        }
-        None => {
-            let preferences = store
-                .runtime_settings::<cfw_singbox_config::RuntimePreferences>()
-                .map_err(|error| error.to_string())?
-                .settings;
-            let settings = preferences
-                .apply_to(EngineSettings::default())
-                .map_err(|error| error.to_string())?;
-            endpoints::select_configured_engine_settings(settings, preferences.preferred_mixed_port)
-                .map_err(|error| format!("engine loopback endpoints are unavailable: {error}"))?
-        }
-    };
+    let (settings, cursor) = configured_engine_settings(&store)?;
     let controller = EngineControllerAccess::resolve(settings)
         .map_err(|error| format!("engine settings are unusable: {error}"))?;
     let crate::platform_runtime::PreparedRuntime {
@@ -467,6 +485,7 @@ pub(crate) fn prepare_managed_engine(
         preflight_backend: services.legacy_preflight,
         system_proxy_authorization: services.authorization,
         profile_delay_backend: services.probes,
+        #[cfg(target_os = "macos")]
         cutover: CutoverPreparationGate::default(),
         maintenance: EngineMaintenanceGate::default(),
         endpoints: Arc::new(RwLock::new(EngineEndpointBinding {
@@ -544,7 +563,7 @@ pub(crate) fn start_engine_event_forwarder(app: AppHandle) {
 #[tauri::command]
 pub(crate) fn engine_snapshot(
     engine: State<'_, ManagedEngine>,
-    retirement: State<'_, LegacyRetirementGate>,
+    retirement: State<'_, PlatformMaintenanceGate>,
 ) -> Result<EngineStatusPayload, String> {
     engine.status_payload(&retirement)
 }
@@ -559,13 +578,13 @@ pub(crate) fn engine_snapshot(
 /// actor responds, so accepted native work cannot escape maintenance.
 pub(crate) async fn apply_admitted_engine_mode(
     engine: &ManagedEngine,
-    retirement: &LegacyRetirementGate,
+    retirement: &PlatformMaintenanceGate,
     profiles: &ManagedProfiles,
     mode: EngineMode,
     mode_lease: EngineModeChangeLease,
 ) -> Result<EngineStatusPayload, String> {
     if mode != EngineMode::Off {
-        crate::legacy::require_network_start_allowed(retirement)?;
+        crate::platform_maintenance::require_start_allowed(retirement)?;
         engine.require_capability(mode)?;
     }
     let (profile_id, profile) = selected_profile_for_mode(profiles.repository(), mode)
@@ -606,7 +625,7 @@ pub(crate) async fn apply_admitted_engine_mode(
 /// for a crashed active runtime. The owned task survives a dropped UI waiter.
 pub(crate) async fn apply_profile_change<T, F, P>(
     engine: &ManagedEngine,
-    retirement: &LegacyRetirementGate,
+    retirement: &PlatformMaintenanceGate,
     prepare: P,
 ) -> Result<T, String>
 where
@@ -621,7 +640,7 @@ where
         .await
         .map_err(|error| error.to_string())?;
     let start_admission = if mode != EngineMode::Off {
-        crate::legacy::require_network_start_allowed(retirement)
+        crate::platform_maintenance::require_start_allowed(retirement)
             .and_then(|()| engine.require_capability(mode))
     } else {
         Ok(())

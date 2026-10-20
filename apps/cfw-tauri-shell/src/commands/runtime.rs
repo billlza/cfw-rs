@@ -25,7 +25,7 @@ use tauri::State;
 
 use super::ManagedProfiles;
 use crate::engine::{ManagedEngine, apply_admitted_engine_mode};
-use crate::legacy::LegacyRetirementGate;
+use crate::platform_maintenance::PlatformMaintenanceGate;
 use crate::settings_store;
 
 /// Placeholder written over the controller secret in a preview.
@@ -66,7 +66,7 @@ pub(crate) struct GeoIpDatabaseStatus {
 #[tauri::command]
 pub(crate) async fn apply_active_profile(
     engine: State<'_, ManagedEngine>,
-    retirement: State<'_, LegacyRetirementGate>,
+    retirement: State<'_, PlatformMaintenanceGate>,
     profiles: State<'_, ManagedProfiles>,
 ) -> Result<ProfileApplyResult, String> {
     let (mode, mode_lease) = engine

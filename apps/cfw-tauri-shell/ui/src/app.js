@@ -3419,7 +3419,15 @@ async function reconcileStartupServices() {
   }
 }
 
+const MACOS_MAINTENANCE_ACTIONS = new Set([
+  "open-legacy-maintenance", "close-legacy-maintenance", "begin-migration-handoff",
+  "prepare-cutover", "confirm-cutover", "recover-cutover",
+]);
+
 export async function handleAction(action) {
+  if (MACOS_MAINTENANCE_ACTIONS.has(action) && state.payload.product.operating_system !== "macos") {
+    throw new Error("Historical Mac maintenance does not apply to this platform");
+  }
   if (action === "reconcile-startup-services") return reconcileStartupServices();
   if (action === "open-automation-settings") { await automationSettingsUI.open(); return; }
   if (action === "open-runtime-settings") { await runtimeSettingsUI.open(); return; }
@@ -4255,7 +4263,9 @@ async function loadEngineStatus() {
 /// visible rather than being represented as completed cleanup.
 async function loadRetirementStatus() {
   try {
-    state.retirement = normalizeRetirementStatus(await invoke("legacy_retirement_status"));
+    state.retirement = normalizeRetirementStatus(
+      await invoke("legacy_retirement_status"), state.payload.product.operating_system,
+    );
   } catch (error) {
     state.retirement = unverifiableRetirementStatus(errorText(error));
     appendLog("error", "engine", t("Unable to read the legacy retirement state: {error}", { error: errorText(error) }));

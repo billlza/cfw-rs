@@ -900,6 +900,38 @@ test("About and Feedback retain the host's Windows version and architecture", as
   }
 });
 
+test("Windows omits Mac maintenance without showing a completed cleanup or dispatching cutover", async () => {
+  const original = {
+    product: state.payload.product, retirement: state.retirement,
+    maintenanceOpen: state.legacyMaintenanceOpen, page: state.activePage,
+  };
+  const commandsBefore = invoked.length;
+  try {
+    state.payload.product = {
+      ...original.product, name: "Clash for Windows", operating_system: "windows",
+      architecture: "x64", minimum_os_version: null,
+    };
+    state.retirement = { state: "not_applicable" };
+    state.legacyMaintenanceOpen = true;
+    const settings = await renderPage("settings");
+    assert.doesNotMatch(settings, /open-legacy-maintenance|Older Clash for Mac|Legacy maintenance/u);
+    const general = await renderPage("general");
+    assert.doesNotMatch(general, /begin-migration-handoff|prepare-cutover|confirm-cutover|recover-cutover|data-migration/u);
+    for (const action of [
+      "open-legacy-maintenance", "begin-migration-handoff", "prepare-cutover",
+      "confirm-cutover", "recover-cutover",
+    ]) {
+      await assert.rejects(() => appModule.handleAction(action), /does not apply/u);
+    }
+    assert.deepEqual(invoked.slice(commandsBefore), []);
+  } finally {
+    state.payload.product = original.product;
+    state.retirement = original.retirement;
+    state.legacyMaintenanceOpen = original.maintenanceOpen;
+    await renderPage(original.page);
+  }
+});
+
 test("a refreshed projection updates the inherited IPv6 switch", async () => {
   const original = responses.read_runtime_settings_snapshot;
   try {

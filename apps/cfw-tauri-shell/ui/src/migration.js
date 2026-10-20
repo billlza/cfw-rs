@@ -169,6 +169,10 @@ export function normalizeBootPayload(value) {
   } else {
     throw new TypeError("handoff boot payload requires renderer readiness authority");
   }
+  if (product.operating_system === "windows"
+    && (value.migration_handoff || migrationHandoffStatus.state !== "idle" || rendererReady !== null)) {
+    throw new TypeError("Windows boot payload cannot grant historical Mac handoff authority");
+  }
   return {
     product,
     native_ui: { ...value.native_ui },
@@ -202,9 +206,16 @@ export function normalizeMigrationHandoffStatus(value) {
   throw new TypeError("migration handoff status is invalid");
 }
 
-export function normalizeRetirementStatus(value) {
+export function normalizeRetirementStatus(value, operatingSystem) {
+  platformPresentation(operatingSystem);
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new TypeError("legacy retirement status is invalid");
+  }
+  if (operatingSystem === "windows") {
+    if (!exactKeys(value, ["state"]) || value.state !== "not_applicable") {
+      throw new TypeError("historical maintenance status is invalid for this Windows release");
+    }
+    return { state: "not_applicable" };
   }
   switch (value.state) {
     case "awaiting_confirmation":
@@ -246,6 +257,9 @@ export function unverifiableRetirementStatus(message) {
 
 export function migrationRoute(retirement, migrationHandoff) {
   switch (retirement?.state) {
+    case "not_applicable":
+      if (migrationHandoff) throw new TypeError("an inapplicable maintenance scope cannot own a handoff");
+      return "none";
     case "cleared":
       return "none";
     case "cleaning":
@@ -275,6 +289,7 @@ export function migrationRoute(retirement, migrationHandoff) {
 /// surface without requiring the user to discover the maintenance entry.
 export function legacyMaintenanceRoute(retirement, migrationHandoff, maintenanceOpen = false) {
   const route = migrationRoute(retirement, migrationHandoff);
+  if (retirement?.state === "not_applicable") return "none";
   if (route === "none") return maintenanceOpen ? "complete" : "none";
   if (migrationHandoff || maintenanceOpen
     || retirement?.state === "cleaning"

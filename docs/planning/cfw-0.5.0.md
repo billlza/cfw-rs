@@ -10,15 +10,31 @@ Rust 重构的首个 Windows 大版本，目前没有可指认的本项目旧 Wi
 服务退役命令标为平台不适用，不能算作 Windows 网络恢复或安装更新已完成。
 当前 Windows 启动解析拒绝 CFM 交接、Apple 服务维护和 Apple 物理证据参数，
 在任何启动 I/O 之前报错；常规 dashboard 与精确的更新事务入口仍保留。共享 UI
-及其余历史维护调用点的拆分尚未完成，不能由入口隔离推出完整应用已经可构建。
+的历史维护状态现在按平台校验，Windows 明确返回 `not_applicable`；Mac 的交接
+命令、启动预检及交接生命周期仅在 Mac 编译。共享引擎仍使用原有 Windows
+Authority 和协调器，历史维护不适用不能替代网络权限或停止证明。不能由这次
+拆分推出完整应用已经可构建。
+
+进程观察已从旧维护模块提取：Mac 保留原有 UID/PID/启动时间格式及全部原生测试；
+Windows 保存完整 SID、登录标识、会话、FILETIME 与令牌属性，通过保留的原生
+进程对象重新观察。访问拒绝仍是错误。当前会话枚举不能证明其他登录会话没有
+进程，也不能代替安装包签名或映像字节验证。新增原生测试覆盖实际 Unicode 路径
+子进程、退出、身份变更和数量上限；已安装客户端场景还会验证中等完整性、非管理员
+上下文中的实际应用模块。这些新增 Windows 原生路径尚待本批 CI 执行。
+
+本批本地通过 Mac 全目标 Clippy（禁止 warning），102 项维护、11 项原生进程、
+8 项启动、8 项更新日志、31 项引擎和 6 项生命周期回归，以及 314 项 UI 测试；
+Windows 引擎库交叉 Clippy 通过。前一源码 `4f43a9b` 的托管 Mac CI 在
+`NativeBridgeABIRequestRegistryTests.admissionWatchdogCancelsAndSuppressesLateSuccess`
+失败，Xcode 与应用打包未执行；原始日志保留，不能以本地 Rust 回归替代这项门禁。
 
 共享界面的产品元数据改由构建目标提供，Windows 不再沿用 Mac 产品名、系统与
 架构，托盘也使用同一产品名。`minimum_os_version` 在 Windows 开发阶段为显式
 `null`，表示尚未确定经过验收的最低支持版本；About/Feedback 不据此展示版本
 保证。Mac 的既有六字段内容保持一致。此元数据不授予引擎或发布权限。
 
-最新完整组件证据（2026-10-20）：`098fe85` 的 Windows CI 四项作业及下载产物核验通过，
-含 648 项 Rust、311 项 UI、14 项原生引擎、35 项 SCM 检查。产品服务/Agent 的
+最新完整组件证据（2026-10-20）：`4f43a9b` 的 Windows CI 四项作业及下载产物核验通过，
+含 655 项 Rust、312 项 UI、14 项原生引擎、35 项 SCM 检查。产品服务/Agent 的
 安装、四种模式的非激活预检、共享 EngineBackend 的 LocalProxy/SystemProxy 启停与
 新鲜状态查询，以及真实引擎退出后的查询拒绝和独立 Off 已验证。安装客户端聚合超时
 已定位并通过拆分有界验收关闭；服务崩溃恢复仍要求独立观察者保留运行 Job。

@@ -9,7 +9,7 @@ use super::journal::{
     UpdateInstallLeaseError,
 };
 use super::staging::remove_all;
-use crate::legacy::ProcessIdentity;
+use crate::process_identity::ProcessIdentity;
 
 /// What the last installation attempt left behind, reported once to the
 /// dashboard that starts after it.

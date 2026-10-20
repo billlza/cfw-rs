@@ -60,23 +60,7 @@ impl VerifiedExecutable {
     }
 
     pub(crate) fn verify_process_image(&self, process: &OwnedHandle) -> Result<(), Error> {
-        let mut buffer = vec![0; 32768];
-        let mut length = buffer.len() as u32;
-        if unsafe {
-            QueryFullProcessImageNameW(process.as_raw_handle(), 0, buffer.as_mut_ptr(), &mut length)
-        } == 0
-        {
-            return Err(Error::Operation {
-                operation: "query live process image",
-                source: std::io::Error::last_os_error(),
-            });
-        }
-        let length = length as usize;
-        if length == 0 || length >= buffer.len() || buffer[..length].contains(&0) {
-            return Err(Error::ExecutableIdentity);
-        }
-        let path = OsString::from_wide(&buffer[..length]);
-        self.verify_image_file(Path::new(&path))
+        self.verify_image_file(&process_image_path(process)?)
     }
 
     /// Compare the live process image to the already hash-verified, retained
@@ -155,6 +139,27 @@ impl VerifiedExecutable {
             version: version.to_owned(),
         })
     }
+}
+
+pub(crate) fn process_image_path(process: &OwnedHandle) -> Result<PathBuf, Error> {
+    let mut buffer = vec![0; 32768];
+    let mut length = buffer.len() as u32;
+    // SAFETY: the retained process and bounded writable UTF-16 buffer live
+    // through the synchronous query. The returned length is checked below.
+    if unsafe {
+        QueryFullProcessImageNameW(process.as_raw_handle(), 0, buffer.as_mut_ptr(), &mut length)
+    } == 0
+    {
+        return Err(Error::Operation {
+            operation: "query live process image",
+            source: std::io::Error::last_os_error(),
+        });
+    }
+    let length = length as usize;
+    if length == 0 || length >= buffer.len() || buffer[..length].contains(&0) {
+        return Err(Error::ExecutableIdentity);
+    }
+    Ok(PathBuf::from(OsString::from_wide(&buffer[..length])))
 }
 
 /// Keep every ancestor non-replaceable while a path is consumed by CreateProcess.

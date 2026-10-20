@@ -5,10 +5,10 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::admission::BundleIdentity;
-use crate::legacy::ProcessIdentity;
 use crate::private_store::{
     AtomicWriteError, LockFileError, PrivateDirectory, PrivateDocument, PrivateReadError,
 };
+use crate::process_identity::ProcessIdentity;
 
 const SCHEMA_VERSION: u16 = 1;
 const LEASE_FILE: &str = "update-install-v1.lock";

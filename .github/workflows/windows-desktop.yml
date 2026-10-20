@@ -97,6 +97,17 @@ jobs:
           cargo test --locked -p cfw-core product::tests 2>&1 |
             Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-product-tests.log')
           if ($LASTEXITCODE -ne 0) { throw 'Windows desktop product identity test failed' }
+      - name: Verify native desktop process observations
+        run: |
+          cargo clippy --locked -p cfw-windows-engine --all-targets --features native-engine-validation,native-service-validation -- -D warnings 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-process-clippy.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Windows desktop process Clippy failed' }
+          cargo test --locked -p cfw-windows-engine --test desktop_process_observation 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-process-tests.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Windows desktop native process tests failed' }
+          cargo test --locked -p cfw-windows-engine --lib peer::observation::tests 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-process-error-tests.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Windows desktop process error classification failed' }
       - name: Check the complete Windows desktop target
         run: |
           cargo check --locked -p cfw-tauri-shell --bin clash-for-mac 2>&1 |

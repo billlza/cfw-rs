@@ -120,6 +120,16 @@ fn recorded_incarnations_and_foreign_logons_do_not_become_native_process_authori
         let changed: ProcessIdentity = serde_json::from_value(changed).unwrap();
         assert!(process_identity_exists(&changed).is_err(), "{field}");
     }
+    for field in ["integrity_rid", "app_container", "restricted"] {
+        let mut changed = value.clone();
+        changed[field] = if field == "integrity_rid" {
+            (value[field].as_u64().unwrap() + 1).into()
+        } else {
+            (!value[field].as_bool().unwrap()).into()
+        };
+        let changed: ProcessIdentity = serde_json::from_value(changed).unwrap();
+        assert!(process_identity_exists(&changed).is_err(), "{field}");
+    }
     assert!(NativePeerProcess::open_if_running(0).is_err());
     assert!(
         NativePeerProcess::open_if_running(u32::MAX)

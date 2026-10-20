@@ -89,7 +89,16 @@ pub(crate) fn process_identity_exists(expected: &ProcessIdentity) -> Result<bool
     let Some(process) = NativePeerProcess::open_if_running(expected.pid).map_err(message)? else {
         return Ok(false);
     };
-    Ok(ProcessIdentity::observed(&process, expected.executable.clone()) == *expected)
+    if process.identity().process_creation_time() != expected.creation_filetime {
+        return Ok(false);
+    }
+    if ProcessIdentity::observed(&process, expected.executable.clone()) != *expected {
+        return Err(
+            "live Windows process identity differs from its record; absence was not established"
+                .into(),
+        );
+    }
+    Ok(true)
 }
 
 /// Query this executable's users in the current logon/session, not every user

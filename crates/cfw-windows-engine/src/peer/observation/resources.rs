@@ -37,7 +37,7 @@ pub(super) fn observe(
             let created = row.Process.ProcessStartTime;
             let filetime =
                 u64::from(created.dwLowDateTime) | (u64::from(created.dwHighDateTime) << 32);
-            if pid == 0 || filetime == 0 || !identities.insert((pid, filetime)) {
+            if pid == 0 || pid == u32::MAX || filetime == 0 || !identities.insert((pid, filetime)) {
                 return Err(invalid("invalid or duplicate resource process identity"));
             }
             // An explicitly different terminal session is outside this query's

@@ -84,7 +84,7 @@ try {
     Require-Rejected 'unprivileged_manifest_writer_rejected'
     Set-Acl -LiteralPath $manifestPath -AclObject $safeAcl
 
-    Invoke-ServiceCommand @('create', $serviceName, 'binPath=', ('"' + $runtimePath + '" --service'), 'type=', 'own', 'start=', 'demand', 'obj=', 'LocalSystem')
+    Invoke-ServiceCommand @('create', $serviceName, 'binPath=', ('"' + $runtimePath + '"'), 'type=', 'own', 'start=', 'demand', 'obj=', 'LocalSystem')
     $created = $true
     Invoke-ServiceCommand @('sdset', $serviceName, 'D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;CCLCSWLORC;;;AU)')
     for ($iteration = 0; $iteration -lt 2; $iteration++) {

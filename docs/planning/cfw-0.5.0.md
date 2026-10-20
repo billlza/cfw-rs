@@ -1616,7 +1616,7 @@ Off，重复调用被拒绝。随后释放引用、重新打开 Off、提交后�
 
 ### 正式安装运行宿主（2026-10-20，源码已实现，原生验证进行中）
 
-`5322e15` 新增默认构建的 `cfw-windows-runtime.exe`。`--service` 通过 SCM
+`5322e15` 新增默认构建的 `cfw-windows-runtime.exe`。无参数启动通过 SCM
 ServiceMain 注册正式 `CFWAuthority` 服务；`--user-agent CFWAuthority` 在当前
 普通用户进程接收已认证的继承管道、同一共享启动请求及凭据槽，使用正式引擎
 和持久用户目录启动。宿主不把验证夹具编入产品入口，也没有路径/服务名的前端
@@ -1647,8 +1647,14 @@ StopPending。30 秒内无法确认全局清理则显式失败，不能用停止
 本地 107 项可移植测试、Windows 目标 Clippy 和 PowerShell 语法解析通过。
 基础安装宿主 [CI 39365853568](https://github.com/billlza/cfw-rs/actions/runs/39365853568)
 与新增完整运行链路 [CI 39366212239](https://github.com/billlza/cfw-rs/actions/runs/39366212239)
-分别绑定 `c6fdaf4`、`fb2cfde`，仍待原生回执核验。两次运行保留各自源码范围；
-没有把先前组件 CI 的结果归给新的可执行入口。
+分别绑定 `c6fdaf4`、`fb2cfde`。两次均通过前置 11 项真实引擎测试，但在安装后
+第一次 Desktop 认证查询失败：安装脚本给 SCM 写入了 `--service` 参数，而既有
+认证契约只接受带引号的绝对可执行路径、无参数。服务启动成功不代表连接认证成功。
+修正产品服务默认无参数进入 SCM，并让安装脚本写入相同命令；保留原认证规则。
+`c6fdaf4` 失败 artifact `12239388917` 的 SHA-256 为
+`6b9fcd20cd2d5efae5b2e2fc4444c5173c97b8f09466f0f1d36c5ce0cffd4fe4`，
+已核验并保存，安装回执只完成三项包校验、没有成功的服务查询。
+`fb2cfde` job log 确认同一失败条件。修正后的完整安装运行链路仍待原生 CI。
 
 ## 官方资料
 

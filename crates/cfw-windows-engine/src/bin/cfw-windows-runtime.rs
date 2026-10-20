@@ -12,7 +12,10 @@ fn main() {
 fn run() -> Result<(), String> {
     use cfw_windows_engine::runtime_host::{self, InstalledRuntime};
     let args: Vec<_> = std::env::args_os().skip(1).collect();
-    if args == [std::ffi::OsStr::new("--service")] {
+    // SCM identity admission requires the exact quoted executable with no
+    // arguments. Keep the service entrypoint aligned with that installation
+    // contract; interactive Agent/check modes are separate invocations.
+    if args.is_empty() {
         return runtime_host::run_service().map_err(|e| e.to_string());
     }
     let installation = InstalledRuntime::open().map_err(|e| e.to_string())?;
@@ -33,5 +36,5 @@ fn run() -> Result<(), String> {
     {
         return runtime_host::run_agent(installation).map_err(|e| e.to_string());
     }
-    Err("expected --service, --check-installation or installed --user-agent invocation".into())
+    Err("expected no arguments for SCM, --check-installation or installed --user-agent invocation".into())
 }

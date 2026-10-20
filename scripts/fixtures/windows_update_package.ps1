@@ -10,6 +10,12 @@ if ($env:CFW_NATIVE_PACKAGE_TESTS -cne '1' -or $env:GITHUB_ACTIONS -cne 'true' -
 if ($Source -cnotmatch '^[0-9a-f]{40}$' -or (git rev-parse HEAD) -cne $Source -or $LASTEXITCODE -ne 0) {
     throw 'Package fixture source identity mismatch'
 }
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+try {
+    if (-not [Security.Principal.WindowsPrincipal]::new($identity).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        throw 'Disposable machine certificate preparation requires an administrator runner'
+    }
+} finally { $identity.Dispose() }
 $root = Join-Path $env:RUNNER_TEMP ('cfw-package-fixtures-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $root -ErrorAction Stop | Out-Null
 New-Item -ItemType Directory -Path $Evidence -ErrorAction Stop | Out-Null
@@ -21,6 +27,11 @@ $cases = [System.Collections.Generic.List[string]]::new()
 $priorFixtures = $env:CFW_NATIVE_PACKAGE_FIXTURES
 $inspectionPassed = $false
 
+function Write-Stage([string]$Phase, [string]$Case) {
+    [ordered]@{ source=$Source; phase=$Phase; case=$Case; recorded_utc=[DateTime]::UtcNow.ToString('o') } |
+        ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Evidence 'progress.json') -Encoding utf8NoBOM
+    Write-Host "Native package fixture: $Phase $Case"
+}
 function Invoke-Msi([object]$Object, [string]$Name, [object[]]$Arguments) {
     $Object.GetType().InvokeMember($Name, [Reflection.BindingFlags]::InvokeMethod, $null, $Object, $Arguments)
 }
@@ -88,27 +99,37 @@ function Sign-File([string]$Path, [object]$Certificate, [bool]$RequireTrusted = 
 }
 function New-SignedDatabase([string]$Name, [hashtable]$Overrides = @{}, [string]$Template = 'x64;1033', [string]$PackageCode = '{E58D1FC6-A003-4849-900C-45D6861E75D9}') {
     $path = Join-Path $root $Name
+    Write-Stage 'create-database' $Name
     New-Database $path $Overrides $Template $PackageCode
+    Write-Stage 'sign-database' $Name
     Sign-File $path $certificates[0]
     $cases.Add($Name)
 }
 try {
     # Three independent keys, with identical subject names. Only two are trusted
-    # in this runner's current-user root store. No private key is exported.
+    # in this disposable runner's machine root store. The CurrentUser Root
+    # provider can display a native confirmation dialog and is unsuitable for
+    # unattended CI. No trust policy is relaxed and no private key is exported.
     $subject = 'CN=CFW disposable package fixture ' + [guid]::NewGuid().ToString('N')
     for ($i = 0; $i -lt 3; $i++) {
+        Write-Stage 'create-certificate' ([string]$i)
         $certificate = New-SelfSignedCertificate -Type CodeSigningCert -Subject $subject -CertStoreLocation 'Cert:\CurrentUser\My' -KeyAlgorithm RSA -KeyLength 2048 -HashAlgorithm SHA256 -NotAfter ([DateTime]::Now.AddDays(1))
         $certificates.Add($certificate)
         if ($i -lt 2) {
             $publicPath = Join-Path $root "publisher-$i.cer"
             Export-Certificate -Cert $certificate -FilePath $publicPath | Out-Null
-            Import-Certificate -FilePath $publicPath -CertStoreLocation 'Cert:\CurrentUser\Root' | Out-Null
+            Write-Stage 'import-disposable-machine-root' ([string]$i)
             $trusted.Add($certificate.Thumbprint)
+            Import-Certificate -FilePath $publicPath -CertStoreLocation 'Cert:\LocalMachine\Root' | Out-Null
+            if (-not (Test-Path -LiteralPath "Cert:\LocalMachine\Root\$($certificate.Thumbprint)")) {
+                throw 'The temporary root was not imported into the requested store'
+            }
         }
     }
     $fixtureSource = Join-Path $root 'publisher.rs'
     'fn main() { println!("package inspection fixture"); }' | Set-Content -LiteralPath $fixtureSource -Encoding utf8NoBOM
     $publisher = Join-Path $root 'publisher.exe'
+    Write-Stage 'build-publisher' 'publisher.exe'
     rustc --edition=2024 -D warnings $fixtureSource -o $publisher
     if ($LASTEXITCODE -ne 0) { throw 'Publisher fixture build failed' }
     Copy-Item -LiteralPath $publisher -Destination (Join-Path $root 'unsigned.exe')
@@ -156,31 +177,44 @@ try {
     New-SignedDatabase 'wrong-package-code.msi' @{} 'x64;1033' 'invalid'
     New-SignedDatabase 'reused-code.msi' @{} 'x64;1033' '{E66ACF84-7639-4707-BC01-0A370C9B2E3E}'
     $env:CFW_NATIVE_PACKAGE_FIXTURES = $root
+    Write-Stage 'clippy' 'native_update_package'
     cargo clippy --locked -p cfw-windows-engine --test native_update_package --features native-package-validation -- -D warnings 2>&1 |
         Tee-Object -FilePath (Join-Path $Evidence 'clippy.log')
     if ($LASTEXITCODE -ne 0) { throw 'Native package inspection Clippy failed' }
+    Write-Stage 'test' 'native_update_package'
     cargo test --locked -p cfw-windows-engine --test native_update_package --features native-package-validation -- --test-threads=1 2>&1 |
         Tee-Object -FilePath (Join-Path $Evidence 'tests.log')
     if ($LASTEXITCODE -ne 0) { throw 'Native signed package inspection failed' }
     $inspectionPassed = $true
 } catch { $failure = "$($_.Exception.ToString())`n$($_.ScriptStackTrace)" }
 finally {
+    try { Write-Stage 'cleanup-certificates' '' } catch { $cleanupErrors.Add($_.ToString()) }
     $env:CFW_NATIVE_PACKAGE_FIXTURES = $priorFixtures
     foreach ($thumbprint in $trusted) {
-        try { Remove-Item -LiteralPath "Cert:\CurrentUser\Root\$thumbprint" -ErrorAction Stop }
+        try {
+            if (Test-Path -LiteralPath "Cert:\LocalMachine\Root\$thumbprint") {
+                Remove-Item -LiteralPath "Cert:\LocalMachine\Root\$thumbprint" -ErrorAction Stop
+            }
+            if (Test-Path -LiteralPath "Cert:\LocalMachine\Root\$thumbprint") { throw 'Temporary machine root remains' }
+        }
         catch { $cleanupErrors.Add($_.ToString()) }
     }
     foreach ($certificate in $certificates) {
-        try { Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($certificate.Thumbprint)" -DeleteKey -ErrorAction Stop }
+        try {
+            Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($certificate.Thumbprint)" -DeleteKey -ErrorAction Stop
+            if (Test-Path -LiteralPath "Cert:\CurrentUser\My\$($certificate.Thumbprint)") { throw 'Temporary signing certificate remains' }
+        }
         catch { $cleanupErrors.Add($_.ToString()) }
     }
     [ordered]@{
         source=$Source; signed_database_cases=$cases.ToArray()
         failure=$failure; cleanup_errors=$cleanupErrors.ToArray()
         native_inspection_passed=$inspectionPassed; temporary_trust_only=$true
+        temporary_root_scope='local_machine_disposable_runner'
         installed_package=$false; production_publisher=$false; release_accepted=$false
     } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $Evidence 'receipt.json') -Encoding utf8NoBOM
 }
 if ($null -ne $failure -or $cleanupErrors.Count -ne 0) {
     throw "Native package validation failed: $failure; certificate cleanup: $($cleanupErrors -join '; ')"
 }
+Write-Stage 'complete' 'native_update_package'

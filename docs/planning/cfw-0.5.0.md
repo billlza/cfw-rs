@@ -69,6 +69,13 @@ Windows 替代实现。首批 `update_package` 原生接口在解析数据库前
 载荷完整性、服务停止/安装/回滚、受限更新工作进程和桌面调用链仍待实现，不能
 由新增检查推出整包构建或更新已经完成。
 
+安装编排的下一步须处理两个已定位的边界：MSI 的 `ServiceControl.Wait` 最多等
+30 秒，不能替代 `runtime_host/service.rs` 的成功退出与全局 Off 观察；当前服务
+清理失败也会终止，但保留非零退出状态，安装器必须拒绝这种替换。MSI 外层签名也
+不能自动覆盖任意外置 CAB；产品包应使用内嵌载荷及包内安装操作，并检查实际生成
+的数据库/字节。依据：[服务等待语义](https://learn.microsoft.com/en-us/windows/win32/msi/servicecontrol-table)、
+[安装签名覆盖](https://learn.microsoft.com/en-us/windows/win32/msi/authoring-a-fully-verified-signed-installation)。
+
 本批本地通过 Mac 全目标 Clippy（禁止 warning），102 项维护、11 项原生进程、
 8 项启动、8 项更新日志、31 项引擎和 6 项生命周期回归，以及 314 项 UI 测试；
 Windows 引擎库交叉 Clippy 通过。前一源码 `4f43a9b` 的托管 Mac CI 在

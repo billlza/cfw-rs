@@ -115,6 +115,7 @@ jobs:
             Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-medium-process-tests.log')
           if ($LASTEXITCODE -ne 0) { throw 'Windows medium-integrity desktop process observation failed' }
       - name: Verify native signed MSI inspection
+        timeout-minutes: 8
         env:
           CFW_NATIVE_PACKAGE_TESTS: '1'
           CFW_PACKAGE_SOURCE: ${{ github.sha }}

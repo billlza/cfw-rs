@@ -45,7 +45,7 @@ function Set-MsiProperty([object]$Object, [string]$Name, [object[]]$Arguments) {
 function Release-Msi([object]$Object) {
     if ($null -ne $Object) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($Object) }
 }
-function New-Database([string]$Path, [hashtable]$Overrides, [string]$Template = 'x64;1033', [string]$PackageCode = '{E58D1FC6-A003-4849-900C-45D6861E75D9}') {
+function New-MinimalDatabase([string]$Path, [hashtable]$Overrides, [string]$Template = 'x64;1033', [string]$PackageCode = '{E58D1FC6-A003-4849-900C-45D6861E75D9}') {
     $properties = [ordered]@{
         CFW_PRODUCT_ID = 'com.bill.clashforwindows'
         ProductName = 'Clash for Windows'
@@ -91,6 +91,44 @@ function New-Database([string]$Path, [hashtable]$Overrides, [string]$Template = 
         Invoke-Msi $database 'Commit' @()
     } finally { Release-Msi $summary; Release-Msi $database; Release-Msi $installer }
 }
+function New-Database([string]$Path, [hashtable]$Overrides, [string]$Template = 'x64;1033', [string]$PackageCode = ([guid]::NewGuid().ToString('B').ToUpperInvariant())) {
+    Copy-Item -LiteralPath (Join-Path $root 'package-template.msi') -Destination $Path
+    $installer = $null
+    $database = $null
+    $summary = $null
+    try {
+        $installer = New-Object -ComObject WindowsInstaller.Installer
+        $database = Invoke-Msi $installer 'OpenDatabase' @($Path, 1)
+        foreach ($entry in $Overrides.GetEnumerator()) {
+            $record = $null
+            $view = $null
+            try {
+                $record = Invoke-Msi $installer 'CreateRecord' @(1)
+                Set-MsiProperty $record 'StringData' @(1, [string]$entry.Key)
+                $view = Invoke-Msi $database 'OpenView' @('DELETE FROM `Property` WHERE `Property` = ?')
+                Invoke-Msi $view 'Execute' @($record)
+                Invoke-Msi $view 'Close' @()
+            } finally { Release-Msi $view; Release-Msi $record }
+            if ($null -ne $entry.Value) {
+                $record = $null
+                $view = $null
+                try {
+                    $record = Invoke-Msi $installer 'CreateRecord' @(2)
+                    Set-MsiProperty $record 'StringData' @(1, [string]$entry.Key)
+                    Set-MsiProperty $record 'StringData' @(2, [string]$entry.Value)
+                    $view = Invoke-Msi $database 'OpenView' @('INSERT INTO `Property` (`Property`, `Value`) VALUES (?, ?)')
+                    Invoke-Msi $view 'Execute' @($record)
+                    Invoke-Msi $view 'Close' @()
+                } finally { Release-Msi $view; Release-Msi $record }
+            }
+        }
+        $summary = Get-MsiProperty $database 'SummaryInformation' @(2)
+        Set-MsiProperty $summary 'Property' @(7, $Template)
+        Set-MsiProperty $summary 'Property' @(9, $PackageCode)
+        Invoke-Msi $summary 'Persist' @()
+        Invoke-Msi $database 'Commit' @()
+    } finally { Release-Msi $summary; Release-Msi $database; Release-Msi $installer }
+}
 function Sign-File([string]$Path, [object]$Certificate, [bool]$RequireTrusted = $true) {
     & $signTool sign /fd SHA256 /s My /sha1 $Certificate.Thumbprint $Path
     if ($LASTEXITCODE -ne 0) { throw "SDK package signing failed: $Path" }
@@ -104,7 +142,7 @@ function Sign-File([string]$Path, [object]$Certificate, [bool]$RequireTrusted = 
         if ($LASTEXITCODE -ne 0) { throw "SDK signature verification failed: $Path" }
     }
 }
-function New-SignedDatabase([string]$Name, [hashtable]$Overrides = @{}, [string]$Template = 'x64;1033', [string]$PackageCode = '{E58D1FC6-A003-4849-900C-45D6861E75D9}') {
+function New-SignedDatabase([string]$Name, [hashtable]$Overrides = @{}, [string]$Template = 'x64;1033', [string]$PackageCode = ([guid]::NewGuid().ToString('B').ToUpperInvariant())) {
     $path = Join-Path $root $Name
     Write-Stage 'create-database' $Name
     New-Database $path $Overrides $Template $PackageCode
@@ -157,6 +195,8 @@ function New-WixControl {
     Write-Stage 'build-wix-control' 'link-and-validate'
     & $light -nologo -wx -out $package $object
     if ($LASTEXITCODE -ne 0) { throw 'WiX control link/validation failed' }
+    Copy-Item -LiteralPath $package -Destination (Join-Path $root 'package-template.msi')
+    Copy-Item -LiteralPath $package -Destination (Join-Path $Evidence 'wix-control-unsigned.msi')
     Write-Stage 'sign-wix-control' 'signtool'
     Sign-File $package $certificates[0]
     [ordered]@{
@@ -202,7 +242,7 @@ try {
     # Each signer sees the same unsigned bytes in ASCII and Unicode paths.
     # These are diagnostic inputs, never a fallback installation path.
     $unsigned = Join-Path $root 'comparison-unsigned.msi'
-    New-Database $unsigned @{}
+    New-MinimalDatabase $unsigned @{}
     Copy-Item -LiteralPath $unsigned -Destination (Join-Path $Evidence 'comparison-unsigned.msi')
     $unsignedDigest = (Get-FileHash -LiteralPath $unsigned -Algorithm SHA256).Hash.ToLowerInvariant()
     $comparison = [System.Collections.Generic.List[object]]::new()
@@ -231,8 +271,11 @@ try {
         }
     }
     $comparison.ToArray() | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Evidence 'signer-comparison.json') -Encoding utf8NoBOM
-    if (@($comparison | Where-Object { $_.signer -ceq 'signtool' -and ($_.observed_status -cne 'Valid' -or $_.sdk_verification_exit -ne 0) }).Count -ne 0) {
-        throw 'SDK signatures of the database bytes are invalid; inspect the signer comparison'
+    # The former positive fixture was an incomplete, non-installable database.
+    # Preserve it as a diagnosed negative control; never use its bytes as a
+    # valid package or weaken the native verifier to admit it.
+    if (@($comparison | Where-Object { $_.observed_status -cne 'HashMismatch' -or $_.sdk_verification_exit -ne 1 }).Count -ne 0) {
+        throw 'The minimal-database counterexample changed; inspect it before altering the fixture contract'
     }
     $fixtureSource = Join-Path $root 'publisher.rs'
     'fn main() { println!("package inspection fixture"); }' | Set-Content -LiteralPath $fixtureSource -Encoding utf8NoBOM

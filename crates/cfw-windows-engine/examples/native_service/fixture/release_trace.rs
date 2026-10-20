@@ -225,7 +225,9 @@ fn read_events(path: &Path) -> Result<Vec<Value>> {
     if let Some(error) = events.error {
         return Err(error);
     }
-    if log.EventsLost != 0 || log.LogfileHeader.EventsLost != 0 {
+    // SAFETY: OpenTraceW populated the modern file header's loss-counter view.
+    let header_events_lost = unsafe { log.LogfileHeader.Anonymous2.Anonymous.EventsLost };
+    if log.EventsLost != 0 || header_events_lost != 0 {
         return Err("ETW consumer reported lost events".into());
     }
     Ok(events.records)

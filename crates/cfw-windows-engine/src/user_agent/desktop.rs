@@ -391,6 +391,32 @@ impl DesktopUserAgent {
     fn revoke(&mut self, deadline: Instant) -> Result<()> {
         retry_stale_revocation(|| self.revoke_once(deadline))
     }
+    /// Wait on the authenticated service's independent cleanup after the owned
+    /// Agent has exited. This never treats a timeout/recovery state as Off.
+    pub fn wait_global_off(&mut self, deadline: Instant) -> Result<AuthoritySnapshot> {
+        check_deadline(deadline)?;
+        if self.agent_exit_observation().is_none() {
+            return Err(DesktopError::State(
+                "Agent has not exited before global cleanup wait",
+            ));
+        }
+        loop {
+            let snapshot = self.observe(deadline)?;
+            match snapshot.state {
+                AuthorityState::Off => return Ok(snapshot),
+                AuthorityState::Stopping => {}
+                _ => {
+                    return Err(DesktopError::State(
+                        "global cleanup requires explicit recovery",
+                    ));
+                }
+            }
+            check_deadline(deadline)?;
+            thread::sleep(
+                Duration::from_millis(25).min(deadline.saturating_duration_since(Instant::now())),
+            );
+        }
+    }
     /// Finish a normally acknowledged SystemProxy stop on its original
     /// connection. Keep this owner/runtime reference through the final reply;
     /// failed or uncertain commands are never replayed here.

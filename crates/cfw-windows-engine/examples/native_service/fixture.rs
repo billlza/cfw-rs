@@ -110,6 +110,16 @@ pub(super) fn main() -> Result<()> {
     if args.len() == 2 && args[1] == "--installed-host-probe" {
         return installed_host::probe();
     }
+    if args.len() == 2 && args[1] == "--installed-host-run" {
+        let image = std::env::current_exe().map_err(|e| e.to_string())?;
+        return restricted::run_installed_host(&image, digest(&image)?);
+    }
+    if args.len() == 4 && args[1] == "--installed-host-client" {
+        if args[2] != cfw_windows_engine::runtime_host::SERVICE_NAME {
+            return Err("installed host selector differs".into());
+        }
+        return installed_host::exercise();
+    }
     if args.len() == 2 && args[1] == "--runtime-job-idle-probe" {
         // Native Job lifetime counterexample only. The parent holds and retires
         // this exact child; the bound also limits lifetime if the parent dies.

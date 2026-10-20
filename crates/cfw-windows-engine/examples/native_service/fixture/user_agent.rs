@@ -544,7 +544,7 @@ pub(super) fn rejected_report() -> serde_json::Value {
     serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"inherited_start_request_validated":true,"parent_image_authenticated":true,"invalid_ticket_precedes_vault_access":true,"actual_engine_started":false})
 }
 
-fn traffic(proxy: std::net::SocketAddr) -> Result<()> {
+pub(super) fn traffic(proxy: std::net::SocketAddr) -> Result<()> {
     let server = reserve()?;
     server.set_nonblocking(true).map_err(|e| e.to_string())?;
     let destination = server.local_addr().map_err(|e| e.to_string())?;

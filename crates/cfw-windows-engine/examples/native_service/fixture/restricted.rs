@@ -17,6 +17,7 @@ pub(super) enum ClientCase {
     RuntimeRestartSystem,
     RuntimeRestartLocal,
     RuntimeLocalRestartDesktop,
+    InstalledHostDesktop,
     RejectedRuntime,
 }
 impl ClientCase {
@@ -32,6 +33,7 @@ impl ClientCase {
             Self::RuntimeRestartSystem => "--restart-system-agent-runtime",
             Self::RuntimeRestartLocal => "--restart-local-agent-runtime",
             Self::RuntimeLocalRestartDesktop => "--restart-local-runtime-desktop",
+            Self::InstalledHostDesktop => "--installed-host-client",
             Self::RejectedRuntime => "--rejected-agent-runtime",
         }
     }
@@ -47,6 +49,7 @@ impl ClientCase {
             Self::RuntimeRestartSystem => format!("{name}-restart-system"),
             Self::RuntimeRestartLocal => format!("{name}-restart-local"),
             Self::RuntimeLocalRestartDesktop => format!("{name}-restart-desktop"),
+            Self::InstalledHostDesktop => "installed-host".into(),
             Self::RejectedRuntime => format!("{name}-runtime-rejected"),
         }
     }
@@ -80,6 +83,9 @@ impl ClientCase {
             }
             Self::RuntimeRestartLocal => {
                 user_agent::restart::agent_report(user_agent::restart::Mode::Local)
+            }
+            Self::InstalledHostDesktop => {
+                serde_json::json!({"product_service":true,"product_agent":true,"desktop_is_fixture":true,"release_accepted":false})
             }
         }
     }
@@ -360,7 +366,21 @@ fn run_case(
         case.flag()
     ));
     let report_prefix = case.report_prefix(name);
-    let parent = image.parent().ok_or("missing fixture image parent")?;
+    let installed_receipts = if matches!(case, ClientCase::InstalledHostDesktop) {
+        let path = PathBuf::from(
+            std::env::var_os("CFW_NATIVE_SERVICE_RECEIPTS")
+                .ok_or("missing installed runtime receipts")?,
+        );
+        if !path.is_absolute() || !path.is_dir() {
+            return Err("invalid installed runtime receipts".into());
+        }
+        Some(path)
+    } else {
+        None
+    };
+    let parent = installed_receipts
+        .as_deref()
+        .unwrap_or(image.parent().ok_or("missing fixture image parent")?);
     let output_path = parent.join(format!("{report_prefix}-client-output.txt"));
     let output = std::fs::OpenOptions::new()
         .write(true)
@@ -439,6 +459,7 @@ fn run_case(
         ClientCase::RuntimeDesktop
             | ClientCase::RuntimeRestartDesktop
             | ClientCase::RuntimeLocalRestartDesktop
+            | ClientCase::InstalledHostDesktop
     ) {
         Duration::from_secs(60)
     } else {
@@ -476,9 +497,25 @@ fn run_case(
     if unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut exit) } == 0 {
         return Err(error("read fixture client exit"));
     }
-    check_report(parent, &report_prefix, case, exit)?;
+    if matches!(case, ClientCase::InstalledHostDesktop) {
+        installed_host::check_output(parent, &output_path, exit)?;
+    } else {
+        check_report(parent, &report_prefix, case, exit)?;
+    }
     desktop.close()?;
     Ok(())
+}
+pub(super) fn run_installed_host(image: &Path, expected: [u8; 32]) -> Result<()> {
+    if std::env::var("CFW_NATIVE_SERVICE_MUTATION_TESTS").as_deref() != Ok("1") {
+        return Err("installed runtime requires disposable CI opt-in".into());
+    }
+    run_case(
+        image,
+        cfw_windows_engine::runtime_host::SERVICE_NAME,
+        expected,
+        ClientCase::InstalledHostDesktop,
+        None,
+    )
 }
 
 pub(super) fn check_report(
@@ -578,6 +615,9 @@ fn client_body(name: &str, hex: &str, case: ClientCase) -> Result<()> {
         return Err("fixture service digest differs from installation".into());
     }
     match case {
+        ClientCase::InstalledHostDesktop => {
+            return Err("installed host client must use its separate test entrypoint".into());
+        }
         ClientCase::RuntimeRestartDesktop => {
             return user_agent::restart::desktop(name, hex, user_agent::restart::Mode::System);
         }

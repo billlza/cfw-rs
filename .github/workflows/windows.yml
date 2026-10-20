@@ -118,6 +118,7 @@ jobs:
             ${{ runner.temp }}/cfw-windows-engine/artifacts/runtime-restart-*.json
             ${{ runner.temp }}/cfw-windows-engine/artifacts/runtime-stop-*.json
             ${{ runner.temp }}/cfw-windows-engine/artifacts/local-restart/**
+            ${{ runner.temp }}/cfw-windows-engine/artifacts/installed-host-*.json
             ${{ runner.temp }}/cfw-windows-engine/artifacts/*.wire-validation.json
             ${{ runner.temp }}/cfw-windows-engine/artifacts/*.off-admission.json
             ${{ runner.temp }}/cfw-windows-engine/artifacts/*.rejection.json

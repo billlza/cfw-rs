@@ -6,11 +6,13 @@
 #![cfg(windows)]
 
 mod entries;
+mod legacy;
 mod locking;
 mod mutex;
 mod registry;
 mod security;
 mod wait;
+pub use legacy::{LegacyReadDirectory, LegacyReadError};
 pub use mutex::PrivateUserMutex;
 pub use registry::{MachineRecordError, MachineRecordGuard, PrivateMachineRecord};
 pub use security::require_process_identity;
@@ -165,6 +167,7 @@ struct DirectoryInner {
 #[derive(Clone, Copy)]
 enum Access {
     Read,
+    ReadSnapshot,
     Write,
     Delete,
     Lock,
@@ -709,7 +712,7 @@ fn open_relative_units(
         SecurityQualityOfService: null(),
     };
     let (mut rights, share_delete) = match access {
-        Access::Read => (FILE_GENERIC_READ, true),
+        Access::Read | Access::ReadSnapshot => (FILE_GENERIC_READ, true),
         // A retained directory needs to create/flush child entries, not delete
         // itself. DELETE here prevents a caller from pinning that directory
         // without FILE_SHARE_DELETE, even in the same process. File publication
@@ -742,8 +745,13 @@ fn open_relative_units(
         } else {
             0
         };
-    let sharing =
-        FILE_SHARE_READ | FILE_SHARE_WRITE | if share_delete { FILE_SHARE_DELETE } else { 0 };
+    let sharing = FILE_SHARE_READ
+        | if matches!(access, Access::ReadSnapshot) {
+            0
+        } else {
+            FILE_SHARE_WRITE
+        }
+        | if share_delete { FILE_SHARE_DELETE } else { 0 };
     let mut handle = null_mut();
     let mut status_block = IO_STATUS_BLOCK::default();
     // SAFETY: all inputs and their backing allocations remain live through the
@@ -814,13 +822,22 @@ fn verify_file(
     maximum: usize,
     policy: ReadPolicy,
 ) -> Result<(), Error> {
+    checked_file_metadata(&inner.security, file, maximum, policy).map(|_| ())
+}
+
+fn checked_file_metadata(
+    security: &Security,
+    file: &File,
+    maximum: usize,
+    policy: ReadPolicy,
+) -> Result<BY_HANDLE_FILE_INFORMATION, Error> {
     let metadata = verify_kind(file, false)?;
-    inner.security.verify(file, policy, false)?;
+    security.verify(file, policy, false)?;
     let actual = (u64::from(metadata.nFileSizeHigh) << 32) | u64::from(metadata.nFileSizeLow);
     if actual > maximum as u64 {
         return Err(Error::TooLarge { actual, maximum });
     }
-    Ok(())
+    Ok(metadata)
 }
 
 #[repr(C)]

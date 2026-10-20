@@ -24,8 +24,6 @@ use super::staged_bundle::{StagedExpectation, verify_staged_bundle};
 use super::staging::StagingArea;
 use crate::legacy::{ProcessIdentity, exact_processes, process_identity_exists};
 
-pub(crate) const FINISH_UPDATE_FLAG: &str = "--finish-update-v1";
-
 const DASHBOARD_EXIT_TIMEOUT: Duration = Duration::from_secs(30);
 const DASHBOARD_EXIT_POLL: Duration = Duration::from_millis(100);
 /// LaunchServices can refuse a bundle for a moment right after it changed.

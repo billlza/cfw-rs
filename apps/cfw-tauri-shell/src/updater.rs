@@ -42,7 +42,8 @@ use staged_bundle::{StagedBundleError, StagedExpectation, verify_staged_bundle};
 use staging::StagingArea;
 use state::{Cancelled, DownloadCancellation, StagedUpdate};
 
-pub(crate) use finisher::{FINISH_UPDATE_FLAG, run as run_update_finisher};
+use crate::launch::FINISH_UPDATE_FLAG;
+pub(crate) use finisher::run as run_update_finisher;
 pub(crate) use journal::UpdateInstallLease;
 pub(crate) use state::UpdaterSecurityState;
 

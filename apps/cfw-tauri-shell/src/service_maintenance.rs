@@ -165,11 +165,6 @@ fn wait_for_worker(
     }
 }
 
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn run(_action: ServiceMaintenanceAction) -> Result<(), String> {
-    Err("service maintenance is supported only on macOS".to_owned())
-}
-
 const fn native_action(action: ServiceMaintenanceAction) -> NativeServiceMaintenanceAction {
     match action {
         ServiceMaintenanceAction::ProveOff => NativeServiceMaintenanceAction::ProveOff,

@@ -79,6 +79,15 @@ jobs:
           cargo test --locked -p cfw-windows-storage --all-targets 2>&1 |
             Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-storage-tests.log')
           if ($LASTEXITCODE -ne 0) { throw 'Windows desktop native storage tests failed' }
+      - name: Verify Windows launch admission
+        run: |
+          $tests = Join-Path $env:RUNNER_TEMP 'cfw-desktop-launch-tests.exe'
+          rustc --edition=2024 --test apps/cfw-tauri-shell/src/launch.rs -D warnings -o $tests 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-launch-build.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Windows desktop launch test build failed' }
+          & $tests 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-launch-tests.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Windows desktop launch admission tests failed' }
       - name: Check the complete Windows desktop target
         run: |
           cargo check --locked -p cfw-tauri-shell --bin clash-for-mac 2>&1 |

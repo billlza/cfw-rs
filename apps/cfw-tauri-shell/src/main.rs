@@ -22,6 +22,7 @@ mod private_store;
 #[cfg(test)]
 mod profile_fixtures;
 mod release_observation;
+#[cfg(target_os = "macos")]
 mod service_maintenance;
 mod shell;
 mod startup;
@@ -34,9 +35,10 @@ mod window_state;
 #[cfg(feature = "physical-release-evidence")]
 pub use engine::{ManagedEngine, packet_evidence};
 
+#[cfg(target_os = "macos")]
+use bootstrap::reopen_main_window;
 use bootstrap::{
     LaunchContext, acknowledge_migration_handoff_renderer_ready, boot_payload, reload_dashboard,
-    reopen_main_window,
 };
 use cfw_core::SettingsStore;
 use cfw_engine_api::EngineEvent;
@@ -65,9 +67,11 @@ use commands::{
 };
 use engine::{engine_snapshot, prepare_legacy_cutover};
 use launch::{LaunchMode, STARTUP_ADMISSION_EXIT_CODE, STARTUP_USAGE_EXIT_CODE, parse_launch_mode};
+#[cfg(target_os = "macos")]
+use legacy::{ConsumedHandoffTicket, MigrationHandoffLease};
 use legacy::{
-    ConsumedHandoffTicket, LegacyRetirementGate, MigrationHandoffLease, begin_migration_handoff,
-    disable_service_mode, legacy_retirement_status, recover_legacy_cutover,
+    LegacyRetirementGate, begin_migration_handoff, disable_service_mode, legacy_retirement_status,
+    recover_legacy_cutover,
 };
 use lifecycle::{AppLifecycle, quit_app, request_shutdown};
 use native_components::general_switches::{
@@ -159,6 +163,7 @@ fn main() {
         LaunchMode::Dashboard => {
             let available = settings_store().and_then(|store| {
                 store.ensure_layout().map_err(|error| error.to_string())?;
+                #[cfg(target_os = "macos")]
                 MigrationHandoffLease::acquire(&store.paths().app_home).map(std::mem::drop)?;
                 // The installer process holds this lease while it unregisters
                 // services and exchanges the bundles. No dashboard may start
@@ -175,6 +180,7 @@ fn main() {
             }
             LaunchContext::dashboard()
         }
+        #[cfg(target_os = "macos")]
         LaunchMode::MigrationHandoff { token } => {
             let admitted = settings_store().and_then(|store| {
                 store.ensure_layout().map_err(|error| error.to_string())?;
@@ -198,6 +204,7 @@ fn main() {
                 }
             }
         }
+        #[cfg(target_os = "macos")]
         LaunchMode::ServiceMaintenance(action) => {
             if let Err(error) = service_maintenance::run(action) {
                 eprintln!("service maintenance failed: {error}");
@@ -208,7 +215,7 @@ fn main() {
         LaunchMode::FinishUpdate { transaction } => {
             std::process::exit(updater::run_update_finisher(&transaction));
         }
-        #[cfg(feature = "physical-release-evidence")]
+        #[cfg(all(target_os = "macos", feature = "physical-release-evidence"))]
         LaunchMode::PacketEvidence => {
             if let Err(error) = packet_evidence_transport::run_packet_evidence_proxy() {
                 eprintln!("physical Packet evidence Host control failed: {error}");

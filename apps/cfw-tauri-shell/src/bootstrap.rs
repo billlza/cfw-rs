@@ -40,6 +40,7 @@ impl LaunchContext {
         }
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn handoff(ticket: ConsumedHandoffTicket, lease: MigrationHandoffLease) -> Self {
         Self {
             migration_handoff: true,
@@ -383,6 +384,7 @@ fn activate_main_window(app: &AppHandle) -> Result<(), String> {
     crate::shell::prepare_migration_handoff_window(app)
 }
 
+#[cfg(target_os = "macos")]
 pub(crate) fn reopen_main_window(app: &AppHandle) -> Result<(), String> {
     let launch = app.state::<LaunchContext>();
     if launch.is_migration_handoff() && !launch.post_parent_window_ready()? {

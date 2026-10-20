@@ -51,6 +51,7 @@ impl Validation {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Installation {
+    source: String,
     desktop_image: PathBuf,
     desktop_digest: [u8; 32],
     agent_image: PathBuf,
@@ -210,6 +211,7 @@ pub(super) fn write_installation_runtime(
     .map_err(|e| e.to_string())?;
     let current = NativePeerProcess::open(std::process::id()).map_err(|e| e.to_string())?;
     let installation = Installation {
+        source: std::env::var("CFW_NATIVE_SERVICE_SOURCE").map_err(|e| e.to_string())?,
         desktop_image,
         desktop_digest: digest,
         agent_image: agent.to_owned(),
@@ -329,6 +331,11 @@ pub(super) fn serve(name: &str, status_handle: SERVICE_STATUS_HANDLE) -> Result<
         installed.runtime.is_some(),
         installed.restart_runtime,
     )?));
+    // SCM services inherit the service manager's environment, not the CI
+    // launcher. Source identity travels in the existing fixture descriptor.
+    let timing = Arc::new(Mutex::new(request_timing::Trace::new(
+        installed.source.clone(),
+    )?));
     for (role, listener) in [
         (ServiceClientRole::Desktop, desktop),
         (ServiceClientRole::UserAgent, agent),
@@ -337,8 +344,17 @@ pub(super) fn serve(name: &str, status_handle: SERVICE_STATUS_HANDLE) -> Result<
         let installed = installed.clone();
         let lease_owner = lease_owner.clone();
         let authority = authority.clone();
+        let timing = Arc::clone(&timing);
         workers.push(thread::spawn(move || {
-            let result = serve_role(&name, role, listener, &installed, &lease_owner, &authority);
+            let result = serve_role(
+                &name,
+                role,
+                listener,
+                &installed,
+                &lease_owner,
+                &authority,
+                &timing,
+            );
             if result.is_err() {
                 STOP.store(true, Ordering::SeqCst);
             }
@@ -367,6 +383,26 @@ pub(super) fn serve(name: &str, status_handle: SERVICE_STATUS_HANDLE) -> Result<
     if let Err(error) = stopping {
         failures.push(error);
     }
+    let recorded = (|| -> Result<()> {
+        let bytes = timing
+            .lock()
+            .map_err(|_| "fixture request timing lock poisoned")?
+            .encode(std::process::id())?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(
+                authority_journal::root()?
+                    .join(format!("service-request-timing-{}.txt", std::process::id())),
+            )
+            .map_err(|e| e.to_string())?;
+        file.write_all(&bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(|e| e.to_string())
+    })();
+    if let Err(error) = recorded {
+        failures.push(format!("request timing receipt: {error}"));
+    }
     if failures.is_empty() {
         Ok(())
     } else {
@@ -381,8 +417,17 @@ fn serve_role(
     installed: &Installation,
     lease_owner: &Mutex<Option<NativeUserSession>>,
     authority: &Mutex<Validation>,
+    timing: &Mutex<request_timing::Trace>,
 ) -> Result<()> {
-    let serving = serve_connections(name, role, &mut listener, installed, lease_owner, authority);
+    let serving = serve_connections(
+        name,
+        role,
+        &mut listener,
+        installed,
+        lease_owner,
+        authority,
+        timing,
+    );
     let closing = listener.close().map_err(|e| e.to_string());
     match (serving, closing) {
         (Ok(()), Ok(())) => Ok(()),
@@ -400,6 +445,7 @@ fn serve_connections(
     installed: &Installation,
     lease_owner: &Mutex<Option<NativeUserSession>>,
     authority: &Mutex<Validation>,
+    timing: &Mutex<request_timing::Trace>,
 ) -> Result<()> {
     thread::scope(|scope| {
         let mut workers: Vec<thread::ScopedJoinHandle<'_, Result<()>>> = Vec::new();
@@ -427,8 +473,15 @@ fn serve_connections(
                 workers.push(scope.spawn(move || {
                     // Move before the first read: each worker owns all reads,
                     // native message admission and replies on this connection.
-                    let result =
-                        serve_connection(name, role, connection, installed, lease_owner, authority);
+                    let result = serve_connection(
+                        name,
+                        role,
+                        connection,
+                        installed,
+                        lease_owner,
+                        authority,
+                        timing,
+                    );
                     if result.is_err() {
                         STOP.store(true, Ordering::SeqCst);
                     }
@@ -464,6 +517,7 @@ fn serve_connection(
     installed: &Installation,
     lease_owner: &Mutex<Option<NativeUserSession>>,
     authority: &Mutex<Validation>,
+    timing: &Mutex<request_timing::Trace>,
 ) -> Result<()> {
     let mut wire_connection = false;
     let mut job_keeper: Option<cfw_windows_engine::authority::JobKeeperProbe> = None;
@@ -505,15 +559,38 @@ fn serve_connection(
         }
         if request.body().starts_with(b"{") {
             wire_connection = true;
+            let command = cfw_windows_engine::authority::wire::Request::decode(request.body())
+                .map_err(|e| e.to_string())?;
+            let measured = timing
+                .lock()
+                .map_err(|_| "fixture request timing lock poisoned")?
+                .begin(command_name(command.command()), role_text(role))?;
+            drop(command);
             let mut authority = authority
                 .lock()
                 .map_err(|_| "native wire lifecycle guard poisoned")?;
-            let (reply, expected_recovery_rejection) =
-                authority.handle(&mut connection, request)?;
-            match reply
+            timing
+                .lock()
+                .map_err(|_| "fixture request timing lock poisoned")?
+                .mark(&measured, request_timing::Phase::LockAcquired)?;
+            let handled = authority.handle(&mut connection, request);
+            let (reply, expected_recovery_rejection) = record_outcome(
+                handled,
+                timing,
+                &measured,
+                request_timing::Phase::DispatchFinished,
+                request_timing::Phase::DispatchFailed,
+            )?;
+            let replied = reply
                 .send(&mut connection, Instant::now() + LIMIT)
-                .map_err(|e| e.to_string())?
-            {
+                .map_err(|e| e.to_string());
+            match record_outcome(
+                replied,
+                timing,
+                &measured,
+                request_timing::Phase::ReplyFinished,
+                request_timing::Phase::ReplyFailed,
+            )? {
                 None
                 | Some(
                     cfw_windows_engine::authority::AuthorityError::Ticket
@@ -731,6 +808,50 @@ fn serve_connection(
         }
     }
     Ok(())
+}
+
+fn record_outcome<T>(
+    outcome: Result<T>,
+    timing: &Mutex<request_timing::Trace>,
+    request: &request_timing::Request,
+    success: request_timing::Phase,
+    failure: request_timing::Phase,
+) -> Result<T> {
+    let phase = if outcome.is_ok() { success } else { failure };
+    let recorded = timing
+        .lock()
+        .map_err(|_| "fixture request timing lock poisoned".to_owned())
+        .and_then(|mut trace| trace.mark(request, phase));
+    match (outcome, recorded) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+        (Err(error), Err(recording)) => Err(format!("{error}; request timing: {recording}")),
+    }
+}
+
+fn command_name(command: &cfw_windows_engine::authority::wire::Command) -> &'static str {
+    use cfw_windows_engine::authority::wire::Command;
+    match command {
+        Command::Observe => "observe",
+        Command::LoadLineage => "load_lineage",
+        Command::ReadRuntimeScope => "read_runtime_scope",
+        Command::BeginProxyRecovery(_) => "begin_proxy_recovery",
+        Command::ConfirmProxyRecovery(_) => "confirm_proxy_recovery",
+        Command::BeginProxyCleanup(_) => "begin_proxy_cleanup",
+        Command::ReconcileProxyCleanup(_) => "reconcile_proxy_cleanup",
+        Command::RetainRuntime(_) => "retain_runtime",
+        Command::ConfirmRuntimeReference(_) => "confirm_runtime_reference",
+        Command::ReserveGeneration(_) => "reserve_generation",
+        Command::Prepare(_) => "prepare",
+        Command::BindUserAgent(_) => "bind_user_agent",
+        Command::ConfirmRuntimeKeeper(_) => "confirm_runtime_keeper",
+        Command::Ready(_) => "ready",
+        Command::Heartbeat(_) => "heartbeat",
+        Command::BeginStop(_) => "begin_stop",
+        Command::AbortPrepared(_) => "abort_prepared",
+        Command::Stopped(_) => "stopped",
+        Command::OwnedLease => "owned_lease",
+    }
 }
 
 fn rejection_kind(error: &ServiceTransportError) -> Option<&'static str> {

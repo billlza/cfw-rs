@@ -1,7 +1,9 @@
 param(
     [Parameter(Mandatory)][string]$Source,
     [Parameter(Mandatory)][string]$Fixtures,
-    [Parameter(Mandatory)][string]$Evidence
+    [Parameter(Mandatory)][string]$Evidence,
+    [Parameter(Mandatory)][string]$SignTool,
+    [Parameter(Mandatory)][string]$PublisherThumbprint
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -18,7 +20,9 @@ $failure = $null
 $cleanupFailure = $null
 $workerPassed = $false
 $transportPassed = $false
+$mediumPassed = $false
 $priorWorker = $env:CFW_NATIVE_PACKAGE_WORKER_FIXTURE
+$priorReceipts = $env:CFW_NATIVE_SERVICE_RECEIPTS
 $manifest = $null
 
 function Protect-Package([string]$Path, [bool]$Directory) {
@@ -29,7 +33,7 @@ function Protect-Package([string]$Path, [bool]$Directory) {
 }
 
 try {
-    cargo build --locked -p cfw-windows-engine --bin cfw-windows-runtime --example native-update-worker-fixture --features native-package-validation 2>&1 |
+    cargo build --locked -p cfw-windows-engine --bin cfw-windows-runtime --example native-update-worker-fixture --example native-service-fixture --features native-package-validation,native-service-validation 2>&1 |
         Tee-Object -FilePath (Join-Path $Evidence 'worker-build.log')
     if ($LASTEXITCODE -ne 0) { throw 'Update worker build failed' }
     New-Item -ItemType Directory -Path $package -ErrorAction Stop | Out-Null
@@ -40,7 +44,15 @@ try {
     $engine = Join-Path $package 'cfw-engine-host.exe'
     $manifestPath = Join-Path $package 'runtime-installation-v2.json'
     Copy-Item -LiteralPath 'target/debug/cfw-windows-runtime.exe' -Destination $runtime
-    Copy-Item -LiteralPath (Join-Path $Fixtures 'publisher.exe') -Destination $desktop
+    Copy-Item -LiteralPath 'target/debug/examples/native-service-fixture.exe' -Destination $desktop
+    & $SignTool sign /fd SHA256 /s My /sha1 $PublisherThumbprint $desktop
+    if ($LASTEXITCODE -ne 0) { throw 'Disposable installed Desktop signing failed' }
+    $signature = Get-AuthenticodeSignature -LiteralPath $desktop
+    if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Thumbprint -cne $PublisherThumbprint) {
+        throw 'Disposable installed Desktop publisher mismatch'
+    }
+    & $SignTool verify /pa /all $desktop
+    if ($LASTEXITCODE -ne 0) { throw 'Disposable installed Desktop signature verification failed' }
     # This inspection never launches an engine. A distinct admitted PE fixture
     # satisfies the installation shape without installing or starting services.
     Copy-Item -LiteralPath (Join-Path $Fixtures 'unsigned.exe') -Destination $engine
@@ -80,9 +92,23 @@ try {
         Tee-Object -FilePath (Join-Path $Evidence 'worker-transport-tests.log')
     if ($LASTEXITCODE -ne 0) { throw 'Native worker timeout/cancellation/pipe cleanup failed' }
     $transportPassed = $true
+
+    $medium = Join-Path $Fixtures 'medium-inspection'
+    New-Item -ItemType Directory -Path $medium -ErrorAction Stop | Out-Null
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    try { $sid = $identity.User.Value } finally { $identity.Dispose() }
+    $acl = [System.Security.AccessControl.DirectorySecurity]::new()
+    $acl.SetSecurityDescriptorSddlForm("O:${sid}G:${sid}D:P(A;OICI;FA;;;${sid})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
+    Set-Acl -LiteralPath $medium -AclObject $acl
+    $env:CFW_NATIVE_SERVICE_RECEIPTS = $medium
+    & $desktop --update-package-validation 2>&1 |
+        Tee-Object -FilePath (Join-Path $Evidence 'worker-medium-tests.log')
+    if ($LASTEXITCODE -ne 0) { throw 'Installed update inspection from an ordinary Desktop failed' }
+    $mediumPassed = $true
 } catch { $failure = "$($_.Exception.ToString())`n$($_.ScriptStackTrace)" }
 finally {
     $env:CFW_NATIVE_PACKAGE_WORKER_FIXTURE = $priorWorker
+    $env:CFW_NATIVE_SERVICE_RECEIPTS = $priorReceipts
     try {
         if ($created) {
             Remove-Item -LiteralPath $package -Recurse -Force -ErrorAction Stop
@@ -93,6 +119,7 @@ finally {
         source=$Source; failure=$failure; cleanup_failure=$cleanupFailure
         protected_installation_created=$created; installation=$manifest
         native_worker_passed=$workerPassed; native_transport_passed=$transportPassed
+        native_medium_worker_passed=$mediumPassed
         installed_product_msi=$false; desktop_is_fixture=$true; engine_is_fixture=$true
         service_started=$false; production_publisher=$false; release_accepted=$false
     } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $Evidence 'worker-receipt.json') -Encoding utf8NoBOM

@@ -1,0 +1,116 @@
+//! The real installed inspector from a medium-integrity, non-admin Desktop.
+use super::*;
+use cfw_windows_engine::{
+    Error as EngineError,
+    runtime_host::{InstalledRuntime, MANIFEST_FILE},
+    update_package::{PackageError, WorkerFailureCategory},
+};
+
+pub(super) fn observe() -> Result<serde_json::Value> {
+    let native = restricted::require_medium_user_context()?;
+    let installed = InstalledRuntime::open().map_err(|e| e.to_string())?;
+    installed
+        .require_desktop_process()
+        .map_err(|e| e.to_string())?;
+    let release = installed.release();
+    if release.version != "0.5.0" || release.build != 1 {
+        return Err("unexpected protected installed release".into());
+    }
+    let image = std::env::current_exe().map_err(|e| e.to_string())?;
+    let manifest = image
+        .parent()
+        .ok_or("missing installed Desktop parent")?
+        .join(MANIFEST_FILE);
+    match std::fs::OpenOptions::new().write(true).open(manifest) {
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {}
+        Err(error) => {
+            return Err(format!(
+                "installed manifest access failed unexpectedly: {error}"
+            ));
+        }
+        Ok(_) => return Err("ordinary Desktop can overwrite the installation manifest".into()),
+    }
+    let fixtures = PathBuf::from(
+        std::env::var_os("CFW_NATIVE_PACKAGE_FIXTURES").ok_or("missing package fixtures")?,
+    );
+    let receipts = PathBuf::from(
+        std::env::var_os("CFW_NATIVE_SERVICE_RECEIPTS").ok_or("missing update receipts")?,
+    );
+    if !fixtures.is_absolute() || !receipts.is_absolute() {
+        return Err("package fixture paths must be absolute".into());
+    }
+    let candidate = fixtures.join("有效 安装包.msi");
+    let package = installed
+        .package_inspector()
+        .map_err(|e| e.to_string())?
+        .inspect(
+            &candidate,
+            "0.5.0",
+            &receipts.join("inspection"),
+            Duration::from_secs(30),
+            || false,
+        )
+        .map_err(|e| e.to_string())?;
+    if package.identity().build != 2
+        || package.identity().version != "0.5.0"
+        || package.sha256() != digest(&candidate)?
+        || package.publisher().spki_sha256() == [0; 32]
+    {
+        return Err("ordinary Desktop lost the signed package identity".into());
+    }
+    let signature_key = package.publisher().spki_sha256();
+    drop(package);
+    let inspector = InstalledRuntime::open()
+        .map_err(|e| e.to_string())?
+        .package_inspector()
+        .map_err(|e| e.to_string())?;
+    match inspector.inspect(
+        &fixtures.join("other-publisher.msi"),
+        "0.5.0",
+        &receipts.join("rejection"),
+        Duration::from_secs(30),
+        || false,
+    ) {
+        Err(PackageError::WorkerRejected {
+            category: WorkerFailureCategory::Authenticity,
+            ..
+        }) => {}
+        Err(error) => {
+            return Err(format!(
+                "ordinary Desktop returned the wrong rejection: {error}"
+            ));
+        }
+        Ok(_) => return Err("ordinary Desktop accepted another publisher".into()),
+    }
+    let cancelled_directory = receipts.join("cancelled");
+    let inspector = InstalledRuntime::open()
+        .map_err(|e| e.to_string())?
+        .package_inspector()
+        .map_err(|e| e.to_string())?;
+    if !matches!(
+        inspector.inspect(
+            &candidate,
+            "0.5.0",
+            &cancelled_directory,
+            Duration::from_secs(30),
+            || true
+        ),
+        Err(PackageError::File(EngineError::Cancelled))
+    ) || cancelled_directory.exists()
+    {
+        return Err("ordinary Desktop cancellation created a worker or changed category".into());
+    }
+    let after = restricted::require_medium_user_context()?;
+    if after.identity() != native.identity() {
+        return Err("Desktop identity changed during package inspection".into());
+    }
+    Ok(serde_json::json!({
+        "medium_integrity": true, "administrator_member": false,
+        "installed_desktop_identity": true, "protected_manifest_write_denied": true,
+        "signed_msi_verified": true, "different_publisher_rejected": true,
+        "precreation_cancellation_observed": true, "release": release,
+        "publisher_spki_sha256": signature_key,
+        "pid": native.process_id(), "creation_filetime": native.identity().process_creation_time(),
+        "service_started": false, "installer_exercised": false,
+    }))
+}

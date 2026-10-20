@@ -23,6 +23,7 @@ pub(super) enum ClientCase {
     InstalledProfileDesktop,
     InstalledCoordinatorDesktop,
     ProcessObservation,
+    UpdateInspection,
     RejectedRuntime,
 }
 impl ClientCase {
@@ -44,6 +45,7 @@ impl ClientCase {
             Self::InstalledProfileDesktop => "--installed-profile-client",
             Self::InstalledCoordinatorDesktop => "--installed-coordinator-client",
             Self::ProcessObservation => "--desktop-process-client",
+            Self::UpdateInspection => "--update-package-client",
             Self::RejectedRuntime => "--rejected-agent-runtime",
         }
     }
@@ -65,6 +67,7 @@ impl ClientCase {
             Self::InstalledProfileDesktop => "installed-host-profile".into(),
             Self::InstalledCoordinatorDesktop => "installed-host-coordinator".into(),
             Self::ProcessObservation => format!("{name}-process"),
+            Self::UpdateInspection => format!("{name}-update"),
             Self::RejectedRuntime => format!("{name}-runtime-rejected"),
         }
     }
@@ -72,6 +75,9 @@ impl ClientCase {
         match self {
             Self::ProcessObservation => {
                 serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"actual_desktop_process_observation":true})
+            }
+            Self::UpdateInspection => {
+                serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"installed_package_inspector":true,"installed_desktop_identity":true,"protected_manifest_write_denied":true,"signed_msi_verified":true,"different_publisher_rejected":true,"precreation_cancellation_observed":true})
             }
             Self::UserAgent => {
                 serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"query_only_service_process":true,"desktop_role_rejected":true,"pipe_instance_creation_rejected":true,"live_console_authorized":true,"missing_lease_rejected":true,"foreign_lease_rejected":true,"unleased_observation_admitted":true,"machine_record_access_denied":true,"zero_access_job_keeper_isolated":true,"job_keeper_prevents_name_loss":true,"job_keeper_release_observed":true,"keeper_object_identity_checked":true,"unrelated_keeper_handle_preserved":true})
@@ -410,7 +416,8 @@ fn run_case(
         case.flag()
     ));
     let report_prefix = case.report_prefix(name);
-    let installed_receipts = if case.is_installed() {
+    let installed_receipts = if case.is_installed() || matches!(case, ClientCase::UpdateInspection)
+    {
         let path = PathBuf::from(
             std::env::var_os("CFW_NATIVE_SERVICE_RECEIPTS")
                 .ok_or("missing installed runtime receipts")?,
@@ -508,6 +515,7 @@ fn run_case(
             | ClientCase::InstalledBackendExitDesktop
             | ClientCase::InstalledProfileDesktop
             | ClientCase::InstalledCoordinatorDesktop
+            | ClientCase::UpdateInspection
     ) {
         Duration::from_secs(60)
     } else {
@@ -620,6 +628,33 @@ pub(super) fn run_desktop_process_observation() -> Result<()> {
     Ok(())
 }
 
+pub(super) fn run_update_package_inspection() -> Result<()> {
+    if std::env::var("CFW_NATIVE_PACKAGE_TESTS").as_deref() != Ok("1") {
+        return Err("update inspection requires disposable CI opt-in".into());
+    }
+    let image = std::env::current_exe().map_err(|e| e.to_string())?;
+    let name = format!("CFW-scm-fixture-update-{}", std::process::id());
+    let case = ClientCase::UpdateInspection;
+    run_case(&image, &name, digest(&image)?, case, None)?;
+    let parent = PathBuf::from(
+        std::env::var_os("CFW_NATIVE_SERVICE_RECEIPTS").ok_or("missing update receipts")?,
+    );
+    // run_case checked this exact bounded output, report and process exit.
+    let bytes =
+        std::fs::read(parent.join(format!("{}-client-output.txt", case.report_prefix(&name))))
+            .map_err(|e| e.to_string())?;
+    let observation: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    println!(
+        "{}",
+        serde_json::json!({
+            "source": std::env::var("CFW_PACKAGE_SOURCE").map_err(|e| e.to_string())?,
+            "package_inspection": observation, "release_accepted": false,
+        })
+    );
+    Ok(())
+}
+
 pub(super) fn check_report(
     parent: &Path,
     report_prefix: &str,
@@ -661,15 +696,24 @@ pub(super) fn client(name: &str, hex: &str, case: ClientCase) -> Result<()> {
         Err(e) => serde_json::json!({"success":false,"error":e}),
     };
     let written = (|| -> Result<()> {
+        let parent = if matches!(case, ClientCase::UpdateInspection) {
+            let parent = PathBuf::from(
+                std::env::var_os("CFW_NATIVE_SERVICE_RECEIPTS").ok_or("missing update receipts")?,
+            );
+            if !parent.is_absolute() || !parent.is_dir() {
+                return Err("invalid update receipt directory".into());
+            }
+            parent
+        } else {
+            image
+                .parent()
+                .ok_or("missing fixture image parent")?
+                .to_owned()
+        };
         let mut output = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(
-                image
-                    .parent()
-                    .ok_or("missing fixture image parent")?
-                    .join(format!("{report_prefix}-client.json")),
-            )
+            .open(parent.join(format!("{report_prefix}-client.json")))
             .map_err(|e| e.to_string())?;
         std::io::Write::write_all(
             &mut output,
@@ -717,8 +761,16 @@ fn client_body(name: &str, hex: &str, case: ClientCase) -> Result<()> {
         *value =
             u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).map_err(|e| e.to_string())?;
     }
-    let (image, installed_digest) = if matches!(case, ClientCase::ProcessObservation) {
-        if std::env::var("CFW_NATIVE_PROCESS_OBSERVATION_TESTS").as_deref() != Ok("1") {
+    let (image, installed_digest) = if matches!(
+        case,
+        ClientCase::ProcessObservation | ClientCase::UpdateInspection
+    ) {
+        let opt_in = if matches!(case, ClientCase::ProcessObservation) {
+            "CFW_NATIVE_PROCESS_OBSERVATION_TESTS"
+        } else {
+            "CFW_NATIVE_PACKAGE_TESTS"
+        };
+        if std::env::var(opt_in).as_deref() != Ok("1") {
             return Err("desktop process client requires disposable CI opt-in".into());
         }
         let image = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -733,6 +785,10 @@ fn client_body(name: &str, hex: &str, case: ClientCase) -> Result<()> {
     match case {
         ClientCase::ProcessObservation => {
             println!("{}", desktop_process::observe()?);
+            return Ok(());
+        }
+        ClientCase::UpdateInspection => {
+            println!("{}", update_package::observe()?);
             return Ok(());
         }
         ClientCase::InstalledHostDesktop

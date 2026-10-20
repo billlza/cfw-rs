@@ -27,7 +27,7 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
     }
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args == ["--fixture-descendant"] {
-        record("descendant")?;
+        record("descendant", None)?;
         std::thread::sleep(Duration::from_secs(60));
         return Err("descendant outlived the owning Job deadline".into());
     }
@@ -37,7 +37,12 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
     let mut input = std::io::stdin().lock();
     let mut mode = [0; 4];
     input.read_exact(&mut mode)?;
-    record("worker")?;
+    let input_capacity = if &mode == b"writ" {
+        Some(stdin_buffer_capacity()?)
+    } else {
+        None
+    };
+    record("worker", input_capacity)?;
     if &mode == b"writ" {
         // Leave the large request unread to exercise a blocked parent write.
         std::thread::sleep(Duration::from_secs(60));
@@ -83,14 +88,40 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
 }
 
 #[cfg(windows)]
-fn record(name: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn record(name: &str, input_capacity: Option<u32>) -> Result<(), Box<dyn std::error::Error>> {
     let process = cfw_windows_engine::NativePeerProcess::open(std::process::id())?;
     let bytes = serde_json::to_vec(&serde_json::json!({
         "pid": std::process::id(),
         "creation_filetime": process.identity().process_creation_time(),
+        "input_buffer_capacity": input_capacity,
     }))?;
     let pending = format!("{name}.pending");
     std::fs::write(&pending, bytes)?;
     std::fs::rename(pending, format!("{name}.json"))?;
     Ok(())
+}
+
+#[cfg(windows)]
+fn stdin_buffer_capacity() -> Result<u32, Box<dyn std::error::Error>> {
+    use std::os::windows::io::AsRawHandle;
+    let mut incoming = 0;
+    // GetNamedPipeInfo explicitly accepts anonymous CreatePipe handles.
+    if unsafe {
+        windows_sys::Win32::System::Pipes::GetNamedPipeInfo(
+            std::io::stdin().as_raw_handle(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut incoming,
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    // Four selector bytes have been consumed; the remaining request cannot
+    // fit in the observed buffer. Do not infer a fixed default pipe size.
+    if incoming == 0 || incoming >= 16 * 1024 - 4 {
+        return Err("fixture did not establish a blocked request writer".into());
+    }
+    Ok(incoming)
 }

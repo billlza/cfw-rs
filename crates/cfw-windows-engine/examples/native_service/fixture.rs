@@ -37,6 +37,7 @@ mod machine_record;
 mod restricted;
 mod stress;
 mod transport;
+mod update_package;
 mod user_agent;
 type Result<T> = std::result::Result<T, String>;
 const LIMIT: Duration = Duration::from_secs(15);
@@ -117,6 +118,12 @@ pub(super) fn main() -> Result<()> {
             &args[3],
             restricted::ClientCase::ProcessObservation,
         );
+    }
+    if args.len() == 2 && args[1] == "--update-package-validation" {
+        return restricted::run_update_package_inspection();
+    }
+    if args.len() == 4 && args[1] == "--update-package-client" {
+        return restricted::client(&args[2], &args[3], restricted::ClientCase::UpdateInspection);
     }
     if args.len() == 2 && args[1] == "--installed-host-probe" {
         return installed_host::probe();

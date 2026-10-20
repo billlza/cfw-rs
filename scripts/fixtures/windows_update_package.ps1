@@ -331,7 +331,7 @@ try {
     New-SignedDatabase 'reused-code.msi' @{} 'x64;1033' '{E66ACF84-7639-4707-BC01-0A370C9B2E3E}'
     $env:CFW_NATIVE_PACKAGE_FIXTURES = $root
     Write-Stage 'clippy' 'native_update_package'
-    cargo clippy --locked -p cfw-windows-engine --all-targets --features native-package-validation -- -D warnings 2>&1 |
+    cargo clippy --locked -p cfw-windows-engine --all-targets --features native-package-validation,native-service-validation -- -D warnings 2>&1 |
         Tee-Object -FilePath (Join-Path $Evidence 'clippy.log')
     if ($LASTEXITCODE -ne 0) { throw 'Native package inspection Clippy failed' }
     Write-Stage 'test' 'native_update_package'
@@ -340,7 +340,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Native signed package inspection failed' }
     $inspectionPassed = $true
     Write-Stage 'test' 'installed_update_worker'
-    ./scripts/fixtures/windows_update_worker.ps1 -Source $Source -Fixtures $root -Evidence $Evidence
+    ./scripts/fixtures/windows_update_worker.ps1 -Source $Source -Fixtures $root -Evidence $Evidence -SignTool $signTool -PublisherThumbprint $certificates[0].Thumbprint
 } catch { $failure = "$($_.Exception.ToString())`n$($_.ScriptStackTrace)" }
 finally {
     try { Write-Stage 'cleanup-certificates' '' } catch { $cleanupErrors.Add($_.ToString()) }

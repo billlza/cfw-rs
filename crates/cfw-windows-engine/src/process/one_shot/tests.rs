@@ -120,6 +120,12 @@ fn waiting_counterexample(mode: &[u8; 4], large: bool) {
             .as_ref()
             .expect("the fixture entered its waiting mode"),
     );
+    if large {
+        let marker: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(directory.join("worker.json")).unwrap()).unwrap();
+        let capacity = marker["input_buffer_capacity"].as_u64().unwrap();
+        assert!(capacity > 0 && capacity < (MAX_REQUEST - 4) as u64);
+    }
 }
 
 #[test]

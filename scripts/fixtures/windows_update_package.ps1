@@ -298,7 +298,9 @@ try {
     $database = $null
     $view = $null
     try {
-        $database = Invoke-Msi $installer 'OpenDatabase' @((Join-Path $root 'tampered.msi'), 1)
+        # Reflection marshals inline cmdlet output as PSObject, not BSTR.
+        [string]$tamperedPath = Join-Path $root 'tampered.msi'
+        $database = Invoke-Msi $installer 'OpenDatabase' @($tamperedPath, 1)
         $view = Invoke-Msi $database 'OpenView' @("UPDATE ``Property`` SET ``Value`` = 'changed' WHERE ``Property`` = 'ProductName'")
         Invoke-Msi $view 'Execute' @()
         Invoke-Msi $view 'Close' @()

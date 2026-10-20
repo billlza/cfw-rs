@@ -71,7 +71,9 @@ try {
     if ($LASTEXITCODE -ne 0 -or -not ($check | ConvertFrom-Json).installation_verified) { throw 'Protected package was not admitted' }
     $cases.Add('protected_fixed_location_package_admitted')
 
-    $altered = $manifest.Clone(); $altered['desktop_sha256'] = '00' * 32
+    $altered = [ordered]@{}
+    foreach ($key in $manifest.Keys) { $altered[$key] = $manifest[$key] }
+    $altered['desktop_sha256'] = '00' * 32
     $altered | ConvertTo-Json | Set-Content -LiteralPath $manifestPath -Encoding utf8NoBOM
     Require-Rejected 'wrong_desktop_digest_rejected'
     [IO.File]::WriteAllBytes($manifestPath, $manifestBytes)

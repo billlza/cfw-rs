@@ -33,6 +33,9 @@ use error::{desktop_error, host_error};
 type Result<T> = std::result::Result<T, BackendError>;
 const LIMIT: Duration = Duration::from_secs(60);
 const NATIVE_LIMIT: Duration = Duration::from_secs(30);
+/// The application watchdog outlives bounded native admission and retirement;
+/// it never changes a native timeout or admits an uncertain cleanup as Off.
+pub const OUTER_WATCHDOG: Duration = Duration::from_secs(65);
 
 struct PendingRequest(Option<EngineStartRequest>);
 impl PendingRequest {

@@ -14,6 +14,7 @@ use std::{
 };
 mod backend;
 mod checks;
+mod coordinator;
 mod profile;
 mod progress;
 use progress::Progress;
@@ -23,6 +24,7 @@ pub(super) enum InstalledSuite {
     Host,
     Backend,
     Profile,
+    Coordinator,
 }
 impl InstalledSuite {
     fn prefix(self) -> &'static str {
@@ -30,6 +32,7 @@ impl InstalledSuite {
             Self::Host => "installed-host",
             Self::Backend => "installed-host-backend",
             Self::Profile => "installed-host-profile",
+            Self::Coordinator => "installed-host-coordinator",
         }
     }
 }
@@ -299,6 +302,20 @@ pub(super) fn exercise_profile() -> Result<()> {
     );
     Ok(())
 }
+pub(super) fn exercise_coordinator() -> Result<()> {
+    require_opt_in()?;
+    let mut progress = Progress::new()?;
+    progress.record("open_desktop", 0)?;
+    let coordinator = coordinator::exercise(&mut progress)?;
+    progress.record("complete", 8)?;
+    println!(
+        "{}",
+        serde_json::json!({"source":std::env::var("CFW_NATIVE_SERVICE_SOURCE").map_err(|e|e.to_string())?,
+        "product_service":true,"product_agent":true,"desktop_is_fixture":true,"medium_integrity":true,
+        "coordinator":coordinator,"release_accepted":false})
+    );
+    Ok(())
+}
 pub(super) fn check_output(
     directory: &Path,
     output: &Path,
@@ -328,6 +345,12 @@ pub(super) fn check_output(
         report["profile_probes"]["shared_profile_delay_backend"] == true
             && report["profile_probes"]["cancellation_observed"] == true
             && report["profile_probes"]["authority_unchanged"] == true
+    } else if suite == InstalledSuite::Coordinator {
+        report["coordinator"]["shared_desktop_assembly"] == true
+            && report["coordinator"]["shared_mode_coordinator"] == true
+            && report["coordinator"]["proxy_restored"] == true
+            && report["coordinator"]["coordinator_retired"] == true
+            && report["coordinator"]["lineage_generation"] == 8
     } else {
         report["configuration_checks"]["authority_unchanged"] == true
             && report["configuration_checks"]["proxy_unchanged"] == true
@@ -430,6 +453,11 @@ pub(super) fn combine_reports(directory: &Path) -> Result<()> {
             InstalledSuite::Profile,
             "profile_probes",
             "shared_profile_delay_backend",
+        ),
+        (
+            InstalledSuite::Coordinator,
+            "coordinator",
+            "shared_mode_coordinator",
         ),
     ] {
         let report = read(&directory.join(format!("{}-lifecycle.json", suite.prefix())))?;

@@ -17,6 +17,7 @@ mod native_components;
 mod native_dashboard;
 #[cfg(feature = "physical-release-evidence")]
 mod packet_evidence_transport;
+mod platform_runtime;
 mod private_store;
 #[cfg(test)]
 mod profile_fixtures;

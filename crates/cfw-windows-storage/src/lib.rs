@@ -361,6 +361,23 @@ impl ReadTransaction {
 }
 
 impl WriteTransaction {
+    /// Creates a new private regular output file relative to the retained
+    /// directory handle. The returned handle cannot replace an existing entry;
+    /// callers own its write/flush lifetime and any application size bound.
+    pub fn create_private_output(&mut self, name: &str) -> Result<File, Error> {
+        record_name(name)?;
+        let file = open_relative(
+            &self.read.inner.file,
+            name,
+            FILE_CREATE,
+            false,
+            Access::Write,
+            Some(&self.read.inner.security),
+        )?;
+        verify_file(&self.read.inner, &file, 0, ReadPolicy::Private)?;
+        Ok(file)
+    }
+
     /// Reads an application-owned temporary without renaming or deleting it.
     /// Recovery must validate this content before any subsequent publication.
     pub fn read_temporary(&self, name: &str, maximum: usize) -> Result<Option<Snapshot>, Error> {

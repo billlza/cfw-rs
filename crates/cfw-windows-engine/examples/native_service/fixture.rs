@@ -117,7 +117,10 @@ pub(super) fn main() -> Result<()> {
     if args.len() == 4
         && matches!(
             args[1].as_str(),
-            "--installed-host-client" | "--installed-backend-client" | "--installed-profile-client"
+            "--installed-host-client"
+                | "--installed-backend-client"
+                | "--installed-profile-client"
+                | "--installed-coordinator-client"
         )
     {
         if args[2] != cfw_windows_engine::runtime_host::SERVICE_NAME {
@@ -126,6 +129,7 @@ pub(super) fn main() -> Result<()> {
         return match args[1].as_str() {
             "--installed-host-client" => installed_host::exercise(),
             "--installed-backend-client" => installed_host::exercise_backend(),
+            "--installed-coordinator-client" => installed_host::exercise_coordinator(),
             _ => installed_host::exercise_profile(),
         };
     }

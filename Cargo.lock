@@ -618,6 +618,8 @@ dependencies = [
  "cfw-platform",
  "cfw-profiles",
  "cfw-singbox-config",
+ "cfw-windows-engine",
+ "cfw-windows-storage",
  "core-foundation",
  "dispatch2",
  "futures-util",
@@ -667,6 +669,7 @@ dependencies = [
 name = "cfw-windows-engine"
 version = "0.5.0"
 dependencies = [
+ "cfw-application",
  "cfw-engine-api",
  "cfw-singbox-config",
  "cfw-windows-credentials",

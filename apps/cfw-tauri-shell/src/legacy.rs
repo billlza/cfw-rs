@@ -349,7 +349,7 @@ pub(crate) async fn disable_service_mode(
     // credential, validates both libbox configs, proves global Off, and for a
     // Tunnel target proves the System Extension is ready.
     let live_outcome =
-        run_native_preflight(engine.preflight_backend.as_ref(), current_request.clone()).await?;
+        run_native_preflight(engine.legacy_preflight()?, current_request.clone()).await?;
     validate_outcome_binding(&current_request, &live_outcome)?;
     if !matches!(live_outcome, CutoverPreflightOutcome::Ready { .. }) {
         return Err(
@@ -630,8 +630,7 @@ pub(crate) async fn recover_legacy_cutover(
             &request,
             &settings,
         )?;
-        let outcome =
-            run_native_preflight(engine.preflight_backend.as_ref(), request.clone()).await?;
+        let outcome = run_native_preflight(engine.legacy_preflight()?, request.clone()).await?;
         validate_outcome_binding(&request, &outcome)?;
         if !matches!(outcome, CutoverPreflightOutcome::Ready { .. }) {
             let message = "System Extension approval is still pending; replacement recovery made no further network change";
@@ -815,8 +814,7 @@ async fn start_replacement_with_endpoint_rebind(
             )?;
         }
 
-        let outcome =
-            run_native_preflight(engine.preflight_backend.as_ref(), request.clone()).await?;
+        let outcome = run_native_preflight(engine.legacy_preflight()?, request.clone()).await?;
         validate_outcome_binding(&request, &outcome)?;
         if !matches!(outcome, CutoverPreflightOutcome::Ready { .. }) {
             return Err(

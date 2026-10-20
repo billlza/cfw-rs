@@ -263,6 +263,7 @@ pub(crate) async fn prepare_legacy_cutover(
         );
     }
     engine.require_capability(target)?;
+    let preflight = engine.legacy_preflight()?;
     let _maintenance = engine
         .reserve_profile_mutation()
         .map_err(|error| error.to_string())?;
@@ -282,7 +283,7 @@ pub(crate) async fn prepare_legacy_cutover(
         )
         .await
         .map_err(|error| error.to_string())?;
-    let outcome = run_native_preflight(engine.preflight_backend.as_ref(), request.clone()).await?;
+    let outcome = run_native_preflight(preflight, request.clone()).await?;
     validate_outcome_binding(&request, &outcome)?;
     match outcome {
         CutoverPreflightOutcome::AwaitingApproval { .. } => {

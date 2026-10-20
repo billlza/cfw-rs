@@ -76,5 +76,9 @@ core-foundation = "=0.10.1"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "libc", "NSRunningApplication"] }
 security-framework = { version = "=3.7.0", default-features = false }
 
+[target.'cfg(windows)'.dependencies]
+cfw-windows-engine = { path = "../../crates/cfw-windows-engine" }
+cfw-windows-storage = { path = "../../crates/cfw-windows-storage" }
+
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 dispatch2 = "=0.3.1"

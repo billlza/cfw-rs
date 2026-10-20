@@ -37,6 +37,13 @@ const PHASES: &[&str] = &[
     "profile_probe_authenticated",
     "profile_probe_cancellation",
     "profile_probe_complete",
+    "coordinator_prepare",
+    "coordinator_initial_off",
+    "coordinator_services_checked",
+    "coordinator_set_mode",
+    "coordinator_active",
+    "coordinator_shutdown",
+    "coordinator_off",
     "complete",
 ];
 #[derive(Serialize, Deserialize)]

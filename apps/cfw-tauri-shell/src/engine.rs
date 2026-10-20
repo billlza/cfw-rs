@@ -22,13 +22,9 @@ mod tests;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
-use cfw_apple_network::{
-    AppleNetworkBackend, KeychainEngineGenerationStore, NATIVE_BRIDGE_OUTER_WATCHDOG,
-    NativeFrameworkBridge,
-};
 use cfw_application::{EngineControllerAccess, EngineCoordinatorError, EngineModeCoordinator};
 use cfw_engine_api::{
-    BackendErrorKind, CutoverPreflightBackend, EngineBackend, EngineEvent, EngineMode, EngineOwner,
+    BackendErrorKind, CutoverPreflightBackend, EngineEvent, EngineMode, EngineOwner,
     EngineSnapshot, EngineState, SystemProxyAuthorization,
 };
 use cfw_profiles::{ProfileError, ProfileRepository};
@@ -164,7 +160,7 @@ pub struct ManagedEngine {
     pub(crate) coordinator: EngineModeCoordinator,
     capabilities: EngineCapabilities,
     unavailable_reason: Option<String>,
-    pub(crate) preflight_backend: Arc<dyn CutoverPreflightBackend>,
+    preflight_backend: Option<Arc<dyn CutoverPreflightBackend>>,
     system_proxy_authorization: Arc<dyn SystemProxyAuthorization>,
     pub(crate) profile_delay_backend: Arc<dyn cfw_engine_api::ProfileDelayBackend>,
     cutover: CutoverPreparationGate,
@@ -197,6 +193,12 @@ impl StagedEndpointRebind {
 }
 
 impl ManagedEngine {
+    pub(crate) fn legacy_preflight(&self) -> Result<&dyn CutoverPreflightBackend, String> {
+        self.preflight_backend
+            .as_deref()
+            .ok_or_else(|| "legacy service cutover is unavailable on this platform".into())
+    }
+
     pub(crate) fn mode_intent_revision(&self) -> Result<u64, EngineMaintenanceError> {
         self.maintenance.intent_revision()
     }
@@ -390,6 +392,10 @@ impl ManagedEngine {
             self.capabilities
         };
         let (cutover_ready, mut cutover_reason) = self.cutover.readiness(Instant::now())?;
+        let cutover_ready = cutover_ready && self.preflight_backend.is_some();
+        if self.preflight_backend.is_none() {
+            cutover_reason = Some("legacy service cutover is unavailable on this platform".into());
+        }
         if self.unavailable_reason.is_some() {
             cutover_reason = self.unavailable_reason.clone();
         }
@@ -407,7 +413,7 @@ impl ManagedEngine {
     }
 }
 
-/// Preparing filesystem / Keychain state never starts the coordinator. The
+/// Preparing filesystem / platform state never starts the coordinator. The
 /// startup owner admits this task only after checking for an intervening quit.
 pub(crate) struct PreparedEngine {
     pub(crate) engine: ManagedEngine,
@@ -415,7 +421,7 @@ pub(crate) struct PreparedEngine {
 }
 
 pub(crate) fn prepare_managed_engine(
-    bridge: NativeFrameworkBridge,
+    services: crate::platform_runtime::PlatformRuntime,
 ) -> Result<PreparedEngine, String> {
     let store = settings_store()?;
     store.ensure_layout().map_err(|error| error.to_string())?;
@@ -439,61 +445,28 @@ pub(crate) fn prepare_managed_engine(
     };
     let controller = EngineControllerAccess::resolve(settings)
         .map_err(|error| format!("engine settings are unusable: {error}"))?;
-    let native_available = bridge.is_available();
-    let native_failure = bridge.unavailable_reason().map(ToOwned::to_owned);
-    let profile_delay_backend = Arc::new(bridge.clone());
-    let concrete_backend = Arc::new(AppleNetworkBackend::new(bridge));
-    let system_proxy_authorization = concrete_backend.clone();
-    let engine_backend: Arc<dyn EngineBackend> = concrete_backend.clone();
-    let preflight_backend: Arc<dyn CutoverPreflightBackend> = concrete_backend;
-    let generation_store =
-        KeychainEngineGenerationStore::new(store.paths().app_home.join("engine"));
-    let mut prepared_task = None;
-    let persisted = match generation_store {
-        Ok(generation_store) => {
-            let generation_store: Arc<dyn cfw_engine_api::EngineGenerationStore> =
-                Arc::new(generation_store);
-            EngineModeCoordinator::spawn_persisted_with(
-                engine_backend.clone(),
-                generation_store,
-                NATIVE_BRIDGE_OUTER_WATCHDOG,
-                |task| prepared_task = Some(task),
-            )
-        }
-        Err(error) => Err(cfw_application::EngineCoordinatorError::Journal(
-            error.to_string(),
-        )),
-    };
-    let (coordinator, lineage_failure) = match persisted {
-        Ok(coordinator) => (coordinator, None),
-        Err(error) => {
-            let message = format!("authoritative engine lineage is unavailable: {error}");
-            let coordinator = EngineModeCoordinator::spawn_journal_unavailable_with(
-                engine_backend,
-                message.clone(),
-                NATIVE_BRIDGE_OUTER_WATCHDOG,
-                |task| prepared_task = Some(task),
-            );
-            (coordinator, Some(message))
-        }
-    };
+    let crate::platform_runtime::PreparedRuntime {
+        services,
+        coordinator,
+        task,
+    } = services.prepare()?;
 
     let engine = ManagedEngine {
         coordinator,
         capabilities: EngineCapabilities {
-            local_proxy: native_available && lineage_failure.is_none(),
-            system_proxy: native_available && lineage_failure.is_none(),
-            tunnel: native_available && lineage_failure.is_none(),
+            local_proxy: services.proxy_available,
+            system_proxy: services.proxy_available,
+            tunnel: services.tunnel_available,
             // Providers are application-owned resources (commands::providers).
             // The pinned sing-box 1.14.2 schema has no proxy or rule providers,
             // so the controller's provider methods stay fail-closed backstops
             // that nothing probes.
             provider_management: true,
         },
-        unavailable_reason: lineage_failure.or(native_failure),
-        preflight_backend,
-        system_proxy_authorization,
-        profile_delay_backend,
+        unavailable_reason: services.unavailable_reason,
+        preflight_backend: services.legacy_preflight,
+        system_proxy_authorization: services.authorization,
+        profile_delay_backend: services.probes,
         cutover: CutoverPreparationGate::default(),
         maintenance: EngineMaintenanceGate::default(),
         endpoints: Arc::new(RwLock::new(EngineEndpointBinding {
@@ -502,7 +475,6 @@ pub(crate) fn prepare_managed_engine(
             active: None,
         })),
     };
-    let task = prepared_task.ok_or("engine preparation produced no coordinator task")?;
     Ok(PreparedEngine { engine, task })
 }
 

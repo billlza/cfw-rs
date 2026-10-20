@@ -20,6 +20,7 @@ pub(super) enum ClientCase {
     InstalledHostDesktop,
     InstalledBackendDesktop,
     InstalledProfileDesktop,
+    InstalledCoordinatorDesktop,
     RejectedRuntime,
 }
 impl ClientCase {
@@ -38,6 +39,7 @@ impl ClientCase {
             Self::InstalledHostDesktop => "--installed-host-client",
             Self::InstalledBackendDesktop => "--installed-backend-client",
             Self::InstalledProfileDesktop => "--installed-profile-client",
+            Self::InstalledCoordinatorDesktop => "--installed-coordinator-client",
             Self::RejectedRuntime => "--rejected-agent-runtime",
         }
     }
@@ -56,6 +58,7 @@ impl ClientCase {
             Self::InstalledHostDesktop => "installed-host".into(),
             Self::InstalledBackendDesktop => "installed-host-backend".into(),
             Self::InstalledProfileDesktop => "installed-host-profile".into(),
+            Self::InstalledCoordinatorDesktop => "installed-host-coordinator".into(),
             Self::RejectedRuntime => format!("{name}-runtime-rejected"),
         }
     }
@@ -90,7 +93,9 @@ impl ClientCase {
             Self::RuntimeRestartLocal => {
                 user_agent::restart::agent_report(user_agent::restart::Mode::Local)
             }
-            Self::InstalledHostDesktop | Self::InstalledBackendDesktop => {
+            Self::InstalledHostDesktop
+            | Self::InstalledBackendDesktop
+            | Self::InstalledCoordinatorDesktop => {
                 serde_json::json!({"product_service":true,"product_agent":true,"desktop_is_fixture":true,"release_accepted":false})
             }
             Self::InstalledProfileDesktop => {
@@ -104,6 +109,7 @@ impl ClientCase {
             Self::InstalledHostDesktop
                 | Self::InstalledBackendDesktop
                 | Self::InstalledProfileDesktop
+                | Self::InstalledCoordinatorDesktop
         )
     }
     fn installed_suite(self) -> Result<installed_host::InstalledSuite> {
@@ -111,6 +117,7 @@ impl ClientCase {
             Self::InstalledHostDesktop => Ok(installed_host::InstalledSuite::Host),
             Self::InstalledBackendDesktop => Ok(installed_host::InstalledSuite::Backend),
             Self::InstalledProfileDesktop => Ok(installed_host::InstalledSuite::Profile),
+            Self::InstalledCoordinatorDesktop => Ok(installed_host::InstalledSuite::Coordinator),
             _ => Err("client is not an installed suite".into()),
         }
     }
@@ -487,6 +494,7 @@ fn run_case(
             | ClientCase::InstalledHostDesktop
             | ClientCase::InstalledBackendDesktop
             | ClientCase::InstalledProfileDesktop
+            | ClientCase::InstalledCoordinatorDesktop
     ) {
         Duration::from_secs(60)
     } else {
@@ -553,6 +561,7 @@ pub(super) fn run_installed_host(image: &Path, expected: [u8; 32]) -> Result<()>
         ClientCase::InstalledHostDesktop,
         ClientCase::InstalledBackendDesktop,
         ClientCase::InstalledProfileDesktop,
+        ClientCase::InstalledCoordinatorDesktop,
     ] {
         run_case(
             image,
@@ -667,7 +676,8 @@ fn client_body(name: &str, hex: &str, case: ClientCase) -> Result<()> {
     match case {
         ClientCase::InstalledHostDesktop
         | ClientCase::InstalledBackendDesktop
-        | ClientCase::InstalledProfileDesktop => {
+        | ClientCase::InstalledProfileDesktop
+        | ClientCase::InstalledCoordinatorDesktop => {
             return Err("installed host client must use its separate test entrypoint".into());
         }
         ClientCase::RuntimeRestartDesktop => {

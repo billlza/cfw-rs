@@ -7,6 +7,47 @@ use std::time::{Duration, Instant};
 use cfw_windows_storage::{EntryKind, Error, PrivateDirectory, Publication, ReadPolicy};
 
 #[test]
+fn private_output_retains_the_admitted_handle_and_never_replaces_existing_data() {
+    use std::io::Write;
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = PrivateDirectory::open_or_create(&temporary.path().join("private")).unwrap();
+    let mut output = directory
+        .write()
+        .unwrap()
+        .create_private_output("native.log")
+        .unwrap();
+    // The write transaction is gone; the admitted handle remains usable.
+    output.write_all(b"native event\n").unwrap();
+    output.sync_all().unwrap();
+    cfw_windows_storage::validate_private_file(&output).unwrap();
+    assert!(
+        directory
+            .write()
+            .unwrap()
+            .create_private_output("native.log")
+            .is_err()
+    );
+    assert!(
+        directory
+            .write()
+            .unwrap()
+            .create_private_output("../outside.log")
+            .is_err()
+    );
+    drop(output);
+    assert_eq!(
+        directory
+            .read()
+            .unwrap()
+            .read("native.log", 128, ReadPolicy::Private)
+            .unwrap()
+            .unwrap()
+            .bytes,
+        b"native event\n"
+    );
+}
+
+#[test]
 fn freshly_created_directory_can_be_pinned_without_delete_sharing() {
     use std::fs::OpenOptions;
     use std::os::windows::fs::OpenOptionsExt;

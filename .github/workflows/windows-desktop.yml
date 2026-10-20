@@ -97,6 +97,9 @@ jobs:
           cargo test --locked -p cfw-core product::tests 2>&1 |
             Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-product-tests.log')
           if ($LASTEXITCODE -ne 0) { throw 'Windows desktop product identity test failed' }
+          cargo test --locked -p cfw-core update:: 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-update-contract-tests.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Windows desktop release target contract tests failed' }
       - name: Verify native desktop process observations
         env:
           CFW_NATIVE_PROCESS_OBSERVATION_TESTS: '1'

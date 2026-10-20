@@ -20,7 +20,6 @@ use std::time::{Duration, Instant};
 
 use cfw_core::DiagnosticTopic;
 use cfw_platform::{ReleaseSignedComponent, operating_system_version};
-use semver::Version;
 use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
@@ -47,7 +46,6 @@ pub(crate) use finisher::run as run_update_finisher;
 pub(crate) use journal::UpdateInstallLease;
 pub(crate) use state::UpdaterSecurityState;
 
-const RELEASE_PAGE_PREFIX: &str = "https://github.com/billlza/cfw-rs/releases/tag/v";
 const PROGRESS_EVENT: &str = "cfw://update-progress";
 const INSTALLER_LOG: &str = "update-installer.log";
 /// Earlier attempts stay in the installer log until it outgrows this.
@@ -184,12 +182,9 @@ async fn recheck_presented_update(
 }
 
 fn release_page_url(authorization: &UpdateAuthorization) -> Result<String> {
-    let parsed =
-        Version::parse(&authorization.version).map_err(|_| UpdateError::InvalidReleaseVersion)?;
-    if parsed.to_string() != authorization.version {
-        return Err(UpdateError::InvalidReleaseVersion);
-    }
-    Ok(format!("{RELEASE_PAGE_PREFIX}{}", authorization.version))
+    contract::target()?
+        .release_page_url(&authorization.version)
+        .map_err(|_| UpdateError::InvalidReleaseVersion)
 }
 
 /// Downloads, authenticates and stages the presented release. The core keeps

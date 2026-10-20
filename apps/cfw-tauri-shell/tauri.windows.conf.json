@@ -29,5 +29,12 @@
     "targets": [],
     "createUpdaterArtifacts": false,
     "icon": ["icons/platforms/windows/icon.ico"]
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/billlza/cfw-rs/releases/download/cfw-stable/latest-windows.json"
+      ]
+    }
   }
 }

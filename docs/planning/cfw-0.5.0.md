@@ -164,8 +164,43 @@ Windows MSI 暂存新增 `UpdateStaging`：使用私有 `updates-msi-v1/<UUID>`�
 活动租约阻止父目录重命名而失败，未进入清理逻辑；失败产物 `12289187043`
 保留。修正夹具先核验持锁时重命名被拒绝，再释放租约、强制完成路径替换，
 随后通过保留句柄取得租约，核对创建与清理不影响替换路径；产品边界和断言不放宽。
-修正后的原生目录测试仍待执行。该组件尚未接入完整桌面更新状态机；
+修正后的 `5850f050a4e939bc35715d133ee71f8ec7b018bc`
+[原生桌面作业](https://github.com/billlza/cfw-rs/actions/runs/39476697236)
+通过 60 项存储、4 项启动、1 项产品、7 项进程检查与普通权限观察，以及全部
+19 项 MSI/工作进程检查和普通权限暂存。产物 `12289947434`、`12289129921`
+的源码、摘要、完整文件集和回执已核验；目录替换用例修正已在 Windows 上通过。
+同源[组件作业](https://github.com/billlza/cfw-rs/actions/runs/39476892785)
+四项通过，679 项 Rust、314 项 UI、14 项原生引擎、35 项 SCM 与 480 个 Go pass
+events 均已核验；engine `12290366428`、SCM `12290455450` 的源码和摘要匹配。
+完整桌面仍有 42 项编译错误、零 warning，与 `6d00580d` 的错误消息和文件完全
+相同，没有 GUI EXE。该组件尚未接入完整桌面更新状态机；
 Windows 更新元数据、安装交接和整份更新流程的原生验收仍未完成。
+
+更新元数据的目标、文件名、版本地址和重定向规则现统一在
+`cfw-core::update`，桌面实际检查和发行页面命令选择本机已限定的发布目标。
+Mac 保留两项 Apple Silicon 别名与原有 `latest.json`、`v{version}` 地址；
+Windows 仅接受 `windows-x86_64`，文件名为
+`Clash.for.Windows_{version}_x64.msi`，版本标签为 `cfw-v{version}`。
+Windows 的 MSI 版本上限与原生包身份检查一致。混合平台、其他架构、替代文件名、
+错误版本路径、签名不一致和跨通道重定向均拒绝；未知构建目标不会回退到 Mac。
+
+Windows 通道约定为
+`https://github.com/billlza/cfw-rs/releases/download/cfw-stable/latest-windows.json`，
+平台 Tauri 配置与运行时地址由同一测试核对。`cfw-stable` 仅承担可更新的通道
+指针；正式 MSI 和签名留在对应的版本发行中，不能用通道指针的可变性替代版本资产
+的封存。发布 Windows 版本和更新通道时都必须保留仓库的 Mac Latest 选择，
+使用 `make_latest: "false"`，不能令现有 CFM 客户端读到 Windows 发行。
+本次未创建标签、发行或通道资产。首次公开 CFW 前仍须实际发布通道、生成与校验
+清单，并端到端观察下载和安装；缺失通道的 HTTP 错误不能伪装成“没有更新”。
+依据：[GitHub Latest 下载地址](https://docs.github.com/en/repositories/releasing-projects-on-github/linking-to-releases)、
+[发行的 Latest 控制](https://docs.github.com/en/rest/releases/releases#create-a-release)、
+[Tauri 平台配置合并](https://v2.tauri.app/reference/config/)。
+
+这次迁移保留原有六项 Mac 契约回归，并增加七项平台契约回归，13 项共享测试
+及其余 113 项 Mac 更新回归通过；Mac 桌面全目标和 Windows core 全目标交叉
+Clippy 均禁止 warning 且通过。这里只移动网络无关的契约层，HTTP 读取限额、
+Minisign 验证、私有文件发布和安装授权仍在各自原有边界执行。新增 Windows
+契约的托管原生运行以及完整状态机接入仍待完成。
 
 安装编排的下一步须处理两个已定位的边界：MSI 的 `ServiceControl.Wait` 最多等
 30 秒，不能替代 `runtime_host/service.rs` 的成功退出与全局 Off 观察；当前服务

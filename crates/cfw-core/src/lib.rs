@@ -12,6 +12,7 @@ mod settings;
 mod settings_storage;
 #[cfg(test)]
 mod test_support;
+pub mod update;
 pub use diagnostics::{
     DiagnosticEntry, DiagnosticJournal, DiagnosticTopic, redact_diagnostic_text,
 };

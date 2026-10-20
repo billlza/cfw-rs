@@ -7,6 +7,7 @@ license.workspace = true
 [features]
 native-engine-validation = []
 native-service-validation = []
+native-package-validation = []
 
 [dependencies]
 cfw-singbox-config = { path = "../cfw-singbox-config" }
@@ -21,6 +22,7 @@ cfw-windows-credentials = { path = "../cfw-windows-credentials" }
 cfw-windows-storage = { path = "../cfw-windows-storage" }
 subtle = "=2.6.1"
 sha2.workspace = true
+semver.workspace = true
 tokio = { workspace = true, features = ["rt", "net", "io-util"] }
 uuid.workspace = true
 url.workspace = true
@@ -29,6 +31,9 @@ windows-sys = { version = "=0.61.2", features = [
   "Win32_Security",
   "Win32_Security_Authorization",
   "Win32_Security_Cryptography",
+  "Win32_Security_Cryptography_Catalog",
+  "Win32_Security_Cryptography_Sip",
+  "Win32_Security_WinTrust",
   "Win32_Storage_FileSystem",
   "Win32_System_JobObjects",
   "Win32_System_Threading",
@@ -44,6 +49,7 @@ windows-sys = { version = "=0.61.2", features = [
   "Win32_System_RemoteDesktop",
   "Win32_System_RestartManager",
   "Win32_System_Com",
+  "Win32_System_ApplicationInstallationAndServicing",
   "Win32_UI_Shell",
 ] }
 
@@ -63,6 +69,10 @@ windows-sys = { version = "=0.61.2", features = ["Win32_System_StationsAndDeskto
 [[test]]
 name = "native_engine"
 required-features = ["native-engine-validation"]
+
+[[test]]
+name = "native_update_package"
+required-features = ["native-package-validation"]
 
 [[example]]
 name = "native-service-fixture"

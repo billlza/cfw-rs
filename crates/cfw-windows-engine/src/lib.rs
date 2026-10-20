@@ -7,6 +7,8 @@
 
 #[cfg(windows)]
 pub mod backend;
+#[cfg(windows)]
+pub mod update_package;
 
 #[cfg(any(windows, test))]
 pub mod authority;

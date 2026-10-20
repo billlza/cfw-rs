@@ -114,6 +114,12 @@ jobs:
           cargo run --locked -p cfw-windows-engine --features native-service-validation --example native-service-fixture -- --desktop-process-validation 2>&1 |
             Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-medium-process-tests.log')
           if ($LASTEXITCODE -ne 0) { throw 'Windows medium-integrity desktop process observation failed' }
+      - name: Verify native signed MSI inspection
+        env:
+          CFW_NATIVE_PACKAGE_TESTS: '1'
+          CFW_PACKAGE_SOURCE: ${{ github.sha }}
+        run: |
+          ./scripts/fixtures/windows_update_package.ps1 -Source $env:CFW_PACKAGE_SOURCE -Evidence (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/package-inspection')
       - name: Check the complete Windows desktop target
         run: |
           cargo check --locked -p cfw-tauri-shell --bin clash-for-mac 2>&1 |

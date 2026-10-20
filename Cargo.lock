@@ -675,6 +675,7 @@ dependencies = [
  "cfw-singbox-config",
  "cfw-windows-credentials",
  "cfw-windows-storage",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.11.0",

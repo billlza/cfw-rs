@@ -245,6 +245,7 @@ pub(super) fn exercise(name: &str, command: &[u8], owner: &NativeUserSession) ->
     let (path, scope) = shared(name)?;
     match command {
         b"authority-journal" if name.ends_with("-a") => {
+            existing_authority_admission()?;
             enrollment_faults()?;
             allocation_faults()?;
             allocation_checkpoint()?;
@@ -272,7 +273,8 @@ pub(super) fn exercise(name: &str, command: &[u8], owner: &NativeUserSession) ->
             write_report("a", &first_report())
         }
         b"authority-journal-observe" if name.ends_with("-b") => {
-            let store = WindowsAuthorityJournal::open(&path, &scope).map_err(|e| e.to_string())?;
+            let store =
+                WindowsAuthorityJournal::open_existing(&path, &scope).map_err(|e| e.to_string())?;
             let recovered = store.recover().map_err(|e| e.to_string())?;
             assert_eq!(recovered.action, RecoveryAction::ReattestOwner);
             let state = recovered
@@ -287,6 +289,73 @@ pub(super) fn exercise(name: &str, command: &[u8], owner: &NativeUserSession) ->
         }
         _ => Err("unexpected journal fixture command".into()),
     }
+}
+
+fn existing_authority_admission() -> Result<()> {
+    use cfw_windows_engine::authority::{AuthorityError, WindowsAuthority};
+    with_case(|store, path, scope| {
+        let missing = path.join("uncreated-journal");
+        assert!(matches!(
+            WindowsAuthority::reopen(&missing, scope),
+            Err(AuthorityError::Journal(JournalStoreError::StoreIdentity))
+        ));
+        assert!(!missing.try_exists().map_err(|e| e.to_string())?);
+        assert!(matches!(
+            WindowsAuthority::reopen(path, scope),
+            Err(AuthorityError::Journal(JournalStoreError::StoreIdentity))
+        ));
+        assert!(
+            store
+                .recover()
+                .map_err(|e| e.to_string())?
+                .committed
+                .is_none()
+        );
+        let anchor = PrivateMachineRecord::new(scope).map_err(|e| e.to_string())?;
+        let guard = anchor.lock(LIMIT).map_err(|e| e.to_string())?;
+        assert!(guard.read().map_err(|e| e.to_string())?.is_none());
+        guard.release().map_err(|e| e.to_string())?;
+
+        let prior = enroll(store)?;
+        let mut reopened = WindowsAuthority::reopen(path, scope).map_err(|e| e.to_string())?;
+        assert_eq!(reopened.snapshot().state, AuthorityState::Recovering);
+        assert_eq!(reopened.recovery_target(), Some(&prior));
+        assert!(reopened.lease_owner().is_none());
+        let admission = reopened.verify_recorded_off().map_err(|e| e.to_string())?;
+        assert_eq!(admission.prior(), &prior);
+        assert_eq!(admission.snapshot().revision, Some(prior.revision()));
+        assert_eq!(admission.snapshot().state, AuthorityState::Off);
+        assert_eq!(
+            store.recover().map_err(|e| e.to_string())?.committed,
+            Some(prior)
+        );
+        Ok(())
+    })?;
+    for point in [
+        JournalFaultPoint::AnchorCreated,
+        JournalFaultPoint::MarkerPublished,
+        JournalFaultPoint::PendingAnchorPublished,
+    ] {
+        with_case(|store, path, scope| {
+            let prior = AuthorityCommittedState::enrollment(uuid::Uuid::new_v4());
+            interrupted(store, &prior, point)?;
+            assert!(matches!(
+                WindowsAuthority::reopen(path, scope),
+                Err(AuthorityError::Journal(JournalStoreError::StoreIdentity))
+            ));
+            // Recovery of the interrupted publication may repair its anchor,
+            // but cannot choose a new installation or commit an Off record.
+            assert!(
+                store
+                    .recover()
+                    .map_err(|e| e.to_string())?
+                    .committed
+                    .is_none()
+            );
+            Ok(())
+        })?;
+    }
+    Ok(())
 }
 
 fn enrollment_faults() -> Result<()> {
@@ -579,7 +648,7 @@ fn rollback_and_missing_identity(owner: &NativeUserSession) -> Result<()> {
     })
 }
 fn first_report() -> serde_json::Value {
-    serde_json::json!({"success":true,"fault_runs":19,"allocation_fault_cases":4,"allocation_checkpoint_cases":1,"unused_allocations_survive_checkpoint":true,"temporary_cases":4,"identity_and_rollback_cases":4,"whole_sid_logon_session_retained":true,"off_requires_verification":true,"active_requires_reattestation":true,"checkpoint_recovery_and_cleanup":true,"full_authority_state_machine_proven":false,"power_loss_tested":false})
+    serde_json::json!({"success":true,"fault_runs":19,"existing_authority_admission_cases":6,"missing_authority_not_enrolled":true,"allocation_fault_cases":4,"allocation_checkpoint_cases":1,"unused_allocations_survive_checkpoint":true,"temporary_cases":4,"identity_and_rollback_cases":4,"whole_sid_logon_session_retained":true,"off_requires_verification":true,"active_requires_reattestation":true,"checkpoint_recovery_and_cleanup":true,"full_authority_state_machine_proven":false,"power_loss_tested":false})
 }
 fn second_report() -> serde_json::Value {
     serde_json::json!({"success":true,"writer_process_exited":true,"revision":5,"allocated_generation":1,"state":"active","recovery_action":"reattest_owner","owner_matches_native_console":true,"configuration_identity_preserved":true,"executable_lease_restored":false})

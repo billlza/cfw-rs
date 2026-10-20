@@ -64,7 +64,7 @@ impl Scoped {
         // All service handles are gone. The production transferred reference
         // (or the actual engine's inherited copy) must retain this exact name.
         let mut recovered =
-            WindowsAuthority::open(&self.path, &self.scope).map_err(|e| e.to_string())?;
+            WindowsAuthority::reopen(&self.path, &self.scope).map_err(|e| e.to_string())?;
         assert_eq!(recovered.snapshot().state, AuthorityState::Recovering);
         let observation = require_live_runtime(&mut recovered, minimum)?;
         if recovered

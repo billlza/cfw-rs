@@ -47,9 +47,28 @@ pub struct WindowsAuthority {
     next_fault: Option<crate::authority_journal::JournalFaultPoint>,
 }
 impl WindowsAuthority {
+    /// Initial service startup may enroll a previously unused installation.
+    /// Maintenance/recovery of an established installation must use `reopen`.
     pub fn open(root: &Path, scope: &str) -> Result<Self> {
         let journal = WindowsAuthorityJournal::open(root, scope)?;
+        Self::from_journal(journal, true)
+    }
+
+    /// Recover a prior committed installation without enrolling replacement
+    /// state. Missing directories, anchors, or an unfinished first enrollment
+    /// remain errors. This restores no lease and proves no cleanup: callers
+    /// must still obtain fresh native admission through `verify_recorded_off`
+    /// or the appropriate runtime recovery path.
+    pub fn reopen(root: &Path, scope: &str) -> Result<Self> {
+        let journal = WindowsAuthorityJournal::open_existing(root, scope)?;
+        Self::from_journal(journal, false)
+    }
+
+    fn from_journal(journal: WindowsAuthorityJournal, enroll: bool) -> Result<Self> {
         let machine = Machine::recovering(journal.recover()?)?;
+        if !enroll && machine.metadata().is_none() {
+            return Err(crate::authority_journal::JournalStoreError::StoreIdentity.into());
+        }
         let mut authority = Self {
             journal,
             machine,

@@ -55,6 +55,20 @@ pub enum JournalFaultPoint {
 }
 
 impl WindowsAuthorityJournal {
+    /// Reopen an existing protected directory without creating one. Recovery
+    /// still validates its independent machine anchor; an empty directory is
+    /// not evidence of a prior authority installation or completed cleanup.
+    pub fn open_existing(root: &Path, scope: &str) -> Result<Self> {
+        let anchor = PrivateMachineRecord::new(scope)?;
+        let directory =
+            PrivateDirectory::open_existing(root)?.ok_or(JournalStoreError::StoreIdentity)?;
+        Ok(Self {
+            directory,
+            anchor,
+            record_capacity: MAX_RECORDS,
+        })
+    }
+
     pub fn open(root: &Path, scope: &str) -> Result<Self> {
         // Reject non-SYSTEM/impersonated identities before creating files.
         let anchor = PrivateMachineRecord::new(scope)?;

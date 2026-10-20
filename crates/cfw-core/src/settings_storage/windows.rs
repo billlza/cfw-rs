@@ -105,6 +105,9 @@ impl From<Error> for SettingsStoreError {
                 Self::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
             }
             Error::InvalidName | Error::InvalidLimit => Self::InvalidPath,
+            Error::IncompleteStream => {
+                Self::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+            }
             Error::UnsafeDirectory => Self::UnsafeDirectory,
             Error::UnexpectedDirectory => Self::UnsafeDirectory,
             Error::UnsafeFile => Self::UnsafeFile,

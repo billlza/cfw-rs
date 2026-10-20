@@ -273,11 +273,12 @@ fn storage_error(error: Error, entry: &str) -> ProfileError {
             storage_error(*operation, entry),
             Err(storage_error(*cleanup, entry)),
         ),
-        Error::InvalidLimit | Error::InvalidSecurityDescriptor | Error::InvalidDirectoryListing => {
-            ProfileError::Io(io::Error::new(
-                io::ErrorKind::InvalidData,
-                error.to_string(),
-            ))
-        }
+        Error::InvalidLimit
+        | Error::IncompleteStream
+        | Error::InvalidSecurityDescriptor
+        | Error::InvalidDirectoryListing => ProfileError::Io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            error.to_string(),
+        )),
     }
 }

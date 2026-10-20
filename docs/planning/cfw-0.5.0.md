@@ -1659,12 +1659,21 @@ StopPending。30 秒内无法确认全局清理则显式失败，不能用停止
 `400918c` 修正 SCM 命令，验证运行
 [39367153298](https://github.com/billlza/cfw-rs/actions/runs/39367153298)。其 shared job
 因本次新增错误消息未按 rustfmt 换行失败，已在后续源代码中修正；不能称该运行全绿。
+其 engine、SCM、directory jobs 成功。engine artifact `12240330615`（SHA-256
+`486c00f9452b1b4a8c2d1731c0ca5ef3a16f13a46c03aaf73f107f851b569f14`）和 SCM
+artifact `12239169619`（SHA-256
+`6f4944ea361239a0218696109977c5f8b12448f7fbb8c57c951c07f71d373c47`）已下载，
+通过完整源码/哈希/回执核验。保留 11 项真实引擎测试、35 项 SCM 验收和已有恢复回归；
+新增安装回执通过 8 项检查。实际产品 service/Agent 在 medium-integrity fixture
+Desktop 下运行 LocalProxy（Active 5→Off 8）和 SystemProxy（Active 12→Off 15），
+真实 HTTP 代理流量成功、Agent 正常退出、监听释放、原代理恢复；随后 SCM 重启保留
+generation 2，并重新验证 Off 16。此处 Desktop 仍为测试驱动程序，未验证实际 UI。
 
 ### 桌面安装上下文与原生配置预检
 
 `InstalledDesktop` 统一提供受保护安装中的凭据、generation store、运行目录和
 Desktop→Agent 准备入口，CI 中两种代理生命周期改为使用这个产品入口。
-新增同步工作线程 API `check_configuration`：核对实际 Desktop image、medium token、
+`8a1e64c` 新增同步工作线程 API `check_configuration`：核对实际 Desktop image、medium token、
 当前 Authority installation/epoch、配置摘要与精确凭据 audience，再使用独立 Go
 子进程执行 parser/constructor/Close。该路径不 Prepare、不 Bind、不申请 generation，
 不启动数据面，也不修改 WinINet；检查互斥、截止时间和失败清理均保留显式结果。
@@ -1672,8 +1681,10 @@ Desktop→Agent 准备入口，CI 中两种代理生命周期改为使用这个�
 安装验收新增四种模式的真实预检，检查期间保持 mixed/controller 端口被测试方占用，
 并验证前后 Authority snapshot、generation 和代理设置完全一致。另检查跨 profile
 凭据拒绝、原生非法配置拒绝、异 epoch 拒绝和过期截止时间。TUN 预检通过不等于
-Windows TUN 数据面已实现。默认及全 feature Windows cross-Clippy、格式检查通过；
-新增安装验收仍待托管 Windows 运行，完整 EngineBackend 和 Tauri 接线尚未完成。
+Windows TUN 数据面已实现。默认及全 feature Windows cross-Clippy、全工作区格式检查、
+107 项 portable tests 通过；新增安装验收由
+[39367715770](https://github.com/billlza/cfw-rs/actions/runs/39367715770) 验证，
+目前 directory job 完成，其余排队。完整 EngineBackend 和 Tauri 接线尚未完成。
 
 ## 官方资料
 

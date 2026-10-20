@@ -190,6 +190,12 @@ fn observe_once() -> Result<ProxySettings, ProxyError> {
 
 pub(super) fn observe() -> Result<ProxySettings, ProxyError> {
     require_user_policy()?;
+    observe_read_only()
+}
+
+/// Observation does not require permission to change proxy policy. Mutation
+/// and owned-state reconciliation retain their separate policy admission.
+pub(super) fn observe_read_only() -> Result<ProxySettings, ProxyError> {
     let first = observe_once()?;
     if observe_once()? != first {
         return Err(ProxyError::SettingsChanged);

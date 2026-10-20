@@ -350,9 +350,11 @@ impl UpdateInstallLease {
                 LockFileError::UnsafeMetadata => {
                     UpdateInstallLeaseError::Unavailable("lock file has unsafe metadata".into())
                 }
-                LockFileError::Open(error)
-                | LockFileError::Inspect(error)
-                | LockFileError::Lock(error) => {
+                #[cfg(unix)]
+                LockFileError::Open(error) | LockFileError::Inspect(error) => {
+                    UpdateInstallLeaseError::Unavailable(error.to_string())
+                }
+                LockFileError::Lock(error) => {
                     UpdateInstallLeaseError::Unavailable(error.to_string())
                 }
             })

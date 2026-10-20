@@ -2,6 +2,7 @@ use super::*;
 use cfw_engine_api::{EngineCommandContext, SystemProxyAuthorization};
 use cfw_windows_engine::{
     ProxyError, ProxyOwnershipObservation, ProxySettings, WindowsSystemProxy,
+    observe_lan_proxy_ports,
 };
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},
@@ -345,6 +346,8 @@ async fn actual_system_proxy_carries_wininet_http_and_restores_before_engine_sto
     let root = tempfile::tempdir().unwrap();
     let authority = WindowsSystemProxy::new(&root.path().join("proxy")).unwrap();
     let before = authority.snapshot().unwrap();
+    let ports_before = observe_lan_proxy_ports().unwrap();
+    assert_eq!(authority.snapshot().unwrap(), before);
     assert!(
         !before.explicit_proxy_enabled(),
         "test user already has an explicit proxy"
@@ -406,6 +409,13 @@ async fn actual_system_proxy_carries_wininet_http_and_restores_before_engine_sto
                 context: context.clone()
             }
         );
+        let owned_settings = authority.snapshot().unwrap();
+        let owned_endpoint = config.system_proxy_endpoint().unwrap();
+        assert_eq!(
+            observe_lan_proxy_ports().unwrap(),
+            std::collections::BTreeSet::from([owned_endpoint.port()])
+        );
+        assert_eq!(authority.snapshot().unwrap(), owned_settings);
         assert_eq!(
             wininet_http("http://192.0.2.123/cfw-system-proxy"),
             "CFW native system proxy"
@@ -413,6 +423,11 @@ async fn actual_system_proxy_carries_wininet_http_and_restores_before_engine_sto
         let endpoint = config.system_proxy_endpoint().unwrap();
         external_server("http=127.0.0.1:9;https=127.0.0.1:9");
         let replacement = authority.snapshot().unwrap();
+        assert_eq!(
+            observe_lan_proxy_ports().unwrap(),
+            std::collections::BTreeSet::from([9])
+        );
+        assert_eq!(authority.snapshot().unwrap(), replacement);
         let owned_server = format!("http={endpoint};https={endpoint}");
         foreign = Some((replacement.clone(), owned_server.clone()));
         assert!(matches!(
@@ -452,6 +467,8 @@ async fn actual_system_proxy_carries_wininet_http_and_restores_before_engine_sto
     restored.unwrap();
     stopped.unwrap();
     upstream_result.unwrap();
+    assert_eq!(observe_lan_proxy_ports().unwrap(), ports_before);
+    assert_eq!(authority.snapshot().unwrap(), before);
     if let Err(failure) = result {
         std::panic::resume_unwind(failure);
     }
@@ -459,6 +476,7 @@ async fn actual_system_proxy_carries_wininet_http_and_restores_before_engine_sto
         "system-proxy-traffic-receipt.json",
         &[
             "native_authorization_without_mutation",
+            "desktop_endpoint_observation_without_mutation",
             "wininet_http_via_owned_engine",
             "restoration_conflict_does_not_stop_engine",
             "expired_observation_preserves_control_owner",

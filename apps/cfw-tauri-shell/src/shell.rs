@@ -719,13 +719,20 @@ fn handle_tray_proxy_event(app: &AppHandle, id: &str) {
 }
 
 pub(crate) fn apply_silent_start(app: &AppHandle) -> Result<(), String> {
-    app.set_activation_policy(tauri::ActivationPolicy::Accessory)
-        .map_err(|error| error.to_string())?;
-    app.set_dock_visibility(false)
-        .map_err(|error| error.to_string())?;
+    #[cfg(target_os = "macos")]
+    {
+        app.set_activation_policy(tauri::ActivationPolicy::Accessory)
+            .map_err(|error| error.to_string())?;
+        app.set_dock_visibility(false)
+            .map_err(|error| error.to_string())?;
+    }
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| "main window is unavailable during silent start".to_string())?;
+    #[cfg(windows)]
+    window
+        .set_skip_taskbar(true)
+        .map_err(|error| error.to_string())?;
     window.hide().map_err(|error| error.to_string())
 }
 
@@ -749,14 +756,23 @@ pub(crate) fn show_dashboard(app: &AppHandle) {
 }
 
 fn show_main_page_result(app: &AppHandle, page: MainPage) -> Result<(), String> {
-    app.set_activation_policy(tauri::ActivationPolicy::Regular)
-        .map_err(|error| error.to_string())?;
-    app.set_dock_visibility(true)
-        .map_err(|error| error.to_string())?;
+    #[cfg(target_os = "macos")]
+    {
+        app.set_activation_policy(tauri::ActivationPolicy::Regular)
+            .map_err(|error| error.to_string())?;
+        app.set_dock_visibility(true)
+            .map_err(|error| error.to_string())?;
+    }
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| "main window is unavailable".to_string())?;
+    #[cfg(windows)]
+    window
+        .set_skip_taskbar(false)
+        .map_err(|error| error.to_string())?;
     window.show().map_err(|error| error.to_string())?;
+    #[cfg(windows)]
+    window.unminimize().map_err(|error| error.to_string())?;
     window.set_focus().map_err(|error| error.to_string())?;
     app.state::<crate::LaunchContext>().note_window_presented();
     app.emit("cfw://page", page.id())

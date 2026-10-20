@@ -21,6 +21,8 @@ pub mod credential_lifecycle;
 #[cfg(any(windows, test))]
 mod protocol;
 #[cfg(any(windows, test))]
+mod proxy_endpoints;
+#[cfg(any(windows, test))]
 pub mod runtime_host;
 #[cfg(any(windows, test))]
 pub mod user_agent;
@@ -73,7 +75,7 @@ pub use process::{
 #[cfg(windows)]
 pub use system_proxy::{
     ProxyError, ProxyOwnershipObservation, ProxyRestorationObservation, ProxySettings,
-    ProxySettingsReceipt, ProxySettingsRestored, WindowsSystemProxy,
+    ProxySettingsReceipt, ProxySettingsRestored, WindowsSystemProxy, observe_lan_proxy_ports,
 };
 
 #[derive(Debug, thiserror::Error)]

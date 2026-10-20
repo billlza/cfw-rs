@@ -4,8 +4,12 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::ptr::null;
 use std::time::Instant;
 
-use windows_sys::Win32::Foundation::{ERROR_IO_PENDING, ERROR_NOT_FOUND, ERROR_OPERATION_ABORTED};
-use windows_sys::Win32::Storage::FileSystem::{LOCKFILE_EXCLUSIVE_LOCK, LockFileEx};
+use windows_sys::Win32::Foundation::{
+    ERROR_IO_PENDING, ERROR_LOCK_VIOLATION, ERROR_NOT_FOUND, ERROR_OPERATION_ABORTED,
+};
+use windows_sys::Win32::Storage::FileSystem::{
+    LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
+};
 use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::System::Threading::CreateEventW;
 
@@ -15,6 +19,16 @@ use crate::{Error, LOCK_WAIT, WaitOutcome, wait_until};
 /// release and reacquire between polls. The lock range matches std::fs::File's
 /// Windows whole-file lock, preserving interoperability with existing callers.
 pub(crate) fn acquire(file: File, exclusive: bool) -> Result<File, Error> {
+    acquire_with(file, exclusive, false)
+}
+
+/// Refuse an existing owner rather than queue behind it. An asynchronous
+/// native completion is still drained under the same bounded I/O deadline.
+pub(crate) fn try_acquire(file: File) -> Result<File, Error> {
+    acquire_with(file, true, true)
+}
+
+fn acquire_with(file: File, exclusive: bool, immediate: bool) -> Result<File, Error> {
     // SAFETY: unnamed manual-reset event; no inherited handle or input buffer.
     let event = unsafe { CreateEventW(null(), 1, 0, null()) };
     if event.is_null() {
@@ -30,6 +44,17 @@ pub(crate) fn acquire(file: File, exclusive: bool) -> Result<File, Error> {
         LOCKFILE_EXCLUSIVE_LOCK
     } else {
         0
+    } | if immediate {
+        LOCKFILE_FAIL_IMMEDIATELY
+    } else {
+        0
+    };
+    let classify = |error: io::Error| {
+        if immediate && error.raw_os_error() == Some(ERROR_LOCK_VIOLATION as i32) {
+            Error::Busy
+        } else {
+            Error::Io(error)
+        }
     };
     // SAFETY: file was opened for overlapped I/O. The event and OVERLAPPED stay
     // alive until the operation is completed, including cancellation teardown.
@@ -48,7 +73,7 @@ pub(crate) fn acquire(file: File, exclusive: bool) -> Result<File, Error> {
     }
     let error = io::Error::last_os_error();
     if error.raw_os_error() != Some(ERROR_IO_PENDING as i32) {
-        return Err(error.into());
+        return Err(classify(error));
     }
     let wait = wait_until(&event, Instant::now() + LOCK_WAIT);
     if matches!(wait, Ok(WaitOutcome::Signaled)) {
@@ -58,7 +83,7 @@ pub(crate) fn acquire(file: File, exclusive: bool) -> Result<File, Error> {
         if unsafe { GetOverlappedResult(file.as_raw_handle(), &overlapped, &mut transferred, 0) }
             == 0
         {
-            return Err(io::Error::last_os_error().into());
+            return Err(classify(io::Error::last_os_error()));
         }
         return Ok(file);
     }

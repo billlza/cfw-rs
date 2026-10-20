@@ -1871,6 +1871,35 @@ Off、generation 5、revision 35，lineage/WinINet 未变化。取消时另外�
 TUN 入口仍显式不可用，尚需完整 TUN/合并模式、backend 的服务重启恢复衔接、应用诊断
 接线、Tauri Windows factory/startup/build、实际 UI 和发布验收。此实现没有关闭这些缺口。
 
+## 桌面装配与 Windows 编译推进（2026-10-20）
+
+`2756224c2e8afc06038e2bc254ebda135de8ffee` 的
+[39385215851](https://github.com/billlza/cfw-rs/actions/runs/39385215851)
+四项 Windows 作业通过，engine `12248025905` 与 SCM `12246609184` 产物已完成源码、
+哈希及回执核验。实际应用的 platform runtime 和共享协调器经历 Off/gen5、
+LocalProxy/gen6、SystemProxy/gen7、关闭后 Off/gen8；两种代理模式均有真实 HTTP
+流量，重复请求不分配新 generation，代理恢复、Authority Off 和协调器退出均已核验。
+夹具直接编译应用模块，但没有启动 Tauri GUI。
+
+`479fcbb` / `e51a7a7` 已分离 macOS 构建入口，加入 Windows 开发配置、原有图标的
+ICO 和独立桌面构建工作流。`e51a7a7` 的
+[39389677580](https://github.com/billlza/cfw-rs/actions/runs/39389677580)
+前端准备通过，完整应用检查报告 260 个编译错误和 1 个 warning，主要是遗留迁移、
+更新器、私有文件和桌面操作中的 Unix/macOS 依赖。失败产物 `12249580555`
+已下载并核验，未生成 EXE；Windows release 构建仍拒绝缺少正式打包/签名准入的输入。
+
+本批改动连接真实 Windows 私有文档事务与进程租约，保留原 Unix 实现及提交不确定性；
+端口游标接入只读 WinINet LAN 手动代理观察，保留有限重试和最终 native bind 判断；
+本地文件导入读取同一已打开对象，拒绝叶子重解析点、非普通文件、额外数据流、超限
+及无效 UTF-8。静默启动与托盘唤醒使用 Windows 任务栏/窗口 API。
+新增测试直接编译应用的文件和端口模块；已有代理流量测试同时核验端口观察没有改变
+设置。当前本地通过 116 项引擎测试、40 项订阅测试、44 项引擎相关回归和 19 项日志
+回归，macOS 全目标 Clippy、Windows 存储全目标及引擎库 cross-Clippy 均禁止 warning。
+这批改动的托管原生运行和新的完整桌面编译结果仍待记录，不能用交叉检查替代。
+
+完整 GUI、五类原生呈现、TUN/合并模式、安装/更新/签名、迁移以及物理 Windows
+睡眠唤醒等验收保持开放。用户尚未确定物理测试机，当前继续代码及托管 CI。
+
 ## 官方资料
 
 以下资料于 2026-10-18 核对；它们说明平台能力，不证明本项目已经实现。
@@ -1902,6 +1931,7 @@ TUN 入口仍显式不可用，尚需完整 TUN/合并模式、backend 的服务
 - [Windows 地址 DAD 状态](https://learn.microsoft.com/en-us/windows/win32/api/nldef/ne-nldef-nl_dad_state)
 - [Windows Wi-Fi SSID 与位置权限](https://learn.microsoft.com/en-us/windows/win32/nativewifi/wi-fi-access-location-changes)
 - [WinINet 连接设置与恢复](https://learn.microsoft.com/en-us/windows/win32/api/wininet/ns-wininet-internet_per_conn_optionw)
+- [WinINet 手动代理列表语法](https://learn.microsoft.com/en-us/windows/win32/wininet/enabling-internet-functionality#listing-proxy-servers)
 - [WinINet 默认 LAN 与 RAS 范围](https://learn.microsoft.com/en-us/windows/win32/api/wininet/ns-wininet-internet_per_conn_option_listw)
 - [Windows 禁止修改代理的策略](https://learn.microsoft.com/en-us/windows/client-management/mdm/policy-csp-internetexplorer#disableproxychange)
 - [SCM 服务访问权限](https://learn.microsoft.com/en-us/windows/win32/services/service-security-and-access-rights)

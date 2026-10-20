@@ -17,9 +17,6 @@
 //! it.
 
 use std::fmt;
-use std::fs::{File, OpenOptions};
-use std::io::Read as _;
-use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 
 use cfw_engine_api::CredentialVaultProvisioner;
@@ -34,6 +31,7 @@ use tauri::State;
 use uuid::Uuid;
 
 mod fetch;
+mod local_file;
 #[cfg(test)]
 mod proxy_tests;
 pub(super) use fetch::{SubscriptionRoute, fetch_provider_resources, validate_subscription_url};
@@ -852,40 +850,7 @@ fn existing_profile_path(repository: &ProfileRepository, id: &str) -> Result<Pat
 }
 
 fn read_local_profile(path: &Path) -> Result<String, String> {
-    read_opened_local_profile(open_local_profile(path)?)
-}
-
-fn open_local_profile(path: &Path) -> Result<File, String> {
-    if !path.is_absolute() {
-        return Err("profile path must be absolute".into());
-    }
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(path)
-        .map_err(|error| error.to_string())
-}
-
-fn read_opened_local_profile(file: File) -> Result<String, String> {
-    let metadata = file.metadata().map_err(|error| error.to_string())?;
-    if !metadata.file_type().is_file() {
-        return Err("profile path is not a regular file".into());
-    }
-    if metadata.len() > MAX_SUBSCRIPTION_DOCUMENT_BYTES as u64 {
-        return Err(format!(
-            "profile file exceeds the {MAX_SUBSCRIPTION_DOCUMENT_BYTES}-byte limit"
-        ));
-    }
-    let mut body = Vec::with_capacity(metadata.len() as usize);
-    file.take(MAX_SUBSCRIPTION_DOCUMENT_BYTES as u64 + 1)
-        .read_to_end(&mut body)
-        .map_err(|error| error.to_string())?;
-    if body.len() > MAX_SUBSCRIPTION_DOCUMENT_BYTES {
-        return Err(format!(
-            "profile file exceeds the {MAX_SUBSCRIPTION_DOCUMENT_BYTES}-byte limit"
-        ));
-    }
-    String::from_utf8(body).map_err(|_| "profile document is not UTF-8".to_owned())
+    local_file::read(path, MAX_SUBSCRIPTION_DOCUMENT_BYTES)
 }
 
 #[cfg(test)]

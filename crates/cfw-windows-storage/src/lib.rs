@@ -262,6 +262,26 @@ impl PrivateDirectory {
         })
     }
 
+    /// An independent process-lifetime lease, separate from the short document
+    /// transaction lock. The private empty file cannot be replaced while held,
+    /// and closing the returned handle releases its exclusive kernel lock.
+    pub fn try_lock_file(&self, name: &str) -> Result<File, Error> {
+        record_name(name)?;
+        self.inner
+            .security
+            .verify(&self.inner.file, ReadPolicy::Private, true)?;
+        let file = open_relative(
+            &self.inner.file,
+            name,
+            FILE_OPEN_IF,
+            false,
+            Access::Lock,
+            Some(&self.inner.security),
+        )?;
+        verify_file(&self.inner, &file, 0, ReadPolicy::Private)?;
+        locking::try_acquire(file)
+    }
+
     fn lock(&self, exclusive: bool) -> Result<ReadTransaction, Error> {
         self.inner
             .security
@@ -435,6 +455,30 @@ impl WriteTransaction {
         maximum: usize,
         publication: Publication,
     ) -> Result<(), Error> {
+        self.publish_with_temporary_and_sync(
+            name,
+            temporary,
+            bytes,
+            maximum,
+            publication,
+            File::sync_all,
+        )
+    }
+
+    /// Preserve the publication boundary for a caller-owned durability policy.
+    /// Content is flushed and renamed before `sync_directory` runs on the exact
+    /// retained directory. Any callback failure is a committed-but-uncertain
+    /// result, never a pre-publication failure. Normal callers use
+    /// `publish_with_temporary`, which supplies the native directory flush.
+    pub fn publish_with_temporary_and_sync(
+        &mut self,
+        name: &str,
+        temporary: &str,
+        bytes: &[u8],
+        maximum: usize,
+        publication: Publication,
+        sync_directory: impl FnOnce(&File) -> io::Result<()>,
+    ) -> Result<(), Error> {
         record_name(name)?;
         temporary_name(temporary)?;
         if bytes.len() > maximum {
@@ -464,11 +508,7 @@ impl WriteTransaction {
         match prepared {
             Ok(()) => {
                 drop(file);
-                self.read
-                    .inner
-                    .file
-                    .sync_all()
-                    .map_err(Error::CommitUncertain)
+                sync_directory(&self.read.inner.file).map_err(Error::CommitUncertain)
             }
             Err(operation) => {
                 let cleanup = delete_handle(&file);
@@ -489,6 +529,13 @@ impl WriteTransaction {
     pub fn remove(&mut self, name: &str, maximum: usize, policy: ReadPolicy) -> Result<(), Error> {
         record_name(name)?;
         self.remove_entry(name, maximum, policy)
+    }
+
+    /// Remove only an admitted private temporary, using the opened entry's
+    /// owner/ACL/type/link/size checks immediately before deleting that handle.
+    pub fn remove_temporary(&mut self, name: &str, maximum: usize) -> Result<(), Error> {
+        temporary_name(name)?;
+        self.remove_entry(name, maximum, ReadPolicy::Private)
     }
 
     fn remove_entry(

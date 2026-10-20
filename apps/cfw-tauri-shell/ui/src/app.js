@@ -147,6 +147,7 @@ function dismissNativeProfileMenu() {
 const LOGIN_ITEM_LIVE_STATUSES = new Set([
   "checking",
   "enabled",
+  "registered",
   "not_registered",
   "not_found",
   "requires_approval",
@@ -238,6 +239,7 @@ function applyPersistedSettings(snapshot) {
   state.settingsUnavailableReason = null;
   state.launchAtLogin = launchAtLogin;
   state.toggles.startAtLogin = launchAtLogin.liveStatus === "enabled"
+    || launchAtLogin.liveStatus === "registered"
     || launchAtLogin.liveStatus === "requires_approval";
   state.toggles.silentStart = Boolean(settings.silent_start);
   state.toggles.checkForUpdates = Boolean(settings.check_for_updates);
@@ -327,13 +329,19 @@ function normalizeLaunchAtLoginState(snapshot) {
   if (!LOGIN_ITEM_LIVE_STATUSES.has(value.live_status)) {
     throw new TypeError("Login Item live status is invalid");
   }
+  const windows = state.payload?.product?.operating_system === "windows";
+  if (windows
+    ? !["checking", "registered", "not_registered"].includes(value.live_status)
+    : value.live_status === "registered") {
+    throw new TypeError("startup status does not belong to the current platform");
+  }
   if (typeof value.matches_persisted_intent !== "boolean") {
     throw new TypeError("Login Item synchronization flag is not boolean");
   }
   if (value.persisted_intent !== snapshot.settings.launch_at_login) {
     throw new TypeError("Login Item persisted intent disagrees with settings");
   }
-  const expectedMatch = value.live_status === "enabled"
+  const expectedMatch = value.live_status === "enabled" || value.live_status === "registered"
     ? value.persisted_intent
     : value.live_status === "not_registered" || value.live_status === "not_found"
       ? !value.persisted_intent
@@ -356,15 +364,38 @@ function launchAtLoginPresentation() {
     };
   }
   const value = state.launchAtLogin;
+  const windows = state.payload?.product?.operating_system === "windows";
   if (value.observationError) {
     return { hint: value.observationError, reason: value.observationError };
   }
   if (value.liveStatus === "checking") {
-    const reason = t("Checking macOS Login Item status…");
+    const reason = windows ? t("Checking Windows startup registration…") : t("Checking macOS Login Item status…");
     return { hint: reason, reason };
   }
   if (value.liveStatus === "unknown") {
-    const reason = t("Start at Login is unavailable because macOS returned an unknown Login Item state.");
+    const reason = windows
+      ? t("Windows startup registration could not be verified. Reload to retry.")
+      : t("Start at Login is unavailable because macOS returned an unknown Login Item state.");
+    return { hint: reason, reason };
+  }
+  if (windows) {
+    if (value.liveStatus === "registered") {
+      return {
+        hint: value.matchesPersistedIntent
+          ? t("Registered for this user's sign-in. Windows Startup settings can disable or delay launch; registration does not confirm launch.")
+          : t("Windows has a startup registration while the saved preference says Off. Switching Off removes the registration."),
+        reason: null,
+      };
+    }
+    if (value.liveStatus === "not_registered") {
+      return {
+        hint: value.matchesPersistedIntent
+          ? t("No startup registration for this user; the saved preference is Off.")
+          : t("The saved preference says On, but the Windows startup registration is absent. Switching On retries registration."),
+        reason: null,
+      };
+    }
+    const reason = t("Windows startup registration could not be verified. Reload to retry.");
     return { hint: reason, reason };
   }
   if (value.liveStatus === "requires_approval") {
@@ -3727,6 +3758,14 @@ export async function handleAction(action) {
       appendLog("error", "shell", t("Open Folder failed: {error}", { error: errorText(error) }));
     }
   }
+  if (action === "open-windows-startup-settings" && state.payload?.product?.operating_system === "windows") {
+    try {
+      await invoke("open_login_items_settings");
+      appendLog("info", "shell", t("Opened Windows Startup settings"));
+    } catch (error) {
+      appendLog("error", "shell", t("Windows Startup settings could not be opened: {error}", { error: errorText(error) }));
+    }
+  }
   if (action === "retry-system-proxy") {
     await applyToggle("systemProxy", true, "explicit retry");
     renderPage();
@@ -4355,7 +4394,9 @@ async function refreshStartupLoginItemStatus(expectedSettings) {
     if (state.settingsSnapshot === expectedSettings) applyPersistedSettings(snapshot);
   } catch {
     if (state.settingsSnapshot === expectedSettings) {
-      state.launchAtLogin.observationError = "macOS Login Item status could not be read. Reload to retry; the failure is recorded in local diagnostics.";
+      state.launchAtLogin.observationError = state.payload?.product?.operating_system === "windows"
+        ? t("Windows startup registration could not be read. Reload to retry; the failure is recorded in local diagnostics.")
+        : "macOS Login Item status could not be read. Reload to retry; the failure is recorded in local diagnostics.";
       appendLog("warning", "settings", state.launchAtLogin.observationError);
     }
   }

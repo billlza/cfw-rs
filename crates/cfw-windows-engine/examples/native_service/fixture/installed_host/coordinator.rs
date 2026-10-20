@@ -20,6 +20,7 @@ const PROFILE: &str = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 pub(super) fn exercise(progress: &mut Progress) -> Result<serde_json::Value> {
     progress.record("coordinator_prepare", 5)?;
     let desktop = InstalledDesktop::open().map_err(|error| error.to_string())?;
+    let startup_registration = super::startup_registration::exercise()?;
     let before = checks::snapshot()?;
     let original_proxy = desktop
         .storage()
@@ -269,6 +270,7 @@ pub(super) fn exercise(progress: &mut Progress) -> Result<serde_json::Value> {
             "authority":checks::snapshot()?,"lineage_generation":lineage.generation,
             "proxy_restored":true,"coordinator_retired":true,"gui_exercised":false,
             "process_observation":process_observation,
+            "startup_registration":startup_registration,
             "final_observation_sequence":final_sequence,
             "network_diagnostics_sha256":diagnostics_digest,
             "tunnel_available":false,"legacy_cutover_available":false}),

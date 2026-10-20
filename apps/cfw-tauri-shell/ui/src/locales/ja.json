@@ -819,5 +819,18 @@
   "Network diagnostics could not be read.": "ネットワーク診断を読み取れませんでした。",
   "Unable to inspect network settings: {error}": "ネットワーク設定を確認できません：{error}",
   "Status": "状態",
-  "Wi-Fi": "Wi-Fi"
+  "Wi-Fi": "Wi-Fi",
+  "Checking Windows startup registration…": "Windows のスタートアップ登録を確認中…",
+  "No startup registration for this user; the saved preference is Off.": "このユーザーの起動登録はなく、保存された設定もオフです。",
+  "Open": "開く",
+  "Opened Windows Startup settings": "Windows のスタートアップ設定を開きました",
+  "Registered for this user's sign-in. Windows Startup settings can disable or delay launch; registration does not confirm launch.": "このユーザーのサインイン時に起動するよう登録済みです。Windows の設定により起動が無効化・遅延される場合があります。登録は起動の実行確認ではありません。",
+  "Review Windows' startup control for this app. This app changes only its own sign-in registration.": "Windows によるこのアプリの起動設定を確認します。アプリが変更するのは自身のサインイン時の起動登録のみです。",
+  "Startup apps": "スタートアップ アプリ",
+  "The saved preference says On, but the Windows startup registration is absent. Switching On retries registration.": "保存された設定はオンですが、Windows の起動登録がありません。オンに切り替えると登録を再試行します。",
+  "Windows Settings": "Windows の設定",
+  "Windows Startup settings could not be opened: {error}": "Windows のスタートアップ設定を開けませんでした: {error}",
+  "Windows has a startup registration while the saved preference says Off. Switching Off removes the registration.": "Windows に起動登録がありますが、保存された設定はオフです。オフに切り替えると登録が削除されます。",
+  "Windows startup registration could not be read. Reload to retry; the failure is recorded in local diagnostics.": "Windows の起動登録を読み取れませんでした。再読み込みして再試行してください。エラーはローカル診断に記録されています。",
+  "Windows startup registration could not be verified. Reload to retry.": "Windows のスタートアップ登録を確認できませんでした。再読み込みして再試行してください。"
 }

@@ -8,7 +8,13 @@
 #[cfg(windows)]
 pub mod backend;
 #[cfg(windows)]
+mod startup;
+#[cfg(windows)]
 pub mod update_package;
+#[cfg(windows)]
+pub use startup::{
+    StartupError, WindowsStartupStatus, observe_windows_startup, set_windows_startup,
+};
 
 #[cfg(any(windows, test))]
 pub mod authority;

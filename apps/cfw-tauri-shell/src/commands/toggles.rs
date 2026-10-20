@@ -348,8 +348,8 @@ fn parse_restore_dns_servers(servers: &str) -> Result<RestoreDnsRequest, String>
 
 /// Restores renderer-owned preferences to their defaults.
 ///
-/// `launch_at_login` is deliberately preserved: it mirrors a macOS registration
-/// that only the transactional Login Item command may change, so resetting it
+/// `launch_at_login` is deliberately preserved: it mirrors a native registration
+/// that only the transactional startup command may change, so resetting it
 /// here would leave the stored preference and the system state disagreeing.
 #[tauri::command]
 pub(crate) async fn reset_settings_snapshot(
@@ -382,7 +382,7 @@ pub(crate) async fn reset_settings_snapshot(
     crate::startup_state::prepare_off_main(move || {
         super::settings::with_login_item_status(
             snapshot,
-            cfw_platform::MacOsPlatformService.login_item_status(),
+            super::settings::live_login_item_status()?,
         )
         .map_err(|error| {
             format!("preferences were reset, but their display status is unavailable: {error}")

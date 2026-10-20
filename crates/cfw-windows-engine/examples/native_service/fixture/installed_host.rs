@@ -17,6 +17,7 @@ mod checks;
 mod coordinator;
 mod profile;
 mod progress;
+mod startup_registration;
 use progress::Progress;
 
 #[derive(Clone, Copy, PartialEq, Eq)]

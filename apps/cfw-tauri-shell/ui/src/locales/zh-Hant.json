@@ -819,5 +819,18 @@
   "Network diagnostics could not be read.": "無法讀取網路診斷資訊。",
   "Unable to inspect network settings: {error}": "無法檢查網路設定：{error}",
   "Status": "狀態",
-  "Wi-Fi": "Wi-Fi"
+  "Wi-Fi": "Wi-Fi",
+  "Checking Windows startup registration…": "正在檢查 Windows 啟動註冊…",
+  "No startup registration for this user; the saved preference is Off.": "目前使用者沒有啟動註冊，儲存的偏好為關閉。",
+  "Open": "開啟",
+  "Opened Windows Startup settings": "已開啟 Windows 啟動應用程式設定",
+  "Registered for this user's sign-in. Windows Startup settings can disable or delay launch; registration does not confirm launch.": "已註冊為目前使用者登入時啟動。Windows 啟動應用程式設定可以停用或延遲啟動；註冊成功不代表已實際啟動。",
+  "Review Windows' startup control for this app. This app changes only its own sign-in registration.": "查看 Windows 對此應用程式的啟動控制。此應用程式僅修改自身的登入啟動註冊。",
+  "Startup apps": "啟動應用程式",
+  "The saved preference says On, but the Windows startup registration is absent. Switching On retries registration.": "儲存的偏好為開啟，但 Windows 啟動註冊不存在。切換為開啟將重試註冊。",
+  "Windows Settings": "Windows 設定",
+  "Windows Startup settings could not be opened: {error}": "無法開啟 Windows 啟動應用程式設定：{error}",
+  "Windows has a startup registration while the saved preference says Off. Switching Off removes the registration.": "Windows 中存在啟動註冊，但儲存的偏好為關閉。切換為關閉將移除註冊。",
+  "Windows startup registration could not be read. Reload to retry; the failure is recorded in local diagnostics.": "無法讀取 Windows 啟動註冊。請重新載入後重試；失敗已記錄於本機診斷中。",
+  "Windows startup registration could not be verified. Reload to retry.": "無法驗證 Windows 啟動註冊。請重新載入後重試。"
 }

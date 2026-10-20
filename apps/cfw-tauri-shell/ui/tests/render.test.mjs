@@ -2887,6 +2887,50 @@ test("Start at Login reflects typed live macOS status without rewriting persiste
   }
 });
 
+test("Windows startup shows actual registration and preserves saved intent without claiming launch approval", async () => {
+  const original = structuredClone(responses.read_settings_snapshot);
+  const product = state.payload.product;
+  const hadOpen = Object.hasOwn(responses, "open_login_items_settings");
+  const open = responses.open_login_items_settings;
+  try {
+    state.payload.product = { ...product, name: "Clash for Windows", operating_system: "windows" };
+    for (const [intent, status, matches, checked, message] of [
+      [true, "registered", true, true, "registration does not confirm launch"],
+      [false, "registered", false, true, "saved preference says Off"],
+      [true, "not_registered", false, false, "startup registration is absent"],
+      [false, "not_registered", true, false, "saved preference is Off"],
+      [false, "checking", false, false, "Checking Windows startup registration"],
+    ]) {
+      const snapshot = {
+        ...original,
+        settings: { ...original.settings, launch_at_login: intent },
+        launch_at_login: { persisted_intent: intent, live_status: status, matches_persisted_intent: matches },
+      };
+      responses.read_settings_snapshot = snapshot;
+      await emit("cfw://settings-changed", snapshot);
+      const html = await renderPage("settings");
+      assert.equal(state.toggles.startAtLogin, checked);
+      assert.equal(state.settingsSnapshot.settings.launch_at_login, intent);
+      assert.ok(html.includes(message), status);
+      assert.doesNotMatch(html, /Checking macOS Login Item|Enabled by macOS|Disabled by macOS/u);
+      assert.match(html, /data-action="open-windows-startup-settings"/u);
+    }
+    responses.open_login_items_settings = null;
+    const before = invoked.length;
+    await appModule.handleAction("open-windows-startup-settings");
+    assert.deepEqual(invoked.slice(before), ["open_login_items_settings"]);
+    state.payload.product = product;
+    await appModule.handleAction("open-windows-startup-settings");
+    assert.equal(invoked.length, before + 1, "Windows action has no macOS dispatch");
+  } finally {
+    state.payload.product = product;
+    responses.read_settings_snapshot = original;
+    if (hadOpen) responses.open_login_items_settings = open;
+    else delete responses.open_login_items_settings;
+    await emit("cfw://settings-changed", original);
+  }
+});
+
 test("invalid settings events recover from native state or disable persistence", async () => {
   const original = structuredClone(responses.read_settings_snapshot);
   const invalid = structuredClone(original);

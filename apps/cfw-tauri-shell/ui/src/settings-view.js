@@ -62,6 +62,7 @@ function renderSettings() {
   const snapshot = state.settingsSnapshot ?? defaultSettingsSnapshot;
   const persisted = snapshot.settings ?? defaultSettings;
   const platform = state.platform;
+  const windows = state.payload?.product?.operating_system === "windows";
   const projection = state.projection;
   const engine = state.engine;
   const engineOff = engineIsOff();
@@ -113,6 +114,7 @@ function renderSettings() {
 
       ${renderSettingsGroup(t("Background controls"), [
         renderSettingAction(t("Shortcuts & network rules"), t("Global shortcuts and automatic connection"), t("Choose global hotkeys and opt-in rules for Wi-Fi or wired networks."), "open-automation-settings", t("Configure")),
+        ...(windows ? [renderSettingAction(t("Startup apps"), t("Windows Settings"), t("Review Windows' startup control for this app. This app changes only its own sign-in registration."), "open-windows-startup-settings", t("Open"))] : []),
       ])}
 
       ${renderSettingsGroup(t("Proxies"), [

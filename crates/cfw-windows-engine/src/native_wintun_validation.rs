@@ -17,37 +17,6 @@ mod library;
 mod recovery;
 use library::{Library, observe, wait_absent};
 type Result<T> = std::result::Result<T, String>;
-const PINS: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../scripts/dependency_pins.env"
-));
-
-fn pin(key: &str) -> Result<&'static str> {
-    let prefix = format!("{key}=");
-    let mut values = PINS.lines().filter_map(|line| line.strip_prefix(&prefix));
-    let value = values.next().ok_or("missing compiled Wintun pin")?;
-    if values.next().is_some() || value.is_empty() {
-        return Err("ambiguous compiled Wintun pin".into());
-    }
-    Ok(value)
-}
-
-fn digest_pin(value: &str) -> Result<[u8; 32]> {
-    if value.len() != 64
-        || !value
-            .bytes()
-            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-    {
-        return Err("invalid compiled Wintun digest".into());
-    }
-    let mut digest = [0; 32];
-    for (index, byte) in digest.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
-            .map_err(|error| error.to_string())?;
-    }
-    Ok(digest)
-}
-
 fn native_error(operation: &str) -> String {
     format!("{operation}: {}", std::io::Error::last_os_error())
 }
@@ -104,7 +73,7 @@ pub fn run(arguments: &[String]) -> Result<()> {
         &json!({"source":source,"process_id":peer.process_id(),
         "process_creation_time":peer.identity().process_creation_time(),
         "integrity_rid":peer.identity().integrity_rid(),"local_system":peer.identity().is_local_system(),
-        "dll_sha256":pin("WINTUN_WINDOWS_AMD64_SHA256")?,"release_accepted":false}),
+        "dll_sha256":crate::runtime_host::wintun_image_pin().map_err(|error| error.to_string())?.sha256,"release_accepted":false}),
     )?;
     let result = (|| {
         let library = Library::load(&dll)?;

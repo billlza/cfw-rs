@@ -56,7 +56,15 @@ try {
     # This inspection never launches an engine. A distinct admitted PE fixture
     # satisfies the installation shape without installing or starting services.
     Copy-Item -LiteralPath (Join-Path $Fixtures 'unsigned.exe') -Destination $engine
-    foreach ($path in @($runtime, $desktop, $engine)) { Protect-Package $path $false }
+    # Use the actual pinned DLL even though this lane never loads it. Runtime
+    # admission must not require a special exemption for package-worker tests.
+    $driverStage = Join-Path $Evidence 'wintun-distribution'
+    python scripts/stage_wintun_validation.py --repository "$PWD" --output $driverStage 2>&1 |
+        Tee-Object -FilePath (Join-Path $Evidence 'wintun-staging.log') | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw 'Update-worker Wintun staging failed' }
+    $wintun = Join-Path $package 'wintun.dll'
+    Copy-Item -LiteralPath (Join-Path $driverStage 'payload/wintun.dll') -Destination $wintun -ErrorAction Stop
+    foreach ($path in @($runtime, $desktop, $engine, $wintun)) { Protect-Package $path $false }
     $manifest = [ordered]@{
         schema_version=2; product_version='0.5.0'; build_number=1
         msi_product_code='{6D762E56-384D-4203-8520-A9B83D0F0652}'

@@ -12,6 +12,9 @@ mod maintenance;
 #[cfg(all(windows, feature = "native-service-validation"))]
 pub use maintenance::ServiceMaintenanceFault;
 mod manifest;
+mod wintun;
+#[cfg(windows)]
+pub(crate) use wintun::image_pin as wintun_image_pin;
 #[cfg(windows)]
 mod service;
 #[cfg(windows)]
@@ -31,6 +34,7 @@ pub const PACKAGE_DIRECTORY: &str = "Clash for Windows";
 pub const RUNTIME_FILE: &str = "cfw-windows-runtime.exe";
 pub const DESKTOP_FILE: &str = "Clash for Windows.exe";
 pub const ENGINE_FILE: &str = "cfw-engine-host.exe";
+pub const WINTUN_FILE: &str = "wintun.dll";
 pub const MANIFEST_FILE: &str = "runtime-installation-v2.json";
 pub const MSI_UPGRADE_CODE: &str = "{7ECD99B2-CFE4-51EA-868B-544E2A12E25D}";
 

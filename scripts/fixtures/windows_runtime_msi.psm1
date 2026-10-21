@@ -54,6 +54,7 @@ function New-RuntimeMsiFixture {
     if ((Get-RuntimeMsiProductState $ProductCode) -ne -1) { throw 'Refusing an existing MSI product registration' }
     Import-Module (Join-Path $PSScriptRoot '../windows/runtime_msi.psm1') -Force
     New-WindowsRuntimeMsi -Runtime $Runtime -Desktop $Desktop -Engine $Engine -Manifest $Manifest `
+        -Wintun (Join-Path (Split-Path -Parent $Engine) 'wintun.dll') `
         -ProductCode $ProductCode -Source $Source -Evidence $Evidence -QualificationFixture
 }
 function Invoke-RuntimeMsi {

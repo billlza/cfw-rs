@@ -69,6 +69,11 @@
               <PermissionEx Id="ManifestAcl" Sddl="O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)" />
             </File>
           </Component>
+          <Component Id="Wintun" Guid="{2D6D669C-4697-464E-A8BD-B38D6092B67D}" Win64="yes">
+            <File Id="WintunFile" Name="wintun.dll" Source="$(var.Wintun)" KeyPath="yes">
+              <PermissionEx Id="WintunAcl" Sddl="O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)" />
+            </File>
+          </Component>
           <?if $(var.QualificationFixture) = 0 ?>
           <Component Id="EngineNotices" Guid="{F06D6DD3-5216-5FB2-8956-F4D0FB35B5A1}" Win64="yes">
             <File Id="EngineNoticesFile" Name="EngineThirdPartyNotices.zip" Source="$(var.EngineNotices)" KeyPath="yes">
@@ -82,6 +87,7 @@
     <Feature Id="RuntimePayload" Level="1">
       <ComponentRef Id="Runtime" /><ComponentRef Id="Desktop" />
       <ComponentRef Id="Engine" /><ComponentRef Id="Manifest" />
+      <ComponentRef Id="Wintun" />
       <?if $(var.QualificationFixture) = 0 ?>
       <ComponentRef Id="EngineNotices" />
       <?endif ?>

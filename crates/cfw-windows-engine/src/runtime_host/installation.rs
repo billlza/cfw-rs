@@ -111,36 +111,44 @@ impl InstalledRuntime {
             manifest_sha256: cfw_singbox_config::sha256_hex(&bytes),
         })
     }
-    fn executable(&self, name: &str, digest: &str, version: &str) -> Result<VerifiedExecutable> {
+    fn executable(
+        &self,
+        name: &str,
+        digest: [u8; 32],
+        version: &str,
+    ) -> Result<VerifiedExecutable> {
         let path = self.root.join(name);
         let held = crate::process::hold_path(&path, false)?;
         security::verify(held.last().ok_or(HostError::InstallationSecurity)?)?;
-        Ok(VerifiedExecutable::open(
-            &path,
-            Manifest::digest(digest)?,
-            version,
-        )?)
+        Ok(VerifiedExecutable::open(&path, digest, version)?)
     }
     pub fn runtime(&self) -> Result<VerifiedExecutable> {
         self.executable(
             RUNTIME_FILE,
-            &self.manifest.runtime_sha256,
+            Manifest::digest(&self.manifest.runtime_sha256)?,
             env!("CARGO_PKG_VERSION"),
         )
     }
     pub fn desktop(&self) -> Result<VerifiedExecutable> {
         self.executable(
             DESKTOP_FILE,
-            &self.manifest.desktop_sha256,
+            Manifest::digest(&self.manifest.desktop_sha256)?,
             env!("CARGO_PKG_VERSION"),
         )
     }
     pub fn engine(&self) -> Result<VerifiedExecutable> {
         self.executable(
             ENGINE_FILE,
-            &self.manifest.engine_sha256,
+            Manifest::digest(&self.manifest.engine_sha256)?,
             &self.manifest.engine_version,
         )
+    }
+    /// Admit the fixed official driver image without loading it or creating an
+    /// adapter. The package DACL and retained file handles use the same boundary
+    /// as the executable payloads; the hash comes from this compiled runtime.
+    pub fn wintun(&self) -> Result<VerifiedExecutable> {
+        let pin = wintun_image_pin()?;
+        self.executable(WINTUN_FILE, pin.digest()?, pin.version)
     }
     pub fn require_runtime_process(&self) -> Result<()> {
         let runtime = self.runtime()?;
@@ -150,6 +158,7 @@ impl InstalledRuntime {
         // handles. Manifest and directory stay pinned throughout the host.
         self.desktop()?;
         self.engine()?;
+        self.wintun()?;
         Ok(())
     }
     pub fn require_desktop_process(&self) -> Result<()> {

@@ -64,12 +64,12 @@ impl ObservedInstallation {
         let manifest = &installation.manifest;
         let desktop = installation.executable(
             DESKTOP_FILE,
-            &manifest.desktop_sha256,
+            Manifest::digest(&manifest.desktop_sha256)?,
             &manifest.product_version,
         )?;
         let runtime = installation.executable(
             RUNTIME_FILE,
-            &manifest.runtime_sha256,
+            Manifest::digest(&manifest.runtime_sha256)?,
             &manifest.product_version,
         )?;
         let engine = installation.engine()?;

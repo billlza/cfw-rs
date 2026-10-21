@@ -146,6 +146,8 @@ class WindowsEngineContractTests(unittest.TestCase):
             with patch.object(engine, "command", return_value=b"\n".join(json.dumps(p).encode() for p in packages)):
                 result = engine.bundle_notices(REPOSITORY, sdk / "bin/go.exe", source, output, {"GOMODCACHE": str(modules)}, pins)
             self.assertEqual((result["components"], result["files"], result["embedded_binaries"]), (4, 4, 1))
+            self.assertEqual((output / "wintun.dll").read_bytes(), binary)
+            self.assertEqual(engine.sha256(output / "wintun.dll"), pins["WINTUN_WINDOWS_AMD64_SHA256"])
             index = json.loads((output / "third-party-notices.json").read_text())
             notice, = [item for item in index["components"] if item["component"] == "Wintun prebuilt DLL"]
             self.assertEqual(notice["embedded_binary"]["sha256"], pins["WINTUN_WINDOWS_AMD64_SHA256"])

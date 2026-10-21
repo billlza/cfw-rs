@@ -18,6 +18,7 @@ if (@([System.ServiceProcess.ServiceController]::GetServices() | Where-Object Se
 $runtimePath = Join-Path $package 'cfw-windows-runtime.exe'
 $desktopPath = Join-Path $package 'Clash for Windows.exe'
 $enginePath = Join-Path $package 'cfw-engine-host.exe'
+$wintunPath = Join-Path $package 'wintun.dll'
 $manifestPath = Join-Path $package 'runtime-installation-v2.json'
 $msi = $null
 $msiCandidate = $null
@@ -46,10 +47,13 @@ function Invoke-ServiceCommand([string[]]$Arguments) {
     $output = & sc.exe @Arguments 2>&1
     if ($LASTEXITCODE -ne 0) { throw "SCM command failed ($LASTEXITCODE): $output" }
 }
-function Require-Rejected([string]$Case) {
+function Require-Rejected([string]$Case, [string]$ExpectedError = '') {
     $output = & $runtimePath --check-installation 2>&1
     if ($LASTEXITCODE -eq 0) { throw "Installation counterexample was accepted: $Case" }
     $output | Set-Content -LiteralPath (Join-Path $Receipts "installed-host-$Case.txt") -Encoding utf8
+    if ($ExpectedError -and -not ($output -join "`n").Contains($ExpectedError, [StringComparison]::Ordinal)) {
+        throw "Installation counterexample failed outside its expected boundary: $Case"
+    }
     $cases.Add($Case)
 }
 function Stop-Installed {
@@ -193,6 +197,33 @@ try {
     }
     $cases.Add('protected_fixed_location_package_admitted')
     $cases.Add('protected_release_build_and_msi_identities_observed')
+    if ((Get-Item -LiteralPath $wintunPath).Length -ne $msi.wintun_bytes -or
+        (Get-FileHash -LiteralPath $wintunPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $msi.wintun_sha256) {
+        throw 'MSI did not install the pinned Wintun image'
+    }
+    $driverBytes = [IO.File]::ReadAllBytes($wintunPath)
+    $driverWriteTime = [IO.File]::GetLastWriteTimeUtc($wintunPath)
+    $driverAcl = Get-Acl -LiteralPath $wintunPath
+    try {
+        $alteredDriver = [byte[]]$driverBytes.Clone()
+        $alteredDriver[0] = $alteredDriver[0] -bxor 1
+        [IO.File]::WriteAllBytes($wintunPath, $alteredDriver)
+        Require-Rejected 'changed_wintun_image_rejected' 'executable does not match the installation identity'
+    } finally {
+        [IO.File]::WriteAllBytes($wintunPath, $driverBytes)
+        [IO.File]::SetLastWriteTimeUtc($wintunPath, $driverWriteTime)
+    }
+    try {
+        $unsafeDriverAcl = Get-Acl -LiteralPath $wintunPath
+        $unsafeDriverAcl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new([System.Security.Principal.SecurityIdentifier]::new('S-1-1-0'), 'Write', 'Allow'))
+        Set-Acl -LiteralPath $wintunPath -AclObject $unsafeDriverAcl
+        Require-Rejected 'unprivileged_wintun_writer_rejected' 'installation ownership or write access is unsafe'
+    } finally { Set-Acl -LiteralPath $wintunPath -AclObject $driverAcl }
+    $driverCheck = & $runtimePath --check-installation $msi.manifest_sha256
+    if ($LASTEXITCODE -ne 0 -or -not ($driverCheck | ConvertFrom-Json).installation_verified) {
+        throw 'Restored Wintun package was not admitted'
+    }
+    $cases.Add('protected_official_wintun_image_admitted')
     foreach ($counterexample in @(
         @($msiCandidate.manifest_sha256, 'installed manifest differs from the expected release'),
         @('invalid', 'Windows runtime installation manifest is invalid')

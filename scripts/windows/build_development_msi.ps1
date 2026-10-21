@@ -19,6 +19,13 @@ if ($desktopReceipt.source -cne $Source -or $engineReceipt.product_source -cne $
 }
 $desktop = Join-Path $DesktopDirectory $desktopReceipt.filename
 $engine = Join-Path $EngineDirectory $engineReceipt.host_artifact.filename
+$driver = $engineReceipt.wintun_artifact
+if ($driver.filename -cne 'wintun.dll') { throw 'The Windows engine build omitted its fixed Wintun payload' }
+$wintun = Join-Path $EngineDirectory $driver.filename
+if ((Get-Item -LiteralPath $wintun).Length -ne $driver.size -or
+    (Get-FileHash -LiteralPath $wintun -Algorithm SHA256).Hash.ToLowerInvariant() -cne $driver.sha256) {
+    throw 'Wintun payload differs from its engine build receipt'
+}
 $notices = $engineReceipt.source_notices.archive
 if ($notices.filename -cne 'engine-third-party-notices.zip' -or $engineReceipt.source_notices.embedded_binaries -ne 1) {
     throw 'The Windows engine build omitted its embedded-binary notices'
@@ -49,13 +56,14 @@ $manifest = [ordered]@{
 $manifestPath = Join-Path $Output 'manifest.json'
 $manifest | ConvertTo-Json | Set-Content -LiteralPath $manifestPath -Encoding utf8NoBOM
 Import-Module (Join-Path $PSScriptRoot 'runtime_msi.psm1') -Force
-$package = New-WindowsRuntimeMsi -Runtime $Runtime -Desktop $desktop -Engine $engine -Manifest $manifestPath `
+$package = New-WindowsRuntimeMsi -Runtime $Runtime -Desktop $desktop -Engine $engine -Wintun $wintun -Manifest $manifestPath `
     -ProductCode $manifest.msi_product_code -Source $Source -Evidence $Output `
     -EngineNotices $noticeArchive -EngineNoticesSha256 $notices.sha256
 [ordered]@{
     source=$Source; profile='debug'; desktop_sha256=$manifest.desktop_sha256
     runtime_sha256=$manifest.runtime_sha256; engine_sha256=$manifest.engine_sha256
     engine_notices_sha256=$package.engine_notices_sha256
+    wintun_sha256=$package.wintun_sha256
     package_sha256=$package.package_sha256; manifest_sha256=$package.manifest_sha256
     development_build_number=1; production_build_allocated=$false
     installed=$false; gui_exercised=$false; signed=$false; release_accepted=$false

@@ -3,7 +3,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 function New-WindowsRuntimeMsi {
-    param([string]$Runtime, [string]$Desktop, [string]$Engine, [string]$Manifest,
+    param([string]$Runtime, [string]$Desktop, [string]$Engine, [string]$Wintun, [string]$Manifest,
           [string]$ProductCode, [string]$Source, [string]$Evidence,
           [string]$EngineNotices, [string]$EngineNoticesSha256,
           [switch]$QualificationFixture)
@@ -20,6 +20,20 @@ function New-WindowsRuntimeMsi {
         throw 'Invalid Windows MSI manifest input'
     }
     $msiVersion = $inputManifest.product_version
+    $driverPin = @(Get-Content -LiteralPath (Join-Path $PSScriptRoot '../dependency_pins.env') |
+        Select-String -Pattern '^WINTUN_WINDOWS_AMD64_SHA256=([a-f0-9]{64})$')
+    if ($driverPin.Count -ne 1 -or -not (Test-Path -LiteralPath $Wintun -PathType Leaf)) {
+        throw 'The runtime MSI requires the pinned official Wintun image'
+    }
+    $driverDigest = (Get-FileHash -LiteralPath $Wintun -Algorithm SHA256).Hash.ToLowerInvariant()
+    $driverBytes = (Get-Item -LiteralPath $Wintun).Length
+    if ($driverDigest -cne $driverPin[0].Matches[0].Groups[1].Value -or $driverBytes -lt 1 -or $driverBytes -gt 2MB) {
+        throw 'MSI Wintun input differs from the compiled official image pin'
+    }
+    $driverSignature = Get-AuthenticodeSignature -LiteralPath $Wintun
+    if ($driverSignature.Status -ne 'Valid' -or $null -eq $driverSignature.SignerCertificate) {
+        throw 'The official Wintun image did not pass native Authenticode verification'
+    }
     $basename = 'CFW-development-windows-x64'
     if ($QualificationFixture) {
         if ($EngineNotices -or $EngineNoticesSha256) { throw 'The executable fixture does not claim engine notice delivery' }
@@ -62,7 +76,7 @@ function New-WindowsRuntimeMsi {
     if ($LASTEXITCODE -ne 0) { throw 'Runtime MSI manifest binder compilation failed' }
     $transaction = [guid]::NewGuid().ToString('D')
     $arguments = @('-nologo', '-wx', '-arch', 'x64', '-out', $object,
-        "-dRuntime=$Runtime", "-dDesktop=$Desktop", "-dEngine=$Engine", "-dManifest=$Manifest",
+        "-dRuntime=$Runtime", "-dDesktop=$Desktop", "-dEngine=$Engine", "-dWintun=$Wintun", "-dManifest=$Manifest",
         "-dQualificationFixture=$([int]$QualificationFixture.IsPresent)", "-dBuildNumber=$build",
         "-dProductCode=$ProductCode", "-dMsiVersion=$msiVersion", "-dMaintenanceTransaction=$transaction", $definition)
     if (-not $QualificationFixture) { $arguments = @("-dEngineNotices=$EngineNotices") + $arguments }
@@ -78,6 +92,9 @@ function New-WindowsRuntimeMsi {
         maintenance_transaction=$transaction; manifest_sha256=(Get-FileHash -LiteralPath $Manifest -Algorithm SHA256).Hash.ToLowerInvariant()
         build_number=$boundManifest.build_number
         desktop_is_fixture=$QualificationFixture.IsPresent; signed=$false; release_accepted=$false
+        wintun_filename='wintun.dll'; wintun_sha256=$driverDigest; wintun_bytes=$driverBytes
+        wintun_authenticode_status=$driverSignature.Status.ToString()
+        wintun_signer_thumbprint=$driverSignature.SignerCertificate.Thumbprint
     }
     if (-not $QualificationFixture) {
         $result['engine_notices_packaged'] = $true

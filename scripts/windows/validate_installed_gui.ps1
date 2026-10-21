@@ -29,7 +29,7 @@ New-Item -ItemType Directory -Path $Output -ErrorAction Stop | Out-Null
 $outputRoot = (Resolve-Path -LiteralPath $Output).Path
 $receipt = [ordered]@{
     source=$Source; package_sha256=$package.package_sha256; installed=$null; uninstalled=$null
-    engine_notices_installed=$false
+    engine_notices_installed=$false; wintun_payload_installed=$false
     fresh_off_session=$null; local_proxy_session=$null; system_proxy_quit_session=$null
     native_gui_exercised=$false; ordinary_user=$false; page_count=0; graceful_exit_observed=$false
     startup_registration_exercised=$false; actual_sign_in_exercised=$false
@@ -68,6 +68,22 @@ try {
     $receipt.engine_notices_installed = $true
     [ordered]@{ source=$Source; sha256=$package.engine_notices_sha256; bytes=$package.engine_notices_bytes; installed=$true } |
         ConvertTo-Json | Set-Content -LiteralPath (Join-Path $outputRoot 'installed-notices.json') -Encoding utf8NoBOM
+    $wintun = Join-Path $installedDirectory 'wintun.dll'
+    if ($package.wintun_filename -cne 'wintun.dll' -or $package.wintun_authenticode_status -cne 'Valid' -or
+        (Get-Item -LiteralPath $wintun).Length -ne $package.wintun_bytes -or
+        (Get-FileHash -LiteralPath $wintun -Algorithm SHA256).Hash.ToLowerInvariant() -cne $package.wintun_sha256) {
+        throw 'Installed Wintun differs from the pinned MSI payload'
+    }
+    $driverSignature = Get-AuthenticodeSignature -LiteralPath $wintun
+    if ($driverSignature.Status -ne 'Valid' -or $null -eq $driverSignature.SignerCertificate -or
+        $driverSignature.SignerCertificate.Thumbprint -cne $package.wintun_signer_thumbprint) {
+        throw 'Installed Wintun signature differs from the verified input'
+    }
+    $receipt.wintun_payload_installed = $true
+    [ordered]@{ source=$Source; sha256=$package.wintun_sha256; bytes=$package.wintun_bytes; installed=$true
+        authenticode_status=$driverSignature.Status.ToString(); signer_thumbprint=$driverSignature.SignerCertificate.Thumbprint
+        loaded=$false; adapter_created=$false; release_accepted=$false } |
+        ConvertTo-Json | Set-Content -LiteralPath (Join-Path $outputRoot 'installed-wintun.json') -Encoding utf8NoBOM
     $runtime = Join-Path $installedDirectory 'cfw-windows-runtime.exe'
     $check = & $runtime --check-installation $package.manifest_sha256
     $check | Set-Content -LiteralPath (Join-Path $outputRoot 'installed-runtime.json') -Encoding utf8NoBOM

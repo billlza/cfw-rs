@@ -157,6 +157,15 @@ def bundle_wintun_notice(repository: Path, package: dict[str, object], root: Pat
     require(binary_digest == pins["WINTUN_WINDOWS_AMD64_SHA256"], "embedded Wintun differs from the official binary")
     license_source = pinned_path(repository, pins["WINTUN_BINARY_LICENSE_PATH"])
     require(sha256(license_source) == pins["WINTUN_BINARY_LICENSE_SHA256"], "Wintun binary license digest mismatch")
+    # The authority needs the same official image as a protected MSI payload.
+    # Copy only after both binary and license admission, and recheck the copy.
+    # The notice archive remains texts only; packaging never executes this DLL.
+    payload = output / "wintun.dll"
+    require(not payload.exists(), "refusing to replace a Wintun payload")
+    output.mkdir(parents=True, exist_ok=True)
+    with dll.open("rb") as source, payload.open("xb") as destination_file:
+        shutil.copyfileobj(source, destination_file)
+    require(sha256(payload) == binary_digest, "copied Wintun payload changed")
     destination = output / "licenses" / f"wintun-{pins['WINTUN_VERSION']}" / "LICENSE.txt"
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(license_source, destination)
@@ -515,6 +524,7 @@ def build(repository: Path, work: Path, pins: dict[str, str]) -> None:
     print("Collecting source license and notice texts for the linked Windows engine", flush=True)
     notices = bundle_notices(repository, go, source, output, environment, pins)
     require(notices["embedded_binaries"] == 1, "fixed Windows engine omitted its embedded Wintun notice")
+    wintun = output / "wintun.dll"
     receipt = {"schema_version": 1, "product_source": git(repository, "rev-parse", "HEAD").decode().strip(),
                "component": "windows-engine", "platform": "windows-amd64", "release_accepted": False,
                "engine_version": pins["SING_BOX_VERSION"], "engine_commit": pins["SING_BOX_COMMIT"],
@@ -528,6 +538,8 @@ def build(repository: Path, work: Path, pins: dict[str, str]) -> None:
                "build_tags": tags.split(","), "cgo_enabled": False, "independent_cache_builds_equal": True,
                "test_packages": packages, "tests_passed": len(passed_tests), "tests_skipped": skipped_tests,
                "packages_without_tests": packages_without_tests, "source_notices": notices,
+               "wintun_artifact": {"filename": wintun.name, "size": wintun.stat().st_size,
+                                   "sha256": sha256(wintun), "version": pins["WINTUN_VERSION"]},
                "module_graph_sha256": sha256(output / "module-graph.json"),
                "rust_version": pins["RUST_VERSION"], "rust_dns_fixture_sha256": fixture_hashes,
                "race_instrumentation": False, "version_output": version,

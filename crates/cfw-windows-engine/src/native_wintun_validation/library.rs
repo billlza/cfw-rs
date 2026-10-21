@@ -1,7 +1,7 @@
 //! Wintun 0.14.1 ABI, from the header in the hash-pinned official distribution.
 //! This probe creates its own adapter handles and never calls OpenAdapter or
 //! DeleteDriver. It does not establish product routing or recovery admission.
-use super::{Result, native_error, pin};
+use super::{Result, native_error};
 use crate::VerifiedExecutable;
 use std::{
     ffi::{OsString, c_void},
@@ -71,9 +71,13 @@ pub(super) struct Library {
 }
 impl Library {
     pub(super) fn load(path: &Path) -> Result<Self> {
-        let digest = super::digest_pin(pin("WINTUN_WINDOWS_AMD64_SHA256")?)?;
-        let image = VerifiedExecutable::open(path, digest, pin("WINTUN_VERSION")?)
-            .map_err(|error| error.to_string())?;
+        let pin = crate::runtime_host::wintun_image_pin().map_err(|error| error.to_string())?;
+        let image = VerifiedExecutable::open(
+            path,
+            pin.digest().map_err(|error| error.to_string())?,
+            pin.version,
+        )
+        .map_err(|error| error.to_string())?;
         let mut wide: Vec<_> = path.as_os_str().encode_wide().collect();
         if wide.contains(&0) {
             return Err("Wintun path contains NUL".into());

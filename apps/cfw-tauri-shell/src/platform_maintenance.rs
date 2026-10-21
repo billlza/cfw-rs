@@ -1,5 +1,14 @@
 //! Applicability of historical platform maintenance, separate from the native
 //! engine authority which must still admit every Windows networking operation.
+
+pub(crate) fn require_legacy_profile_migration() -> Result<(), String> {
+    if cfg!(target_os = "macos") {
+        Ok(())
+    } else {
+        Err("Historical Mac profile migration does not apply to this platform; import a configuration file or subscription instead".into())
+    }
+}
+
 #[cfg(target_os = "macos")]
 pub use crate::legacy::LegacyRetirementGate as PlatformMaintenanceGate;
 #[cfg(target_os = "macos")]

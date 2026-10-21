@@ -949,6 +949,8 @@ test("Windows omits Mac maintenance without showing a completed cleanup or dispa
   const original = {
     product: state.payload.product, retirement: state.retirement,
     maintenanceOpen: state.legacyMaintenanceOpen, page: state.activePage,
+    profiles: state.profiles, invalidProfiles: state.invalidProfiles,
+    profilesUnavailableReason: state.profilesUnavailableReason,
   };
   const commandsBefore = invoked.length;
   try {
@@ -962,9 +964,16 @@ test("Windows omits Mac maintenance without showing a completed cleanup or dispa
     assert.doesNotMatch(settings, /open-legacy-maintenance|Older Clash for Mac|Legacy maintenance/u);
     const general = await renderPage("general");
     assert.doesNotMatch(general, /begin-migration-handoff|prepare-cutover|confirm-cutover|recover-cutover|data-migration/u);
+    state.profiles = [];
+    state.invalidProfiles = [];
+    state.profilesUnavailableReason = null;
+    const profiles = await renderPage("profiles");
+    assert.doesNotMatch(profiles, /migrate-legacy-profiles|Migrate selected legacy subscription/u);
+    assert.match(profiles, /data-action="import-profile-file"/u);
+    assert.match(profiles, /data-action="import-profile"/u);
     for (const action of [
       "open-legacy-maintenance", "begin-migration-handoff", "prepare-cutover",
-      "confirm-cutover", "recover-cutover",
+      "confirm-cutover", "recover-cutover", "migrate-legacy-profiles",
     ]) {
       await assert.rejects(() => appModule.handleAction(action), /does not apply/u);
     }
@@ -973,6 +982,9 @@ test("Windows omits Mac maintenance without showing a completed cleanup or dispa
     state.payload.product = original.product;
     state.retirement = original.retirement;
     state.legacyMaintenanceOpen = original.maintenanceOpen;
+    state.profiles = original.profiles;
+    state.invalidProfiles = original.invalidProfiles;
+    state.profilesUnavailableReason = original.profilesUnavailableReason;
     await renderPage(original.page);
   }
 });

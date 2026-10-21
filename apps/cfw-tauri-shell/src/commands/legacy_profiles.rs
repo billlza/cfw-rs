@@ -130,6 +130,7 @@ pub(crate) fn preview_legacy_cfw_profile_migration(
     engine: State<'_, ManagedEngine>,
     profiles: State<'_, ManagedProfiles>,
 ) -> Result<LegacyProfileMigrationPreview, String> {
+    crate::platform_maintenance::require_legacy_profile_migration()?;
     // The preview validates the same Off boundary as commit, but does not create
     // directories or write any durable state.
     let _maintenance = engine
@@ -192,6 +193,7 @@ pub(crate) async fn commit_legacy_cfw_profile_migration(
     preview_id: String,
     confirmed: bool,
 ) -> Result<LegacyProfileMigrationOutcome, String> {
+    crate::platform_maintenance::require_legacy_profile_migration()?;
     if !confirmed {
         return Err("legacy profile migration requires explicit confirmation".into());
     }

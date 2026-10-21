@@ -1,5 +1,6 @@
 // Consumed by `playwright-cli run-code --filename`. All IPC below is the
-// installed application's real read-only IPC; no renderer state is injected.
+// installed application's real IPC: observations plus explicit rejection tests
+// for Mac-only migration commands. No renderer state is injected.
 (async (page) => {
   // Product identity is delivered by boot_payload below. The shared page has
   // no #product-name element; wait for its actual navigation to be rendered.
@@ -30,6 +31,7 @@
   }
   const pages = [];
   for (const id of expected) {
+    const checks = {};
     await page.locator(`#nav button[data-page="${id}"]`).click();
     await page.locator(`#nav button[data-page="${id}"][aria-current="page"]`).waitFor();
     const heading = await page.locator('#page-title').innerText();
@@ -47,12 +49,36 @@
       if (!help.includes('Windows virtual network adapter') || /macOS|NetworkExtension|System Settings/u.test(help)) {
         throw new Error('Windows TUN help contains foreign platform instructions');
       }
+      checks.tun_help = help;
       await page.screenshot({ path: 'windows-tun-help.png' });
       await dialog.locator('button[data-glass-dismiss]').click();
       await dialog.waitFor({ state: 'hidden' });
     }
     if (id === 'feedback' && !content.includes(backend.platform.startup_strategy)) {
       throw new Error('Windows startup architecture is missing from the Feedback page');
+    }
+    if (id === 'profiles') {
+      if (await page.locator('[data-action="migrate-legacy-profiles"]').count()) {
+        throw new Error('First Windows release offers an inapplicable predecessor migration');
+      }
+      await page.locator('[data-action="import-profile-file"]:enabled').waitFor();
+      await page.locator('[data-action="import-profile"]:enabled').waitFor();
+      const migration = await page.evaluate(async () => {
+        const results = [];
+        for (const command of ['preview_legacy_cfw_profile_migration', 'commit_legacy_cfw_profile_migration']) {
+          try {
+            await window.__TAURI_INTERNALS__.invoke(command, {
+              previewId: '00000000-0000-4000-8000-000000000000', confirmed: true,
+            });
+            results.push({ command, rejected: false });
+          } catch (error) { results.push({ command, rejected: true, error: String(error) }); }
+        }
+        return results;
+      });
+      if (!migration.every(item => item.rejected && item.error.startsWith('Historical Mac profile migration does not apply'))) {
+        throw new Error(`Windows historical profile admission is incorrect: ${JSON.stringify(migration)}`);
+      }
+      checks.legacy_profile_migration_rejections = migration;
     }
     if (id === 'settings') {
       const families = await page.locator('[data-font-family] option').evaluateAll(nodes => nodes.map(node => node.value));
@@ -63,7 +89,7 @@
       }
     }
     await page.screenshot({ path: `${id}.png` });
-    pages.push({ id, heading, content, snapshot: await page.locator('body').ariaSnapshot() });
+    pages.push({ id, heading, content, checks, snapshot: await page.locator('body').ariaSnapshot() });
   }
   await page.locator('#nav button[data-page="settings"]').click();
   await page.locator('[data-action="quit-app"]').waitFor();

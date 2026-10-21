@@ -2435,7 +2435,8 @@ function renderProfiles() {
         `).join("") + state.invalidProfiles.map(renderInvalidProfileCard).join("") : `
           <div class="empty-profile-state">
             <p>${escapeHtml(t("No profiles found in the managed profiles directory."))}</p>
-            <button data-action="migrate-legacy-profiles">${escapeHtml(t("Migrate selected legacy subscription"))}</button>
+            ${state.payload.product.operating_system === "macos"
+              ? `<button data-action="migrate-legacy-profiles">${escapeHtml(t("Migrate selected legacy subscription"))}</button>` : ""}
           </div>
         `}
       </section>
@@ -3451,6 +3452,7 @@ async function reconcileStartupServices() {
 const MACOS_MAINTENANCE_ACTIONS = new Set([
   "open-legacy-maintenance", "close-legacy-maintenance", "begin-migration-handoff",
   "prepare-cutover", "confirm-cutover", "recover-cutover",
+  "migrate-legacy-profiles",
 ]);
 
 export async function handleAction(action) {

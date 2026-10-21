@@ -924,7 +924,7 @@ mod tests {
     #[test]
     fn credential_requirements_are_loaded_from_the_validated_stored_profile() {
         let temporary = TempDir::new().expect("temporary repository");
-        let repository = ProfileRepository::new(temporary.path());
+        let repository = ProfileRepository::new(temporary.path().join("profiles"));
         let profile = ValidatedSingBoxProfile::parse(
             r#"{"outbounds":[{"type":"trojan","tag":"proxy","server":"proxy.example.com","server_port":443,"credential_ref":{"id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","kind":"trojan_password"},"tls":{"enabled":true,"server_name":"proxy.example.com"}}]}"#,
         )

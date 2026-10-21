@@ -903,7 +903,7 @@ mod runtime_settings;
 #[path = "tests/ticket_retry.rs"]
 mod ticket_retry;
 
-/// What the recovery asks macOS for, and what macOS answers.
+/// What the recovery asks the platform for, and what the platform answers.
 fn restoration_answer(
     requests: &Arc<Mutex<Vec<bool>>>,
     answer: Result<(), cfw_engine_api::BackendError>,
@@ -921,11 +921,7 @@ fn restoration_answer(
 #[tokio::test]
 async fn a_declined_settings_restoration_ends_the_recovery_before_it_starts() {
     use cfw_engine_api::{BackendError, BackendErrorKind as Code};
-    for (code, expected) in [
-        (Code::Timeout, "or the ProxyAgent did not reply"),
-        (Code::ApprovalDenied, "cancelled or denied"),
-        (Code::PermissionDenied, "cancelled or denied"),
-    ] {
+    for code in [Code::Timeout, Code::ApprovalDenied, Code::PermissionDenied] {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let recoveries = Arc::new(AtomicUsize::new(0));
         let recovered = recoveries.clone();
@@ -938,10 +934,23 @@ async fn a_declined_settings_restoration_ends_the_recovery_before_it_starts() {
         )
         .await;
         let message = outcome.expect_err("a declined restoration must end the recovery");
-        assert!(message.contains(expected), "{message}");
-        assert!(
-            message.contains("Recover background services again"),
-            "{message}"
+        #[cfg(target_os = "macos")]
+        {
+            let expected = if code == Code::Timeout {
+                "or the ProxyAgent did not reply"
+            } else {
+                "cancelled or denied"
+            };
+            assert!(message.contains(expected), "{message}");
+            assert!(
+                message.contains("Recover background services again"),
+                "{message}"
+            );
+        }
+        #[cfg(windows)]
+        assert_eq!(
+            message,
+            "Restoring System Proxy settings was not authorized: the prompt. Check Windows proxy policy and the user session, then recover background services again."
         );
         assert_eq!(recoveries.load(Ordering::SeqCst), 0, "{code:?}");
         assert_eq!(*requests.lock().expect("requests"), vec![true]);
@@ -1082,6 +1091,7 @@ async fn a_service_fault_before_the_restoration_leaves_the_recovery_to_repair_it
 }
 
 #[test]
+#[cfg(target_os = "macos")]
 fn system_proxy_authorization_outcomes_tell_the_user_what_to_do() {
     use cfw_engine_api::BackendErrorKind as Code;
     let timed_out =
@@ -1103,4 +1113,27 @@ fn system_proxy_authorization_outcomes_tell_the_user_what_to_do() {
         ),
         "System Proxy authorization failed: Unavailable: signed macOS Host Bridge is not linked"
     );
+}
+
+#[test]
+#[cfg(windows)]
+fn system_proxy_authorization_outcomes_preserve_windows_failure_and_recovery_guidance() {
+    use cfw_engine_api::BackendErrorKind as Code;
+    for (code, detail) in [
+        (Code::Timeout, "The native operation timed out"),
+        (Code::ApprovalDenied, "denied"),
+        (Code::PermissionDenied, "denied"),
+        (
+            Code::Unavailable,
+            "installed Windows runtime is unavailable",
+        ),
+    ] {
+        let message = super::authorization_failure_message(code, detail);
+        assert_eq!(
+            message,
+            format!(
+                "System Proxy authorization failed: {code:?}: {detail}. Check Windows proxy policy and the user session before trying again."
+            )
+        );
+    }
 }

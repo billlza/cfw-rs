@@ -695,6 +695,23 @@ mod tests {
         }
     }
 
+    fn write_legacy_file(directory: &Path, name: &str, bytes: &[u8]) {
+        #[cfg(unix)]
+        fs::write(directory.join(name), bytes).expect("write legacy file");
+        #[cfg(windows)]
+        {
+            // A newly created Win32 file need not inherit its owner's SID.
+            // Set the fixture's owner and DACL through the actual private store.
+            cfw_windows_storage::PrivateDirectory::open_existing(directory)
+                .unwrap()
+                .unwrap()
+                .write()
+                .unwrap()
+                .replace(name, bytes, bytes.len().max(1))
+                .unwrap();
+        }
+    }
+
     fn write_candidate(directory: &Path, source_url: Option<&str>) {
         let sidecar = serde_json::json!({
             "id": "active-profile",
@@ -704,16 +721,16 @@ mod tests {
             "subscription_userinfo": "upload=0",
             "update_interval": "0"
         });
-        fs::write(
-            directory.join("active-profile.json"),
-            serde_json::to_vec(&sidecar).expect("sidecar JSON"),
-        )
-        .expect("write sidecar");
-        fs::write(
-            directory.join("active-profile.yaml"),
+        write_legacy_file(
+            directory,
+            "active-profile.json",
+            &serde_json::to_vec(&sidecar).expect("sidecar JSON"),
+        );
+        write_legacy_file(
+            directory,
+            "active-profile.yaml",
             b"proxies:\n  - name: Direct\n    type: ss\n",
-        )
-        .expect("write YAML");
+        );
     }
 
     fn ready(directory: &Path) -> LegacyCandidate {
@@ -776,14 +793,17 @@ mod tests {
             directory.path(),
             Some("https://subscription.example/profile"),
         );
-        fs::write(directory.path().join("active-profile.yml"), b"proxies: []")
-            .expect("ambiguous YAML");
+        write_legacy_file(directory.path(), "active-profile.yml", b"proxies: []");
         let file = open_owned_directory(directory.path(), false).expect("open directory");
-        assert!(read_candidate_from_directory(&file, "active-profile").is_err());
+        let error = match read_candidate_from_directory(&file, "active-profile") {
+            Err(error) => error,
+            Ok(_) => panic!("ambiguous YAML must fail"),
+        };
+        assert!(error.contains("ambiguous .yaml and .yml"), "{error}");
         fs::remove_file(directory.path().join("active-profile.yml")).expect("remove YAML");
 
         let outside = directory.path().join("outside.json");
-        fs::write(&outside, b"{}").expect("outside sidecar");
+        write_legacy_file(directory.path(), "outside.json", b"{}");
         fs::remove_file(directory.path().join("active-profile.json")).expect("remove sidecar");
         symlink(&outside, directory.path().join("active-profile.json")).expect("sidecar symlink");
         let file = open_owned_directory(directory.path(), false).expect("open directory");

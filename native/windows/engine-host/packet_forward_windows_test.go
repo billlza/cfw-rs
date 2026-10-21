@@ -314,9 +314,15 @@ func assertPacketUDPFrame(t *testing.T, packet []byte, source, destination netip
 		t.Fatal("invalid IPv6 response tuple")
 	}
 	udp := packet[headerBytes:]
-	if len(udp) < 8 || int(binary.BigEndian.Uint16(udp[4:6])) != len(udp) || binary.BigEndian.Uint16(udp[:2]) != source.Port() ||
+	if len(udp) < 8 {
+		t.Fatalf("truncated UDP response: %d bytes", len(udp))
+	}
+	if int(binary.BigEndian.Uint16(udp[4:6])) != len(udp) || binary.BigEndian.Uint16(udp[:2]) != source.Port() ||
 		binary.BigEndian.Uint16(udp[2:4]) != destination.Port() || binary.BigEndian.Uint16(udp[6:8]) == 0 ||
 		packetChecksum(packetUDPPseudo(source.Addr(), destination.Addr(), udp)) != 0 || !bytes.Equal(udp[8:], payload) {
-		t.Fatal("invalid UDP response ports, length, checksum or payload")
+		t.Fatalf("invalid UDP response: ipv4=%t source_port=%d/%d destination_port=%d/%d declared_bytes=%d actual_bytes=%d checksum=%#04x residual=%#04x payload_equal=%t payload_bytes=%d/%d",
+			source.Addr().Is4(), binary.BigEndian.Uint16(udp[:2]), source.Port(), binary.BigEndian.Uint16(udp[2:4]), destination.Port(),
+			binary.BigEndian.Uint16(udp[4:6]), len(udp), binary.BigEndian.Uint16(udp[6:8]),
+			packetChecksum(packetUDPPseudo(source.Addr(), destination.Addr(), udp)), bytes.Equal(udp[8:], payload), len(udp)-8, len(payload))
 	}
 }

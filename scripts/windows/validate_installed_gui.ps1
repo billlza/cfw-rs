@@ -157,19 +157,6 @@ try {
     $failure = $_
     ($_.Exception.ToString() + "`n" + $_.ScriptStackTrace) |
         Set-Content -LiteralPath (Join-Path $outputRoot 'failure.txt') -Encoding utf8NoBOM
-    # Probe only after the original normal-exit requirement failed. This does
-    # not change $failure or any acceptance field, even if one native paint
-    # lets the pinned window runtime complete its already-admitted exit.
-    if ($receipt.debugger_detached_before_exit_wait -and -not $receipt.graceful_exit_observed -and
-        $null -ne $guiProcess -and -not $guiProcess.HasExited) {
-        try {
-            [IO.File]::WriteAllText((Join-Path $outputRoot 'paint-probe.request'), $Source)
-            if (-not $controller.WaitForExit(10000)) { throw 'GUI paint diagnostic did not finish within its bound' }
-        } catch {
-            ($_.Exception.ToString() + "`n" + $_.ScriptStackTrace) |
-                Set-Content -LiteralPath (Join-Path $outputRoot 'paint-diagnostic-failure.txt') -Encoding utf8NoBOM
-        }
-    }
     if (-not $attached -and $null -ne $guiProcess -and -not $guiProcess.HasExited) {
         try {
             Invoke-Playwright 'reattach-after-failure' @('attach', "--cdp=$endpoint") | Out-Null

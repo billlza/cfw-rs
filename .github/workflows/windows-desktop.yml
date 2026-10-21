@@ -248,9 +248,10 @@ jobs:
           $status = @(git status --porcelain=v1 --untracked-files=all)
           if ($LASTEXITCODE -ne 0) { throw 'Cannot observe desktop build source status' }
           $status | Set-Content -LiteralPath (Join-Path $evidence 'desktop-generated-source-status.txt') -Encoding utf8NoBOM
-          git diff -- apps/cfw-tauri-shell/gen/schemas/ |
-            Set-Content -LiteralPath (Join-Path $evidence 'desktop-generated-schemas.diff') -Encoding utf8NoBOM
+          $schemaDiff = @(git diff -- apps/cfw-tauri-shell/gen/schemas/)
           if ($LASTEXITCODE -ne 0) { throw 'Cannot preserve generated schema differences' }
+          $schemaText = if ($schemaDiff.Count -eq 0) { '' } else { ($schemaDiff -join "`n") + "`n" }
+          [IO.File]::WriteAllText((Join-Path $evidence 'desktop-generated-schemas.diff'), $schemaText, [Text.UTF8Encoding]::new($false))
           $generated = @(
             'apps/cfw-tauri-shell/gen/schemas/windows-schema.json',
             'apps/cfw-tauri-shell/gen/schemas/desktop-schema.json',

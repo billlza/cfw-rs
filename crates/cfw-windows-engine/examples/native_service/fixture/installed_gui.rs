@@ -4,7 +4,6 @@ use super::*;
 use std::os::windows::io::AsHandle;
 
 mod input_desktop;
-mod paint_probe;
 
 pub(super) fn run() -> Result<()> {
     if std::env::var("GITHUB_ACTIONS").as_deref() != Ok("true")
@@ -107,34 +106,11 @@ pub(super) fn run() -> Result<()> {
                 "release_accepted": false
             }),
         )?;
-        let deadline = Instant::now() + Duration::from_secs(180);
-        loop {
-            if cfw_windows_storage::wait_until(
-                &process,
-                deadline.min(Instant::now() + Duration::from_millis(200)),
-            )
+        if cfw_windows_storage::wait_until(&process, Instant::now() + Duration::from_secs(180))
             .map_err(|e| e.to_string())?
-                == cfw_windows_storage::WaitOutcome::Signaled
-            {
-                break;
-            }
-            let probe_request = receipts.join("paint-probe.request");
-            match std::fs::read_to_string(&probe_request) {
-                Ok(request) => {
-                    if request != source {
-                        return Err("GUI paint diagnostic source differs".into());
-                    }
-                    paint_probe::run(&process, &peer, info.dwThreadId, &source, &receipts)?;
-                    // The caller has already failed normal Quit. An externally
-                    // supplied paint is a causal probe, never exit acceptance.
-                    return Err("normal GUI exit failed; paint diagnostic was collected".into());
-                }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(format!("read GUI diagnostic request: {error}")),
-            }
-            if Instant::now() >= deadline {
-                return Err("installed GUI did not exit before its validation deadline".into());
-            }
+            != cfw_windows_storage::WaitOutcome::Signaled
+        {
+            return Err("installed GUI did not exit before its validation deadline".into());
         }
         let mut exit = 0;
         if unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut exit) } == 0 {

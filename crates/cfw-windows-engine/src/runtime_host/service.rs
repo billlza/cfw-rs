@@ -90,6 +90,7 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut *mut u16) {
             }
         }
         crate::configure_service_process_observation()?;
+        super::maintenance::require_service_start_allowed()?;
         let installation = InstalledRuntime::open()?;
         installation.require_runtime_process()?;
         serve(installation, handle)

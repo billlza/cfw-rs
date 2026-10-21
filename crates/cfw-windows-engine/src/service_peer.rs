@@ -41,6 +41,7 @@ use windows_sys::Win32::{
 
 use crate::VerifiedExecutable;
 
+pub(crate) mod maintenance;
 mod observation;
 pub use observation::configure_service_process_observation;
 pub(crate) use observation::require_system_service_identity;
@@ -75,6 +76,8 @@ pub(crate) fn service_pipe_name(
 
 #[derive(Debug, thiserror::Error)]
 pub enum ServicePeerError {
+    #[error("Windows service maintenance: {0}")]
+    Maintenance(&'static str),
     #[error("Windows service peer {operation}: {source}")]
     Native {
         operation: &'static str,
@@ -337,6 +340,12 @@ fn verify_configuration(
     service: &ServiceHandle,
     expected_command: &[u16],
 ) -> Result<(), ServicePeerError> {
+    let buffer = configuration_buffer(service)?;
+    let config = unsafe { &*buffer.as_ptr().cast::<QUERY_SERVICE_CONFIGW>() };
+    validate_configuration(&buffer, config, expected_command)
+}
+
+fn configuration_buffer(service: &ServiceHandle) -> Result<Vec<usize>, ServicePeerError> {
     // Windows documents an 8 KiB maximum. usize storage provides the native
     // structure alignment; all returned string pointers must stay in it.
     let mut buffer = vec![0usize; MAX_CONFIG_BYTES / size_of::<usize>()];
@@ -352,8 +361,7 @@ fn verify_configuration(
     {
         return Err(native("query service configuration"));
     }
-    let config = unsafe { &*buffer.as_ptr().cast::<QUERY_SERVICE_CONFIGW>() };
-    validate_configuration(&buffer, config, expected_command)
+    Ok(buffer)
 }
 
 fn config_string(buffer: &[usize], pointer: *const u16) -> Result<&[u16], ServicePeerError> {
@@ -378,11 +386,22 @@ fn validate_configuration(
     config: &QUERY_SERVICE_CONFIGW,
     expected_command: &[u16],
 ) -> Result<(), ServicePeerError> {
+    validate_configuration_identity(buffer, config, expected_command)?;
+    if !matches!(
+        config.dwStartType,
+        SERVICE_AUTO_START | SERVICE_DEMAND_START
+    ) {
+        return Err(ServicePeerError::ConfigurationMismatch);
+    }
+    Ok(())
+}
+
+fn validate_configuration_identity(
+    buffer: &[usize],
+    config: &QUERY_SERVICE_CONFIGW,
+    expected_command: &[u16],
+) -> Result<(), ServicePeerError> {
     if config.dwServiceType != SERVICE_WIN32_OWN_PROCESS
-        || !matches!(
-            config.dwStartType,
-            SERVICE_AUTO_START | SERVICE_DEMAND_START
-        )
         || config_string(buffer, config.lpBinaryPathName)? != expected_command
         || config_string(buffer, config.lpServiceStartName)?
             != "LocalSystem".encode_utf16().collect::<Vec<_>>()
@@ -393,6 +412,10 @@ fn validate_configuration(
 }
 
 fn running_process(service: &ServiceHandle) -> Result<u32, ServicePeerError> {
+    validate_status(&service_status(service)?)
+}
+
+fn service_status(service: &ServiceHandle) -> Result<SERVICE_STATUS_PROCESS, ServicePeerError> {
     let mut status = SERVICE_STATUS_PROCESS::default();
     let mut needed = 0;
     if unsafe {
@@ -407,7 +430,7 @@ fn running_process(service: &ServiceHandle) -> Result<u32, ServicePeerError> {
     {
         return Err(native("query service status"));
     }
-    validate_status(&status)
+    Ok(status)
 }
 
 fn validate_status(status: &SERVICE_STATUS_PROCESS) -> Result<u32, ServicePeerError> {

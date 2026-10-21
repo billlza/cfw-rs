@@ -51,7 +51,7 @@ impl Validation {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Installation {
-    source: String,
+    pub(super) source: String,
     desktop_image: PathBuf,
     desktop_digest: [u8; 32],
     agent_image: PathBuf,
@@ -758,6 +758,10 @@ fn serve_connection(
         let (reply, finished): (&[u8], bool) = match request.body() {
             b"ping" => (b"pong", false),
             b"done" => (b"end!", true),
+            b"installed-maintenance" if role == ServiceClientRole::Desktop => {
+                super::maintenance::exercise()?;
+                (b"maintenance-ok", true)
+            }
             b"authority-local-recovery" if role == ServiceClientRole::Desktop => {
                 authority
                     .lock()

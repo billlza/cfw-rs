@@ -39,6 +39,7 @@ pub struct InstalledRuntime {
     _manifest: Vec<File>,
     root: PathBuf,
     manifest: Manifest,
+    pub(super) manifest_sha256: String,
 }
 impl InstalledRuntime {
     pub fn package_inspector(self) -> Result<crate::update_package::InstalledPackageInspector> {
@@ -84,6 +85,7 @@ impl InstalledRuntime {
             _manifest: manifest,
             root,
             manifest: decoded,
+            manifest_sha256: cfw_singbox_config::sha256_hex(&bytes),
         })
     }
     fn executable(&self, name: &str, digest: &str, version: &str) -> Result<VerifiedExecutable> {

@@ -10,6 +10,7 @@ pub(super) fn collect_fixture_diagnostics(root: &Path, output: &Path) -> Result<
             return Err("non-Unicode fixture diagnostic filename".into());
         };
         if !text.ends_with(".failure.txt")
+            && text != "installed-service-maintenance.json"
             && !text.ends_with("-client.json")
             && !text.ends_with("-client-output.txt")
             && !text.ends_with(".rejection.json")
@@ -68,5 +69,66 @@ mod tests {
         root.close().unwrap();
         assert_eq!(std::fs::read(output.path().join(name)).unwrap(), bytes);
         assert!(!output.path().join("fixture-installation.json").exists());
+    }
+}
+
+pub(super) fn with_diagnostics(
+    root: &Path,
+    receipts: &Path,
+    operation: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation));
+    let diagnostics = collect_fixture_diagnostics(root, receipts);
+    let result = match result {
+        Ok(result) => result,
+        Err(payload) => {
+            if let Err(error) = diagnostics {
+                eprintln!("runtime fixture diagnostic collection also failed: {error}");
+            }
+            std::panic::resume_unwind(payload)
+        }
+    };
+    match (result, diagnostics) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(test), Err(diagnostics)) => {
+            Err(format!("{test}; diagnostic collection: {diagnostics}"))
+        }
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+    #[test]
+    fn cleanup_panic_still_exports_diagnostics_and_remains_a_panic() {
+        let root = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("runtime-client-output.txt"),
+            b"original runtime error",
+        )
+        .unwrap();
+        let result = std::panic::catch_unwind(|| {
+            with_diagnostics(root.path(), output.path(), || panic!("disposal fault"))
+        });
+        let payload = result.unwrap_err();
+        assert_eq!(payload.downcast_ref::<&str>(), Some(&"disposal fault"));
+        assert_eq!(
+            std::fs::read(output.path().join("runtime-client-output.txt")).unwrap(),
+            b"original runtime error"
+        );
+    }
+    #[test]
+    fn diagnostic_failure_preserves_the_original_operation_error() {
+        let root = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("invalid-client-output.txt")).unwrap();
+        let error = with_diagnostics(root.path(), output.path(), || {
+            Err("primary runtime error".into())
+        })
+        .unwrap_err();
+        assert!(error.contains("primary runtime error"));
+        assert!(error.contains("invalid fixture diagnostic file"));
     }
 }

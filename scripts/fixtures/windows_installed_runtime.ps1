@@ -80,6 +80,13 @@ try {
     }
     $cases.Add('protected_fixed_location_package_admitted')
     $cases.Add('protected_release_build_and_msi_identities_observed')
+    foreach ($mode in @('--prepare-maintenance', '--rollback-maintenance')) {
+        $rejected = & $runtimePath $mode 'c40a7b13-74b7-4543-a5c0-55de82b9dad6' 2>&1
+        if ($LASTEXITCODE -eq 0 -or "$rejected" -notmatch 'requires the SYSTEM primary identity') {
+            throw "Ordinary installer caller was not refused before maintenance: $mode; $rejected"
+        }
+    }
+    $cases.Add('non_system_maintenance_entrypoints_rejected')
 
     foreach ($case in @(
         @('old_manifest_schema_rejected', 'schema_version', 1),
@@ -141,6 +148,16 @@ try {
                 $cases.Add('product_service_and_agent_run_both_proxy_modes')
             }
             $probes += $probe
+            if ($iteration -eq 0) {
+                & $DesktopFixture --installed-maintenance-validation
+                if ($LASTEXITCODE -ne 0) { throw 'Installed SYSTEM service maintenance validation failed' }
+                $maintenance = Get-Content -LiteralPath (Join-Path $Receipts 'installed-service-maintenance.json') -Raw | ConvertFrom-Json
+                if ($maintenance.source -cne $Source -or -not $maintenance.rollback_restored_startup -or
+                    -not $maintenance.maintenance_record_removed -or $maintenance.msi_installation_exercised) {
+                    throw 'Installed service maintenance receipt is incomplete'
+                }
+                $cases.Add('product_service_maintenance_prepare_and_rollback')
+            }
             Stop-Installed
             if (-not $process.WaitForExit(10000) -or $process.ExitCode -ne 0) { throw 'Product service process did not retire successfully' }
         } finally { $process.Dispose() }

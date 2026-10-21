@@ -32,10 +32,10 @@ mod authority_wire;
 mod desktop;
 mod desktop_process;
 mod diagnostics;
-use diagnostics::collect_fixture_diagnostics;
 mod installed_host;
 mod job_keeper;
 mod machine_record;
+mod maintenance;
 mod release_trace;
 mod request_timing;
 mod restricted;
@@ -113,6 +113,9 @@ impl Drop for Descriptor {
 
 pub(super) fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().collect();
+    if args.len() == 2 && args[1] == "--installed-maintenance-validation" {
+        return maintenance::run();
+    }
     if args.len() == 2 && args[1] == "--desktop-process-validation" {
         return restricted::run_desktop_process_observation();
     }
@@ -709,14 +712,9 @@ fn run_validation() -> Result<()> {
         return Err("invalid service receipt directory".into());
     }
     let root = tempfile::tempdir().map_err(|e| e.to_string())?;
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    diagnostics::with_diagnostics(root.path(), &receipt_root, || {
         run_in_directory(root.path(), &receipt_root, &source)
-    }));
-    collect_fixture_diagnostics(root.path(), &receipt_root)?;
-    match result {
-        Ok(result) => result,
-        Err(payload) => std::panic::resume_unwind(payload),
-    }
+    })
 }
 
 fn run_in_directory(root: &Path, receipt_root: &Path, source: &str) -> Result<()> {

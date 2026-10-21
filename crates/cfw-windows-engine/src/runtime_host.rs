@@ -7,6 +7,10 @@ mod agent;
 mod desktop;
 #[cfg(windows)]
 mod installation;
+#[cfg(any(windows, test))]
+mod maintenance;
+#[cfg(all(windows, feature = "native-service-validation"))]
+pub use maintenance::ServiceMaintenanceFault;
 mod manifest;
 #[cfg(windows)]
 mod service;
@@ -47,6 +51,9 @@ pub enum HostError {
     #[cfg(windows)]
     #[error("Windows runtime private storage: {0}")]
     Storage(#[from] cfw_windows_storage::Error),
+    #[cfg(windows)]
+    #[error("Windows service maintenance record: {0}")]
+    MaintenanceRecord(#[from] cfw_windows_storage::MachineRecordError),
     #[cfg(windows)]
     #[error("Windows runtime peer identity: {0}")]
     Peer(#[from] crate::PeerIdentityError),

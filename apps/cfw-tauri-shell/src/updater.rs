@@ -85,7 +85,9 @@ use crate::launch::FINISH_UPDATE_FLAG;
 pub(crate) use finisher::run as run_update_finisher;
 pub(crate) use install_lease::UpdateInstallLease;
 #[cfg(windows)]
-pub(crate) use windows_update::{run as run_update_finisher, wait_for_finisher_exit};
+pub(crate) use windows_update::{
+    admit_dashboard_startup, run as run_update_finisher, wait_for_finisher_exit,
+};
 pub(crate) type UpdaterSecurityState = state::UpdaterSecurityState<StagedResources>;
 
 const PROGRESS_EVENT: &str = "cfw://update-progress";

@@ -135,6 +135,32 @@ impl Record {
             Phase::HandedOff => None,
         }
     }
+    /// Losing the finisher's process lock does not prove that Windows Installer
+    /// has ended. Dashboard startup must not race an unconfirmed transaction.
+    pub fn require_dashboard_startup(&self) -> Result<(), String> {
+        if let Some(process) = self.finisher()
+            && crate::process_identity::process_identity_exists(process)?
+        {
+            return Err("the Windows update finisher is still running".into());
+        }
+        match &self.phase {
+            Phase::HandedOff => {
+                if crate::process_identity::process_identity_exists(&self.dashboard)? {
+                    return Err("the dashboard is still handing off its update".into());
+                }
+                // Launching is durably published before MSI can be spawned.
+                // This earlier phase can only be reviewed as an interruption.
+                Ok(())
+            }
+            Phase::Finished {
+                disposition: Disposition::Installed | Disposition::Original,
+                ..
+            } => Ok(()),
+            _ => Err(
+                "the previous Windows installation outcome is unconfirmed; startup requires update recovery".into(),
+            ),
+        }
+    }
     fn validate(&self) -> Result<(), String> {
         let bad = || "Windows update record violates its version 1 contract".to_owned();
         let from = semver::Version::parse(&self.original.release.version).map_err(|_| bad())?;
@@ -357,6 +383,90 @@ mod tests {
         let mut extra = serde_json::to_value(&original).unwrap();
         extra["trusted"] = serde_json::json!(true);
         assert!(serde_json::from_value::<Record>(extra).is_err());
+    }
+    #[test]
+    fn startup_refuses_a_live_handoff_or_an_unconfirmed_installer_outcome() {
+        const CHILD: &str = "CFW_UPDATE_STARTUP_EXIT_CHILD";
+        if std::env::var_os(CHILD).as_deref() == Some(std::ffi::OsStr::new("1")) {
+            use std::io::Read as _;
+            let mut byte = [0];
+            assert_eq!(std::io::stdin().read(&mut byte).unwrap(), 0);
+            std::process::exit(0);
+        }
+        let mut pending = record();
+        assert!(pending.require_dashboard_startup().is_err());
+        pending.phase = Phase::Launching {
+            process: pending.dashboard.clone(),
+        };
+        assert!(pending.require_dashboard_startup().is_err());
+        // Observe a real process incarnation, then release its input and wait
+        // for native exit. A released process lock must not admit Launching.
+        let executable = std::env::current_exe().unwrap();
+        let test = concat!(
+            module_path!(),
+            "::startup_refuses_a_live_handoff_or_an_unconfirmed_installer_outcome"
+        )
+        .split_once("::")
+        .unwrap()
+        .1;
+        let mut child = std::process::Command::new(&executable)
+            .args(["--exact", test])
+            .env(CHILD, "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let departed = crate::process_identity::process_identity(child.id(), &executable).unwrap();
+        drop(child.stdin.take());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("startup observation child did not exit after input closed");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!crate::process_identity::process_identity_exists(&departed).unwrap());
+        pending.phase = Phase::Launching { process: departed };
+        pending.bytes().unwrap();
+        assert!(pending.require_dashboard_startup().is_err());
+        pending.phase = Phase::Finished {
+            process: None,
+            exit_code: Some(3010),
+            disposition: Disposition::Uncertain,
+            code: Some("installation_unconfirmed".into()),
+        };
+        pending.bytes().unwrap();
+        assert!(pending.require_dashboard_startup().is_err());
+        for (exit_code, disposition, code) in [
+            (Some(0), Disposition::Installed, None),
+            (
+                Some(1602),
+                Disposition::Original,
+                Some("install_cancelled".into()),
+            ),
+        ] {
+            pending.phase = Phase::Finished {
+                process: None,
+                exit_code,
+                disposition,
+                code: code.clone(),
+            };
+            pending.bytes().unwrap();
+            pending.require_dashboard_startup().unwrap();
+            pending.phase = Phase::Finished {
+                process: Some(pending.dashboard.clone()),
+                exit_code,
+                disposition,
+                code,
+            };
+            assert!(pending.require_dashboard_startup().is_err());
+        }
     }
     #[test]
     fn journal_refuses_premature_success_and_preserves_mismatched_transactions() {

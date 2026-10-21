@@ -38,6 +38,14 @@ const POLL: Duration = Duration::from_millis(100);
 const INSTALL_NOTICE: Duration = Duration::from_secs(15 * 60);
 const LOG_LIMIT: usize = 16 * 1024 * 1024;
 
+pub(crate) fn admit_dashboard_startup(home: &Path) -> Result<(), String> {
+    let _lease = UpdateInstallLease::acquire(home).map_err(|error| error.to_string())?;
+    if let Some(record) = Journal::new(home).load()? {
+        record.require_dashboard_startup()?;
+    }
+    Ok(())
+}
+
 pub(super) async fn hand_off(app: &AppHandle, staged: &StagedUpdate) -> super::Result<HandOff> {
     let home = super::app_home()?;
     let current = InstalledRuntime::open().map_err(host)?;

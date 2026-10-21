@@ -94,9 +94,11 @@ use native_components::{
 use platform_maintenance::{PlatformMaintenanceGate, legacy_retirement_status};
 use shell::{TrayMenuState, build_app_menu, focus_main_window, handle_app_menu_event};
 use tauri::{Emitter, Manager, RunEvent, WindowEvent};
+#[cfg(target_os = "macos")]
+use updater::UpdateInstallLease;
 use updater::{
-    UpdateInstallLease, UpdaterSecurityState, cancel_update_install, check_for_updates,
-    commit_update_install, open_available_update, prepare_update_install, resolve_update_install,
+    UpdaterSecurityState, cancel_update_install, check_for_updates, commit_update_install,
+    open_available_update, prepare_update_install, resolve_update_install,
 };
 use window_state::{WindowBoundsManager, handle_window_bounds_event};
 
@@ -158,12 +160,19 @@ fn admit_dashboard_launch() -> LaunchContext {
         store.ensure_layout().map_err(|error| error.to_string())?;
         #[cfg(target_os = "macos")]
         MigrationHandoffLease::acquire(&store.paths().app_home).map(std::mem::drop)?;
-        // The installer process holds this lease while it unregisters
-        // services and exchanges the bundles. No dashboard may start
-        // underneath that exchange.
-        UpdateInstallLease::acquire(&store.paths().app_home)
-            .map(std::mem::drop)
-            .map_err(|error| error.to_string())
+        // No dashboard may start underneath a platform installation. Windows
+        // also observes durable intent: a crashed finisher releases its lock
+        // while the system MSI transaction may still be running.
+        #[cfg(target_os = "macos")]
+        {
+            UpdateInstallLease::acquire(&store.paths().app_home)
+                .map(std::mem::drop)
+                .map_err(|error| error.to_string())
+        }
+        #[cfg(windows)]
+        {
+            updater::admit_dashboard_startup(&store.paths().app_home)
+        }
     });
     if let Err(error) = available {
         eprintln!(

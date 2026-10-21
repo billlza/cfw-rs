@@ -33,10 +33,10 @@ impl InternetHandle {
             .ok_or("WinINet handle is already closed".into())
     }
     fn close(&mut self) -> Result<()> {
-        if let Some(handle) = self.0.take() {
-            if unsafe { InternetCloseHandle(handle.as_ptr()) } == 0 {
-                return Err(native_error("close WinINet handle"));
-            }
+        if let Some(handle) = self.0.take()
+            && unsafe { InternetCloseHandle(handle.as_ptr()) } == 0
+        {
+            return Err(native_error("close WinINet handle"));
         }
         Ok(())
     }

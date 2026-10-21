@@ -90,19 +90,19 @@ def load_policy(path: Path) -> dict:
     by_digest = {}
     ids = set()
     for entry in peers:
-        peer = exactly(entry, {"id", "public_key", "session_limit_bytes", "rate_limit_bps"})
+        peer = exactly(entry, {"id", "public_key", "session_alert_bytes", "rate_alert_bps"})
         alias = peer["id"]
         if not isinstance(alias, str) or not PEER_ID.fullmatch(alias) or alias in ids:
             raise GuardError("invalid or repeated peer id")
         digest = key_digest(peer["public_key"])
         if digest in by_digest:
             raise GuardError("duplicate peer key")
-        bounded_integer(peer["session_limit_bytes"], positive=True)
-        bounded_integer(peer["rate_limit_bps"], positive=True)
+        bounded_integer(peer["session_alert_bytes"], positive=True)
+        bounded_integer(peer["rate_alert_bps"], positive=True)
         by_digest[digest] = {
             "id": alias,
-            "session_limit_bytes": peer["session_limit_bytes"],
-            "rate_limit_bps": peer["rate_limit_bps"],
+            "session_alert_bytes": peer["session_alert_bytes"],
+            "rate_alert_bps": peer["rate_alert_bps"],
         }
         ids.add(alias)
     return {"interface": data["interface"], "peers": by_digest}
@@ -255,6 +255,13 @@ def evaluate(policy: dict, samples: dict[str, tuple[int, int]],
     elapsed_ns = observed_at - previous["observed_at"] if previous else None
     details = []
     alerts = []
+    # The policy defines the expected admission population. An empty table or
+    # missing configured peer is an inconsistent observation, not "safe idle".
+    if not samples:
+        alerts.append({"code": "empty_peer_observation", "peer": None})
+    for expected, rule in policy["peers"].items():
+        if expected not in samples:
+            alerts.append({"code": "configured_peer_missing", "peer": rule["id"]})
     for digest, (rx, tx) in sorted(samples.items()):
         rule = policy["peers"].get(digest)
         alias = rule["id"] if rule else "unknown:" + digest[:12]
@@ -262,16 +269,16 @@ def evaluate(policy: dict, samples: dict[str, tuple[int, int]],
         delta = None
         if rule is None:
             alerts.append({"code": "unregistered_peer", "peer": alias})
-        elif total > rule["session_limit_bytes"]:
-            alerts.append({"code": "session_budget_exceeded", "peer": alias})
+        elif total > rule["session_alert_bytes"]:
+            alerts.append({"code": "session_alert_threshold_exceeded", "peer": alias})
         if digest in prior:
             old = prior[digest]
             if rx < old["rx"] or tx < old["tx"]:
                 uncertain.add(digest)
             else:
                 delta = rx - old["rx"] + tx - old["tx"]
-                if rule and delta * 8 * 1_000_000_000 > rule["rate_limit_bps"] * elapsed_ns:
-                    alerts.append({"code": "observed_rate_exceeded", "peer": alias})
+                if rule and delta * 8 * 1_000_000_000 > rule["rate_alert_bps"] * elapsed_ns:
+                    alerts.append({"code": "rate_alert_threshold_exceeded", "peer": alias})
         if digest in uncertain:
             alerts.append({"code": "counter_reset_or_mismatch", "peer": alias})
         details.append({

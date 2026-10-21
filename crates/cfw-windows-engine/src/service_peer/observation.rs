@@ -37,16 +37,31 @@ pub fn configure_service_process_observation() -> Result<(), ServicePeerError> {
 
 pub(crate) fn require_system_service_identity() -> Result<crate::NativePeerProcess, ServicePeerError>
 {
+    require_system_identity(Some(0))
+}
+
+/// MSI's unrestricted SYSTEM actions can run in the installing session. They
+/// may maintain the fixed service and inspect global protected Off evidence;
+/// they are not service hosts and gain no pipe role or runtime grant.
+pub(crate) fn require_system_maintenance_identity()
+-> Result<crate::NativePeerProcess, ServicePeerError> {
+    require_system_identity(None)
+}
+
+fn require_system_identity(
+    required_session: Option<u32>,
+) -> Result<crate::NativePeerProcess, ServicePeerError> {
     cfw_windows_storage::require_process_identity()?;
     let own = crate::NativePeerProcess::open(std::process::id())?;
     let identity = own.identity();
     if !identity.is_local_system()
-        || identity.session_id() != 0
+        || required_session.is_some_and(|session| identity.session_id() != session)
         || identity.integrity_rid() != 0x4000
         || identity.is_app_container()
         || identity.is_restricted()
     {
         return Err(ServicePeerError::InvalidServiceProcessIdentity {
+            required_session,
             local_system: identity.is_local_system(),
             session_id: identity.session_id(),
             integrity_rid: identity.integrity_rid(),
@@ -223,6 +238,19 @@ mod tests {
         assert!(matches!(
             configure_service_process_observation(),
             Err(ServicePeerError::InvalidServiceProcessIdentity {
+                required_session: Some(0),
+                local_system: false,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn ordinary_user_cannot_acquire_system_maintenance_identity() {
+        assert!(matches!(
+            require_system_maintenance_identity(),
+            Err(ServicePeerError::InvalidServiceProcessIdentity {
+                required_session: None,
                 local_system: false,
                 ..
             })

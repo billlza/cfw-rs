@@ -111,6 +111,7 @@ pub(super) fn exercise() -> Result<()> {
                 .prepare_service_maintenance(transaction)
                 .map_err(|e| e.to_string())?;
             assert_eq!(prepared["retained_process_exit_observed"], true);
+            assert_eq!(prepared["caller_session_id"], 0);
             assert_eq!(prepared["original_start_type"], SERVICE_DEMAND_START);
             assert_eq!(prepared["authority"]["state"], "off");
             assert_eq!(prepared["service_start_disabled"], true);

@@ -28,7 +28,21 @@ impl NativePeerProcess {
     /// each reported process image; opening a data file is not executing it.
     /// This is not system-wide absence or package replacement authorization.
     pub fn processes_using_file(&self, file: &Path) -> Result<Vec<Self>, PeerIdentityError> {
-        resources::observe(self, file)
+        resources::observe(self, file, resources::Scope::CallerLogon)
+    }
+
+    /// Privileged maintenance still observes the service's session-zero logon,
+    /// never an empty caller-session view substituted for that observation.
+    pub(crate) fn system_service_processes_using_file(
+        &self,
+        file: &Path,
+    ) -> Result<Vec<Self>, crate::ServicePeerError> {
+        crate::service_peer::require_system_maintenance_identity()?;
+        Ok(resources::observe(
+            self,
+            file,
+            resources::Scope::SystemService,
+        )?)
     }
 }
 

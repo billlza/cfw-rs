@@ -145,6 +145,9 @@ function Invoke-RuntimeMsi {
         if (-not (Test-Path -LiteralPath $log -PathType Leaf)) { throw 'MSI verbose transaction log was not created' }
         if ($expectedCode -eq 1603) {
             $content = Get-Content -LiteralPath $log -Raw
+            if ($content.Contains('CustomAction RollbackRuntimeMaintenance returned actual error code', [StringComparison]::Ordinal)) {
+                throw 'MSI reported an error in runtime-maintenance rollback; continued rollback is not a successful helper result'
+            }
             $validationIndex = $content.IndexOf('Executing op: CustomActionSchedule(Action=ValidateInstalledRuntime,', [StringComparison]::Ordinal)
             $failureIndex = $content.IndexOf('CustomAction FailAfterReplacement returned actual error code 1', [StringComparison]::Ordinal)
             if ($validationIndex -lt 0 -or $failureIndex -le $validationIndex) {

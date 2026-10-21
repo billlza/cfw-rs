@@ -44,6 +44,7 @@ use crate::VerifiedExecutable;
 pub(crate) mod maintenance;
 mod observation;
 pub use observation::configure_service_process_observation;
+pub(crate) use observation::require_system_maintenance_identity;
 pub(crate) use observation::require_system_service_identity;
 
 const MAX_CONFIG_BYTES: usize = 8192;
@@ -87,9 +88,10 @@ pub enum ServicePeerError {
     #[error("Windows service installation expectation is invalid")]
     InvalidExpectation,
     #[error(
-        "Windows service observation setup requires the SYSTEM primary identity in session zero (system={local_system}, session={session_id}, integrity={integrity_rid:#x}, app_container={app_container}, restricted={restricted})"
+        "Windows privileged runtime requires the SYSTEM primary identity at System integrity (required_session={required_session:?}, system={local_system}, session={session_id}, integrity={integrity_rid:#x}, app_container={app_container}, restricted={restricted})"
     )]
     InvalidServiceProcessIdentity {
+        required_session: Option<u32>,
         local_system: bool,
         session_id: u32,
         integrity_rid: u32,

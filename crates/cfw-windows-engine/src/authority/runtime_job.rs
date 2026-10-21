@@ -249,6 +249,18 @@ fn create(root: &RootContext) -> Result<OwnedHandle> {
 
 pub(super) fn observe(root: &RootContext) -> Result<RuntimeProcessObservation> {
     crate::service_peer::require_system_service_identity()?;
+    observe_global(root)
+}
+
+/// Read-only global-job observation for a SYSTEM maintenance process. The
+/// service's assignment, keeper transfer and endpoint admission stay in
+/// session zero; no observer handle is returned to the maintenance caller.
+pub(super) fn observe_for_maintenance(root: &RootContext) -> Result<RuntimeProcessObservation> {
+    crate::service_peer::require_system_maintenance_identity()?;
+    observe_global(root)
+}
+
+fn observe_global(root: &RootContext) -> Result<RuntimeProcessObservation> {
     let state = if root.epoch == 0 && root.generation == 0 && !root.installation_id.is_nil() {
         RuntimeProcessState::NoRuntimeRoot
     } else {

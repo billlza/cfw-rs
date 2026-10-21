@@ -161,7 +161,7 @@ impl InstalledRuntime {
         })
     }
     pub(super) fn machine_root() -> Result<PathBuf> {
-        crate::service_peer::require_system_service_identity()?;
+        crate::service_peer::require_system_maintenance_identity()?;
         Ok(known_folder(&FOLDERID_ProgramData)?
             .join(PACKAGE_DIRECTORY)
             .join("authority-v1"))

@@ -18,14 +18,25 @@ use windows_sys::Win32::{
     },
 };
 
+#[derive(Clone, Copy)]
+pub(super) enum Scope {
+    CallerLogon,
+    SystemService,
+}
+
 pub(super) fn observe(
     observer: &NativePeerProcess,
     file: &Path,
+    scope: Scope,
 ) -> Result<Vec<NativePeerProcess>, PeerIdentityError> {
     if observer.process_id() != std::process::id() {
         return Err(PeerIdentityError::WrongProcess);
     }
     observer.revalidate()?;
+    let target_session = match scope {
+        Scope::CallerLogon => observer.identity().session_id(),
+        Scope::SystemService => 0,
+    };
     let name = resource_name(file)?;
     let mut session = Session::start()?;
     let result = (|| {
@@ -42,7 +53,7 @@ pub(super) fn observe(
             }
             // An explicitly different terminal session is outside this query's
             // scope. An unknown session must be resolved from the native token.
-            if row.TSSessionId != u32::MAX && row.TSSessionId != observer.identity().session_id() {
+            if row.TSSessionId != u32::MAX && row.TSSessionId != target_session {
                 continue;
             }
             let Some(process) = NativePeerProcess::open_if_running(pid)? else {
@@ -52,7 +63,16 @@ pub(super) fn observe(
                 // The snapshot's process has ended and this PID was reused.
                 continue;
             }
-            if process.identity().user_session() == observer.identity().user_session() {
+            let identity = process.identity();
+            let included = match scope {
+                Scope::CallerLogon => identity.user_session() == observer.identity().user_session(),
+                Scope::SystemService => {
+                    identity.is_local_system()
+                        && identity.session_id() == 0
+                        && identity.authentication_id() == observer.identity().authentication_id()
+                }
+            };
+            if included {
                 processes.push(process);
             }
         }

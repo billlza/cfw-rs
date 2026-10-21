@@ -69,22 +69,7 @@ impl WindowsAuthority {
         if !enroll && machine.metadata().is_none() {
             return Err(crate::authority_journal::JournalStoreError::StoreIdentity.into());
         }
-        let mut authority = Self {
-            journal,
-            machine,
-            owner_session: None,
-            host_process: None,
-            runtime_process: None,
-            runtime_job: None,
-            keeper_confirmed: false,
-            desktop_reference_issued: false,
-            desktop_reference_confirmed: false,
-            cleanup_context: None,
-            proxy_recovery: None,
-            draining: false,
-            #[cfg(feature = "native-service-validation")]
-            next_fault: None,
-        };
+        let mut authority = Self::empty(journal, machine);
         if authority.machine.metadata().is_none() {
             let mut initial = authority.machine.clone();
             // SYSTEM chooses the installation once, before serving any client.
@@ -105,6 +90,25 @@ impl WindowsAuthority {
             };
         }
         Ok(authority)
+    }
+
+    fn empty(journal: WindowsAuthorityJournal, machine: Machine) -> Self {
+        Self {
+            journal,
+            machine,
+            owner_session: None,
+            host_process: None,
+            runtime_process: None,
+            runtime_job: None,
+            keeper_confirmed: false,
+            desktop_reference_issued: false,
+            desktop_reference_confirmed: false,
+            cleanup_context: None,
+            proxy_recovery: None,
+            draining: false,
+            #[cfg(feature = "native-service-validation")]
+            next_fault: None,
+        }
     }
     pub fn snapshot(&self) -> AuthoritySnapshot {
         self.machine.snapshot()
@@ -237,11 +241,23 @@ impl WindowsAuthority {
     /// requires separate evidence. Unknown journal state never means no runtime.
     pub fn observe_runtime_processes(&self) -> Result<super::RuntimeProcessObservation> {
         require_service()?;
+        self.observe_runtime_processes_with(runtime_job::observe)
+    }
+
+    fn observe_runtime_processes_with(
+        &self,
+        observe: impl FnOnce(
+            &cfw_engine_api::authority_v1::RootContext,
+        ) -> std::result::Result<
+            super::RuntimeProcessObservation,
+            super::RuntimeJobError,
+        >,
+    ) -> Result<super::RuntimeProcessObservation> {
         if !self.machine.durable_known() {
             return Err(AuthorityError::Recovering);
         }
         let metadata = self.machine.metadata().ok_or(AuthorityError::Recovering)?;
-        match runtime_job::observe(metadata.root()) {
+        match observe(metadata.root()) {
             Ok(observation) => Ok(observation),
             Err(super::RuntimeJobError::Unavailable) => Ok(
                 super::RuntimeProcessObservation::unexecutable_record(metadata)?,

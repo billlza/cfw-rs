@@ -16,7 +16,7 @@ pub(crate) struct ServiceControl {
 }
 impl ServiceControl {
     pub(crate) fn open(image: VerifiedExecutable) -> Result<Self> {
-        require_system_service_identity()?;
+        require_system_maintenance_identity()?;
         let manager = ServiceHandle(unsafe { OpenSCManagerW(null(), null(), SC_MANAGER_CONNECT) });
         if manager.0.is_null() {
             return Err(native("open maintenance SCM"));
@@ -45,7 +45,7 @@ impl ServiceControl {
         Ok(value)
     }
     pub(crate) fn start_type(&self) -> Result<u32> {
-        require_system_service_identity()?;
+        require_system_maintenance_identity()?;
         verify_service_security(&self.service)?;
         let buffer = configuration_buffer(&self.service)?;
         let config = unsafe { &*buffer.as_ptr().cast::<QUERY_SERVICE_CONFIGW>() };
@@ -106,6 +106,20 @@ impl ServiceControl {
         if self.start_type()? != expected_start || running_process(&self.service)? != pid {
             return Err(ServicePeerError::WrongProcess);
         }
+        // Calibrate the service-session resource view against this retained,
+        // still-live SCM process before relying on its absence after stopping.
+        // An MSI caller in another session must not accidentally query only
+        // its own session and turn an empty list into retirement evidence.
+        let observer = require_system_maintenance_identity()?;
+        if !observer
+            .system_service_processes_using_file(self.image.path())?
+            .iter()
+            .any(|p| p.process_id() == pid && p.identity().process_creation_time() == created)
+        {
+            return Err(ServicePeerError::Maintenance(
+                "service-session file users did not include the retained SCM process",
+            ));
+        }
         let mut reported = SERVICE_STATUS::default();
         if unsafe { ControlService(self.service.0, SERVICE_CONTROL_STOP, &mut reported) } == 0 {
             return Err(native("request installed service drain"));
@@ -159,11 +173,12 @@ impl ServiceControl {
             ));
         }
         // A valid product SCM process is SYSTEM in session zero. This existing
-        // resource observer covers that exact logon; it does not claim that
+        // resource observer explicitly targets that logon, even when MSI runs
+        // SYSTEM in an interactive session. It does not claim that
         // GUI/Agent processes in other user sessions have all exited.
-        let observer = require_system_service_identity()?;
+        let observer = require_system_maintenance_identity()?;
         if observer
-            .processes_using_file(self.image.path())?
+            .system_service_processes_using_file(self.image.path())?
             .iter()
             .any(|p| p.process_id() != observer.process_id())
         {

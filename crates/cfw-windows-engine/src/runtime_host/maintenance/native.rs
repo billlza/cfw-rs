@@ -57,8 +57,8 @@ fn bind(record: &Record, transaction: Uuid, installation: &InstalledRuntime) -> 
 }
 fn fresh_off() -> Result<AuthoritySnapshot> {
     let root = InstalledRuntime::machine_root()?;
-    let mut authority = WindowsAuthority::reopen(&root.join("journal"), SERVICE_NAME)?;
-    let observation = authority.observe_recorded_off()?;
+    let observation =
+        WindowsAuthority::observe_off_for_maintenance(&root.join("journal"), SERVICE_NAME)?;
     let record = observation.record();
     // This describes the freshly checked protected record. The temporary
     // controller remains Recovering and cannot grant a new runtime operation.
@@ -74,6 +74,7 @@ fn prepare(
     guard: &MachineRecordGuard<'_>,
     hook: &mut impl FnMut(ServiceMaintenanceFault) -> Result<()>,
 ) -> Result<serde_json::Value> {
+    let caller = crate::service_peer::require_system_maintenance_identity()?;
     let control = ServiceControl::open(installation.runtime()?)?;
     let existing = guard.read()?;
     let (mut record, original_bytes) = if let Some(bytes) = existing {
@@ -126,7 +127,7 @@ fn prepare(
     record.phase = Phase::Prepared { off: off.clone() };
     guard.compare_exchange(Some(&original_bytes), &record.encode()?)?;
     Ok(
-        serde_json::json!({"transaction":transaction,"authority":off,"service_stopped":true,
+        serde_json::json!({"transaction":transaction,"caller_session_id":caller.identity().session_id(),"authority":off,"service_stopped":true,
         "service_start_disabled":true,"original_start_type":record.original_start,"retained_process_exit_observed":process_exit_observed,
         "replacement_authorized":false}),
     )
@@ -157,7 +158,7 @@ impl InstalledRuntime {
         transaction: Uuid,
         hook: &mut impl FnMut(ServiceMaintenanceFault) -> Result<()>,
     ) -> Result<serde_json::Value> {
-        crate::service_peer::require_system_service_identity()?;
+        crate::service_peer::require_system_maintenance_identity()?;
         if transaction.is_nil() {
             return Err(HostError::State("maintenance transaction is nil"));
         }
@@ -170,7 +171,7 @@ impl InstalledRuntime {
     /// installation. This does not start a service or restore a network mode.
     /// MSI rollback must restore old files before invoking this entrypoint.
     pub fn rollback_service_maintenance(&self, transaction: Uuid) -> Result<serde_json::Value> {
-        crate::service_peer::require_system_service_identity()?;
+        crate::service_peer::require_system_maintenance_identity()?;
         if transaction.is_nil() {
             return Err(HostError::State("maintenance transaction is nil"));
         }

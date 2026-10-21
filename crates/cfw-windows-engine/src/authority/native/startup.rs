@@ -38,12 +38,39 @@ impl VerifiedOffAdmission {
     }
 }
 impl WindowsAuthority {
+    /// SYSTEM installers can run outside session zero. This closed maintenance
+    /// entrypoint opens only existing state, requires explicit Off, and returns
+    /// only a checked observation. It exposes no controller, enrollment, lease,
+    /// job assignment or service endpoint. The global record/job checks are the
+    /// same ones used by service startup, with read-only job access.
+    pub(crate) fn observe_off_for_maintenance(
+        root: &Path,
+        scope: &str,
+    ) -> Result<ObservedRecordedOff> {
+        crate::service_peer::require_system_maintenance_identity()
+            .map_err(ServiceAuthorizationError::from)?;
+        let journal = WindowsAuthorityJournal::open_existing(root, scope)?;
+        let machine = Machine::recovering(journal.recover()?)?;
+        machine.recorded_off_target()?;
+        let mut observer = Self::empty(journal, machine);
+        observer.observe_recorded_off_with(|controller| {
+            controller.observe_runtime_processes_with(runtime_job::observe_for_maintenance)
+        })
+    }
+
     /// Observe an existing Off record after open/reload without entering Off
     /// in this controller or publishing a new revision. Recovery of an already
     /// pending journal publication still follows the normal journal contract.
     /// Active, Preparing, Stopping, Quarantined and unknown records are rejected.
     pub fn observe_recorded_off(&mut self) -> Result<ObservedRecordedOff> {
         require_service()?;
+        self.observe_recorded_off_with(Self::observe_runtime_processes)
+    }
+
+    fn observe_recorded_off_with(
+        &mut self,
+        observe: impl FnOnce(&Self) -> Result<RuntimeProcessObservation>,
+    ) -> Result<ObservedRecordedOff> {
         let target = self.machine.recorded_off_target()?;
         let empty_controller = self.owner_session.is_none()
             && self.host_process.is_none()
@@ -58,7 +85,7 @@ impl WindowsAuthority {
             return Err(AuthorityError::CleanupUnproven);
         }
         self.recheck_recorded_off(&target)?;
-        let processes = self.observe_runtime_processes()?;
+        let processes = observe(self)?;
         let retired = processes.root() == target.root()
             && match processes.state() {
                 RuntimeProcessState::NoRuntimeRoot => {

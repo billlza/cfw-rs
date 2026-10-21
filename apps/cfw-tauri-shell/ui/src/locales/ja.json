@@ -866,5 +866,10 @@
   "The first matching rule applies after a network change or when enabled. Manual Stop stays stopped on the same network. Rules run while CFW is open.": "ネットワークの変更後、またはルールを有効にしたときに、最初に一致するルールが適用されます。手動で停止した場合、同じネットワークでは停止したままになります。ルールは CFW の起動中のみ動作します。",
   "Windows controls access to Wi-Fi names in Location settings. Review those settings if a named Wi-Fi rule cannot read its network, then refresh network status.": "Windows では位置情報の設定で Wi-Fi 名へのアクセスを管理します。名前を指定した Wi-Fi ルールがネットワークを読み取れない場合は、設定を確認してからネットワークの状態を更新してください。",
   "Open Windows Location settings": "Windows の位置情報の設定を開く",
-  "Review Windows Location settings, then refresh network status.": "Windows の位置情報の設定を確認してから、ネットワークの状態を更新してください。"
+  "Review Windows Location settings, then refresh network status.": "Windows の位置情報の設定を確認してから、ネットワークの状態を更新してください。",
+  "Local proxy is unavailable in this Windows session.": "この Windows セッションではローカルプロキシを利用できません。",
+  "System Proxy is unavailable in this Windows session.": "この Windows セッションではシステムプロキシを利用できません。",
+  "TUN Mode is unavailable in this Windows build.": "このアプリの Windows 版では TUN モードを利用できません。",
+  "TUN Mode routes device traffic through a Windows virtual network adapter.": "TUN モードは Windows の仮想ネットワークアダプターを通してデバイスの通信を転送します。",
+  "TUN Mode uses a Windows virtual network adapter to route traffic. The switch is available only when Windows tunnel support is ready.": "TUN モードは Windows の仮想ネットワークアダプターを使用して通信を転送します。Windows のトンネル機能が利用可能になると、このスイッチを操作できます。"
 }

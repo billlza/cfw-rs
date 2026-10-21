@@ -866,5 +866,10 @@
   "The first matching rule applies after a network change or when enabled. Manual Stop stays stopped on the same network. Rules run while CFW is open.": "The first matching rule applies after a network change or when enabled. Manual Stop stays stopped on the same network. Rules run while CFW is open.",
   "Windows controls access to Wi-Fi names in Location settings. Review those settings if a named Wi-Fi rule cannot read its network, then refresh network status.": "Windows controls access to Wi-Fi names in Location settings. Review those settings if a named Wi-Fi rule cannot read its network, then refresh network status.",
   "Open Windows Location settings": "Open Windows Location settings",
-  "Review Windows Location settings, then refresh network status.": "Review Windows Location settings, then refresh network status."
+  "Review Windows Location settings, then refresh network status.": "Review Windows Location settings, then refresh network status.",
+  "Local proxy is unavailable in this Windows session.": "Local proxy is unavailable in this Windows session.",
+  "System Proxy is unavailable in this Windows session.": "System Proxy is unavailable in this Windows session.",
+  "TUN Mode is unavailable in this Windows build.": "TUN Mode is unavailable in this Windows build.",
+  "TUN Mode routes device traffic through a Windows virtual network adapter.": "TUN Mode routes device traffic through a Windows virtual network adapter.",
+  "TUN Mode uses a Windows virtual network adapter to route traffic. The switch is available only when Windows tunnel support is ready.": "TUN Mode uses a Windows virtual network adapter to route traffic. The switch is available only when Windows tunnel support is ready."
 }

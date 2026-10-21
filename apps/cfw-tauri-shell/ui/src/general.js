@@ -168,7 +168,7 @@ export function createGeneralView({ state, escapeHtml, engineStateLabel, engineT
           <div class="cfw-row-left">
             <span>${escapeHtml(t("TUN Mode"))}</span>
             <span class="general-icons">
-              ${generalIconButton("tun-info", "info", t("The Packet Tunnel runs as a signed NetworkExtension System Extension and must be approved once in System Settings."))}
+              ${generalIconButton("tun-info", "info", t(presentation.tunnelInfoHint))}
               ${generalIconButton("tun-restore-dns-info", "history", t("System DNS after TUN Mode is disabled"))}
             </span>
           </div>

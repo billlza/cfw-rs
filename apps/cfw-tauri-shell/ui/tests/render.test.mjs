@@ -822,6 +822,7 @@ test("General uses host identity and copies platform-appropriate commands withou
     projection: state.projection,
     writeText: navigator.clipboard.writeText,
     page: state.activePage,
+    dialog: state.glassDialog,
   };
   const observedEngine = structuredClone(state.engine);
   const commandsBefore = invoked.length;
@@ -847,8 +848,15 @@ test("General uses host identity and copies platform-appropriate commands withou
       assert.ok(html.includes(expectedLabel));
       assert.equal((html.match(/class="cfw-row"/gu) ?? []).length, 12);
       if (operatingSystem === "windows") {
-        assert.doesNotMatch(html, /Clash for Mac|Start with macOS/u);
+        assert.doesNotMatch(html, /Clash for Mac|Start with macOS|NetworkExtension|System Extension|System Settings/u);
         assert.match(html, /PowerShell/u);
+      }
+      await appModule.handleAction("tun-info");
+      if (operatingSystem === "windows") {
+        assert.match(glassRoot.innerHTML, /Windows virtual network adapter/u);
+        assert.doesNotMatch(glassRoot.innerHTML, /macOS|NetworkExtension|System Settings/u);
+      } else {
+        assert.match(glassRoot.innerHTML, /NetworkExtension/u);
       }
       await appModule.handleAction("copy-proxy-exports");
       assert.equal(copies.at(-1), expectedCommands);
@@ -862,6 +870,7 @@ test("General uses host identity and copies platform-appropriate commands withou
   } finally {
     state.payload.product = original.product;
     state.projection = original.projection;
+    state.glassDialog = original.dialog;
     navigator.clipboard.writeText = original.writeText;
     await renderPage(original.page);
   }

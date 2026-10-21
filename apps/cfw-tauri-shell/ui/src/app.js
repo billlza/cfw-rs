@@ -1150,7 +1150,7 @@ function engineToggleCapability(key) {
     return {
       available: state.engine.localProxyAvailable === true,
       label: t("Core"),
-      reason: state.engine.availabilityReason ?? t("The signed ProxyAgent has not reported local proxy capability."),
+      reason: state.engine.availabilityReason ?? t(platformPresentation(state.payload.product.operating_system).localProxyUnavailable),
     };
   }
   if (key === "systemProxy") {
@@ -1158,7 +1158,7 @@ function engineToggleCapability(key) {
       available: state.engine.systemProxyAvailable === true,
       get label() { return t("System Proxy"); },
       reason: state.engine.availabilityReason
-        ?? t("The signed ProxyAgent has not reported capability."),
+        ?? t(platformPresentation(state.payload.product.operating_system).systemProxyUnavailable),
     };
   }
   if (key === "tunMode") {
@@ -1166,7 +1166,7 @@ function engineToggleCapability(key) {
       available: state.engine.tunnelAvailable === true,
       get label() { return t("TUN Mode"); },
       reason: state.engine.availabilityReason
-        ?? t("The signed Packet Tunnel System Extension has not reported capability."),
+        ?? t(platformPresentation(state.payload.product.operating_system).tunnelUnavailable),
     };
   }
   return null;
@@ -3733,7 +3733,7 @@ export async function handleAction(action) {
       kind: "info",
       payload: {
         title: t("TUN Mode"),
-        body: t("TUN Mode runs the packet tunnel as a signed NetworkExtension System Extension. macOS asks for approval once, under System Settings › General › Login Items & Extensions; until it is approved the switch stays unavailable."),
+        body: t(platformPresentation(state.payload.product.operating_system).tunnelInfo),
       },
     };
     renderGlassOverlays();

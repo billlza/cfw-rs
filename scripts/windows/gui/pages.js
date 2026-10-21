@@ -35,6 +35,22 @@
     const heading = await page.locator('#page-title').innerText();
     const content = await page.locator('#page').innerText();
     if (!heading.trim() || !content.trim()) throw new Error(`Empty shared page: ${id}`);
+    if (id === 'general') {
+      const tunHelp = page.locator('[data-action="tun-info"]');
+      if ((await tunHelp.getAttribute('title')) !== 'TUN Mode routes device traffic through a Windows virtual network adapter.') {
+        throw new Error('Windows TUN help does not describe the host platform');
+      }
+      await tunHelp.click();
+      const dialog = page.getByRole('dialog', { name: 'TUN Mode', exact: true });
+      await dialog.waitFor();
+      const help = await dialog.innerText();
+      if (!help.includes('Windows virtual network adapter') || /macOS|NetworkExtension|System Settings/u.test(help)) {
+        throw new Error('Windows TUN help contains foreign platform instructions');
+      }
+      await page.screenshot({ path: 'windows-tun-help.png' });
+      await dialog.locator('button[data-glass-dismiss]').click();
+      await dialog.waitFor({ state: 'hidden' });
+    }
     if (id === 'feedback' && !content.includes(backend.platform.startup_strategy)) {
       throw new Error('Windows startup architecture is missing from the Feedback page');
     }

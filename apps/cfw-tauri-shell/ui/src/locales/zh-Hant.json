@@ -866,5 +866,10 @@
   "The first matching rule applies after a network change or when enabled. Manual Stop stays stopped on the same network. Rules run while CFW is open.": "網路變更或啟用規則後，將套用第一個相符的規則。在同一網路中手動停止後，會保持停止。規則僅在 CFW 執行時生效。",
   "Windows controls access to Wi-Fi names in Location settings. Review those settings if a named Wi-Fi rule cannot read its network, then refresh network status.": "Windows 透過位置設定控制對 Wi-Fi 名稱的存取。如果指定 Wi-Fi 名稱的規則無法讀取網路，請檢查這些設定，然後重新整理網路狀態。",
   "Open Windows Location settings": "開啟 Windows 位置設定",
-  "Review Windows Location settings, then refresh network status.": "請檢查 Windows 位置設定，然後重新整理網路狀態。"
+  "Review Windows Location settings, then refresh network status.": "請檢查 Windows 位置設定，然後重新整理網路狀態。",
+  "Local proxy is unavailable in this Windows session.": "目前的 Windows 工作階段無法使用本機代理。",
+  "System Proxy is unavailable in this Windows session.": "目前的 Windows 工作階段無法使用系統代理。",
+  "TUN Mode is unavailable in this Windows build.": "目前的 Windows 版應用程式尚不支援 TUN 模式。",
+  "TUN Mode routes device traffic through a Windows virtual network adapter.": "TUN 模式透過 Windows 虛擬網路介面卡轉送裝置流量。",
+  "TUN Mode uses a Windows virtual network adapter to route traffic. The switch is available only when Windows tunnel support is ready.": "TUN 模式使用 Windows 虛擬網路介面卡轉送流量。只有 Windows 通道功能就緒後，才能使用此開關。"
 }

@@ -10,9 +10,18 @@
 Quit 未产生进程退出，卸载未执行。`36fe5a0e` 的
 [诊断复验](https://github.com/billlza/cfw-rs/actions/runs/39602725518)进一步证明
 窗口状态保存、引擎关闭、退出分发均已完成，ExitRequested 收到 `ready=true`，
-但仍未记录 Exit。`5acc39e5` 正在验证 CDP 调试连接的影响：先要求单独断开连接
-不终止精确 GUI 进程，再真实点击 Quit、断开连接并观察原生退出；退出码零和
-精确进程身份要求保持不变。该试验尚未通过，不能视为已修复。
+但仍未记录 Exit。`5acc39e5` 的
+[CDP 对照试验](https://github.com/billlza/cfw-rs/actions/runs/39608457010)确认单独
+断开调试连接后精确 GUI 进程仍在运行；真实点击 Quit 并再次断开后，正常退出
+仍失败。因此这次失败不能归因于持续附着的调试连接。原生产物 SHA-256 为
+`119c9ca11e0849b936fffcf79b701b1a3b4ea91347f0097f990167df889e622d`，
+退出阶段仍停在 `exit_requested ready=true`。
+
+后续诊断在 Windows 退出插件之前增加观察点，并在正常 Quit 已失败后，向保留
+进程的精确主线程中唯一的 `Tao Thread Event Target` 投递一次 WM_PAINT。固定
+Tao 0.37.1 的退出路径要求事件循环回到 Idle，而绘制事件负责该状态推进；当前
+测试使用私有非交互窗口站。该试验用于区分消息推进问题与插件阻塞，尚无原生
+结果；即便诊断促成退出，也保留原失败，不作为正常退出或发布验收。
 
 截图另发现 Feedback 错用 Mac 的 launchd 字段，Windows 启动说明为空，已修正为
 实际 startup_strategy；旧渲染器回归失败，修正后的 327 项 UI 测试通过。设置页

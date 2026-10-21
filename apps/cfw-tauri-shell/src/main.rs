@@ -273,6 +273,23 @@ fn main() {
         .manage(WindowBoundsManager::default())
         .manage(commands::UiSettingsMutations::default())
         .manage(UpdaterSecurityState::default());
+    // Observe the event loop before exit plugins run. The application callback
+    // runs after them, so its absence alone cannot locate a stalled shutdown.
+    #[cfg(target_os = "windows")]
+    let builder = builder.plugin(
+        tauri::plugin::Builder::new("lifecycle-diagnostics")
+            .on_event(|app, event| {
+                if matches!(event, RunEvent::Exit) {
+                    diagnostics::record(
+                        app,
+                        cfw_core::DiagnosticTopic::Startup,
+                        "runtime_exit_before_plugins",
+                        "",
+                    );
+                }
+            })
+            .build(),
+    );
     // The explicit handoff instance must coexist with the still-running 0.3.5
     // GUI so it can validate 0.4.0 without asking the user to quit and trigger
     // old cleanup_runtime. Every destructive command still requires the full

@@ -89,7 +89,7 @@ impl InstalledPackageInspector {
             || held.digest()? != expected_digest
             || observation.identity.version != request.version
             || observation.identity.build <= request.installed_build
-            || observation.identity.architecture != "x64"
+            || observation.identity.architecture != MSI_ARCHITECTURE
             || windows_version(&observation.identity.minimum_windows_version)?
                 > expectation.system_version
             || observation.publisher_spki_sha256 == [0; 32]

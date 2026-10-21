@@ -1,6 +1,6 @@
 use super::{
-    MsiIdentity, PRODUCT_IDENTIFIER, PackageError, PackageExpectation, Result, UPGRADE_CODE,
-    canonical_version, combine, require_manifest_digest, wide_path, windows_version,
+    MSI_ARCHITECTURE, MsiIdentity, PRODUCT_IDENTIFIER, PackageError, PackageExpectation, Result,
+    UPGRADE_CODE, canonical_version, combine, require_manifest_digest, wide_path, windows_version,
 };
 use std::{path::Path, ptr::null};
 use windows_sys::Win32::{
@@ -69,7 +69,7 @@ fn identity(database: &Handle, expectation: &PackageExpectation) -> Result<MsiId
     let summary = Handle::new(raw)?;
     let result = (|| {
         let template = summary_property(&summary, PID_TEMPLATE)?;
-        let Some(("x64", languages)) = template.split_once(';') else {
+        let Some((MSI_ARCHITECTURE, languages)) = template.split_once(';') else {
             return Err(PackageError::Invalid("MSI architecture"));
         };
         // CFW packages are x64 and carry at least one canonical Windows LANGID.
@@ -94,7 +94,7 @@ fn identity(database: &Handle, expectation: &PackageExpectation) -> Result<MsiId
             build,
             product_code,
             package_code,
-            architecture: "x64".into(),
+            architecture: MSI_ARCHITECTURE.into(),
             minimum_windows_version,
             runtime_manifest_sha256,
         })

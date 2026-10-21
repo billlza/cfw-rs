@@ -5,7 +5,10 @@ use crate::{
     process_identity::ProcessIdentity,
 };
 use cfw_core::update::UpdateAuthorization;
-use cfw_windows_engine::{runtime_host::InstallationSnapshot, update_package::MsiIdentity};
+use cfw_windows_engine::{
+    runtime_host::InstallationSnapshot,
+    update_package::{MSI_ARCHITECTURE, MsiIdentity},
+};
 use serde::{Deserialize, Serialize};
 use std::{
     fs::File,
@@ -181,7 +184,7 @@ impl Record {
             || to <= from
             || self.original.release.build == 0
             || self.target.build <= self.original.release.build
-            || self.target.architecture != "x86_64"
+            || self.target.architecture != MSI_ARCHITECTURE
             || !digest(&self.package_sha256)
             || !digest(&self.original.manifest_sha256)
             || !digest(&self.target.runtime_manifest_sha256)
@@ -341,7 +344,7 @@ mod tests {
                 build: 2,
                 product_code: Uuid::from_u128(3).braced().to_string().to_ascii_uppercase(),
                 package_code: Uuid::from_u128(4).braced().to_string().to_ascii_uppercase(),
-                architecture: "x86_64".into(),
+                architecture: "x64".into(),
                 minimum_windows_version: "10.0.19041".into(),
                 runtime_manifest_sha256: "cd".repeat(32),
             },
@@ -354,6 +357,16 @@ mod tests {
             [42; 32],
             dashboard,
         )
+    }
+    #[test]
+    fn journal_accepts_native_msi_architecture_and_refuses_runtime_or_foreign_labels() {
+        let mut native = record();
+        assert_eq!(native.target.architecture, "x64");
+        native.bytes().unwrap();
+        for architecture in ["x86_64", "Intel", "Arm64", ""] {
+            native.target.architecture = architecture.into();
+            assert!(native.bytes().is_err(), "{architecture}");
+        }
     }
     #[test]
     fn record_rejects_replayed_release_claims_and_success_without_a_zero_exit() {

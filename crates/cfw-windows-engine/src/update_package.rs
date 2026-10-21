@@ -26,6 +26,9 @@ pub(crate) use worker::run_stdio;
 pub use worker::{InstalledPackageInspector, WorkerFailureCategory};
 
 pub const PRODUCT_IDENTIFIER: &str = "com.bill.clashforwindows";
+/// MSI summary-template architecture. The runtime manifest uses `x86_64`;
+/// that separate label must not be substituted in an inspected MSI identity.
+pub const MSI_ARCHITECTURE: &str = "x64";
 pub use crate::runtime_host::MSI_UPGRADE_CODE as UPGRADE_CODE;
 pub const MAX_PACKAGE_BYTES: u64 = 192 * 1024 * 1024;
 

@@ -18,6 +18,11 @@ use windows_sys::Win32::{
     },
 };
 
+mod pending_read;
+pub(crate) use pending_read::PendingMessageRead;
+mod connected_pair;
+pub(crate) use connected_pair::connected_pair;
+
 struct Operation {
     event: OwnedHandle,
     state: UnsafeCell<OVERLAPPED>,

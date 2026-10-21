@@ -1,10 +1,14 @@
 //! Windows tunnel device primitives. They do not authorize a user, publish
 //! global readiness or change routing. The authority owns those decisions.
 #[cfg(windows)]
+mod channel;
+#[cfg(windows)]
 mod driver;
 mod packet;
 #[cfg(windows)]
 mod session;
+#[cfg(windows)]
+pub use channel::{PacketCancellation, PacketClient, PacketServer};
 #[cfg(windows)]
 pub use driver::{Adapter, Library, Session, interface_identity, observe};
 #[cfg(all(windows, feature = "native-service-validation"))]
@@ -28,6 +32,14 @@ pub enum Error {
     RingFull,
     #[error("Windows tunnel packet length or IP header is invalid")]
     Packet,
+    #[cfg(windows)]
+    #[error("Windows tunnel packet transport: {0}")]
+    Transport(#[from] crate::ServiceTransportError),
+    #[error("Windows tunnel operation failed ({operation}); cleanup failed ({cleanup})")]
+    Cleanup {
+        operation: Box<Self>,
+        cleanup: Box<Self>,
+    },
 }
 impl From<&str> for Error {
     fn from(value: &str) -> Self {

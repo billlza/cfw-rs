@@ -38,6 +38,7 @@ pub(crate) fn run(
         directory,
         None,
         child::Program::PackageInspection,
+        None,
     )?;
     let mut process = OneShot {
         assets,

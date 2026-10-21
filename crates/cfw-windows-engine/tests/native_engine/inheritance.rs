@@ -16,6 +16,44 @@ use windows_sys::Win32::{
     },
 };
 
+#[test]
+fn owned_packet_endpoint_is_inherited_by_the_real_engine_and_retires() {
+    let temporary = tempfile::tempdir().unwrap();
+    let (mut server, client) =
+        cfw_windows_engine::tunnel::PacketServer::create(uuid::Uuid::new_v4(), 9000).unwrap();
+    let (ambient, name) = event();
+    let mut owner = EngineProcess::spawn_with_packet_endpoint(
+        executable(),
+        &temporary.path().join("packet engine 空格"),
+        TIMEOUT,
+        None,
+        client,
+    )
+    .unwrap();
+    let retained = process_handle(owner.process_id());
+    drop(ambient);
+    assert!(
+        !exists(&name).unwrap(),
+        "ambient inheritable handle leaked alongside packet capability"
+    );
+    assert!(
+        server
+            .receive(Instant::now() + Duration::from_millis(20))
+            .unwrap()
+            .is_none(),
+        "idle packet engine unexpectedly emitted a packet"
+    );
+    owner.abort().unwrap();
+    exited(&retained);
+    assert!(
+        server
+            .receive(Instant::now() + Duration::from_secs(5))
+            .is_err(),
+        "packet client remained open after the owned engine retired"
+    );
+    server.close().unwrap();
+}
+
 fn event() -> (OwnedHandle, Vec<u16>) {
     let name: Vec<_> = format!("Local\\CFW-engine-inheritance-{}", uuid::Uuid::new_v4())
         .encode_utf16()

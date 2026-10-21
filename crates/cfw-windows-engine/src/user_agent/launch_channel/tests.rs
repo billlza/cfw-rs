@@ -1,6 +1,7 @@
 use super::*;
 use crate::user_agent::tests::launch;
 use cfw_singbox_config::ProjectionMode;
+use std::time::Duration;
 
 fn executable() -> Arc<VerifiedExecutable> {
     let path = std::env::current_exe().unwrap();

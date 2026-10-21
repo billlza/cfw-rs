@@ -204,6 +204,7 @@ fn cancellation_records_job_membership_and_native_process_signals() {
             &directory,
             None,
             child::Program::PackageInspection,
+            None,
         )
         .unwrap();
         let mut owner = OneShot {
@@ -352,6 +353,7 @@ fn retirement_rejects_a_census_that_missed_later_descendants() {
         &directory,
         None,
         child::Program::PackageInspection,
+        None,
     )
     .unwrap();
     // The root is still suspended. This real census cannot include the child

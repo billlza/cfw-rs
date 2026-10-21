@@ -11,28 +11,14 @@ use crate::{
 use sha2::{Digest, Sha256};
 use std::{
     io,
-    mem::size_of,
-    os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
-    ptr::{null, null_mut},
+    os::windows::io::{AsRawHandle, OwnedHandle},
+    ptr::null_mut,
     sync::{Arc, atomic::AtomicBool},
-    time::{Duration, Instant},
+    time::Instant,
 };
-use windows_sys::Win32::{
-    Foundation::{INVALID_HANDLE_VALUE, LocalFree},
-    Security::{
-        Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1},
-        SECURITY_ATTRIBUTES,
-    },
-    Storage::FileSystem::{
-        CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, FILE_READ_ATTRIBUTES,
-        FILE_READ_DATA, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
-        SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT, SYNCHRONIZE,
-    },
-    System::Pipes::{
-        CreateNamedPipeW, GetNamedPipeHandleStateW, GetNamedPipeInfo, PIPE_READMODE_MESSAGE,
-        PIPE_REJECT_REMOTE_CLIENTS, PIPE_SERVER_END, PIPE_TYPE_MESSAGE, PIPE_WAIT,
-        SetNamedPipeHandleState,
-    },
+use windows_sys::Win32::System::Pipes::{
+    GetNamedPipeHandleStateW, GetNamedPipeInfo, PIPE_READMODE_MESSAGE, PIPE_SERVER_END,
+    PIPE_TYPE_MESSAGE,
 };
 
 const ACK_PREFIX: &[u8] = b"cfw.launch.received.v1\0";
@@ -74,37 +60,7 @@ impl LaunchSender {
     /// No pipe name, configuration, key or ticket enters the command line.
     pub fn create() -> Result<(Self, OwnedHandle)> {
         let current = user()?;
-        let name = format!(r"\\.\pipe\cfw-launch-{}", uuid::Uuid::new_v4());
-        let server = create_server(&name, current.identity().user_sid())?;
-        let mut pending = native_io::PendingAccept::new(server)?;
-        let name: Vec<_> = name.encode_utf16().chain([0]).collect();
-        let raw = unsafe {
-            CreateFileW(
-                name.as_ptr(),
-                FILE_READ_DATA
-                    | FILE_WRITE_DATA
-                    | FILE_READ_ATTRIBUTES
-                    | FILE_WRITE_ATTRIBUTES
-                    | SYNCHRONIZE,
-                0,
-                null(),
-                OPEN_EXISTING,
-                FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
-                null_mut(),
-            )
-        };
-        if raw == INVALID_HANDLE_VALUE {
-            return Err(io::Error::last_os_error().into());
-        }
-        let receiver = unsafe { OwnedHandle::from_raw_handle(raw) };
-        let mode = PIPE_READMODE_MESSAGE;
-        if unsafe { SetNamedPipeHandleState(receiver.as_raw_handle(), &mode, null(), null()) } == 0
-        {
-            return Err(io::Error::last_os_error().into());
-        }
-        pending.wait(Instant::now() + Duration::from_secs(5))?;
-        let pipe = pending.into_pipe()?;
-        current.verify_pipe_server(&receiver)?;
+        let (pipe, receiver) = native_io::connected_pair(&current, "launch", 8192)?;
         Ok((Self { pipe }, receiver))
     }
     pub fn send(
@@ -248,53 +204,6 @@ fn user() -> Result<NativePeerProcess> {
         return Err(LaunchChannelError::Identity);
     }
     Ok(current)
-}
-struct Descriptor(*mut std::ffi::c_void);
-impl Drop for Descriptor {
-    fn drop(&mut self) {
-        unsafe { LocalFree(self.0) };
-    }
-}
-fn create_server(name: &str, sid: &str) -> Result<OwnedHandle> {
-    let sddl: Vec<_> = format!("O:{sid}D:P(A;;GA;;;{sid})(A;;GA;;;SY)")
-        .encode_utf16()
-        .chain([0])
-        .collect();
-    let mut raw_descriptor = null_mut();
-    if unsafe {
-        ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            sddl.as_ptr(),
-            SDDL_REVISION_1,
-            &mut raw_descriptor,
-            null_mut(),
-        )
-    } == 0
-    {
-        return Err(io::Error::last_os_error().into());
-    }
-    let descriptor = Descriptor(raw_descriptor);
-    let security = SECURITY_ATTRIBUTES {
-        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
-        lpSecurityDescriptor: descriptor.0,
-        bInheritHandle: 0,
-    };
-    let name: Vec<_> = name.encode_utf16().chain([0]).collect();
-    let raw = unsafe {
-        CreateNamedPipeW(
-            name.as_ptr(),
-            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
-            PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-            1,
-            8192,
-            8192,
-            0,
-            &security,
-        )
-    };
-    if raw == INVALID_HANDLE_VALUE {
-        return Err(io::Error::last_os_error().into());
-    }
-    Ok(unsafe { OwnedHandle::from_raw_handle(raw) })
 }
 
 #[cfg(test)]

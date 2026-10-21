@@ -294,7 +294,43 @@ impl EngineProcess {
         timeout: Duration,
         cancellation: Option<Arc<AtomicBool>>,
     ) -> Result<Self, Error> {
-        match Self::spawn_retained(executable, runtime_directory, timeout, cancellation, None) {
+        Self::spawn_owned(executable, runtime_directory, timeout, cancellation, None)
+    }
+
+    /// Consume a locally created packet endpoint through the explicit native
+    /// handle list. This only starts an idle data-plane child, not a TUN lease
+    /// or a system network mode. Authority transfer/admission remains separate.
+    pub fn spawn_with_packet_endpoint(
+        executable: VerifiedExecutable,
+        runtime_directory: &Path,
+        timeout: Duration,
+        cancellation: Option<Arc<AtomicBool>>,
+        packet: crate::tunnel::PacketClient,
+    ) -> Result<Self, Error> {
+        Self::spawn_owned(
+            executable,
+            runtime_directory,
+            timeout,
+            cancellation,
+            Some(packet),
+        )
+    }
+
+    fn spawn_owned(
+        executable: VerifiedExecutable,
+        runtime_directory: &Path,
+        timeout: Duration,
+        cancellation: Option<Arc<AtomicBool>>,
+        packet: Option<crate::tunnel::PacketClient>,
+    ) -> Result<Self, Error> {
+        match Self::spawn_retained_with_packet(
+            executable,
+            runtime_directory,
+            timeout,
+            cancellation,
+            None,
+            packet,
+        ) {
             Ok(owner) => Ok(owner),
             Err(failure) => {
                 let ChildLaunchFailure { error, owner } = failure;
@@ -318,6 +354,24 @@ impl EngineProcess {
         cancellation: Option<Arc<AtomicBool>>,
         keeper: Option<&crate::authority::RuntimeKeeper>,
     ) -> Result<Self, ChildLaunchFailure> {
+        Self::spawn_retained_with_packet(
+            executable,
+            runtime_directory,
+            timeout,
+            cancellation,
+            keeper,
+            None,
+        )
+    }
+
+    fn spawn_retained_with_packet(
+        executable: VerifiedExecutable,
+        runtime_directory: &Path,
+        timeout: Duration,
+        cancellation: Option<Arc<AtomicBool>>,
+        keeper: Option<&crate::authority::RuntimeKeeper>,
+        packet: Option<crate::tunnel::PacketClient>,
+    ) -> Result<Self, ChildLaunchFailure> {
         let deadline = deadline(timeout).map_err(ChildLaunchFailure::uncreated)?;
         if cancellation
             .as_ref()
@@ -326,7 +380,7 @@ impl EngineProcess {
             return Err(ChildLaunchFailure::uncreated(Error::Cancelled));
         }
         let session = uuid::Uuid::new_v4().simple().to_string();
-        let assets = spawn_assets(executable, runtime_directory, keeper)
+        let assets = spawn_assets(executable, runtime_directory, keeper, packet)
             .map_err(ChildLaunchFailure::uncreated)?;
         let mut owner = Self {
             child: assets.child,
@@ -394,7 +448,29 @@ impl EngineProcess {
             .spawn(move || protocol::run_control(&mut input, &mut output, receiver))?;
         self.sender = Some(sender);
         self.worker = Some(worker);
-        self.rpc("hello", None, "idle", "", deadline)
+        if self.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        if self.child.try_wait()?.is_some() {
+            return Err(Error::Exited);
+        }
+        let attachment = self.child.packet_attachment.take();
+        let receiver = protocol::submit_hello(
+            self.sender.as_ref().ok_or(Error::Exited)?,
+            &mut self.sequence,
+            &self.session,
+            attachment.as_ref(),
+            deadline,
+        )?;
+        let response = self.receive_response(receiver, deadline, true)?;
+        response.validate(
+            &self.session,
+            self.sequence,
+            self.child.id(),
+            &self._executable.version,
+            "idle",
+            "",
+        )
     }
 
     pub fn process_id(&self) -> u32 {
@@ -816,12 +892,14 @@ fn spawn_assets(
     executable: VerifiedExecutable,
     runtime_directory: &Path,
     keeper: Option<&crate::authority::RuntimeKeeper>,
+    packet: Option<crate::tunnel::PacketClient>,
 ) -> Result<SpawnAssets, Error> {
     spawn_assets_for(
         executable,
         runtime_directory,
         keeper,
         child::Program::Engine,
+        packet,
     )
 }
 
@@ -830,6 +908,7 @@ fn spawn_assets_for(
     runtime_directory: &Path,
     keeper: Option<&crate::authority::RuntimeKeeper>,
     program: child::Program,
+    packet: Option<crate::tunnel::PacketClient>,
 ) -> Result<SpawnAssets, Error> {
     let parent = runtime_directory
         .parent()
@@ -864,6 +943,7 @@ fn spawn_assets_for(
         job.as_handle(),
         keeper,
         program,
+        packet,
     )?;
     Ok(SpawnAssets {
         child,

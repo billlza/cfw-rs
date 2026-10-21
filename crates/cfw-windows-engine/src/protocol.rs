@@ -19,6 +19,30 @@ const MAX_RESPONSE: usize = 4096;
 const MAX_PROBE_RESPONSE: usize = 65536;
 const MAX_PROBE_REQUEST: usize = cfw_singbox_config::MAX_ENGINE_CONFIG_BYTES + 65536;
 
+#[derive(Serialize)]
+pub(crate) struct PacketAttachment {
+    handle: u64,
+    name: String,
+    mtu: u16,
+}
+impl PacketAttachment {
+    pub(crate) fn for_endpoint(handle: u64, name: String, mtu: u16) -> Result<Self, Error> {
+        let id = name
+            .strip_prefix("CFW-TUN-")
+            .and_then(|value| uuid::Uuid::parse_str(value).ok())
+            .filter(|id| !id.is_nil() && name == format!("CFW-TUN-{id}"))
+            .ok_or(Error::Protocol("packet adapter identity"))?;
+        if handle == 0 || handle > isize::MAX as u64 || !(1280..=9000).contains(&mtu) {
+            return Err(Error::Protocol("packet attachment bound"));
+        }
+        Ok(Self {
+            handle,
+            name: format!("CFW-TUN-{id}"),
+            mtu,
+        })
+    }
+}
+
 #[derive(Clone, Copy)]
 enum ResponseLimit {
     Runtime,
@@ -37,6 +61,32 @@ pub(crate) struct Exchange {
     pub bytes: Zeroizing<Vec<u8>>,
     pub result: SyncSender<Result<Response, Error>>,
     response_limit: ResponseLimit,
+}
+
+pub(crate) fn submit_hello(
+    sender: &SyncSender<Exchange>,
+    sequence: &mut u64,
+    session: &str,
+    tunnel: Option<&PacketAttachment>,
+    deadline: Instant,
+) -> Result<Receiver<Result<Response, Error>>, Error> {
+    if *sequence != 0 {
+        return Err(Error::Protocol("hello has already been submitted"));
+    }
+    let bytes = serialize_bounded(
+        &Request {
+            protocol: PROTOCOL,
+            session,
+            id: 1,
+            op: "hello",
+            digest: None,
+            config: None,
+            probe: None,
+            tunnel,
+        },
+        MAX_REQUEST,
+    )?;
+    enqueue(sender, sequence, 1, bytes, ResponseLimit::Runtime, deadline)
 }
 
 pub(crate) fn submit(
@@ -83,6 +133,7 @@ pub(crate) fn submit_probe(
             digest: Some(probe.projection.digest()),
             config: Some(config),
             probe: Some(&probe.options),
+            tunnel: None,
         },
         MAX_PROBE_REQUEST,
     )?;
@@ -171,6 +222,8 @@ struct Request<'a> {
     config: Option<&'a serde_json::value::RawValue>,
     #[serde(skip_serializing_if = "Option::is_none")]
     probe: Option<&'a ProbeOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tunnel: Option<&'a PacketAttachment>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -216,6 +269,7 @@ pub(crate) fn request(
             digest,
             config,
             probe: None,
+            tunnel: None,
         },
         MAX_REQUEST,
     )
@@ -301,6 +355,11 @@ impl Response {
                 "probe_failed" => "probe_failed",
                 "probe_cleanup_failed" => "probe_cleanup_failed",
                 "probe_response_invalid" => "probe_response_invalid",
+                "invalid_packet_capability" => "invalid_packet_capability",
+                "invalid_packet_operation" => "invalid_packet_operation",
+                "invalid_packet_config" => "invalid_packet_config",
+                "packet_capability_required" => "packet_capability_required",
+                "packet_io_failed" => "packet_io_failed",
                 _ => return Err(Error::Protocol("unknown rejection code")),
             }));
         }
@@ -355,6 +414,68 @@ impl Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packet_hello_preserves_full_handle_and_is_submitted_once() {
+        let name = "CFW-TUN-8c4fe63e-b108-4cb8-b422-fd9186cba252";
+        let packet = PacketAttachment::for_endpoint(0x1_0000_0004, name.into(), 9000).unwrap();
+        let (sender, queue) = mpsc::sync_channel(1);
+        let mut sequence = 0;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let _reply =
+            submit_hello(&sender, &mut sequence, "session", Some(&packet), deadline).unwrap();
+        let request = queue.try_recv().unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&request.bytes).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"protocol":1,"session":"session","id":1,
+            "op":"hello","tunnel":{"handle":0x1_0000_0004u64,"name":name,"mtu":9000}})
+        );
+        assert!(submit_hello(&sender, &mut sequence, "session", Some(&packet), deadline).is_err());
+        assert_eq!(sequence, 1);
+        assert!(matches!(queue.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        let mut sequence = 0;
+        let _reply = submit_hello(&sender, &mut sequence, "session", None, deadline).unwrap();
+        assert_eq!(
+            queue.try_recv().unwrap().bytes.as_slice(),
+            super::request("session", 1, "hello", None, None)
+                .unwrap()
+                .as_slice()
+        );
+    }
+
+    #[test]
+    fn packet_attachment_bounds_and_rejection_codes_remain_explicit() {
+        let name = "CFW-TUN-8c4fe63e-b108-4cb8-b422-fd9186cba252";
+        for handle in [0, u64::MAX] {
+            assert!(PacketAttachment::for_endpoint(handle, name.into(), 1500).is_err());
+        }
+        for mtu in [1279, 9001] {
+            assert!(PacketAttachment::for_endpoint(4, name.into(), mtu).is_err());
+        }
+        for name in [
+            "CFW-TUN-00000000-0000-0000-0000-000000000000",
+            "unowned",
+            "CFW-TUN-8C4FE63E-B108-4CB8-B422-FD9186CBA252",
+        ] {
+            assert!(PacketAttachment::for_endpoint(4, name.into(), 1500).is_err());
+        }
+        for code in [
+            "invalid_packet_capability",
+            "invalid_packet_operation",
+            "invalid_packet_config",
+            "packet_capability_required",
+            "packet_io_failed",
+        ] {
+            let mut value = reply();
+            value["error"] = serde_json::json!(code);
+            let response: Response = serde_json::from_value(value).unwrap();
+            assert!(
+                matches!(response.validate("session", 1, 123, "1.14.2", "running", "digest"),
+                Err(Error::Rejected(actual)) if actual == code)
+            );
+        }
+    }
     use serde_json::json;
     use std::io::Cursor;
 

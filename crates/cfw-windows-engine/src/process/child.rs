@@ -1,4 +1,4 @@
-//! Explicit native creation: three selected stdio handles and an atomic local
+//! Explicit native creation: selected stdio/lifetime/packet handles and an atomic local
 //! Job assignment. The owner retains failures before the suspended thread runs.
 use super::{Error, VerifiedExecutable};
 use crate::{NativePeerIdentity, NativePeerProcess, process_handles::ProcessHandleList};
@@ -50,6 +50,7 @@ pub(super) struct NativeChild {
     creator: NativePeerIdentity,
     pub(super) stdin: Option<File>,
     pub(super) stdout: Option<File>,
+    pub(super) packet_attachment: Option<crate::protocol::PacketAttachment>,
 }
 #[derive(Clone, Copy)]
 pub(super) enum Program {
@@ -68,7 +69,13 @@ impl NativeChild {
         job: BorrowedHandle<'_>,
         keeper: Option<&crate::authority::RuntimeKeeper>,
         program: Program,
+        packet: Option<crate::tunnel::PacketClient>,
     ) -> Result<Self, Error> {
+        if matches!(program, Program::PackageInspection) && packet.is_some() {
+            return Err(Error::Protocol(
+                "package worker cannot inherit a packet endpoint",
+            ));
+        }
         let parent = NativePeerProcess::open(std::process::id()).map_err(peer_error)?;
         let (input_read, input_write) = pipe()?;
         let (output_read, output_write) = pipe()?;
@@ -85,9 +92,15 @@ impl NativeChild {
                 operation: "inherit runtime lifetime",
                 source: io::Error::other(source),
             })?;
+        let inherited_packet = packet
+            .map(crate::tunnel::PacketClient::into_child)
+            .transpose()?;
         let mut selected = vec![input.as_handle(), output.as_handle(), error.as_handle()];
         if let Some(keeper) = &inherited_keeper {
             selected.push(keeper.as_handle());
+        }
+        if let Some((handle, _)) = &inherited_packet {
+            selected.push(handle.as_handle());
         }
         let mut attributes = ProcessHandleList::with_job(&selected, job)?;
         let application = terminated_path(executable.path())?;
@@ -139,6 +152,8 @@ impl NativeChild {
         {
             return Err(native("create suspended verified worker"));
         }
+        drop(attributes);
+        drop(selected);
         // No fallible operation follows successful creation before returning
         // ownership. Admission, resume and cleanup belong to EngineProcess.
         Ok(Self {
@@ -148,6 +163,7 @@ impl NativeChild {
             creator,
             stdin: Some(File::from(input_write)),
             stdout: Some(File::from(output_read)),
+            packet_attachment: inherited_packet.map(|(_, metadata)| metadata),
         })
     }
     pub(super) fn id(&self) -> u32 {

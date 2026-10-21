@@ -1,6 +1,7 @@
 use super::*;
 use crate::{RunningChild, authority::LeaseContext};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use uuid::Uuid;
 use windows_sys::Win32::System::Pipes::PeekNamedPipe;
 

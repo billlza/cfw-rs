@@ -22,7 +22,7 @@ fn owned_packet_endpoint_is_inherited_by_the_real_engine_and_retires() {
     let (mut server, client) =
         cfw_windows_engine::tunnel::PacketServer::create(uuid::Uuid::new_v4(), 9000).unwrap();
     let (ambient, name) = event();
-    let mut owner = EngineProcess::spawn_with_packet_endpoint(
+    let owner = EngineProcess::spawn_with_packet_endpoint(
         executable(),
         &temporary.path().join("packet engine 空格"),
         TIMEOUT,
@@ -43,7 +43,9 @@ fn owned_packet_endpoint_is_inherited_by_the_real_engine_and_retires() {
             .is_none(),
         "idle packet engine unexpectedly emitted a packet"
     );
-    owner.abort().unwrap();
+    // Exercise owner loss through the public ownership contract. Drop alone
+    // proves nothing: require the retained native process and pipe observations.
+    drop(owner);
     exited(&retained);
     assert!(
         server

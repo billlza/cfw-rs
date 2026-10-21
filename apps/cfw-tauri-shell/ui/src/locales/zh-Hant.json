@@ -860,5 +860,11 @@
   "Logs could not be opened. Try Open diagnostic logs from the application menu.": "無法開啟日誌。請嘗試從應用程式選單選擇「開啟診斷日誌」。",
   "Time since this profile was saved in {product}": "此設定儲存至 {product} 後經過的時間",
   "The application could not start safely (startup_state_unverifiable). Review the application log before retrying.": "應用程式無法安全啟動（startup_state_unverifiable）。請先檢查應用程式日誌，再重試。",
-  "This app does not change Windows network adapter DNS settings. Manage DNS for each active adapter in Windows Settings → Network & internet.": "本應用程式不會變更 Windows 網路介面卡的 DNS 設定。請在 Windows 設定 → 網路和網際網路中管理各個使用中介面卡的 DNS。"
+  "This app does not change Windows network adapter DNS settings. Manage DNS for each active adapter in Windows Settings → Network & internet.": "本應用程式不會變更 Windows 網路介面卡的 DNS 設定。請在 Windows 設定 → 網路和網際網路中管理各個使用中介面卡的 DNS。",
+  "Global shortcuts work while this app is in the background. Include Control, Alt or Super (Windows key); leave a field empty to disable it.": "應用程式在背景執行時，全域快捷鍵仍然有效。請包含 Control、Alt 或 Super（Windows 鍵）；留空可停用該快捷鍵。",
+  "Control+Alt+P": "Control+Alt+P",
+  "The first matching rule applies after a network change or when enabled. Manual Stop stays stopped on the same network. Rules run while CFW is open.": "網路變更或啟用規則後，將套用第一個相符的規則。在同一網路中手動停止後，會保持停止。規則僅在 CFW 執行時生效。",
+  "Windows controls access to Wi-Fi names in Location settings. Review those settings if a named Wi-Fi rule cannot read its network, then refresh network status.": "Windows 透過位置設定控制對 Wi-Fi 名稱的存取。如果指定 Wi-Fi 名稱的規則無法讀取網路，請檢查這些設定，然後重新整理網路狀態。",
+  "Open Windows Location settings": "開啟 Windows 位置設定",
+  "Review Windows Location settings, then refresh network status.": "請檢查 Windows 位置設定，然後重新整理網路狀態。"
 }

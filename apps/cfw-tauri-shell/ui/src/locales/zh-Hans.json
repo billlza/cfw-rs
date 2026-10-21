@@ -860,5 +860,11 @@
   "Logs could not be opened. Try Open diagnostic logs from the application menu.": "无法打开日志。请尝试从应用菜单选择“打开诊断日志”。",
   "Time since this profile was saved in {product}": "此配置保存到 {product} 后经过的时间",
   "The application could not start safely (startup_state_unverifiable). Review the application log before retrying.": "应用无法安全启动（startup_state_unverifiable）。请先查看应用日志，再重试。",
-  "This app does not change Windows network adapter DNS settings. Manage DNS for each active adapter in Windows Settings → Network & internet.": "本应用不会更改 Windows 网络适配器的 DNS 设置。请在 Windows 设置 → 网络和 Internet 中管理各个活动适配器的 DNS。"
+  "This app does not change Windows network adapter DNS settings. Manage DNS for each active adapter in Windows Settings → Network & internet.": "本应用不会更改 Windows 网络适配器的 DNS 设置。请在 Windows 设置 → 网络和 Internet 中管理各个活动适配器的 DNS。",
+  "Global shortcuts work while this app is in the background. Include Control, Alt or Super (Windows key); leave a field empty to disable it.": "应用在后台运行时，全局快捷键仍然有效。请包含 Control、Alt 或 Super（Windows 键）；留空可禁用该快捷键。",
+  "Control+Alt+P": "Control+Alt+P",
+  "The first matching rule applies after a network change or when enabled. Manual Stop stays stopped on the same network. Rules run while CFW is open.": "网络变更或启用规则后，将应用第一个匹配的规则。在同一网络中手动停止后，会保持停止。规则仅在 CFW 运行时生效。",
+  "Windows controls access to Wi-Fi names in Location settings. Review those settings if a named Wi-Fi rule cannot read its network, then refresh network status.": "Windows 通过位置设置控制对 Wi-Fi 名称的访问。如果指定 Wi-Fi 名称的规则无法读取网络，请检查这些设置，然后刷新网络状态。",
+  "Open Windows Location settings": "打开 Windows 位置设置",
+  "Review Windows Location settings, then refresh network status.": "请检查 Windows 位置设置，然后刷新网络状态。"
 }

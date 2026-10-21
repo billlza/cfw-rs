@@ -860,5 +860,11 @@
   "Logs could not be opened. Try Open diagnostic logs from the application menu.": "ログを開けませんでした。アプリケーションメニューから「診断ログを開く」を試してください。",
   "Time since this profile was saved in {product}": "このプロファイルが {product} に保存されてからの経過時間",
   "The application could not start safely (startup_state_unverifiable). Review the application log before retrying.": "アプリケーションを安全に起動できませんでした（startup_state_unverifiable）。再試行する前にアプリケーションログを確認してください。",
-  "This app does not change Windows network adapter DNS settings. Manage DNS for each active adapter in Windows Settings → Network & internet.": "このアプリは Windows のネットワーク アダプターの DNS 設定を変更しません。使用中の各アダプターの DNS は、Windows の設定 → ネットワークとインターネットで管理してください。"
+  "This app does not change Windows network adapter DNS settings. Manage DNS for each active adapter in Windows Settings → Network & internet.": "このアプリは Windows のネットワーク アダプターの DNS 設定を変更しません。使用中の各アダプターの DNS は、Windows の設定 → ネットワークとインターネットで管理してください。",
+  "Global shortcuts work while this app is in the background. Include Control, Alt or Super (Windows key); leave a field empty to disable it.": "このアプリがバックグラウンドにあるときもグローバルショートカットは動作します。Control、Alt、Super（Windows キー）のいずれかを含めてください。空欄にすると無効になります。",
+  "Control+Alt+P": "Control+Alt+P",
+  "The first matching rule applies after a network change or when enabled. Manual Stop stays stopped on the same network. Rules run while CFW is open.": "ネットワークの変更後、またはルールを有効にしたときに、最初に一致するルールが適用されます。手動で停止した場合、同じネットワークでは停止したままになります。ルールは CFW の起動中のみ動作します。",
+  "Windows controls access to Wi-Fi names in Location settings. Review those settings if a named Wi-Fi rule cannot read its network, then refresh network status.": "Windows では位置情報の設定で Wi-Fi 名へのアクセスを管理します。名前を指定した Wi-Fi ルールがネットワークを読み取れない場合は、設定を確認してからネットワークの状態を更新してください。",
+  "Open Windows Location settings": "Windows の位置情報の設定を開く",
+  "Review Windows Location settings, then refresh network status.": "Windows の位置情報の設定を確認してから、ネットワークの状態を更新してください。"
 }

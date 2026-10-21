@@ -860,5 +860,11 @@
   "Logs could not be opened. Try Open diagnostic logs from the application menu.": "Logs could not be opened. Try Open diagnostic logs from the application menu.",
   "Time since this profile was saved in {product}": "Time since this profile was saved in {product}",
   "The application could not start safely (startup_state_unverifiable). Review the application log before retrying.": "The application could not start safely (startup_state_unverifiable). Review the application log before retrying.",
-  "This app does not change Windows network adapter DNS settings. Manage DNS for each active adapter in Windows Settings → Network & internet.": "This app does not change Windows network adapter DNS settings. Manage DNS for each active adapter in Windows Settings → Network & internet."
+  "This app does not change Windows network adapter DNS settings. Manage DNS for each active adapter in Windows Settings → Network & internet.": "This app does not change Windows network adapter DNS settings. Manage DNS for each active adapter in Windows Settings → Network & internet.",
+  "Global shortcuts work while this app is in the background. Include Control, Alt or Super (Windows key); leave a field empty to disable it.": "Global shortcuts work while this app is in the background. Include Control, Alt or Super (Windows key); leave a field empty to disable it.",
+  "Control+Alt+P": "Control+Alt+P",
+  "The first matching rule applies after a network change or when enabled. Manual Stop stays stopped on the same network. Rules run while CFW is open.": "The first matching rule applies after a network change or when enabled. Manual Stop stays stopped on the same network. Rules run while CFW is open.",
+  "Windows controls access to Wi-Fi names in Location settings. Review those settings if a named Wi-Fi rule cannot read its network, then refresh network status.": "Windows controls access to Wi-Fi names in Location settings. Review those settings if a named Wi-Fi rule cannot read its network, then refresh network status.",
+  "Open Windows Location settings": "Open Windows Location settings",
+  "Review Windows Location settings, then refresh network status.": "Review Windows Location settings, then refresh network status."
 }

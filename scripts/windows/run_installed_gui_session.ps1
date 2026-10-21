@@ -50,7 +50,7 @@ function Invoke-Playwright([string]$Name, [string[]]$Arguments) {
         return ($result -join "`n")
     } finally { Pop-Location }
 }
-function Invoke-GuiScenario([ValidateSet('startup-registration', 'network-start', 'network-stop')][string]$Name) {
+function Invoke-GuiScenario([ValidateSet('startup-registration', 'network-start', 'network-stop', 'quit')][string]$Name) {
     $observer = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'gui/observe.js'))
     $scenario = [IO.File]::ReadAllText((Join-Path $PSScriptRoot "gui/$Name.js"))
     $path = Join-Path $playwrightOutput "$Name.scenario.js"
@@ -188,7 +188,9 @@ try {
     $receipt.debugger_detach_preserved_gui = $true
     Invoke-Playwright 'reattach-for-quit' @('attach', "--cdp=$endpoint") | Out-Null
     $attached = $true
-    Invoke-Playwright 'quit' @('click', '[data-action="quit-app"]') | Out-Null
+    $quit = (Invoke-GuiScenario 'quit') | ConvertFrom-Json
+    if (-not $quit.quit_click_completed -or $quit.native_exit_verified) { throw 'Quit input receipt is invalid' }
+    $quit | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $outputRoot 'quit-input.json') -Encoding utf8NoBOM
     Invoke-Playwright 'detach' @('detach') | Out-Null
     $attached = $false
     $receipt.debugger_detached_before_exit_wait = $true

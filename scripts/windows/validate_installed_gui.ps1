@@ -39,9 +39,11 @@ $session = 'cfw-installed-' + [guid]::NewGuid().ToString('N')
 $receipt = [ordered]@{
     source=$Source; package_sha256=$package.package_sha256; installed=$null; uninstalled=$null
     native_gui_exercised=$false; ordinary_user=$false; page_count=0; graceful_exit_observed=$false
+    debugger_detach_preserved_gui=$false; debugger_detached_before_exit_wait=$false
     physical_display_exercised=$false; network_mode_exercised=$false; release_accepted=$false
 }
 $controller = $null
+$guiProcess = $null
 $attached = $false
 $failure = $null
 $probeAttempts = [Collections.Generic.List[object]]::new()
@@ -122,14 +124,30 @@ try {
     $receipt.page_count = $pages.pages.Count
     $receipt.native_gui_exercised = $true
     Invoke-Playwright 'console' @('console', 'error') | Out-Null
+    # CDP attachment is a test-owned resource. First prove that releasing it
+    # does not close this exact product process, then reconnect for the actual
+    # Quit action. Detach before waiting so the debugger cannot retain WebView2
+    # during its shutdown. The original native exit/code checks stay required.
+    $guiProcess = [Diagnostics.Process]::GetProcessById([int]$launch.process_id)
+    $guiCreated = $guiProcess.StartTime.ToUniversalTime().ToFileTimeUtc()
+    if ($guiCreated -ne $launch.process_creation_time) { throw 'GUI detach control process identity changed' }
+    Invoke-Playwright 'detach-control' @('detach') | Out-Null
+    $attached = $false
+    if ($guiProcess.WaitForExit(500)) { throw 'Detaching the debugger unexpectedly ended the GUI' }
+    [ordered]@{ source=$Source; process_id=$launch.process_id; process_creation_time=$guiCreated; still_running_after_detach=$true; observation_ms=500 } |
+        ConvertTo-Json | Set-Content -LiteralPath (Join-Path $outputRoot 'debugger-detach-control.json') -Encoding utf8NoBOM
+    $receipt.debugger_detach_preserved_gui = $true
+    Invoke-Playwright 'reattach-for-quit' @('attach', "--cdp=$endpoint") | Out-Null
+    $attached = $true
     Invoke-Playwright 'quit' @('click', '[data-action="quit-app"]') | Out-Null
+    Invoke-Playwright 'detach' @('detach') | Out-Null
+    $attached = $false
+    $receipt.debugger_detached_before_exit_wait = $true
     if (-not $controller.WaitForExit(30000) -or $controller.ExitCode -ne 0) { throw 'Installed GUI graceful exit was not observed' }
     $exit = Get-Content -LiteralPath (Join-Path $outputRoot 'exit.json') -Raw | ConvertFrom-Json
     if ($exit.process_id -ne $launch.process_id -or $exit.process_creation_time -ne $launch.process_creation_time -or
         $exit.exit_code -ne 0 -or -not $exit.retained_process_exit_observed) { throw 'GUI exit identity differs from the launched process' }
     $receipt.graceful_exit_observed = $true
-    Invoke-Playwright 'detach' @('detach') | Out-Null
-    $attached = $false
     $receipt.uninstalled = Invoke-Installer '/x' 'uninstall'
     if ((Test-Path -LiteralPath $installedDirectory) -or
         @([ServiceProcess.ServiceController]::GetServices() | Where-Object ServiceName -CEQ 'CFWAuthority').Count -ne 0) {
@@ -139,6 +157,15 @@ try {
     $failure = $_
     ($_.Exception.ToString() + "`n" + $_.ScriptStackTrace) |
         Set-Content -LiteralPath (Join-Path $outputRoot 'failure.txt') -Encoding utf8NoBOM
+    if (-not $attached -and $null -ne $guiProcess -and -not $guiProcess.HasExited) {
+        try {
+            Invoke-Playwright 'reattach-after-failure' @('attach', "--cdp=$endpoint") | Out-Null
+            $attached = $true
+        } catch {
+            ($_.Exception.ToString() + "`n" + $_.ScriptStackTrace) |
+                Set-Content -LiteralPath (Join-Path $outputRoot 'reattach-diagnostic-failure.txt') -Encoding utf8NoBOM
+        }
+    }
     if ($attached) {
         try {
             Invoke-Playwright 'console-after-failure' @('console', 'error') | Out-Null
@@ -209,6 +236,7 @@ try {
         }
         $controller.Dispose()
     }
+    if ($null -ne $guiProcess) { $guiProcess.Dispose() }
     $receipt | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $outputRoot 'receipt.json') -Encoding utf8NoBOM
     ConvertTo-Json -InputObject $probeAttempts.ToArray() -Depth 5 |
         Set-Content -LiteralPath (Join-Path $outputRoot 'webview-startup-attempts.json') -Encoding utf8NoBOM

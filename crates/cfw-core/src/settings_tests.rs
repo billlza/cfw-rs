@@ -199,6 +199,29 @@ fn strict_json_round_trip_is_private_and_atomic() {
 }
 
 #[test]
+fn windows_font_preferences_round_trip_without_coercing_the_family() {
+    let (root, store) = test_store("windows-font-families");
+    for family in ["Segoe UI", "Consolas"] {
+        let mut document = serde_json::to_value(UiPreferences::default()).unwrap();
+        document["font_family"] = family.into();
+        let preferences: UiPreferences = serde_json::from_value(document).unwrap();
+        store.write(&preferences).expect("save Windows font");
+        let snapshot = store.snapshot().expect("reopen saved Windows font");
+        assert_eq!(snapshot.settings, preferences);
+        assert_eq!(
+            serde_json::to_value(snapshot.settings).unwrap()["font_family"],
+            family
+        );
+    }
+    for family in ["segoe ui", "Arial", "Consolas, monospace"] {
+        let mut document = serde_json::to_value(UiPreferences::default()).unwrap();
+        document["font_family"] = family.into();
+        assert!(serde_json::from_value::<UiPreferences>(document).is_err());
+    }
+    fs::remove_dir_all(root).expect("remove test root");
+}
+
+#[test]
 fn v1_preferences_upgrade_without_mutating_the_original_on_read() {
     let (root, store) = test_store("v1-language-upgrade");
     store.ensure_layout().expect("create layout");

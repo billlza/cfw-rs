@@ -92,6 +92,10 @@ pub enum FontFamily {
     AvenirNext,
     #[serde(rename = "SF Mono")]
     SfMono,
+    #[serde(rename = "Segoe UI")]
+    SegoeUi,
+    #[serde(rename = "Consolas")]
+    Consolas,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

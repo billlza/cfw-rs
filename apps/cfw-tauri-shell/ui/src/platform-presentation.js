@@ -2,6 +2,7 @@
 // user agent. These labels do not grant network or native-component capabilities.
 const MACOS = Object.freeze({
   name: "macOS",
+  systemDns: "This app never writes host DNS, because the legacy restore value carries no per-service ownership identity. Clear or set custom DNS per service in System Settings › Network › Details › DNS.",
   startAtLogin: "Start with macOS",
   copyProxyCommands: "Copy proxy export commands for Terminal",
   copiedProxyCommands: "Copied proxy export commands for Terminal",
@@ -13,6 +14,7 @@ const MACOS = Object.freeze({
 });
 const WINDOWS = Object.freeze({
   name: "Windows",
+  systemDns: "This app does not change Windows network adapter DNS settings. Manage DNS for each active adapter in Windows Settings → Network & internet.",
   startAtLogin: "Start with Windows",
   copyProxyCommands: "Copy proxy commands for PowerShell",
   copiedProxyCommands: "Copied proxy commands for PowerShell",

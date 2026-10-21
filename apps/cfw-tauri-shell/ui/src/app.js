@@ -6,6 +6,7 @@ import { createNativePromptDialog, promptDialogFrame } from "./native-prompt-dia
 import { createWindowGlass } from "./window-glass.js";
 import { navIcon } from "./nav-icons.js";
 import { platformPresentation, platformStartupDesign, proxyEnvironmentCommands } from "./platform-presentation.js";
+import { FONT_OPTIONS, platformFontStyles } from "./font-preferences.js";
 import { networkDiagnosticsView } from "./network-diagnostics.js";
 import { t, setLocale, getLocale, SUPPORTED_LOCALES, LANGUAGE_OPTIONS } from "./i18n.js";
 import {
@@ -13,7 +14,6 @@ import {
   defaultEngineStatus,
   defaultSettings,
   defaultSettingsSnapshot,
-  FONT_OPTIONS,
   THEME_OPTIONS,
   state,
   primaryNavIds,
@@ -173,7 +173,7 @@ const REASONS = Object.freeze({
   get mixin() { return t("Mixin is unavailable: the engine configuration is projected by the app, and an imported document may only describe routing and outbound policy."); },
   get geoip() { return t("Country rules use sing-box rule sets, downloaded on first start and refreshed daily while the engine runs. An existing Clash Country.mmdb file is not used."); },
   get mainlandChinaDirect() { return t("In Rule mode, traffic that no profile rule matches goes direct when it is bound for mainland China, and the app's own DNS answers mainland names through encrypted DNS in mainland China. The first start with each profile downloads the China rule sets through the proxy and waits for them; they then refresh daily while the core runs. It does not apply to a profile that routes directly. Existing connections may reconnect when this changes."); },
-  get restoreDns() { return t("This app never writes host DNS, because the legacy restore value carries no per-service ownership identity. Clear or set custom DNS per service in System Settings › Network › Details › DNS."); },
+  get restoreDns() { return t(platformPresentation(state.payload.product.operating_system).systemDns); },
   get engineNotOff() { return t("Stop the core before credential maintenance or legacy migration."); },
 });
 
@@ -200,7 +200,7 @@ const { renderConnections, scheduleConnectionsPatch, connectionFacets, bindConne
 import { createRulesView } from "./rules.js";
 const { renderRules, changePage: changeRulePage } = createRulesView({state,escapeHtml});
 import { createSettingsView } from "./settings-view.js";
-const { renderSettings, renderNetworkDiagnostics } = createSettingsView({ state, defaultSettingsSnapshot, defaultSettings, engineIsOff, launchAtLoginPresentation, escapeHtml, renderToggle, THEME_OPTIONS, FONT_OPTIONS, REASONS, engineStateLabel, serviceProxyLabel });
+const { renderSettings, renderNetworkDiagnostics } = createSettingsView({ state, defaultSettingsSnapshot, defaultSettings, engineIsOff, launchAtLoginPresentation, escapeHtml, renderToggle, THEME_OPTIONS, REASONS, engineStateLabel, serviceProxyLabel });
 
 import { createAutomationSettingsUI } from "./automation-settings.js";
 const automationSettingsUI = createAutomationSettingsUI({ state, invoke, renderPage, appendLog,
@@ -434,9 +434,10 @@ function persistedSettingsFromUi() {
   const fontFamily = document.querySelector("[data-font-family]")?.value ?? current.font_family ?? "";
   const language = document.querySelector("[data-language-setting]")?.value ?? current.language;
   if (!LANGUAGE_OPTIONS.some((option) => option.value === language)) throw new TypeError("Invalid language preference");
+  if (!FONT_OPTIONS.some((option) => option.value === fontFamily)) throw new TypeError("Invalid font preference");
   return {
     theme: THEME_OPTIONS.some((option) => option.value === theme) ? theme : "system",
-    font_family: FONT_OPTIONS.some((option) => option.value === fontFamily) ? fontFamily : "",
+    font_family: fontFamily,
     language,
     retain_window_bounds: state.toggles.retainWindowBounds,
     launch_at_login: Boolean(current.launch_at_login),
@@ -452,11 +453,9 @@ function applyAppearance(settings) {
     : requested;
   document.documentElement.dataset.theme = resolved;
   windowGlass.refresh();
-  const font = String(settings.font_family ?? "").trim();
-  document.documentElement.style.setProperty(
-    "--sans",
-    font ? `"${font}", "Avenir Next", "SF Pro Text", "Helvetica Neue", sans-serif` : '"Avenir Next", "SF Pro Text", "Helvetica Neue", sans-serif',
-  );
+  for (const [property, value] of Object.entries(platformFontStyles(state.payload.product.operating_system, settings.font_family))) {
+    document.documentElement.style.setProperty(property, value);
+  }
 }
 
 function localizeShell() {

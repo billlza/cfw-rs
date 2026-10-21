@@ -1,8 +1,9 @@
 import { t, LANGUAGE_OPTIONS } from "./i18n.js";
 import { networkDiagnosticsView } from "./network-diagnostics.js";
+import { platformFontOptions } from "./font-preferences.js";
 // Settings and read-only network diagnostics rendering. Commands and
 // transactional settings dialogs own all mutations.
-export function createSettingsView({ state, defaultSettingsSnapshot, defaultSettings, engineIsOff, launchAtLoginPresentation, escapeHtml, renderToggle, THEME_OPTIONS, FONT_OPTIONS, REASONS, engineStateLabel, serviceProxyLabel }) {
+export function createSettingsView({ state, defaultSettingsSnapshot, defaultSettings, engineIsOff, launchAtLoginPresentation, escapeHtml, renderToggle, THEME_OPTIONS, REASONS, engineStateLabel, serviceProxyLabel }) {
 function renderSettingsGroup(title, rows) {
   return `
     <section class="panel settings-group">
@@ -99,7 +100,7 @@ function renderSettings() {
       ${renderSettingsGroup(t("Appearance"), [
         renderSettingSelect(t("Language"), persisted.language, LANGUAGE_OPTIONS, windows ? t("Applied immediately and saved. Follow system uses your Windows language preferences.") : t("Applied immediately and saved. Follow system uses your macOS language preferences."), "data-language-setting", settingsReason),
         renderSettingSelect(t("Theme"), persisted.theme ?? "system", THEME_OPTIONS, t("Applied immediately and persisted."), "data-theme-setting", settingsReason),
-        renderSettingSelect(t("Font"), persisted.font_family ?? "", FONT_OPTIONS, t("The preference store accepts these families only."), "data-font-family", settingsReason),
+        renderSettingSelect(t("Font"), persisted.font_family, platformFontOptions(state.payload.product.operating_system, persisted.font_family), t("The preference store accepts these families only."), "data-font-family", settingsReason),
       ])}
 
       ${renderSettingsGroup(t("Engine"), [

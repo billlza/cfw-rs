@@ -38,6 +38,14 @@
     if (id === 'feedback' && !content.includes(backend.platform.startup_strategy)) {
       throw new Error('Windows startup architecture is missing from the Feedback page');
     }
+    if (id === 'settings') {
+      const families = await page.locator('[data-font-family] option').evaluateAll(nodes => nodes.map(node => node.value));
+      if (JSON.stringify(families) !== JSON.stringify(['', 'Segoe UI', 'Consolas']) ||
+          content.includes('System Settings › Network') ||
+          !content.includes('Manage DNS for each active adapter in Windows Settings')) {
+        throw new Error('Fresh Windows preferences contain foreign font or DNS instructions');
+      }
+    }
     await page.screenshot({ path: `${id}.png` });
     pages.push({ id, heading, content, snapshot: await page.locator('body').ariaSnapshot() });
   }

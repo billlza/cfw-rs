@@ -2954,7 +2954,10 @@ test("Windows settings use native platform descriptions and reject a macOS desig
     for (const text of ["Windows protected storage", "File Explorer", "system tray", "Not available in this development build"]) {
       assert.ok(html.includes(text), text);
     }
-    assert.doesNotMatch(html, /Minimum macOS|ARM64-only|Keychain vault|in Finder|Dock icon|launchd|NetworkExtension/u);
+    assert.doesNotMatch(html, /Minimum macOS|ARM64-only|Keychain vault|in Finder|Dock icon|launchd|NetworkExtension|System Settings › Network|legacy restore|Avenir Next|SF Mono/u);
+    assert.match(html, /Segoe UI/u);
+    assert.match(html, /Consolas/u);
+    assert.match(html, /Manage DNS for each active adapter in Windows Settings/u);
     state.platform = platform;
     const foreign = await renderPage("settings");
     assert.ok(foreign.includes("The platform design could not be read."));
@@ -2965,6 +2968,64 @@ test("Windows settings use native platform descriptions and reject a macOS desig
   } finally {
     state.payload.product = product;
     state.platform = platform;
+  }
+});
+
+test("Windows font selection saves its actual family and restores the native value after a refused save", async () => {
+  const product = state.payload.product;
+  const original = structuredClone(responses.read_settings_snapshot);
+  const originalWriter = responses.write_settings_snapshot;
+  const originalStyleWriter = document.documentElement.style.setProperty;
+  const styles = new Map();
+  const handlers = new Map();
+  const selector = "[data-theme-setting], [data-font-family], [data-language-setting]";
+  const input = element("select");
+  input.addEventListener = (type, handler) => handlers.set(type, handler);
+  querySelectorElements.set("[data-font-family]", input);
+  querySelectorAllElements.set(selector, [input]);
+  document.documentElement.style.setProperty = (name, value) => styles.set(name, value);
+  responses.write_settings_snapshot = ({ settings }) => {
+    const snapshot = { ...original, settings: structuredClone(settings) };
+    responses.read_settings_snapshot = snapshot;
+    return snapshot;
+  };
+  try {
+    state.payload.product = { ...product, name: "Clash for Windows", operating_system: "windows", architecture: "x64" };
+    await emit("cfw://settings-changed", original);
+    assert.equal(styles.get("--sans"), '"Segoe UI", system-ui, sans-serif');
+    for (const family of ["Segoe UI", "Consolas"]) {
+      input.value = family;
+      await renderPage("settings");
+      const before = invocationDetails.length;
+      await handlers.get("change")();
+      const writes = invocationDetails.slice(before).filter(({ command }) => command === "write_settings_snapshot");
+      assert.equal(writes.length, 1);
+      assert.equal(writes[0].args.settings.font_family, family);
+      assert.equal(state.settingsSnapshot.settings.font_family, family);
+      assert.ok(styles.get("--sans").startsWith(`"${family}", `));
+    }
+    rejected.write_settings_snapshot = "disk busy";
+    input.value = "Segoe UI";
+    await handlers.get("change")();
+    assert.equal(state.settingsSnapshot.settings.font_family, "Consolas");
+    assert.match(page.innerHTML, /value="Consolas" selected/u);
+    assert.ok(state.logs.some(({ message }) => message.includes("disk busy")));
+    delete rejected.write_settings_snapshot;
+    // A recognized saved family remains visible even if it was selected on a
+    // different host; changing another preference must not silently erase it.
+    const foreign = { ...original, settings: { ...original.settings, font_family: "SF Mono" } };
+    await emit("cfw://settings-changed", foreign);
+    assert.match(await renderPage("settings"), /value="SF Mono" selected/u);
+  } finally {
+    delete rejected.write_settings_snapshot;
+    state.payload.product = product;
+    if (originalWriter === undefined) delete responses.write_settings_snapshot;
+    else responses.write_settings_snapshot = originalWriter;
+    querySelectorElements.delete("[data-font-family]");
+    querySelectorAllElements.delete(selector);
+    responses.read_settings_snapshot = original;
+    await emit("cfw://settings-changed", original);
+    document.documentElement.style.setProperty = originalStyleWriter;
   }
 });
 

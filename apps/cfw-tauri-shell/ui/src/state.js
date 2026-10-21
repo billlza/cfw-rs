@@ -35,15 +35,6 @@ export const THEME_OPTIONS = [
   { value: "dark", label: "Dark" },
 ];
 
-/// `FontFamily` is a closed enum in the preference store, so the dashboard
-/// offers exactly the values the backend accepts instead of free text that
-/// would be rejected on save.
-export const FONT_OPTIONS = [
-  { value: "", label: "System" },
-  { value: "Avenir Next", label: "Avenir Next" },
-  { value: "SF Mono", label: "SF Mono" },
-];
-
 export const defaultEngineStatus = {
   desiredMode: "off",
   state: "Off",

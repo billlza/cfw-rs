@@ -859,5 +859,6 @@
   "Starting dashboard": "ダッシュボードを起動中",
   "Logs could not be opened. Try Open diagnostic logs from the application menu.": "ログを開けませんでした。アプリケーションメニューから「診断ログを開く」を試してください。",
   "Time since this profile was saved in {product}": "このプロファイルが {product} に保存されてからの経過時間",
-  "The application could not start safely (startup_state_unverifiable). Review the application log before retrying.": "アプリケーションを安全に起動できませんでした（startup_state_unverifiable）。再試行する前にアプリケーションログを確認してください。"
+  "The application could not start safely (startup_state_unverifiable). Review the application log before retrying.": "アプリケーションを安全に起動できませんでした（startup_state_unverifiable）。再試行する前にアプリケーションログを確認してください。",
+  "This app does not change Windows network adapter DNS settings. Manage DNS for each active adapter in Windows Settings → Network & internet.": "このアプリは Windows のネットワーク アダプターの DNS 設定を変更しません。使用中の各アダプターの DNS は、Windows の設定 → ネットワークとインターネットで管理してください。"
 }

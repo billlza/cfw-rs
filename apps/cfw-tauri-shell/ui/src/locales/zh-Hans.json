@@ -859,5 +859,6 @@
   "Starting dashboard": "正在启动界面",
   "Logs could not be opened. Try Open diagnostic logs from the application menu.": "无法打开日志。请尝试从应用菜单选择“打开诊断日志”。",
   "Time since this profile was saved in {product}": "此配置保存到 {product} 后经过的时间",
-  "The application could not start safely (startup_state_unverifiable). Review the application log before retrying.": "应用无法安全启动（startup_state_unverifiable）。请先查看应用日志，再重试。"
+  "The application could not start safely (startup_state_unverifiable). Review the application log before retrying.": "应用无法安全启动（startup_state_unverifiable）。请先查看应用日志，再重试。",
+  "This app does not change Windows network adapter DNS settings. Manage DNS for each active adapter in Windows Settings → Network & internet.": "本应用不会更改 Windows 网络适配器的 DNS 设置。请在 Windows 设置 → 网络和 Internet 中管理各个活动适配器的 DNS。"
 }

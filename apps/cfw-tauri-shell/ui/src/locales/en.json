@@ -859,5 +859,6 @@
   "Starting dashboard": "Starting dashboard",
   "Logs could not be opened. Try Open diagnostic logs from the application menu.": "Logs could not be opened. Try Open diagnostic logs from the application menu.",
   "Time since this profile was saved in {product}": "Time since this profile was saved in {product}",
-  "The application could not start safely (startup_state_unverifiable). Review the application log before retrying.": "The application could not start safely (startup_state_unverifiable). Review the application log before retrying."
+  "The application could not start safely (startup_state_unverifiable). Review the application log before retrying.": "The application could not start safely (startup_state_unverifiable). Review the application log before retrying.",
+  "This app does not change Windows network adapter DNS settings. Manage DNS for each active adapter in Windows Settings → Network & internet.": "This app does not change Windows network adapter DNS settings. Manage DNS for each active adapter in Windows Settings → Network & internet."
 }

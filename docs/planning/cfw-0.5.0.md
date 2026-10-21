@@ -1,7 +1,25 @@
 # CFW 0.5.0：CFM GA 对齐与 Windows 发布计划
 
 评估日期：2026-10-18；最近实施检查：2026-10-21。状态：真实 Windows 开发 MSI
-已构建、原生安装，并启动普通用户桌面进程；界面、完整更新和发布验收尚未完成。
+已构建、原生安装，并以普通用户打开全部九个页面；正常退出、原生呈现对齐、完整
+更新和发布验收尚未完成。
+
+最新 GUI 检查点：`918fec8f` 的
+[真实桌面作业](https://github.com/billlza/cfw-rs/actions/runs/39596494496)
+完成全部九页导航、截图及真实只读 IPC，下载的源码绑定产物与截图已核验。正常
+Quit 未产生进程退出，卸载未执行。`36fe5a0e` 的
+[诊断复验](https://github.com/billlza/cfw-rs/actions/runs/39602725518)进一步证明
+窗口状态保存、引擎关闭、退出分发均已完成，ExitRequested 收到 `ready=true`，
+但仍未记录 Exit。`5acc39e5` 正在验证 CDP 调试连接的影响：先要求单独断开连接
+不终止精确 GUI 进程，再真实点击 Quit、断开连接并观察原生退出；退出码零和
+精确进程身份要求保持不变。该试验尚未通过，不能视为已修复。
+
+截图另发现 Feedback 错用 Mac 的 launchd 字段，Windows 启动说明为空，已修正为
+实际 startup_strategy；旧渲染器回归失败，修正后的 327 项 UI 测试通过。设置页
+随后修正 Windows 字体与 DNS 说明：共享存储明确接受 Segoe UI/Consolas，Windows
+使用自身字体配置，已有合法选择不被重写，Mac 原有字体仍保留；DNS 说明不再指向
+macOS 或不存在的旧 Windows 版本。旧渲染器和旧存储的目标回归均失败，修正后
+328 项 UI 与 27 项设置相关 Rust 测试通过；实际 Windows 页面复验仍待执行。
 
 当前安装里程碑：`41f5722a2f32f1537125059f43cb2919b4495822` 的
 [桌面作业](https://github.com/billlza/cfw-rs/actions/runs/39581667052)
@@ -26,7 +44,7 @@ PATH 中第一个可执行文件并验证固定版本，本地双 Node 路径反
 `1f765d58` 改为等待共享页面实际存在的导航项，保留来自真实 `boot_payload` 的
 产品身份断言。该批同时修正 Windows 更新提示、启动与诊断文案，四种语言齐备；
 旧实现的四个反例均失败，修正后的完整 325 项 UI 测试及固定依赖检查通过。
-页面截图、正常退出与卸载尚未验收，`918fec8f` 的完整桌面作业正在复验。
+该阶段尚无页面证据；后续九页观察和未通过的退出见上面的最新检查点。
 
 同一源码的独立包检查在取消校验进程后未通过即时退出断言，原断言没有留下进程
 角色或实际返回值；后续 64 次即时退出试验在 `7db5a873` 明确观察到子进程仍活着。
@@ -44,9 +62,15 @@ PATH 中第一个可执行文件并验证固定版本，本地双 Node 路径反
 没有放宽产品清理、超时或原断言。
 
 [组件作业](https://github.com/billlza/cfw-rs/actions/runs/39581672551)再次复现的
-LocalProxy 服务重启期间查询进程映像访问拒绝仍未解释。因此当前 Windows 工作流
-不是全绿，更不能作为发布验收。后续安装/界面进展与这些
-失败分别保留，不用成功重跑替代根因修复。
+LocalProxy 服务重启期间查询进程映像访问拒绝，已由 `43576a47` 的
+[原生观察](https://github.com/billlza/cfw-rs/actions/runs/39597750456)定位：精确旧
+服务已返回注入退出码 `0xcf01` 和非零退出 FILETIME，但两次保留句柄等待仍未有
+退出信号。`7a5153d1` 将有这组证据的拒绝分类为 TerminationPending，不把它当作
+已退出、清理成功或有权重连；活进程权限拒绝仍原样失败。`36fe5a0e` 的
+[四项原生/共享作业](https://github.com/billlza/cfw-rs/actions/runs/39602734853)
+通过，下载的完整运行时、pending-stop 和十次 MSI 事务回执均通过原有审计。
+该成功运行没有直接记录到 TerminationPending 样本，不能替代特定竞态分支的
+现场证据。GUI 退出仍失败，不能称当前 Windows 工作流全绿或发布已验收。
 
 前一个完整组件检查点：`fafb7f00890c5d226090e688730d6f04a6407df4` 的
 [桌面与包检查](https://github.com/billlza/cfw-rs/actions/runs/39573490356)和
@@ -75,7 +99,7 @@ Windows SDK 的 `assert.h` 阻断，不能
 首轮真实桌面安装流程 `312e6653` 在
 [桌面作业](https://github.com/billlza/cfw-rs/actions/runs/39579956427)的引擎构建前失败：
 严格的源码洁净检查发现桌面构建后的工作区变化；安装包和 GUI 尚未执行。固定依赖
-Tauri 2.7.0 的构建路径调用 schema 生成器，Windows 目标会在源码目录生成尚未
+tauri-build 2.7.0 的构建路径调用 schema 生成器，Windows 目标会在源码目录生成尚未
 跟踪的 `gen/schemas/windows-schema.json`，并可能更新通用 schema。首轮没有保存
 `git status`，不能断言没有其他变化。流程现改为在桌面生成步骤前构建引擎，保留
 原有完整洁净检查；桌面构建后保存状态、schema 和差异，并拒绝 schema 输出之外

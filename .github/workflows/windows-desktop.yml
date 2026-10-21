@@ -16,7 +16,7 @@ jobs:
   desktop:
     name: Windows x64 shared desktop application
     runs-on: windows-2025
-    timeout-minutes: 25
+    timeout-minutes: 50
     defaults:
       run:
         shell: pwsh
@@ -33,7 +33,7 @@ jobs:
           $source = git rev-parse HEAD
           if ($LASTEXITCODE -ne 0 -or $source -cne $env:EXPECTED_SOURCE) { throw 'Source identity mismatch' }
           $pins = Get-Content scripts/dependency_pins.env -Raw
-          foreach ($name in @('RUST_VERSION', 'NODE_VERSION', 'NPM_VERSION', 'NPM_ARCHIVE_SHA256')) {
+          foreach ($name in @('RUST_VERSION', 'NODE_VERSION', 'NPM_VERSION', 'NPM_ARCHIVE_SHA256', 'PYTHON_VERSION')) {
             $pinMatches = [regex]::Matches($pins, "(?m)^${name}=([A-Za-z0-9.]+)\r?`$")
             if ($pinMatches.Count -ne 1) { throw "Missing or ambiguous pin: $name" }
             "$name=$($pinMatches[0].Groups[1].Value)" >> $env:GITHUB_OUTPUT
@@ -48,6 +48,9 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ steps.pins.outputs.NODE_VERSION }}
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ steps.pins.outputs.PYTHON_VERSION }}
       - name: Prepare pinned npm and shared UI
         env:
           CFW_NPM_VERSION: ${{ steps.pins.outputs.NPM_VERSION }}
@@ -70,6 +73,8 @@ jobs:
               if ($LASTEXITCODE -ne 0) { throw 'Locked UI dependency installation failed' }
             } finally { Pop-Location }
             ./scripts/build_ui_windows.ps1
+            node $npmCli ci --prefix scripts/windows/gui --ignore-scripts --no-audit --no-fund
+            if ($LASTEXITCODE -ne 0) { throw 'Locked WebView2 validation tool installation failed' }
           } finally { Stop-Transcript -ErrorAction Stop }
       - name: Verify native desktop file boundaries
         run: |
@@ -218,6 +223,38 @@ jobs:
             update_handoff_exercised = $false
             release_accepted = $false
           } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $evidence 'startup-receipt.json') -Encoding utf8NoBOM
+      - name: Build the pinned native engine for the installed desktop
+        run: |
+          $evidence = Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence'
+          $engineRoot = Join-Path $env:RUNNER_TEMP 'cfw-desktop-engine'
+          try {
+            python scripts/windows_engine.py build --repository "$pwd" --output $engineRoot 2>&1 |
+              Tee-Object -FilePath (Join-Path $evidence 'engine-build.log')
+            if ($LASTEXITCODE -ne 0) { throw 'Installed desktop engine build or GA contract tests failed' }
+          } finally {
+            $artifacts = Join-Path $engineRoot 'artifacts'
+            if (Test-Path -LiteralPath $artifacts -PathType Container) {
+              Copy-Item -LiteralPath $artifacts -Destination (Join-Path $evidence 'engine') -Recurse -ErrorAction Stop
+            }
+          }
+      - name: Build the real desktop development MSI
+        run: |
+          $evidence = Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence'
+          cargo build --locked -p cfw-windows-engine --bin cfw-windows-runtime 2>&1 |
+            Tee-Object -FilePath (Join-Path $evidence 'runtime-build.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Installed desktop runtime build failed' }
+          ./scripts/windows/build_development_msi.ps1 -Runtime (Join-Path $PWD 'target/debug/cfw-windows-runtime.exe') `
+            -DesktopDirectory $evidence -EngineDirectory (Join-Path $evidence 'engine') `
+            -Source (git rev-parse HEAD) -Output (Join-Path $evidence 'msi')
+      - name: Install and exercise the actual ordinary-user desktop
+        timeout-minutes: 12
+        env:
+          CFW_NATIVE_SERVICE_MUTATION_TESTS: '1'
+        run: |
+          $evidence = Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence'
+          ./scripts/windows/validate_installed_gui.ps1 -PackageDirectory (Join-Path $evidence 'msi') `
+            -Launcher (Join-Path $PWD 'target/debug/examples/native-service-fixture.exe') `
+            -Source (git rev-parse HEAD) -Output (Join-Path $evidence 'installed-gui')
       - name: Preserve desktop build output and diagnostics
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6

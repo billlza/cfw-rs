@@ -1,24 +1,43 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Disposable native qualification package, never a distributable installer.
-     Its Desktop is an authenticated test client. It deliberately has no GUI,
-     or publisher signature. Its SYSTEM actions qualify service availability. -->
+<!-- Shared payload, ACL and transaction authoring. Failure injection exists
+     only in a qualification build; the desktop package has mandatory update
+     maintenance and carries the actual application identity. -->
+<?if $(var.QualificationFixture) = 1 ?>
+  <?define ProductName = "CFW Runtime Installation Fixture" ?>
+  <?define Manufacturer = "CFW validation fixture" ?>
+  <?define ServiceStart = "demand" ?>
+  <?define PrepareCondition = "(Installed OR WIX_UPGRADE_DETECTED) AND NOT UPGRADINGPRODUCTCODE AND CFW_FIXTURE_MAINTENANCE = 1" ?>
+  <?define UpdateCondition = "WIX_UPGRADE_DETECTED AND NOT UPGRADINGPRODUCTCODE AND CFW_FIXTURE_MAINTENANCE = 1" ?>
+<?else ?>
+  <?define ProductName = "Clash for Windows" ?>
+  <?define Manufacturer = "bill" ?>
+  <?define ServiceStart = "auto" ?>
+  <?define PrepareCondition = "WIX_UPGRADE_DETECTED AND NOT UPGRADINGPRODUCTCODE" ?>
+  <?define UpdateCondition = "WIX_UPGRADE_DETECTED AND NOT UPGRADINGPRODUCTCODE" ?>
+<?endif ?>
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
-  <Product Id="$(var.ProductCode)" Name="CFW Runtime Installation Fixture" Language="1033"
-           Version="$(var.MsiVersion)" Manufacturer="CFW validation fixture"
+  <Product Id="$(var.ProductCode)" Name="$(var.ProductName)" Language="1033"
+           Version="$(var.MsiVersion)" Manufacturer="$(var.Manufacturer)"
            UpgradeCode="{7ECD99B2-CFE4-51EA-868B-544E2A12E25D}">
     <Package InstallerVersion="500" Compressed="yes"
              InstallScope="perMachine" Platform="x64" />
     <MediaTemplate EmbedCab="yes" />
-    <!-- MSI fixture versions increase independently of the unchanged 0.5.0
-         application binary. This fixture is not release metadata admission.
-         Keep removal inside the transaction, after the installation script. -->
+    <!-- Removal stays inside the transaction, after the installation script. -->
     <MajorUpgrade Schedule="afterInstallExecute"
-                  DowngradeErrorMessage="A newer runtime fixture is installed." />
+                  DowngradeErrorMessage="A newer Clash for Windows version is installed." />
     <Property Id="MSIRESTARTMANAGERCONTROL" Value="DisableShutdown" />
     <Property Id="ARPNOREPAIR" Value="1" />
     <Property Id="ARPNOMODIFY" Value="1" />
     <Property Id="CFW_RUNTIME_MANIFEST_SHA256" Value="unbound" />
-    <Condition Message="Native MSI qualification requires rollback support.">NOT RollbackDisabled</Condition>
+    <?if $(var.QualificationFixture) = 0 ?>
+    <Property Id="CFW_PRODUCT_ID" Value="com.bill.clashforwindows" />
+    <Property Id="CFW_RELEASE_VERSION" Value="$(var.MsiVersion)" />
+    <Property Id="CFW_BUILD_NUMBER" Value="$(var.BuildNumber)" />
+    <Property Id="CFW_MINIMUM_WINDOWS_VERSION" Value="10.0.19041" />
+    <!-- In-place repair has no separately qualified maintenance contract yet. -->
+    <Condition Message="Remove this development installation before reinstalling the same package.">NOT Installed OR REMOVE~="ALL"</Condition>
+    <?endif ?>
+    <Condition Message="Clash for Windows installation requires rollback support.">NOT RollbackDisabled</Condition>
     <Directory Id="TARGETDIR" Name="SourceDir">
       <Directory Id="ProgramFiles64Folder">
         <Directory Id="INSTALLFOLDER" Name="Clash for Windows">
@@ -30,7 +49,7 @@
               <PermissionEx Id="RuntimeAcl" Sddl="O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)" />
             </File>
             <ServiceInstall Id="Authority" Name="CFWAuthority" DisplayName="CFW Authority"
-                            Type="ownProcess" Start="demand" ErrorControl="normal" Account="LocalSystem">
+                            Type="ownProcess" Start="$(var.ServiceStart)" ErrorControl="normal" Account="LocalSystem">
               <PermissionEx Id="AuthorityAcl" Sddl="D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;CCLCSWLORC;;;AU)" />
             </ServiceInstall>
             <ServiceControl Id="AuthorityControl" Name="CFWAuthority" Stop="both" Remove="uninstall" Wait="yes" />
@@ -53,7 +72,7 @@
         </Directory>
       </Directory>
     </Directory>
-    <Feature Id="RuntimeFixture" Level="1">
+    <Feature Id="RuntimePayload" Level="1">
       <ComponentRef Id="Runtime" /><ComponentRef Id="Desktop" />
       <ComponentRef Id="Engine" /><ComponentRef Id="Manifest" />
     </Feature>
@@ -97,6 +116,7 @@
                   Execute="rollback" Impersonate="no" Return="check" />
     <CustomAction Id="ValidateInstalledRuntime" FileKey="RuntimeFile" ExeCommand="--check-installation"
                   Execute="deferred" Impersonate="no" Return="check" />
+    <?if $(var.QualificationFixture) = 1 ?>
     <!-- A real rejected runtime command supplies a nonzero deferred-action
          result after files and the service have been installed. No product
          error path or compiler check is bypassed to inject this failure. -->
@@ -104,20 +124,25 @@
                   Execute="deferred" Impersonate="no" Return="check" />
     <CustomAction Id="FailAfterCommit" FileKey="RuntimeFile" ExeCommand="--cfw-msi-fixture-failure"
                   Execute="commit" Impersonate="no" Return="check" />
+    <?endif ?>
     <InstallExecuteSequence>
-      <Custom Action="RollbackRuntimeMaintenance" Before="PrepareRuntimeMaintenance">(Installed OR WIX_UPGRADE_DETECTED) AND NOT UPGRADINGPRODUCTCODE AND CFW_FIXTURE_MAINTENANCE = 1</Custom>
-      <Custom Action="PrepareRuntimeMaintenance" After="InstallInitialize">(Installed OR WIX_UPGRADE_DETECTED) AND NOT UPGRADINGPRODUCTCODE AND CFW_FIXTURE_MAINTENANCE = 1</Custom>
+      <Custom Action="RollbackRuntimeMaintenance" Before="PrepareRuntimeMaintenance">$(var.PrepareCondition)</Custom>
+      <Custom Action="PrepareRuntimeMaintenance" After="InstallInitialize">$(var.PrepareCondition)</Custom>
       <Custom Action="FreshInstallMaintenance" Before="InstallServices">NOT Installed AND NOT WIX_UPGRADE_DETECTED AND NOT REMOVE~="ALL"</Custom>
       <Custom Action="ValidateInstalledRuntime" After="InstallServices">NOT REMOVE~="ALL"</Custom>
-      <Custom Action="CommitRuntimeMaintenance" After="ValidateInstalledRuntime">WIX_UPGRADE_DETECTED AND NOT UPGRADINGPRODUCTCODE AND CFW_FIXTURE_MAINTENANCE = 1</Custom>
-      <Custom Action="ActivateRuntimeUpdate" After="CommitRuntimeMaintenance">WIX_UPGRADE_DETECTED AND NOT UPGRADINGPRODUCTCODE AND CFW_FIXTURE_MAINTENANCE = 1</Custom>
+      <Custom Action="CommitRuntimeMaintenance" After="ValidateInstalledRuntime">$(var.UpdateCondition)</Custom>
+      <Custom Action="ActivateRuntimeUpdate" After="CommitRuntimeMaintenance">$(var.UpdateCondition)</Custom>
       <Custom Action="ActivateFreshRuntime" After="ActivateRuntimeUpdate">NOT Installed AND NOT WIX_UPGRADE_DETECTED AND NOT REMOVE~="ALL"</Custom>
+      <?if $(var.QualificationFixture) = 1 ?>
       <Custom Action="FailAfterCommit" After="ActivateFreshRuntime">NOT REMOVE~="ALL" AND NOT UPGRADINGPRODUCTCODE AND CFW_FIXTURE_FAIL_COMMIT = 1</Custom>
+      <?endif ?>
       <!-- Queue retirement after validated target files and old-product removal,
            so rollback runs it before restoring any original executable. -->
-      <Custom Action="RetireRuntimeTarget" After="RemoveExistingProducts">WIX_UPGRADE_DETECTED AND NOT UPGRADINGPRODUCTCODE AND CFW_FIXTURE_MAINTENANCE = 1</Custom>
+      <Custom Action="RetireRuntimeTarget" After="RemoveExistingProducts">$(var.UpdateCondition)</Custom>
       <Custom Action="RetireFreshRuntime" After="RetireRuntimeTarget">NOT Installed AND NOT WIX_UPGRADE_DETECTED AND NOT REMOVE~="ALL"</Custom>
+      <?if $(var.QualificationFixture) = 1 ?>
       <Custom Action="FailAfterReplacement" After="RetireFreshRuntime">NOT REMOVE~="ALL" AND CFW_FIXTURE_FAIL = 1</Custom>
+      <?endif ?>
     </InstallExecuteSequence>
   </Product>
 </Wix>

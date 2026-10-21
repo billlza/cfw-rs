@@ -165,7 +165,7 @@ impl Drop for Sid {
     }
 }
 
-fn token() -> Result<OwnedHandle> {
+pub(super) fn token() -> Result<OwnedHandle> {
     let mut original = null_mut();
     if unsafe {
         OpenProcessToken(
@@ -254,6 +254,45 @@ fn token() -> Result<OwnedHandle> {
         return Err(error("set fixture user default DACL"));
     }
     Ok(token)
+}
+
+pub(super) fn require_non_admin_process(process: &OwnedHandle) -> Result<()> {
+    let mut primary = null_mut();
+    if unsafe {
+        OpenProcessToken(
+            process.as_raw_handle(),
+            TOKEN_QUERY | TOKEN_DUPLICATE,
+            &mut primary,
+        )
+    } == 0
+    {
+        return Err(error("open GUI process token"));
+    }
+    let primary = unsafe { OwnedHandle::from_raw_handle(primary) };
+    let mut copied = null_mut();
+    if unsafe {
+        DuplicateTokenEx(
+            primary.as_raw_handle(),
+            TOKEN_QUERY,
+            null(),
+            SecurityIdentification,
+            TokenImpersonation,
+            &mut copied,
+        )
+    } == 0
+    {
+        return Err(error("copy GUI token for group observation"));
+    }
+    let copied = unsafe { OwnedHandle::from_raw_handle(copied) };
+    let admins = Sid::new("S-1-5-32-544")?;
+    let mut member = 1;
+    if unsafe { CheckTokenMembership(copied.as_raw_handle(), admins.0, &mut member) } == 0 {
+        return Err(error("observe GUI administrator membership"));
+    }
+    if member != 0 {
+        return Err("installed GUI has administrator membership".into());
+    }
+    Ok(())
 }
 
 pub(super) fn with_medium_impersonation(action: impl FnOnce() -> Result<()>) -> Result<()> {

@@ -1,4 +1,4 @@
-// WiX 3 fixture build hook. Let WiX generate a fresh PackageCode, then bind
+// WiX 3 payload build hook. Let WiX generate a fresh PackageCode, then bind
 // that identity into the payload before WiX creates the cabinet. The normal
 // file metadata, ICE validation and warning checks remain enabled.
 using System;

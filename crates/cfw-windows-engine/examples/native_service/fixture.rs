@@ -32,6 +32,7 @@ mod authority_wire;
 mod desktop;
 mod desktop_process;
 mod diagnostics;
+mod installed_gui;
 mod installed_host;
 mod job_keeper;
 mod machine_record;
@@ -113,6 +114,9 @@ impl Drop for Descriptor {
 
 pub(super) fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().collect();
+    if args.len() == 2 && args[1] == "--installed-gui-validation" {
+        return installed_gui::run();
+    }
     if args.len() == 2 && args[1] == "--installed-maintenance-validation" {
         return maintenance::run();
     }

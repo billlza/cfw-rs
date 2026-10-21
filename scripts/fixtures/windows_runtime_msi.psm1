@@ -51,48 +51,10 @@ function New-RuntimeMsiFixture {
     param([string]$Runtime, [string]$Desktop, [string]$Engine, [string]$Manifest,
           [string]$ProductCode, [string]$Source, [string]$Evidence)
     Assert-RuntimeMsiOptIn
-    if ($Source -cnotmatch '^[0-9a-f]{40}$' -or (git rev-parse HEAD) -cne $Source -or $LASTEXITCODE -ne 0) {
-        throw 'Runtime MSI source identity mismatch'
-    }
     if ((Get-RuntimeMsiProductState $ProductCode) -ne -1) { throw 'Refusing an existing MSI product registration' }
-    $build = (Get-Content -LiteralPath $Manifest -Raw | ConvertFrom-Json).build_number
-    if ($build -notin @(1, 2)) { throw 'Unexpected native MSI qualification build' }
-    $msiVersion = "0.5.$build"
-    $tools = Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'WiX Toolset v3.14/bin'
-    $candle = Join-Path $tools 'candle.exe'
-    $light = Join-Path $tools 'light.exe'
-    $csc = Join-Path ([Environment]::GetFolderPath('Windows')) 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
-    $wixAssembly = Join-Path $tools 'wix.dll'
-    $wixUtil = Join-Path $tools 'WixUtilExtension.dll'
-    foreach ($path in @($candle, $light, $csc, $wixAssembly, $wixUtil, $Runtime, $Desktop, $Engine, $Manifest)) {
-        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Required MSI qualification input missing: $path" }
-    }
-    $definition = Join-Path $PSScriptRoot 'windows_runtime_installation.wxs'
-    $object = Join-Path $Evidence 'runtime-fixture.wixobj'
-    $package = Join-Path $Evidence 'runtime-fixture.msi'
-    $binder = Join-Path $Evidence 'RuntimeMsiManifestBinder.dll'
-    & $csc /nologo /target:library /warnaserror+ "/reference:$wixAssembly" "/out:$binder" (Join-Path $PSScriptRoot 'RuntimeMsiManifestBinder.cs') 2>&1 |
-        Tee-Object -FilePath (Join-Path $Evidence 'binder-compile.log') | Out-Host
-    if ($LASTEXITCODE -ne 0) { throw 'Runtime MSI manifest binder compilation failed' }
-    $transaction = [guid]::NewGuid().ToString('D')
-    $arguments = @('-nologo', '-wx', '-arch', 'x64', '-out', $object,
-        "-dRuntime=$Runtime", "-dDesktop=$Desktop", "-dEngine=$Engine", "-dManifest=$Manifest",
-        "-dProductCode=$ProductCode", "-dMsiVersion=$msiVersion", "-dMaintenanceTransaction=$transaction", $definition)
-    & $candle @arguments 2>&1 | Tee-Object -FilePath (Join-Path $Evidence 'compile.log') | Out-Host
-    if ($LASTEXITCODE -ne 0) { throw 'Runtime MSI fixture compilation failed' }
-    & $light -nologo -wx -ext $binder -ext $wixUtil -out $package $object 2>&1 | Tee-Object -FilePath (Join-Path $Evidence 'link.log') | Out-Host
-    if ($LASTEXITCODE -ne 0) { throw 'Runtime MSI fixture link or validation failed' }
-    $boundManifest = Get-Content -LiteralPath $Manifest -Raw | ConvertFrom-Json
-    if ($boundManifest.msi_product_code -cne $ProductCode -or $boundManifest.msi_package_code -ceq '{00000000-0000-0000-0000-000000000000}') { throw 'Runtime manifest was not bound to its generated MSI identity' }
-    $result = [pscustomobject]@{
-        source=$Source; path=$package; product_code=$ProductCode; package_code=$boundManifest.msi_package_code; msi_version=$msiVersion
-        package_sha256=(Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash.ToLowerInvariant()
-        maintenance_transaction=$transaction; manifest_sha256=(Get-FileHash -LiteralPath $Manifest -Algorithm SHA256).Hash.ToLowerInvariant()
-        build_number=$boundManifest.build_number
-        desktop_is_fixture=$true; signed=$false; release_accepted=$false
-    }
-    $result | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Evidence 'package.json') -Encoding utf8NoBOM
-    return $result
+    Import-Module (Join-Path $PSScriptRoot '../windows/runtime_msi.psm1') -Force
+    New-WindowsRuntimeMsi -Runtime $Runtime -Desktop $Desktop -Engine $Engine -Manifest $Manifest `
+        -ProductCode $ProductCode -Source $Source -Evidence $Evidence -QualificationFixture
 }
 function Invoke-RuntimeMsi {
     param([Parameter(Mandatory)]$Fixture,

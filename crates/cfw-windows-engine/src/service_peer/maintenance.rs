@@ -15,6 +15,35 @@ pub(crate) struct ServiceControl {
     command: Vec<u16>,
 }
 impl ServiceControl {
+    /// A missing service is observed only from SCM's explicit not-found code.
+    /// Marked-for-deletion, access and I/O errors cannot admit a fresh install.
+    pub(crate) fn require_absent() -> Result<()> {
+        require_system_maintenance_identity()?;
+        let manager = ServiceHandle(unsafe { OpenSCManagerW(null(), null(), SC_MANAGER_CONNECT) });
+        if manager.0.is_null() {
+            return Err(native("open fresh-install SCM"));
+        }
+        let name = service_name_wide(crate::runtime_host::SERVICE_NAME)?;
+        let service = unsafe { OpenServiceW(manager.0, name.as_ptr(), SERVICE_QUERY_STATUS) };
+        if !service.is_null() {
+            let _held = ServiceHandle(service);
+            return Err(ServicePeerError::Maintenance(
+                "fresh installation requires an absent service",
+            ));
+        }
+        let source = io::Error::last_os_error();
+        if source.raw_os_error()
+            == Some(windows_sys::Win32::Foundation::ERROR_SERVICE_DOES_NOT_EXIST as i32)
+        {
+            Ok(())
+        } else {
+            Err(ServicePeerError::Native {
+                operation: "observe fresh-install service absence",
+                source,
+            })
+        }
+    }
+
     pub(crate) fn open(image: VerifiedExecutable) -> Result<Self> {
         require_system_maintenance_identity()?;
         let manager = ServiceHandle(unsafe { OpenSCManagerW(null(), null(), SC_MANAGER_CONNECT) });

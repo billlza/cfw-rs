@@ -96,8 +96,9 @@ function New-RuntimeMsiFixture {
 }
 function Invoke-RuntimeMsi {
     param([Parameter(Mandatory)]$Fixture,
-          [ValidateSet('failed-install','install','failed-maintenance','uninstall')][string]$Operation,
-          [string]$Evidence, [string]$ExpectedProductCode, [string]$ExpectedPackageCode, [string]$ExpectedMsiVersion)
+          [ValidateSet('failed-install','install','failed-maintenance','failed-commit','upgrade','reinstall','uninstall','uninstall-reinstalled')][string]$Operation,
+          [string]$Evidence, [string]$ExpectedProductCode, [string]$ExpectedPackageCode, [string]$ExpectedMsiVersion,
+          [string]$PreviousProductCode)
     Assert-RuntimeMsiOptIn
     if ((Get-FileHash -LiteralPath $Fixture.path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $Fixture.package_sha256) {
         throw 'Runtime MSI fixture bytes changed after authoring'
@@ -105,14 +106,16 @@ function Invoke-RuntimeMsi {
     $log = Join-Path $Evidence "$Operation.log"
     $start = [Diagnostics.ProcessStartInfo]::new((Join-Path ([Environment]::GetFolderPath('System')) 'msiexec.exe'))
     $start.UseShellExecute = $false
-    $mode = if ($Operation -eq 'uninstall') { '/x' } else { '/i' }
+    $mode = if ($Operation -in @('uninstall', 'uninstall-reinstalled')) { '/x' } else { '/i' }
     foreach ($arg in @($mode, $Fixture.path, '/qn', '/norestart', 'REBOOT=ReallySuppress', '/l*vx', $log)) { $start.ArgumentList.Add($arg) }
     if ($Operation -in @('failed-install', 'failed-maintenance')) { $start.ArgumentList.Add('CFW_FIXTURE_FAIL=1') }
-    if ($Operation -eq 'failed-maintenance') { $start.ArgumentList.Add('CFW_FIXTURE_MAINTENANCE=1') }
+    if ($Operation -in @('failed-maintenance', 'failed-commit', 'upgrade')) { $start.ArgumentList.Add('CFW_FIXTURE_MAINTENANCE=1') }
+    if ($Operation -eq 'failed-commit') { $start.ArgumentList.Add('CFW_FIXTURE_FAIL_COMMIT=1') }
     $process = [Diagnostics.Process]::Start($start)
     if ([string]::IsNullOrEmpty($ExpectedProductCode)) { $ExpectedProductCode = $Fixture.product_code }
     $result = [ordered]@{ operation=$Operation; exit_code=$null; completed=$false; product_state=$null
-        registration_product_code=$ExpectedProductCode; replacement_product_state=$null; registration=$null; log=[IO.Path]::GetFileName($log) }
+        registration_product_code=$ExpectedProductCode; replacement_product_state=$null; registration=$null
+        previous_product_code=$null; previous_product_state=$null; log=[IO.Path]::GetFileName($log) }
     try {
         if (-not $process.WaitForExit(180000)) {
             # Killing msiexec's client does not prove the elevated transaction
@@ -122,11 +125,11 @@ function Invoke-RuntimeMsi {
         $result.completed = $true
         $result.exit_code = $process.ExitCode
         $result.product_state = Get-RuntimeMsiProductState $ExpectedProductCode
-        $expectedCode = if ($Operation -in @('failed-install', 'failed-maintenance')) { 1603 } else { 0 }
+        $expectedCode = if ($Operation -in @('failed-install', 'failed-maintenance', 'failed-commit')) { 1603 } else { 0 }
         if ($result.exit_code -ne $expectedCode) {
             throw "Unexpected MSI result for ${Operation}: $($result.exit_code), expected $expectedCode (reboot-required is not accepted as completed replacement)"
         }
-        $expectedState = if ($Operation -in @('failed-install', 'uninstall')) { -1 } else { 5 }
+        $expectedState = if ($Operation -in @('failed-install', 'uninstall', 'uninstall-reinstalled')) { -1 } else { 5 }
         if ($result.product_state -ne $expectedState) { throw "Unexpected MSI registration after ${Operation}: $($result.product_state)" }
         if ($expectedState -eq 5) {
             $result.registration = Get-RuntimeMsiRegistration $ExpectedProductCode
@@ -137,10 +140,18 @@ function Invoke-RuntimeMsi {
                 $result.registration.ProductName -cne 'CFW Runtime Installation Fixture' -or
                 $result.registration.AssignmentType -cne '1') { throw 'Machine MSI registration does not match the original installed package' }
         }
-        if ($Operation -eq 'failed-maintenance') {
+        if ($Operation -in @('failed-maintenance', 'failed-commit')) {
             if ($ExpectedProductCode -ceq $Fixture.product_code) { throw 'MSI rollback fixture did not use a distinct candidate product' }
             $result.replacement_product_state = Get-RuntimeMsiProductState $Fixture.product_code
             if ($result.replacement_product_state -ne -1) { throw 'Failed replacement left a candidate MSI product registered' }
+        }
+        if ($Operation -eq 'upgrade') {
+            if ([string]::IsNullOrEmpty($PreviousProductCode) -or $PreviousProductCode -ceq $Fixture.product_code) {
+                throw 'Successful MSI upgrade requires a distinct previous product'
+            }
+            $result.previous_product_code = $PreviousProductCode
+            $result.previous_product_state = Get-RuntimeMsiProductState $PreviousProductCode
+            if ($result.previous_product_state -ne -1) { throw 'Successful upgrade retained the previous product registration' }
         }
         if (-not (Test-Path -LiteralPath $log -PathType Leaf)) { throw 'MSI verbose transaction log was not created' }
         if ($expectedCode -eq 1603) {
@@ -149,13 +160,18 @@ function Invoke-RuntimeMsi {
                 throw 'MSI reported an error in runtime-maintenance rollback; continued rollback is not a successful helper result'
             }
             $validationIndex = $content.IndexOf('Executing op: CustomActionSchedule(Action=ValidateInstalledRuntime,', [StringComparison]::Ordinal)
-            $failureIndex = $content.IndexOf('CustomAction FailAfterReplacement returned actual error code 1', [StringComparison]::Ordinal)
+            $faultAction = if ($Operation -eq 'failed-commit') { 'FailAfterCommit' } else { 'FailAfterReplacement' }
+            $failureIndex = $content.IndexOf("CustomAction $faultAction returned actual error code 1", [StringComparison]::Ordinal)
             if ($validationIndex -lt 0 -or $failureIndex -le $validationIndex) {
                 throw 'MSI failed outside the injected deferred-action/rollback boundary'
             }
-            if ($Operation -eq 'failed-maintenance' -and
+            if ($Operation -in @('failed-maintenance', 'failed-commit') -and
                 $content.IndexOf('CustomActionRollback(Action=RollbackRuntimeMaintenance,', [StringComparison]::Ordinal) -le $failureIndex) {
                 throw 'MSI did not execute the scheduled runtime-maintenance rollback action'
+            }
+            if ($Operation -eq 'failed-commit') {
+                $commitIndex = $content.IndexOf('"rollback_record_retained":true', [StringComparison]::Ordinal)
+                if ($commitIndex -lt 0 -or $commitIndex -ge $failureIndex) { throw 'Late MSI failure did not follow a completed runtime-maintenance commit' }
             }
         }
         return [pscustomobject]$result

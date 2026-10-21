@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Disposable native qualification package, never a distributable installer.
      Its Desktop is an authenticated test client. It deliberately has no GUI,
-     successful upgrade commit, publisher signature, or automatic service startup. -->
+     publisher signature, or automatic service startup. -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
   <Product Id="$(var.ProductCode)" Name="CFW Runtime Installation Fixture" Language="1033"
            Version="$(var.MsiVersion)" Manufacturer="CFW validation fixture"
@@ -17,6 +17,7 @@
     <Property Id="MSIRESTARTMANAGERCONTROL" Value="DisableShutdown" />
     <Property Id="ARPNOREPAIR" Value="1" />
     <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="CFW_RUNTIME_MANIFEST_SHA256" Value="unbound" />
     <Condition Message="Native MSI qualification requires rollback support.">NOT RollbackDisabled</Condition>
     <Directory Id="TARGETDIR" Name="SourceDir">
       <Directory Id="ProgramFiles64Folder">
@@ -65,10 +66,18 @@
     <SetProperty Id="RollbackRuntimeMaintenance" Before="RollbackRuntimeMaintenance" Sequence="execute"
                  Value="&quot;[#RuntimeFile]&quot; --rollback-maintenance $(var.MaintenanceTransaction)" />
     <SetProperty Id="PrepareRuntimeMaintenance" Before="PrepareRuntimeMaintenance" Sequence="execute"
-                 Value="&quot;[#RuntimeFile]&quot; --prepare-maintenance $(var.MaintenanceTransaction)" />
+                 Value="&quot;[#RuntimeFile]&quot; --prepare-update $(var.MaintenanceTransaction) __CFW_TARGET_MANIFEST_SHA256__" />
+    <SetProperty Id="CommitRuntimeMaintenance" Before="CommitRuntimeMaintenance" Sequence="execute"
+                 Value="&quot;[#RuntimeFile]&quot; --commit-update $(var.MaintenanceTransaction) __CFW_TARGET_MANIFEST_SHA256__" />
+    <SetProperty Id="FreshInstallMaintenance" Before="FreshInstallMaintenance" Sequence="execute"
+                 Value="&quot;[#RuntimeFile]&quot; --fresh-install-maintenance __CFW_TARGET_MANIFEST_SHA256__" />
     <CustomAction Id="RollbackRuntimeMaintenance" BinaryKey="WixCA" DllEntry="WixQuietExec64"
                   Execute="rollback" Impersonate="no" Return="check" />
     <CustomAction Id="PrepareRuntimeMaintenance" BinaryKey="WixCA" DllEntry="WixQuietExec64"
+                  Execute="deferred" Impersonate="no" Return="check" />
+    <CustomAction Id="CommitRuntimeMaintenance" BinaryKey="WixCA" DllEntry="WixQuietExec64"
+                  Execute="commit" Impersonate="no" Return="check" />
+    <CustomAction Id="FreshInstallMaintenance" BinaryKey="WixCA" DllEntry="WixQuietExec64"
                   Execute="deferred" Impersonate="no" Return="check" />
     <CustomAction Id="ValidateInstalledRuntime" FileKey="RuntimeFile" ExeCommand="--check-installation"
                   Execute="deferred" Impersonate="no" Return="check" />
@@ -77,10 +86,15 @@
          error path or compiler check is bypassed to inject this failure. -->
     <CustomAction Id="FailAfterReplacement" FileKey="RuntimeFile" ExeCommand="--cfw-msi-fixture-failure"
                   Execute="deferred" Impersonate="no" Return="check" />
+    <CustomAction Id="FailAfterCommit" FileKey="RuntimeFile" ExeCommand="--cfw-msi-fixture-failure"
+                  Execute="commit" Impersonate="no" Return="check" />
     <InstallExecuteSequence>
       <Custom Action="RollbackRuntimeMaintenance" Before="PrepareRuntimeMaintenance">(Installed OR WIX_UPGRADE_DETECTED) AND NOT UPGRADINGPRODUCTCODE AND CFW_FIXTURE_MAINTENANCE = 1</Custom>
       <Custom Action="PrepareRuntimeMaintenance" After="InstallInitialize">(Installed OR WIX_UPGRADE_DETECTED) AND NOT UPGRADINGPRODUCTCODE AND CFW_FIXTURE_MAINTENANCE = 1</Custom>
+      <Custom Action="FreshInstallMaintenance" Before="InstallServices">NOT Installed AND NOT WIX_UPGRADE_DETECTED AND NOT REMOVE~="ALL"</Custom>
       <Custom Action="ValidateInstalledRuntime" After="InstallServices">NOT REMOVE~="ALL"</Custom>
+      <Custom Action="CommitRuntimeMaintenance" After="ValidateInstalledRuntime">WIX_UPGRADE_DETECTED AND NOT UPGRADINGPRODUCTCODE AND CFW_FIXTURE_MAINTENANCE = 1</Custom>
+      <Custom Action="FailAfterCommit" After="CommitRuntimeMaintenance">WIX_UPGRADE_DETECTED AND NOT UPGRADINGPRODUCTCODE AND CFW_FIXTURE_FAIL_COMMIT = 1</Custom>
       <Custom Action="FailAfterReplacement" After="RemoveExistingProducts">NOT REMOVE~="ALL" AND CFW_FIXTURE_FAIL = 1</Custom>
     </InstallExecuteSequence>
   </Product>

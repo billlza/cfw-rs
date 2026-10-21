@@ -29,11 +29,27 @@ fn run() -> Result<(), String> {
     installation
         .require_runtime_process()
         .map_err(|e| e.to_string())?;
-    if args.len() == 2
+    if args.len() == 2 && args[0] == "--fresh-install-maintenance" {
+        let report = installation
+            .retire_completed_maintenance_for_fresh_install(
+                args[1]
+                    .to_str()
+                    .ok_or("target manifest digest is not Unicode")?,
+            )
+            .map_err(|e| e.to_string())?;
+        println!("{report}");
+        return Ok(());
+    }
+    if (args.len() == 2
         && matches!(
             args[0].to_str(),
             Some("--prepare-maintenance" | "--rollback-maintenance")
-        )
+        ))
+        || (args.len() == 3
+            && matches!(
+                args[0].to_str(),
+                Some("--prepare-update" | "--commit-update")
+            ))
     {
         let value = args[1]
             .to_str()
@@ -43,10 +59,24 @@ fn run() -> Result<(), String> {
         if transaction.is_nil() || transaction.to_string() != value {
             return Err("maintenance transaction must be a canonical non-nil UUID".into());
         }
-        let report = if args[0] == "--prepare-maintenance" {
-            installation.prepare_service_maintenance(transaction)
-        } else {
-            installation.rollback_service_maintenance(transaction)
+        let report = match args[0].to_str() {
+            Some("--prepare-maintenance") => installation.prepare_service_maintenance(transaction),
+            Some("--rollback-maintenance") => {
+                installation.rollback_service_maintenance(transaction)
+            }
+            Some("--prepare-update") => installation.prepare_update_maintenance(
+                transaction,
+                args[2]
+                    .to_str()
+                    .ok_or("target manifest digest is not Unicode")?,
+            ),
+            Some("--commit-update") => installation.commit_update_maintenance(
+                transaction,
+                args[2]
+                    .to_str()
+                    .ok_or("target manifest digest is not Unicode")?,
+            ),
+            _ => return Err("unexpected maintenance operation".into()),
         }
         .map_err(|e| e.to_string())?;
         println!("{report}");
@@ -81,7 +111,7 @@ fn run() -> Result<(), String> {
         return runtime_host::run_agent(installation).map_err(|e| e.to_string());
     }
     Err(
-        "expected SCM, --check-installation [manifest-sha256], --inspect-update, installed --user-agent or SYSTEM --prepare-maintenance/--rollback-maintenance with a transaction UUID"
+        "expected SCM, --check-installation [manifest-sha256], --inspect-update, installed --user-agent, SYSTEM --prepare-maintenance/--rollback-maintenance with a transaction UUID, or SYSTEM --prepare-update/--commit-update with a transaction UUID and target manifest SHA-256"
             .into(),
     )
 }

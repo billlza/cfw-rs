@@ -67,6 +67,20 @@ public sealed class RuntimeMsiManifestBinder : BinderExtensionEx
         }
         File.WriteAllBytes(file.Source, bytes);
         action[3] = "--check-installation " + digest;
+        Row property = FindRow(output.Tables["Property"], "CFW_RUNTIME_MANIFEST_SHA256");
+        if ((string)property[1] != "unbound") { throw new InvalidOperationException("Unexpected target manifest property"); }
+        property[1] = digest;
+        foreach (string name in new[] { "PrepareRuntimeMaintenance", "CommitRuntimeMaintenance", "FreshInstallMaintenance" })
+        {
+            Row setter = FindRow(output.Tables["CustomAction"], "Set" + name);
+            string command = (string)setter[3];
+            const string placeholderDigest = "__CFW_TARGET_MANIFEST_SHA256__";
+            if ((string)setter[2] != name || command.Split(new[] { placeholderDigest }, StringSplitOptions.None).Length != 2)
+            {
+                throw new InvalidOperationException("Unexpected target-bound maintenance command");
+            }
+            setter[3] = command.Replace(placeholderDigest, digest);
+        }
         // The extended binder's supported updated-file table makes WiX
         // recalculate size/hash before cabinet creation and ICE validation.
         output.Tables["WixBindUpdatedFiles"].CreateRow(null)[0] = "ManifestFile";

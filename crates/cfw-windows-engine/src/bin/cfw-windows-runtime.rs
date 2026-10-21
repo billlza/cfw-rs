@@ -52,7 +52,16 @@ fn run() -> Result<(), String> {
         println!("{report}");
         return Ok(());
     }
-    if args == [std::ffi::OsStr::new("--check-installation")] {
+    if (args.len() == 1 || args.len() == 2) && args[0] == "--check-installation" {
+        if let Some(expected) = args.get(1) {
+            installation
+                .require_manifest_sha256(
+                    expected
+                        .to_str()
+                        .ok_or("expected manifest digest is not Unicode")?,
+                )
+                .map_err(|e| e.to_string())?;
+        }
         println!(
             "{}",
             serde_json::json!({
@@ -72,7 +81,7 @@ fn run() -> Result<(), String> {
         return runtime_host::run_agent(installation).map_err(|e| e.to_string());
     }
     Err(
-        "expected SCM, --check-installation, --inspect-update, installed --user-agent or SYSTEM --prepare-maintenance/--rollback-maintenance with a transaction UUID"
+        "expected SCM, --check-installation [manifest-sha256], --inspect-update, installed --user-agent or SYSTEM --prepare-maintenance/--rollback-maintenance with a transaction UUID"
             .into(),
     )
 }

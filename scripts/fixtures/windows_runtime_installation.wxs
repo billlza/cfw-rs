@@ -1,14 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Disposable native qualification package, never a distributable installer.
      Its Desktop is an authenticated test client. It deliberately has no GUI,
-     upgrade authoring, publisher signature, or automatic service startup. -->
+     successful upgrade commit, publisher signature, or automatic service startup. -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
   <Product Id="$(var.ProductCode)" Name="CFW Runtime Installation Fixture" Language="1033"
            Version="0.5.0" Manufacturer="CFW validation fixture"
            UpgradeCode="{7ECD99B2-CFE4-51EA-868B-544E2A12E25D}">
-    <Package Id="$(var.PackageCode)" InstallerVersion="500" Compressed="yes"
+    <Package InstallerVersion="500" Compressed="yes"
              InstallScope="perMachine" Platform="x64" />
     <MediaTemplate EmbedCab="yes" />
+    <!-- Same release version, distinct test build/product identities. This
+         allows the fixture to reach real RemoveExistingProducts rollback;
+         release/downgrade admission must be supplied by the product updater. -->
+    <MajorUpgrade Schedule="afterInstallInitialize" AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer runtime fixture is installed." />
     <Property Id="MSIRESTARTMANAGERCONTROL" Value="DisableShutdown" />
     <Property Id="ARPNOREPAIR" Value="1" />
     <Property Id="ARPNOMODIFY" Value="1" />
@@ -68,8 +73,8 @@
     <CustomAction Id="FailAfterInstallServices" FileKey="RuntimeFile" ExeCommand="--cfw-msi-fixture-failure"
                   Execute="deferred" Impersonate="no" Return="check" />
     <InstallExecuteSequence>
-      <Custom Action="RollbackRuntimeMaintenance" After="InstallInitialize">Installed AND CFW_FIXTURE_MAINTENANCE = 1</Custom>
-      <Custom Action="PrepareRuntimeMaintenance" After="RollbackRuntimeMaintenance">Installed AND CFW_FIXTURE_MAINTENANCE = 1</Custom>
+      <Custom Action="RollbackRuntimeMaintenance" Before="PrepareRuntimeMaintenance">(Installed OR WIX_UPGRADE_DETECTED) AND NOT UPGRADINGPRODUCTCODE AND CFW_FIXTURE_MAINTENANCE = 1</Custom>
+      <Custom Action="PrepareRuntimeMaintenance" Before="RemoveExistingProducts">(Installed OR WIX_UPGRADE_DETECTED) AND NOT UPGRADINGPRODUCTCODE AND CFW_FIXTURE_MAINTENANCE = 1</Custom>
       <Custom Action="ValidateInstalledRuntime" After="InstallServices">NOT REMOVE~="ALL"</Custom>
       <Custom Action="FailAfterInstallServices" After="ValidateInstalledRuntime">NOT REMOVE~="ALL" AND CFW_FIXTURE_FAIL = 1</Custom>
     </InstallExecuteSequence>

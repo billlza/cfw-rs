@@ -27,6 +27,7 @@ $msiReport = [ordered]@{
     failed_fresh_install=$null; installed=$null; failed_maintenance=$null; uninstalled=$null
     fresh_rollback_removed_files_and_service=$false; maintenance_rollback=$null
     uninstall_removed_files_and_service=$false; desktop_is_fixture=$true
+    wrong_manifest_expectations_rejected=$false; new_build_manifest_rollback_exercised=$false
     new_version_upgrade_exercised=$false; updater_handoff_exercised=$false; release_accepted=$false
 }
 $failure = $null
@@ -62,7 +63,7 @@ try {
     $manifest = [ordered]@{
         schema_version = 2; product_version = '0.5.0'; build_number = 1
         msi_product_code = '{E66ACF84-7639-4707-BC01-0A370C9B2E3E}'
-        msi_package_code = '{E58D1FC6-A003-4849-900C-45D6861E75D9}'
+        msi_package_code = '{00000000-0000-0000-0000-000000000000}'
         architecture = 'x86_64'; engine_version = $EngineVersion
         runtime_sha256 = (Get-FileHash -LiteralPath $Runtime -Algorithm SHA256).Hash.ToLowerInvariant()
         desktop_sha256 = (Get-FileHash -LiteralPath $DesktopFixture -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -71,7 +72,19 @@ try {
     $manifestInput = Join-Path $msiEvidence 'manifest.json'
     $manifest | ConvertTo-Json | Set-Content -LiteralPath $manifestInput -Encoding utf8NoBOM
     $msi = New-RuntimeMsiFixture -Runtime $Runtime -Desktop $DesktopFixture -Engine $Engine -Manifest $manifestInput `
-        -ProductCode $manifest.msi_product_code -PackageCode $manifest.msi_package_code -Source $Source -Evidence $msiEvidence
+        -ProductCode $manifest.msi_product_code -Source $Source -Evidence $msiEvidence
+    $manifest.msi_package_code = $msi.package_code
+    $candidateEvidence = Join-Path $msiEvidence 'candidate'
+    New-Item -ItemType Directory -Path $candidateEvidence | Out-Null
+    $candidateManifest = [ordered]@{}
+    foreach ($key in $manifest.Keys) { $candidateManifest[$key] = $manifest[$key] }
+    $candidateManifest.build_number = 2
+    $candidateManifest.msi_product_code = [guid]::NewGuid().ToString('B').ToUpperInvariant()
+    $candidateManifest.msi_package_code = '{00000000-0000-0000-0000-000000000000}'
+    $candidateInput = Join-Path $candidateEvidence 'manifest.json'
+    $candidateManifest | ConvertTo-Json | Set-Content -LiteralPath $candidateInput -Encoding utf8NoBOM
+    $msiCandidate = New-RuntimeMsiFixture -Runtime $Runtime -Desktop $DesktopFixture -Engine $Engine -Manifest $candidateInput `
+        -ProductCode $candidateManifest.msi_product_code -Source $Source -Evidence $candidateEvidence
     $msiInFlight = 'failed-install'
     $msiReport.failed_fresh_install = Invoke-RuntimeMsi -Fixture $msi -Operation $msiInFlight -Evidence $msiEvidence
     $msiInFlight = $null
@@ -87,7 +100,7 @@ try {
         throw 'MSI installed a different runtime manifest'
     }
     $manifestBytes = [IO.File]::ReadAllBytes($manifestPath)
-    $check = & $runtimePath --check-installation
+    $check = & $runtimePath --check-installation $msi.manifest_sha256
     if ($LASTEXITCODE -ne 0 -or -not ($check | ConvertFrom-Json).installation_verified) { throw 'Protected package was not admitted' }
     $release = ($check | ConvertFrom-Json).release
     if ($release.version -cne '0.5.0' -or $release.build -ne 1 -or
@@ -96,6 +109,11 @@ try {
     }
     $cases.Add('protected_fixed_location_package_admitted')
     $cases.Add('protected_release_build_and_msi_identities_observed')
+    foreach ($expected in @($msiCandidate.manifest_sha256, 'invalid')) {
+        $rejected = & $runtimePath --check-installation $expected 2>&1
+        if ($LASTEXITCODE -eq 0) { throw 'Wrong expected installed manifest was accepted' }
+    }
+    $msiReport.wrong_manifest_expectations_rejected = $true
     foreach ($mode in @('--prepare-maintenance', '--rollback-maintenance')) {
         $rejected = & $runtimePath $mode 'c40a7b13-74b7-4543-a5c0-55de82b9dad6' 2>&1
         if ($LASTEXITCODE -eq 0 -or "$rejected" -notmatch 'requires the SYSTEM primary identity') {
@@ -182,8 +200,9 @@ try {
     $cases.Add('scm_stop_waits_for_off_and_process_exit')
 
     # Exercise the real deferred SYSTEM preparation and rollback entrypoints
-    # inside a failing Windows Installer repair. The package bytes are the same;
-    # this proves rollback of the original installation, not a version upgrade.
+    # inside a failing major-upgrade transaction. The test build has different manifest bytes
+    # and package identity. The deferred check requires those exact new bytes
+    # before the injected failure; rollback must restore the original bytes.
     Invoke-ServiceCommand @('start', $serviceName)
     $service = [System.ServiceProcess.ServiceController]::new($serviceName)
     try { $service.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(30)) } finally { $service.Dispose() }
@@ -196,13 +215,13 @@ try {
     $null = $oldProcess.Handle
     try {
         $msiInFlight = 'failed-maintenance'
-        $msiReport.failed_maintenance = Invoke-RuntimeMsi -Fixture $msi -Operation $msiInFlight -Evidence $msiEvidence
+        $msiReport.failed_maintenance = Invoke-RuntimeMsi -Fixture $msiCandidate -Operation $msiInFlight -Evidence $msiEvidence -ExpectedProductCode $msi.product_code -ExpectedPackageCode $msi.package_code
         $msiInFlight = $null
         if (-not $oldProcess.WaitForExit(10000) -or $oldProcess.ExitCode -ne 0) { throw 'MSI maintenance did not retire the original service process cleanly' }
     } finally { $oldProcess.Dispose() }
     $observed = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
     if ($observed.State -cne 'Stopped' -or $observed.StartMode -cne 'Manual') { throw 'MSI rollback did not restore the original stopped, demand-start service' }
-    $check = & $runtimePath --check-installation
+    $check = & $runtimePath --check-installation $msi.manifest_sha256
     if ($LASTEXITCODE -ne 0 -or -not ($check | ConvertFrom-Json).installation_verified) { throw 'MSI rollback did not restore an admitted installation' }
     if ((Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash -cne (Get-FileHash -LiteralPath $manifestInput -Algorithm SHA256).Hash) { throw 'MSI rollback changed the installed manifest' }
     Invoke-ServiceCommand @('start', $serviceName)
@@ -219,6 +238,7 @@ try {
         original_start_type_restored=$true; original_manifest_restored=$true
         restart_after_rollback=$true; rollback_started_runtime=$false; active_proxy_drain_exercised=$false
     }
+    $msiReport.new_build_manifest_rollback_exercised = $true
 } catch { $failure = $_.ToString() }
 finally {
     try {

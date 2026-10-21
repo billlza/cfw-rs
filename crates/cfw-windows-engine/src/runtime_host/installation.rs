@@ -62,6 +62,19 @@ impl InstalledRuntime {
         }
     }
 
+    /// Compare the exact, already held protected manifest with an installer's
+    /// expected bytes. This observes installation identity; it neither accepts
+    /// a publisher nor authorizes replacement or maintenance completion.
+    pub fn require_manifest_sha256(&self, expected: &str) -> Result<()> {
+        Manifest::digest(expected)?;
+        if expected != self.manifest_sha256 {
+            return Err(HostError::State(
+                "installed manifest differs from the expected release",
+            ));
+        }
+        Ok(())
+    }
+
     /// Fixed native known-folder location, not an environment variable, cwd,
     /// incoming request or adjacent unsigned hash receipt. Installer-managed
     /// ownership/DACL is required before any manifest field is consumed.

@@ -407,21 +407,10 @@ pub(super) fn serve(name: &str, status_handle: SERVICE_STATUS_HANDLE) -> Result<
         failures.push(error);
     }
     let recorded = (|| -> Result<()> {
-        let bytes = timing
+        timing
             .lock()
             .map_err(|_| "fixture request timing lock poisoned")?
-            .encode(std::process::id())?;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(
-                authority_journal::root()?
-                    .join(format!("service-request-timing-{}.txt", std::process::id())),
-            )
-            .map_err(|e| e.to_string())?;
-        file.write_all(&bytes)
-            .and_then(|()| file.sync_all())
-            .map_err(|e| e.to_string())
+            .persist(&authority_journal::root()?, std::process::id())
     })();
     if let Err(error) = recorded {
         failures.push(format!("request timing receipt: {error}"));

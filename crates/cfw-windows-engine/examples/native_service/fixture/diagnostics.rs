@@ -31,11 +31,12 @@ pub(super) fn collect_fixture_diagnostics(root: &Path, output: &Path) -> Result<
             return Err("invalid fixture diagnostic file".into());
         }
         let bytes = std::fs::read(entry.path()).map_err(|e| e.to_string())?;
+        let destination = output.join(name);
         let mut target = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(output.join(name))
-            .map_err(|e| e.to_string())?;
+            .open(&destination)
+            .map_err(|e| format!("create diagnostic {}: {e}", destination.display()))?;
         std::io::Write::write_all(&mut target, &bytes).map_err(|e| e.to_string())?;
         target.sync_all().map_err(|e| e.to_string())?;
     }
@@ -58,8 +59,12 @@ mod tests {
             )
             .unwrap();
         let bytes = trace.encode(123).unwrap();
-        let name = "service-request-timing-123.txt";
-        std::fs::write(root.path().join(name), &bytes).unwrap();
+        let record: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let name = format!(
+            "service-request-timing-{}-123.txt",
+            record["trace_id"].as_str().unwrap()
+        );
+        trace.persist(root.path(), 123).unwrap();
         std::fs::write(
             root.path().join("fixture-installation.json"),
             b"private descriptor",
@@ -69,6 +74,44 @@ mod tests {
         root.close().unwrap();
         assert_eq!(std::fs::read(output.path().join(name)).unwrap(), bytes);
         assert!(!output.path().join("fixture-installation.json").exists());
+    }
+
+    #[test]
+    fn reused_process_id_keeps_both_service_timing_receipts() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        for root in [first.path(), second.path()] {
+            let trace = super::super::request_timing::Trace::new("a".repeat(40)).unwrap();
+            trace.persist(root, 123).unwrap();
+            assert!(trace.persist(root, 123).is_err());
+            collect_fixture_diagnostics(root, output.path()).unwrap();
+            let error = collect_fixture_diagnostics(root, output.path()).unwrap_err();
+            assert!(error.contains("create diagnostic"));
+            assert!(error.contains("service-request-timing-"));
+        }
+        first.close().unwrap();
+        second.close().unwrap();
+        let files: Vec<_> = std::fs::read_dir(output.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(files.len(), 2);
+        let mut trace_ids = std::collections::HashSet::new();
+        for file in files {
+            let record: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+            let trace_id = record["trace_id"].as_str().unwrap();
+            assert!(!uuid::Uuid::parse_str(trace_id).unwrap().is_nil());
+            assert!(trace_ids.insert(trace_id.to_owned()));
+            assert_eq!(
+                file.file_name().unwrap().to_str().unwrap(),
+                format!("service-request-timing-{trace_id}-123.txt")
+            );
+            assert_eq!(record["document"], "cfw-native-authority-request-timing-v2");
+            assert_eq!(record["process_id"], 123);
+            assert_eq!(record["source"], "a".repeat(40));
+        }
     }
 }
 
@@ -90,7 +133,8 @@ pub(super) fn with_diagnostics(
     };
     match (result, diagnostics) {
         (Ok(()), Ok(())) => Ok(()),
-        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(format!("fixture diagnostic collection: {error}")),
         (Err(test), Err(diagnostics)) => {
             Err(format!("{test}; diagnostic collection: {diagnostics}"))
         }

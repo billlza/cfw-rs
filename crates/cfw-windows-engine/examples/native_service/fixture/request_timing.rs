@@ -1,6 +1,7 @@
 //! Bounded, nonsecret fixture diagnostics. Never changes a product deadline.
 use serde::Serialize;
-use std::{collections::VecDeque, time::Instant};
+use std::{collections::VecDeque, io::Write, path::Path, time::Instant};
+use uuid::Uuid;
 
 const MAX_EVENTS: usize = 64;
 const MAX_BYTES: usize = 16384;
@@ -36,6 +37,7 @@ pub(super) struct Request {
 
 pub(super) struct Trace {
     source: String,
+    trace_id: Uuid,
     started: Instant,
     requests: u64,
     event_count: u64,
@@ -52,6 +54,7 @@ impl Trace {
         }
         Ok(Self {
             source,
+            trace_id: Uuid::new_v4(),
             started: Instant::now(),
             requests: 0,
             event_count: 0,
@@ -118,8 +121,9 @@ impl Trace {
             return Err("request timing process identity is invalid".into());
         }
         let bytes = serde_json::to_vec(&serde_json::json!({
-            "document":"cfw-native-authority-request-timing-v1",
-            "source":self.source,"process_id":process_id,"requests":self.requests,
+            "document":"cfw-native-authority-request-timing-v2",
+            "source":self.source,"trace_id":self.trace_id,
+            "process_id":process_id,"requests":self.requests,
             "event_count":self.event_count,"omitted_events":self.event_count-self.events.len() as u64,
             "events":self.events,
         })).map_err(|e| e.to_string())?;
@@ -127,6 +131,24 @@ impl Trace {
             return Err("request timing record exceeds its bound".into());
         }
         Ok(bytes)
+    }
+
+    pub(super) fn persist(&self, root: &Path, process_id: u32) -> Result<()> {
+        let bytes = self.encode(process_id)?;
+        // SCM can reuse a PID for a later fixture process. Each service run
+        // needs its own receipt even when independent roots share an archive.
+        let path = root.join(format!(
+            "service-request-timing-{}-{process_id}.txt",
+            self.trace_id
+        ));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|e| format!("create request timing receipt {}: {e}", path.display()))?;
+        file.write_all(&bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(|e| format!("write request timing receipt {}: {e}", path.display()))
     }
 }
 

@@ -1033,7 +1033,7 @@ mod tests {
     #[test]
     fn a_preparation_owns_the_slot_before_its_slow_checks_and_honours_a_cancellation() {
         let source = include_str!("updater.rs")
-            .split("#[cfg(test)]")
+            .split("\nmod tests {")
             .next()
             .expect("production source");
         let prepare = source
@@ -1073,7 +1073,7 @@ mod tests {
     #[test]
     fn the_hand_off_opens_the_installer_log_before_it_owns_the_lifecycle() {
         let source = include_str!("updater.rs")
-            .split("#[cfg(test)]")
+            .split("\nmod tests {")
             .next()
             .expect("production source");
         let hand_off = source
@@ -1152,7 +1152,7 @@ mod tests {
     #[test]
     fn nothing_can_fail_out_of_the_hand_off_once_the_core_is_stopped() {
         let source = include_str!("updater.rs")
-            .split("#[cfg(test)]")
+            .split("\nmod tests {")
             .next()
             .expect("production source");
         let hand_off = source
@@ -1185,7 +1185,7 @@ mod tests {
     #[test]
     fn the_installer_is_started_only_as_its_exact_mode_with_a_private_log() {
         let source = include_str!("updater.rs")
-            .split("#[cfg(test)]")
+            .split("\nmod tests {")
             .next()
             .expect("production source");
         let spawn = source

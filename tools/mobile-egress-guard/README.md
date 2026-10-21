@@ -104,6 +104,22 @@ router admin passwords or tokens in policy JSON.
 Apple launchd can run the one-shot monitor periodically after a real deployment
 has been validated. No daemon is auto-installed by this prototype.
 
+## Firmware source intake (offline only)
+
+When NETGEAR supplies a source archive, the separate analyzer can inventory
+it without extracting or executing any of its content:
+
+    python3 firmware_intake.py /path/to/received-vendor-source.tgz
+
+The output contains a SHA-256 digest, bounded member counts, declared content
+size, suspicious duplicate paths, link counts and a small source-path sample.
+Absolute paths and traversal are rejected. **An OSS tar archive is not a
+flashable firmware image or evidence that arbitrary applications can run on
+the hotspot.** Do not copy build scripts to the M7 Pro or try unknown images.
+
+See MR7450.md for verified model evidence, device-specific documentation,
+remaining execution-environment questions and safe fallback architecture.
+
 ## VPS enforcement requirements (not yet implemented)
 
 1. **Default deny**: peer-specific admission with unique, revocable keys,

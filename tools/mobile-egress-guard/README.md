@@ -42,6 +42,11 @@ A Mac temporary gateway is a separate fallback, not evidence of on-router suppor
   observation/policy/state errors. Exit 1 must itself trigger an operator alert:
   absence of telemetry is not evidence that the network is safe.
 
+The policy fields session_alert_bytes and rate_alert_bps are **alert thresholds
+only**: they neither disconnect a peer nor rate-limit traffic. An empty
+observation, unknown peer or absent configured peer is reported as a problem,
+not interpreted as safe idle.
+
 **Counters are WireGuard transfer values since the peer/interface last
 started, not the SIM's billed data and not accurate daily/monthly usage.**
 After restarts these counters may reset. This observer explicitly reports
@@ -67,8 +72,8 @@ peer key (the example below is a synthetic test key, never deploy it):
         {
           "id": "test-user",
           "public_key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
-          "session_limit_bytes": 104857600,
-          "rate_limit_bps": 8000000
+          "session_alert_bytes": 104857600,
+          "rate_alert_bps": 8000000
         }
       ]
     }

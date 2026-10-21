@@ -101,18 +101,21 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(handler.calls, 1)
         self.assertEqual(len(value["attempts"]), 1)
 
-    def test_connection_refusal_stops_at_the_startup_bound(self):
+    def test_unavailable_endpoint_stops_at_the_startup_bound(self):
         with socket.socket() as reservation:
             reservation.bind(("127.0.0.1", 0))
             endpoint = f"http://127.0.0.1:{reservation.getsockname()[1]}"
-        # A bound, non-listening socket timed out on macOS instead of refusing
-        # the connection. Close it to exercise actual ConnectionRefused; an
-        # unrelated listener acquiring the port would fail these assertions.
+        # The closed endpoint can refuse the connection or reach HttpClient's
+        # observation deadline (both were observed on native hosts). Neither
+        # outcome may become ready or extend the overall startup budget.
         started = time.monotonic()
         value = self.probe(endpoint, budget=1)
         self.assertIsNone(value["result"])
         self.assertIn("WebView2 startup deadline", value["failure"])
-        self.assertTrue(all(attempt["connection_refused"] for attempt in value["attempts"]))
+        self.assertTrue(all(
+            attempt["connection_refused"] or attempt["request_timed_out"]
+            for attempt in value["attempts"]
+        ), value["attempts"])
         self.assertGreaterEqual(len(value["attempts"]), 1)
         self.assertLess(time.monotonic() - started, 6)
 

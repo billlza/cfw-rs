@@ -318,11 +318,49 @@ func assertPacketUDPFrame(t *testing.T, packet []byte, source, destination netip
 		t.Fatalf("truncated UDP response: %d bytes", len(udp))
 	}
 	if int(binary.BigEndian.Uint16(udp[4:6])) != len(udp) || binary.BigEndian.Uint16(udp[:2]) != source.Port() ||
-		binary.BigEndian.Uint16(udp[2:4]) != destination.Port() || binary.BigEndian.Uint16(udp[6:8]) == 0 ||
-		packetChecksum(packetUDPPseudo(source.Addr(), destination.Addr(), udp)) != 0 || !bytes.Equal(udp[8:], payload) {
+		binary.BigEndian.Uint16(udp[2:4]) != destination.Port() ||
+		!packetUDPChecksumValid(source.Addr(), destination.Addr(), udp) || !bytes.Equal(udp[8:], payload) {
 		t.Fatalf("invalid UDP response: ipv4=%t source_port=%d/%d destination_port=%d/%d declared_bytes=%d actual_bytes=%d checksum=%#04x residual=%#04x payload_equal=%t payload_bytes=%d/%d",
 			source.Addr().Is4(), binary.BigEndian.Uint16(udp[:2]), source.Port(), binary.BigEndian.Uint16(udp[2:4]), destination.Port(),
 			binary.BigEndian.Uint16(udp[4:6]), len(udp), binary.BigEndian.Uint16(udp[6:8]),
 			packetChecksum(packetUDPPseudo(source.Addr(), destination.Addr(), udp)), bytes.Equal(udp[8:], payload), len(udp)-8, len(payload))
+	}
+}
+
+func packetUDPChecksumValid(source, destination netip.Addr, udp []byte) bool {
+	if len(udp) < 8 {
+		return false
+	}
+	if binary.BigEndian.Uint16(udp[6:8]) == 0 {
+		// RFC 768 permits an omitted IPv4 UDP checksum. The frozen
+		// sing-tun UDPBackWriter uses that form. RFC 8200 section 8.1
+		// requires an IPv6 checksum for these ordinary UDP flows.
+		return source.Is4() && destination.Is4()
+	}
+	return packetChecksum(packetUDPPseudo(source, destination, udp)) == 0
+}
+
+func TestPacketUDPChecksumContractRejectsCorruptionAndMissingIPv6Checksum(t *testing.T) {
+	for _, item := range []struct {
+		source, destination string
+		header              int
+	}{
+		{"192.0.2.2", "192.0.2.123", 20}, {"2001:db8:1::2", "2001:db8:2::123", 40},
+	} {
+		source, destination := netip.MustParseAddr(item.source), netip.MustParseAddr(item.destination)
+		packet := packetUDPFrame(netip.AddrPortFrom(source, 34567), netip.AddrPortFrom(destination, 54321), []byte("checksum-contract"))
+		udp := packet[item.header:]
+		if !packetUDPChecksumValid(source, destination, udp) {
+			t.Fatal("correct checksum was rejected")
+		}
+		corrupt := bytes.Clone(udp)
+		corrupt[len(corrupt)-1] ^= 1
+		if packetUDPChecksumValid(source, destination, corrupt) {
+			t.Fatal("corrupt nonzero checksum was accepted")
+		}
+		udp[6], udp[7] = 0, 0
+		if packetUDPChecksumValid(source, destination, udp) != source.Is4() {
+			t.Fatal("IPv4 and IPv6 checksum omission rules were conflated")
+		}
 	}
 }

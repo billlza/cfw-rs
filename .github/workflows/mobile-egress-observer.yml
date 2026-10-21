@@ -31,6 +31,6 @@ jobs:
         with:
           python-version: "3.13"
       - name: Compile observer
-        run: python -m py_compile tools/mobile-egress-guard/observer.py
+        run: python -m py_compile tools/mobile-egress-guard/observer.py tools/mobile-egress-guard/firmware_intake.py
       - name: Validate offline security and accounting contracts
         run: python -m unittest discover -s tools/mobile-egress-guard/tests -v

@@ -52,12 +52,17 @@ fn start(service: &Installed) -> Result<()> {
     service.wait(SERVICE_RUNNING)
 }
 fn wait_runtime_quiet(installation: &InstalledRuntime) -> Result<()> {
-    let image = installation.runtime().map_err(|e| e.to_string())?;
+    // Keep the admitted bytes pinned while querying the public fixed layout;
+    // the executable capability's internal path accessor stays private.
+    let _held_image = installation.runtime().map_err(|e| e.to_string())?;
+    let path = InstalledRuntime::desktop_path()
+        .map_err(|e| e.to_string())?
+        .with_file_name(cfw_windows_engine::runtime_host::RUNTIME_FILE);
     let observer = NativePeerProcess::open(std::process::id()).map_err(|e| e.to_string())?;
     let deadline = Instant::now() + LIMIT;
     loop {
         let users = observer
-            .processes_using_file(image.path())
+            .processes_using_file(&path)
             .map_err(|e| e.to_string())?;
         if users
             .iter()

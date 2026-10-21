@@ -11,7 +11,7 @@ import time
 import unittest
 
 
-MODULE = Path(__file__).resolve().parents[1] / "windows" / "webview_probe.psm1"
+MODULE = Path(__file__).resolve().parents[1] / "webview_probe.psm1"
 POWERSHELL = r"""
 param([string]$ProbeModule, [string]$Endpoint, [int]$Budget)
 $ErrorActionPreference = 'Stop'

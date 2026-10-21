@@ -117,6 +117,14 @@ pub enum Error {
     Exited,
     #[error("Windows engine emergency cleanup could not be verified")]
     Cleanup,
+    #[error(
+        "Windows inspection Job retirement population is incomplete: observed={observed}, total={total}, active={active}"
+    )]
+    JobRetirementIncomplete {
+        observed: u32,
+        total: u32,
+        active: u32,
+    },
     #[error("Windows engine operation failed ({operation}); cleanup also failed ({cleanup})")]
     CleanupFailed {
         operation: Box<Error>,

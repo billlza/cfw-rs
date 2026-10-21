@@ -147,6 +147,8 @@ try {
     } else {
         $started = (Invoke-GuiScenario 'network-start') | ConvertFrom-Json
         $started | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'network-start.json') -Encoding utf8NoBOM
+        if (-not $started.controller_verified) { throw 'GUI network case did not verify its real controller' }
+        $receipt.controller_verified = $true
         $proxyPort = [int]$started.settings.effective.mixed_port
         if ($proxyPort -lt 1 -or $proxyPort -gt 65535) { throw 'GUI proxy port is invalid' }
         $receipt.native_gui_exercised = $true

@@ -18,6 +18,33 @@ use crate::Error;
 
 pub(crate) fn owned(pid: u32) -> Result<BTreeSet<SocketAddr>, Error> {
     let mut result = BTreeSet::new();
+    for_each(|owner, address| {
+        if owner == pid {
+            result.insert(address);
+        }
+    })?;
+    Ok(result)
+}
+
+/// A read-only, port-scoped native observation for disposable-host validation.
+/// It is not an ownership proof and never admits or retires a product runtime.
+#[cfg(feature = "native-service-validation")]
+pub fn observe_tcp_listeners_at_port(port: u16) -> Result<BTreeSet<(u32, SocketAddr)>, Error> {
+    if port == 0 {
+        return Err(Error::Protocol(
+            "listener observation requires a nonzero port",
+        ));
+    }
+    let mut result = BTreeSet::new();
+    for_each(|owner, address| {
+        if address.port() == port {
+            result.insert((owner, address));
+        }
+    })?;
+    Ok(result)
+}
+
+fn for_each(mut observe: impl FnMut(u32, SocketAddr)) -> Result<(), Error> {
     for family in [AF_INET, AF_INET6] {
         let mut size = 0u32;
         let status = unsafe {
@@ -102,9 +129,7 @@ pub(crate) fn owned(pid: u32) -> Result<BTreeSet<SocketAddr>, Error> {
                 if state != 2 {
                     return Err(Error::Protocol("TCP table returned a non-listener"));
                 }
-                if owner == pid {
-                    result.insert(address);
-                }
+                observe(owner, address);
             }
             complete = true;
             break;
@@ -115,5 +140,5 @@ pub(crate) fn owned(pid: u32) -> Result<BTreeSet<SocketAddr>, Error> {
             ));
         }
     }
-    Ok(result)
+    Ok(())
 }

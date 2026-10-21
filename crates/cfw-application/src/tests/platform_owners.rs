@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use cfw_engine_api::{
-    EngineCommandContext, EngineMode, EngineOwner, EngineState, NativeEngineStatus, RuntimeIdentity,
+    EngineCommandContext, EngineMode, EngineOwner, EngineRuntimePlatform, EngineState,
+    NativeEngineStatus, RuntimeIdentity,
 };
 use cfw_singbox_config::{EngineSettings, ValidatedSingBoxProfile};
 
@@ -75,6 +76,10 @@ async fn windows_startup_cleanup_still_requires_independent_global_off() {
 async fn windows_modes_bind_platform_owners_and_preserve_exact_restart_identity() {
     let backend = Arc::new(FakeBackend::windows());
     let coordinator = coordinator(backend);
+    assert_eq!(
+        coordinator.runtime_platform(),
+        EngineRuntimePlatform::Windows
+    );
     for mode in [
         EngineMode::LocalProxy,
         EngineMode::SystemProxy,
@@ -178,6 +183,14 @@ async fn status_reconciliation_rejects_a_foreign_platform_even_with_matching_gen
     };
     runtime.owner = EngineOwner::ProxyAgent;
     backend.replace_reported_platform_for_test(false);
+    assert_eq!(
+        coordinator.runtime_platform(),
+        EngineRuntimePlatform::Windows
+    );
+    assert_eq!(
+        coordinator.clone().runtime_platform(),
+        EngineRuntimePlatform::Windows
+    );
     backend.set_native_status(NativeEngineStatus::LocalProxy { runtime });
     assert!(
         coordinator

@@ -416,7 +416,12 @@ fn build_tray_menu(
             None::<&str>,
         )?),
     ];
-    let ready = ready_mode(snapshot);
+    let ready = ready_mode(
+        app.state::<crate::engine::ManagedEngine>()
+            .coordinator
+            .runtime_platform(),
+        snapshot,
+    );
     items.push(Box::new(MenuItem::with_id(
         app,
         "core-start",
@@ -544,7 +549,14 @@ pub(crate) async fn refresh_tray_from_controller(app: &AppHandle) -> Result<(), 
     let mut groups = Vec::new();
     let mut route_mode = None;
     let mut observation_error = None;
-    if ready_mode(&snapshot).is_some() {
+    if ready_mode(
+        app.state::<crate::engine::ManagedEngine>()
+            .coordinator
+            .runtime_platform(),
+        &snapshot,
+    )
+    .is_some()
+    {
         match controller_client_for_app(app) {
             Ok(client) => {
                 let (proxies, configs) = tokio::join!(client.proxies(), client.configs());
@@ -583,27 +595,11 @@ pub(crate) async fn refresh_tray_from_controller(app: &AppHandle) -> Result<(), 
     }
 }
 
-fn ready_mode(snapshot: &EngineSnapshot) -> Option<EngineMode> {
-    match &snapshot.state {
-        EngineState::LocalProxyActive { runtime }
-        | EngineState::ProxyActive { runtime }
-        | EngineState::TunnelActive { runtime }
-        | EngineState::TunnelSystemProxyActive { runtime }
-            if runtime.ready
-                && snapshot.desired_mode == snapshot.state.active_mode()
-                && runtime.context.generation == snapshot.generation
-                && snapshot.config_digest.as_deref() == Some(runtime.config_digest.as_str())
-                && runtime.owner
-                    == if snapshot.desired_mode.tunnel_enabled() {
-                        cfw_engine_api::EngineOwner::PacketTunnelSystemExtension
-                    } else {
-                        cfw_engine_api::EngineOwner::ProxyAgent
-                    } =>
-        {
-            Some(snapshot.desired_mode)
-        }
-        _ => None,
-    }
+fn ready_mode(
+    platform: cfw_engine_api::EngineRuntimePlatform,
+    snapshot: &EngineSnapshot,
+) -> Option<EngineMode> {
+    crate::engine::ready_runtime(platform, snapshot).map(|_| snapshot.desired_mode)
 }
 
 fn start_tray_state_updates(app: AppHandle) {
@@ -1010,7 +1006,28 @@ mod tests {
             generation: 2,
             config_digest: Some(runtime.config_digest.clone()),
         };
-        assert_eq!(ready_mode(&snapshot), Some(EngineMode::SystemProxy));
+        assert_eq!(
+            ready_mode(cfw_engine_api::EngineRuntimePlatform::MacOs, &snapshot),
+            Some(EngineMode::SystemProxy)
+        );
+        assert_eq!(
+            ready_mode(cfw_engine_api::EngineRuntimePlatform::Windows, &snapshot),
+            None
+        );
+        snapshot.state = EngineState::ProxyActive {
+            runtime: RuntimeIdentity {
+                owner: EngineOwner::WindowsUserAgent,
+                ..runtime.clone()
+            },
+        };
+        assert_eq!(
+            ready_mode(cfw_engine_api::EngineRuntimePlatform::Windows, &snapshot),
+            Some(EngineMode::SystemProxy)
+        );
+        assert_eq!(
+            ready_mode(cfw_engine_api::EngineRuntimePlatform::MacOs, &snapshot),
+            None
+        );
         for state in [
             EngineState::Off,
             EngineState::ProxyStarting { generation: 2 },
@@ -1034,13 +1051,22 @@ mod tests {
             },
         ] {
             snapshot.state = state;
-            assert_eq!(ready_mode(&snapshot), None);
+            assert_eq!(
+                ready_mode(cfw_engine_api::EngineRuntimePlatform::MacOs, &snapshot),
+                None
+            );
         }
         snapshot.state = EngineState::ProxyActive { runtime };
         snapshot.generation += 1;
-        assert_eq!(ready_mode(&snapshot), None);
+        assert_eq!(
+            ready_mode(cfw_engine_api::EngineRuntimePlatform::MacOs, &snapshot),
+            None
+        );
         snapshot.generation -= 1;
         snapshot.config_digest = Some("cd".repeat(32));
-        assert_eq!(ready_mode(&snapshot), None);
+        assert_eq!(
+            ready_mode(cfw_engine_api::EngineRuntimePlatform::MacOs, &snapshot),
+            None
+        );
     }
 }

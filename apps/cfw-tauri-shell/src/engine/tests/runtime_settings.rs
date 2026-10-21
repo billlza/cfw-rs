@@ -27,7 +27,7 @@ async fn online_settings_publish_the_new_binding_only_after_a_successful_commit(
             )
             .await
             .unwrap();
-        record_endpoint_runtime(&endpoints, &initial).unwrap();
+        record_endpoint_runtime(&endpoints, coordinator.runtime_platform(), &initial).unwrap();
         let expected = endpoints.read().unwrap().clone();
         let settings = EngineSettings {
             mixed_port: 8890,
@@ -72,7 +72,7 @@ async fn online_settings_publish_the_new_binding_only_after_a_successful_commit(
             })
             .await;
         let current = coordinator.snapshot();
-        record_endpoint_runtime(&endpoints, &current).unwrap();
+        record_endpoint_runtime(&endpoints, coordinator.runtime_platform(), &current).unwrap();
         if stale_revision {
             assert!(result.unwrap_err().to_string().contains("restored"));
             assert_eq!(
@@ -157,7 +157,7 @@ async fn a_mainland_switch_whose_rule_sets_cannot_download_restores_the_previous
             )
             .await
             .unwrap();
-        record_endpoint_runtime(&endpoints, &initial).unwrap();
+        record_endpoint_runtime(&endpoints, coordinator.runtime_platform(), &initial).unwrap();
         let expected = endpoints.read().unwrap().clone();
         let settings = EngineSettings {
             mainland_china_direct: true,
@@ -191,7 +191,7 @@ async fn a_mainland_switch_whose_rule_sets_cannot_download_restores_the_previous
             })
             .await;
         let current = coordinator.snapshot();
-        record_endpoint_runtime(&endpoints, &current).unwrap();
+        record_endpoint_runtime(&endpoints, coordinator.runtime_platform(), &current).unwrap();
         let error = result.unwrap_err().to_string();
         assert!(error.contains("rule-set"), "{failure:?}: {error}");
         assert!(error.contains("restored"), "{failure:?}: {error}");

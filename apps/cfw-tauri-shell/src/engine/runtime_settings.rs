@@ -155,7 +155,7 @@ pub(crate) async fn change_runtime_preferences(
             let binding = if before == after {
                 Ok(())
             } else {
-                record_endpoint_runtime(&endpoints, &after)
+                record_endpoint_runtime(&endpoints, coordinator.runtime_platform(), &after)
             };
             match (result, binding) {
                 (Ok(()), Ok(())) => Ok(()),

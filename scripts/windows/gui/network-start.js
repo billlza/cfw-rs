@@ -45,7 +45,30 @@
   if (!Number.isInteger(settings.effective.mixed_port) || settings.effective.mixed_port < 1 || settings.effective.mixed_port > 65535) {
     throw new Error('The active GUI did not report a valid local proxy listener');
   }
+  // These controls are enabled by the product only after its own controller
+  // snapshot succeeds. A ready engine and working HTTP proxy alone did not
+  // catch the former macOS-only controller identity checks.
+  await page.locator('#nav button[data-page="proxies"]').click();
+  await page.locator('button[data-mode="Rule"]:enabled').waitFor({ timeout: 15000 });
+  const controller = await page.evaluate(async () => {
+    const invoke = window.__TAURI_INTERNALS__.invoke;
+    return { snapshot: await invoke('controller_snapshot'), version: await invoke('controller_version'),
+      rules: await invoke('rules_snapshot'), engine: await invoke('engine_snapshot') };
+  });
+  if (JSON.stringify(controller.engine.snapshot) !== JSON.stringify(active.snapshot) ||
+      typeof controller.version.version !== 'string' || !controller.version.version.trim() ||
+      !['rule', 'global', 'direct'].includes(controller.snapshot.config.mode) ||
+      !Array.isArray(controller.snapshot.proxies.groups) ||
+      !controller.snapshot.proxies.proxies.some(node => node.name === 'direct') ||
+      !Array.isArray(controller.snapshot.connections.connections) || !Array.isArray(controller.rules.rules)) {
+    throw new Error('The GUI controller did not describe the active imported direct profile');
+  }
+  await page.screenshot({ path: 'local-proxy-controller.png' });
+  const controllerSnapshot = await page.locator('body').ariaSnapshot();
+  await page.locator('#nav button[data-page="general"]').click();
+  await page.locator('.core-version-link').filter({ hasText: controller.version.version }).waitFor({ timeout: 15000 });
   await page.screenshot({ path: 'local-proxy-active.png' });
-  return { before, selected, active, settings, snapshot: await page.locator('body').ariaSnapshot(),
+  return { before, selected, active, settings, controller, controllerSnapshot, controller_verified: true,
+    snapshot: await page.locator('body').ariaSnapshot(),
     mutations: ['import-profile', 'toggle-core'], release_accepted: false };
 })

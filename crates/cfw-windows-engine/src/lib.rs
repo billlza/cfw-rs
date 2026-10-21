@@ -68,6 +68,8 @@ pub use service_transport::{
 mod listeners;
 #[cfg(windows)]
 pub use lineage::{LineageError, WindowsEngineGenerationStore};
+#[cfg(all(windows, feature = "native-service-validation"))]
+pub use listeners::observe_tcp_listeners_at_port;
 #[cfg(windows)]
 mod process;
 #[cfg(windows)]

@@ -26,8 +26,8 @@ use std::time::Instant;
 
 use cfw_application::{EngineControllerAccess, EngineCoordinatorError, EngineModeCoordinator};
 use cfw_engine_api::{
-    BackendErrorKind, CutoverPreflightBackend, EngineEvent, EngineMode, EngineOwner,
-    EngineSnapshot, EngineState, SystemProxyAuthorization,
+    BackendErrorKind, CutoverPreflightBackend, EngineEvent, EngineMode, EngineRuntimePlatform,
+    EngineSnapshot, EngineState, RuntimeIdentity, SystemProxyAuthorization,
 };
 use cfw_profiles::{ProfileError, ProfileRepository};
 use cfw_singbox_config::{EngineSettings, ValidatedSingBoxProfile};
@@ -243,7 +243,11 @@ impl ManagedEngine {
 
     #[cfg(target_os = "macos")]
     pub(crate) fn record_endpoint_runtime(&self, snapshot: &EngineSnapshot) -> Result<(), String> {
-        record_endpoint_runtime(&self.endpoints, snapshot)
+        record_endpoint_runtime(
+            &self.endpoints,
+            self.coordinator.runtime_platform(),
+            snapshot,
+        )
     }
 
     #[cfg(target_os = "macos")]
@@ -680,7 +684,7 @@ where
             let binding = if after == before {
                 Ok(())
             } else {
-                record_endpoint_runtime(&endpoints, &after)
+                record_endpoint_runtime(&endpoints, coordinator.runtime_platform(), &after)
             };
             match (result, binding) {
                 (Ok(value), Ok(())) => Ok(value),
@@ -822,7 +826,7 @@ async fn set_mode_with_endpoint_rebind(
             .await
         {
             Ok(snapshot) => {
-                record_endpoint_runtime(endpoints, &snapshot)?;
+                record_endpoint_runtime(endpoints, coordinator.runtime_platform(), &snapshot)?;
                 return Ok(snapshot);
             }
             Err(EngineCoordinatorError::StartEndpointConflictAfterOff { conflict, .. }) => {
@@ -886,42 +890,44 @@ fn read_active_controller_access(
     Ok(binding.controller.clone())
 }
 
+/// Shared desktop identity policy for endpoints, controller commands and tray
+/// state. The platform must come from the coordinator's pinned backend choice.
+pub(crate) fn ready_runtime(
+    platform: EngineRuntimePlatform,
+    snapshot: &EngineSnapshot,
+) -> Option<&RuntimeIdentity> {
+    let (runtime, owner) = match &snapshot.state {
+        EngineState::LocalProxyActive { runtime } | EngineState::ProxyActive { runtime } => {
+            (runtime, platform.proxy_owner())
+        }
+        EngineState::TunnelActive { runtime }
+        | EngineState::TunnelSystemProxyActive { runtime } => (runtime, platform.tunnel_owner()),
+        _ => return None,
+    };
+    (snapshot.desired_mode == snapshot.state.active_mode()
+        && runtime.owner == owner
+        && runtime.ready
+        && runtime.context.generation == snapshot.generation
+        && snapshot.config_digest.as_deref() == Some(runtime.config_digest.as_str()))
+    .then_some(runtime)
+}
+
 fn record_endpoint_runtime(
     endpoints: &RwLock<EngineEndpointBinding>,
+    platform: EngineRuntimePlatform,
     snapshot: &EngineSnapshot,
 ) -> Result<(), String> {
     let active = match &snapshot.state {
         EngineState::Off if snapshot.desired_mode == EngineMode::Off => None,
         EngineState::AwaitingApproval { .. } if snapshot.desired_mode.tunnel_enabled() => None,
-        EngineState::LocalProxyActive { runtime } | EngineState::ProxyActive { runtime }
-            if snapshot.desired_mode == snapshot.state.active_mode()
-                && runtime.owner == EngineOwner::ProxyAgent
-                && runtime.ready
-                && runtime.context.generation == snapshot.generation
-                && snapshot.config_digest.as_deref() == Some(runtime.config_digest.as_str()) =>
-        {
-            Some(ActiveControllerBinding {
-                generation: runtime.context.generation,
-                config_digest: runtime.config_digest.clone(),
-            })
-        }
-        EngineState::TunnelActive { runtime }
-        | EngineState::TunnelSystemProxyActive { runtime }
-            if snapshot.desired_mode == snapshot.state.active_mode()
-                && runtime.owner == EngineOwner::PacketTunnelSystemExtension
-                && runtime.ready
-                && runtime.context.generation == snapshot.generation
-                && snapshot.config_digest.as_deref() == Some(runtime.config_digest.as_str()) =>
-        {
-            Some(ActiveControllerBinding {
-                generation: runtime.context.generation,
-                config_digest: runtime.config_digest.clone(),
-            })
-        }
         _ => {
-            return Err(
-                "coordinator returned a state that cannot bind controller access".to_owned(),
-            );
+            let runtime = ready_runtime(platform, snapshot).ok_or_else(|| {
+                "coordinator returned a state that cannot bind controller access".to_owned()
+            })?;
+            Some(ActiveControllerBinding {
+                generation: runtime.context.generation,
+                config_digest: runtime.config_digest.clone(),
+            })
         }
     };
     endpoints

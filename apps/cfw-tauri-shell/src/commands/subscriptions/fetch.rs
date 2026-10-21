@@ -335,10 +335,11 @@ impl SubscriptionRoute {
             EngineState::LocalProxyActive { .. }
             | EngineState::ProxyActive { .. }
             | EngineState::TunnelSystemProxyActive { .. } => {
-                let identity = crate::commands::controller::running_runtime_identity(&snapshot)
-                    .map_err(
-                        |_| "subscription download cannot bind an inconsistent active engine",
-                    )?;
+                let identity = crate::commands::controller::running_runtime_identity(
+                    engine.coordinator.runtime_platform(),
+                    &snapshot,
+                )
+                .map_err(|_| "subscription download cannot bind an inconsistent active engine")?;
                 let access = engine.active_controller_access(
                     identity.context.generation,
                     &identity.config_digest,

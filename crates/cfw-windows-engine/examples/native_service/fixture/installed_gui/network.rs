@@ -4,6 +4,83 @@ use super::*;
 use cfw_windows_engine::{ProxySettings, WindowsSystemProxy};
 use std::io::Read;
 
+fn connect_observation(address: std::net::SocketAddr, seconds: u64) -> serde_json::Value {
+    let started = std::time::Instant::now();
+    let result = std::net::TcpStream::connect_timeout(&address, Duration::from_secs(seconds));
+    match result {
+        Ok(_) => serde_json::json!({
+            "address": address, "timeout_ms": seconds * 1000,
+            "elapsed_ms": started.elapsed().as_millis(), "outcome": "connected"
+        }),
+        Err(error) => serde_json::json!({
+            "address": address, "timeout_ms": seconds * 1000,
+            "elapsed_ms": started.elapsed().as_millis(), "outcome": "error",
+            "kind": format!("{:?}", error.kind()), "raw_os_error": error.raw_os_error(),
+            "message": error.to_string(), "connection_refused": error.kind() == io::ErrorKind::ConnectionRefused
+        }),
+    }
+}
+
+fn listener_observation(port: u16) -> Result<serde_json::Value> {
+    let listeners = cfw_windows_engine::observe_tcp_listeners_at_port(port)
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(listeners).map_err(|error| error.to_string())
+}
+
+fn verify_closed_listener(
+    source: &str,
+    receipts: &Path,
+    address: std::net::SocketAddr,
+) -> Result<()> {
+    let before = listener_observation(address.port())?;
+    let primary = connect_observation(address, 2);
+    let after = listener_observation(address.port())?;
+    write(
+        receipts,
+        "closed-listener-observation.json",
+        &serde_json::json!({
+            "source": source, "primary": primary, "listeners_before": before, "listeners_after": after,
+            "release_accepted": false
+        }),
+    )?;
+    if primary["connection_refused"].as_bool() == Some(true) {
+        return Ok(());
+    }
+
+    // Preserve the original two-second failure. A known listener followed by
+    // its close distinguishes host connect timing from a surviving product
+    // listener. Longer attempts are diagnostics only, never acceptance fallback.
+    let control = std::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+        .map_err(|error| error.to_string())?;
+    let control_address = control.local_addr().map_err(|error| error.to_string())?;
+    let observed = cfw_windows_engine::observe_tcp_listeners_at_port(control_address.port())
+        .map_err(|error| error.to_string())?;
+    if !observed.contains(&(std::process::id(), control_address)) {
+        return Err("native TCP table did not observe the live control listener".into());
+    }
+    drop(control);
+    let control_before = listener_observation(control_address.port())?;
+    let control_short = connect_observation(control_address, 2);
+    let control_extended = connect_observation(control_address, 5);
+    let target_extended = connect_observation(address, 5);
+    write(
+        receipts,
+        "closed-listener-diagnostics.json",
+        &serde_json::json!({
+            "source": source, "primary": primary,
+            "known_listener_while_open": observed, "known_listener_after_close": control_before,
+            "control_short": control_short, "control_extended": control_extended,
+            "target_extended": target_extended,
+            "target_listeners_after": listener_observation(address.port())?,
+            "control_listeners_after": listener_observation(control_address.port())?,
+            "primary_failure_preserved": true, "release_accepted": false
+        }),
+    )?;
+    Err(format!(
+        "stopped GUI listener did not refuse the original probe: {primary}"
+    ))
+}
+
 pub(super) fn proxy_snapshot() -> Result<ProxySettings> {
     let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
     let observed = (|| {
@@ -82,15 +159,7 @@ pub(super) fn probe(operation: &str, port: &str) -> Result<()> {
     if operation == "http" {
         super::super::user_agent::traffic(address)?;
     } else {
-        match std::net::TcpStream::connect_timeout(&address, Duration::from_secs(2)) {
-            Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {}
-            Err(error) => {
-                return Err(format!(
-                    "stopped GUI listener could not be observed: {error}"
-                ));
-            }
-            Ok(_) => return Err("stopped GUI proxy listener still accepts connections".into()),
-        }
+        verify_closed_listener(&source, &receipts, address)?;
     }
     // This public observation revalidates identity/liveness on the retained
     // process object before and after querying its image, without reopening PID.

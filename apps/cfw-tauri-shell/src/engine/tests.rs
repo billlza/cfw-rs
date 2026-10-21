@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use cfw_engine_api::{
     BackendError, BackendErrorKind, BackendFuture, EngineBackend, EngineCommandContext, EngineMode,
-    EngineOwner, EngineSessionIdentity, EngineSnapshot, EngineStartRequest, EngineState,
-    NativeEngineStatus, RuntimeIdentity, TunnelInstallOutcome,
+    EngineOwner, EngineRuntimePlatform, EngineSessionIdentity, EngineSnapshot, EngineStartRequest,
+    EngineState, NativeEngineStatus, RuntimeIdentity, TunnelInstallOutcome,
 };
 use cfw_profiles::{ProfileError, ProfileRepository};
 use cfw_singbox_config::{EngineSettings, ValidatedSingBoxProfile};
@@ -451,6 +451,42 @@ fn non_off_mode_refuses_a_selected_profile_that_fails_validation_without_a_fallb
 }
 
 #[test]
+fn windows_controller_binding_accepts_the_ready_user_agent() {
+    let settings = EngineSettings::default();
+    let endpoints = std::sync::RwLock::new(endpoint_binding(settings));
+    let active = EngineSnapshot {
+        desired_mode: EngineMode::LocalProxy,
+        state: EngineState::LocalProxyActive {
+            runtime: RuntimeIdentity {
+                owner: EngineOwner::WindowsUserAgent,
+                context: EngineCommandContext {
+                    installation_id: "installation".into(),
+                    config_epoch: 1,
+                    generation: 7,
+                },
+                config_digest: "digest-a".into(),
+                ready: true,
+            },
+        },
+        generation: 7,
+        config_digest: Some("digest-a".into()),
+    };
+    record_endpoint_runtime(&endpoints, EngineRuntimePlatform::Windows, &active)
+        .expect("bind the Windows controller");
+    assert!(read_active_controller_access(&endpoints, 7, "digest-a").is_ok());
+    let original = endpoints.read().unwrap().clone();
+    assert!(record_endpoint_runtime(&endpoints, EngineRuntimePlatform::MacOs, &active).is_err());
+    assert_eq!(*endpoints.read().unwrap(), original);
+    record_endpoint_runtime(
+        &endpoints,
+        EngineRuntimePlatform::Windows,
+        &EngineSnapshot::default(),
+    )
+    .expect("Off invalidates the controller");
+    assert!(read_active_controller_access(&endpoints, 7, "digest-a").is_err());
+}
+
+#[test]
 fn controller_access_is_bound_to_the_exact_active_generation_and_digest() {
     let settings = EngineSettings::default();
     let endpoints = std::sync::RwLock::new(EngineEndpointBinding {
@@ -477,7 +513,9 @@ fn controller_access_is_bound_to_the_exact_active_generation_and_digest() {
         generation: 7,
         config_digest: Some("digest-a".into()),
     };
-    record_endpoint_runtime(&endpoints, &active).expect("bind active controller");
+    record_endpoint_runtime(&endpoints, EngineRuntimePlatform::MacOs, &active)
+        .expect("bind active controller");
+    assert!(record_endpoint_runtime(&endpoints, EngineRuntimePlatform::Windows, &active).is_err());
     assert!(read_active_controller_access(&endpoints, 7, "digest-a").is_ok());
     assert!(read_active_controller_access(&endpoints, 8, "digest-a").is_err());
     assert!(read_active_controller_access(&endpoints, 7, "digest-b").is_err());
@@ -542,7 +580,7 @@ fn invalid_active_snapshot_cannot_bind_controller_access() {
         generation: 2,
         config_digest: Some("digest".into()),
     };
-    assert!(record_endpoint_runtime(&endpoints, &invalid).is_err());
+    assert!(record_endpoint_runtime(&endpoints, EngineRuntimePlatform::MacOs, &invalid).is_err());
     assert!(read_active_controller_access(&endpoints, 1, "prior").is_ok());
 }
 

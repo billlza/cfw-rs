@@ -139,6 +139,16 @@ try {
     $failure = $_
     ($_.Exception.ToString() + "`n" + $_.ScriptStackTrace) |
         Set-Content -LiteralPath (Join-Path $outputRoot 'failure.txt') -Encoding utf8NoBOM
+    if ($attached) {
+        try {
+            Invoke-Playwright 'console-after-failure' @('console', 'error') | Out-Null
+            Invoke-Playwright 'failed-window' @('--raw', 'run-code', "--filename=$(Join-Path $PSScriptRoot 'gui/failure.js')") |
+                Set-Content -LiteralPath (Join-Path $outputRoot 'failed-window.json') -Encoding utf8NoBOM
+        } catch {
+            ($_.Exception.ToString() + "`n" + $_.ScriptStackTrace) |
+                Set-Content -LiteralPath (Join-Path $outputRoot 'window-diagnostic-failure.txt') -Encoding utf8NoBOM
+        }
+    }
     try {
         $launchPath = Join-Path $outputRoot 'launch.json'
         if (Test-Path -LiteralPath $launchPath -PathType Leaf) {

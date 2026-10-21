@@ -376,6 +376,12 @@ fn finish_exit(
     {
         eprintln!("provider refresh shutdown failed: {error}");
     }
+    crate::diagnostics::record(
+        app,
+        cfw_core::DiagnosticTopic::Startup,
+        "shutdown_dispatch_exit",
+        "",
+    );
     app.exit(exit_code);
     Ok(())
 }
@@ -390,6 +396,7 @@ fn reset_shutdown_after_failure(app: &AppHandle) {
 }
 
 fn emit_shutdown_error(app: &AppHandle, code: &str, message: String) {
+    crate::diagnostics::record(app, cfw_core::DiagnosticTopic::Network, code, &message);
     if let Err(emit_error) = app.emit(
         "cfw://engine-event",
         EngineEvent::boundary_failure(code, message),
@@ -401,7 +408,14 @@ fn emit_shutdown_error(app: &AppHandle, code: &str, message: String) {
 fn start_shutdown(app: AppHandle, exit_code: i32) -> Result<(), String> {
     let lifecycle = app.state::<AppLifecycle>();
     match lifecycle.begin_shutdown() {
-        Ok(ShutdownAdmission::Started) => {}
+        Ok(ShutdownAdmission::Started) => {
+            crate::diagnostics::record(
+                &app,
+                cfw_core::DiagnosticTopic::Startup,
+                "shutdown_started",
+                "",
+            );
+        }
         Ok(ShutdownAdmission::AlreadyInProgress) => return Ok(()),
         Ok(ShutdownAdmission::ExitReady) => {
             app.exit(exit_code);
@@ -419,9 +433,27 @@ fn start_shutdown(app: AppHandle, exit_code: i32) -> Result<(), String> {
     }
 
     tauri::async_runtime::spawn(async move {
+        crate::diagnostics::record(
+            &app,
+            cfw_core::DiagnosticTopic::Startup,
+            "shutdown_task_started",
+            "",
+        );
         flush_window_bounds_for_exit(&app).await;
+        crate::diagnostics::record(
+            &app,
+            cfw_core::DiagnosticTopic::Startup,
+            "shutdown_window_bounds_finished",
+            "",
+        );
         let coordinator = app.state::<ManagedEngine>().coordinator.clone();
         let shutdown = app.state::<ManagedEngine>().shutdown_to_completion().await;
+        crate::diagnostics::record(
+            &app,
+            cfw_core::DiagnosticTopic::Startup,
+            "shutdown_engine_request_finished",
+            "",
+        );
         match shutdown {
             Ok(outcome) => {
                 let (result, maintenance) = outcome.into_parts();

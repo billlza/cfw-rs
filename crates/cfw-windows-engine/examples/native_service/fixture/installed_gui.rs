@@ -127,10 +127,18 @@ pub(super) fn run() -> Result<()> {
         }
         Ok(())
     })();
-    if result.is_err()
-        && cfw_windows_storage::wait_until(&process, Instant::now()).map_err(|e| e.to_string())?
-            != cfw_windows_storage::WaitOutcome::Signaled
-    {
+    // An already elapsed wait_until deadline does not poll the kernel object.
+    // Observe it directly before deciding whether failure cleanup must kill it.
+    let failed_process_running = if result.is_err() {
+        match unsafe { WaitForSingleObject(process.as_raw_handle(), 0) } {
+            WAIT_OBJECT_0 => false,
+            WAIT_TIMEOUT => true,
+            _ => return Err(format!("{result:?}; {}", error("observe failed GUI exit"))),
+        }
+    } else {
+        false
+    };
+    if failed_process_running {
         if unsafe { TerminateProcess(process.as_raw_handle(), 3) } == 0 {
             return Err(format!(
                 "{result:?}; {}",

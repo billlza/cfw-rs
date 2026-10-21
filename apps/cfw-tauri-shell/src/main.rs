@@ -510,12 +510,23 @@ fn main() {
 
     application.run(|app, event| match event {
         RunEvent::Exit => {
+            diagnostics::record(app, cfw_core::DiagnosticTopic::Startup, "exit_event", "");
             if let Err(error) = app.state::<Diagnostics>().flush() {
                 eprintln!("final diagnostic flush failed: {error}");
             }
         }
         RunEvent::ExitRequested { api, .. } => {
             let lifecycle = app.state::<AppLifecycle>();
+            diagnostics::record(
+                app,
+                cfw_core::DiagnosticTopic::Startup,
+                "exit_requested",
+                if lifecycle.exit_ready() {
+                    "ready=true"
+                } else {
+                    "ready=false"
+                },
+            );
             if !lifecycle.exit_ready() {
                 api.prevent_exit();
                 if let Err(error) = request_shutdown(app.clone(), 0) {

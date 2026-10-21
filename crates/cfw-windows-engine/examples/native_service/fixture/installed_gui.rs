@@ -77,7 +77,7 @@ pub(super) fn run() -> Result<()> {
             null(),
             null(),
             1,
-            CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
+            CREATE_NO_WINDOW | CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT,
             null(),
             null(),
             &startup.StartupInfo,
@@ -88,7 +88,7 @@ pub(super) fn run() -> Result<()> {
         return Err(error("start installed desktop as medium user"));
     }
     let process = unsafe { OwnedHandle::from_raw_handle(info.hProcess) };
-    let _thread = unsafe { OwnedHandle::from_raw_handle(info.hThread) };
+    let thread = unsafe { OwnedHandle::from_raw_handle(info.hThread) };
     drop(attributes);
     drop(input);
     let result = (|| -> Result<()> {
@@ -116,10 +116,33 @@ pub(super) fn run() -> Result<()> {
                 "image_sha256": cfw_singbox_config::sha256_hex(&std::fs::read(&path).map_err(|e| e.to_string())?),
                 "installed_release": installed.release(), "desktop_is_fixture": false,
                 "private_desktop": false, "desktop_observation": desktop.observation(),
+                "primary_thread_suspended_for_admission": true,
                 "user_proxy_before_sha256": original_proxy_sha256,
                 "proxy_observer_same_user_session": true,
                 "physical_display_exercised": false,
                 "release_accepted": false
+            }),
+        )?;
+        // WebView2 can answer before identity observation and the image
+        // hash finish. Publish the complete launch receipt while the primary
+        // thread is still suspended, then permit any GUI/browser startup.
+        let suspended = unsafe { ResumeThread(thread.as_raw_handle()) };
+        if suspended == u32::MAX {
+            return Err(error("resume admitted installed GUI"));
+        }
+        if suspended != 1 {
+            return Err(format!(
+                "installed GUI primary thread had unexpected suspend count {suspended}"
+            ));
+        }
+        write(
+            &receipts,
+            "resume.json",
+            &serde_json::json!({
+                "source": source, "process_id": info.dwProcessId,
+                "process_creation_time": peer.identity().process_creation_time(),
+                "previous_suspend_count": suspended,
+                "launch_receipt_published_before_resume": true
             }),
         )?;
         if cfw_windows_storage::wait_until(&process, Instant::now() + Duration::from_secs(180))

@@ -113,7 +113,8 @@ try {
     $version = Wait-CfwWebView2 -Controller $controller -Endpoint $endpoint -ProbeAttempts $probeAttempts
     $version | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $outputRoot 'webview-version.json') -Encoding utf8NoBOM
     $launch = Get-Content -LiteralPath (Join-Path $outputRoot 'launch.json') -Raw | ConvertFrom-Json
-    if ($launch.source -cne $Source -or $launch.integrity_rid -ne 8192 -or $launch.administrator_member -or $launch.desktop_is_fixture) {
+    if ($launch.source -cne $Source -or $launch.integrity_rid -ne 8192 -or $launch.administrator_member -or $launch.desktop_is_fixture -or
+        -not $launch.primary_thread_suspended_for_admission) {
         throw 'GUI did not run as the admitted ordinary-user product image'
     }
     $receipt.ordinary_user = $true
@@ -183,6 +184,12 @@ try {
     $receipt.debugger_detached_before_exit_wait = $true
     if (-not $controller.WaitForExit(30000) -or $controller.ExitCode -ne 0) { throw 'Installed GUI graceful exit was not observed' }
     $exit = Get-Content -LiteralPath (Join-Path $outputRoot 'exit.json') -Raw | ConvertFrom-Json
+    $resumed = Get-Content -LiteralPath (Join-Path $outputRoot 'resume.json') -Raw | ConvertFrom-Json
+    if ($resumed.source -cne $Source -or $resumed.process_id -ne $launch.process_id -or
+        $resumed.process_creation_time -ne $launch.process_creation_time -or $resumed.previous_suspend_count -ne 1 -or
+        -not $resumed.launch_receipt_published_before_resume) {
+        throw 'The GUI did not resume from its admitted suspended launch'
+    }
     if ($exit.process_id -ne $launch.process_id -or $exit.process_creation_time -ne $launch.process_creation_time -or
         $exit.exit_code -ne 0 -or -not $exit.retained_process_exit_observed) { throw 'GUI exit identity differs from the launched process' }
     if ($exit.source -cne $Source -or -not $exit.user_proxy_unchanged -or

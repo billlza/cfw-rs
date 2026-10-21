@@ -14,7 +14,8 @@ if ($Source -cnotmatch '^[0-9a-f]{40}$' -or (git rev-parse HEAD) -cne $Source -o
 }
 $installedDirectory = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Clash for Windows'
 $machineState = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'Clash for Windows'
-if ((Test-Path -LiteralPath $installedDirectory) -or (Test-Path -LiteralPath $machineState) -or
+$userState = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Clash for Windows'
+if ((Test-Path -LiteralPath $installedDirectory) -or (Test-Path -LiteralPath $machineState) -or (Test-Path -LiteralPath $userState) -or
     @([ServiceProcess.ServiceController]::GetServices() | Where-Object ServiceName -CEQ 'CFWAuthority').Count -ne 0) {
     throw 'Refusing an existing CFW installation or machine state'
 }
@@ -40,6 +41,7 @@ $receipt = [ordered]@{
 $controller = $null
 $attached = $false
 $failure = $null
+$probeAttempts = [Collections.Generic.List[object]]::new()
 
 function Invoke-Installer([string]$Mode, [string]$Name) {
     $start = [Diagnostics.ProcessStartInfo]::new((Join-Path ([Environment]::GetFolderPath('System')) 'msiexec.exe'))
@@ -98,26 +100,10 @@ try {
     $controller = [Diagnostics.Process]::Start($start)
     $stdout = $controller.StandardOutput.ReadToEndAsync()
     $stderr = $controller.StandardError.ReadToEndAsync()
-    $deadline = [DateTime]::UtcNow.AddSeconds(45)
     $endpoint = "http://127.0.0.1:$port"
-    $lastConnectionError = $null
-    while ($true) {
-        if ($controller.HasExited) { throw "GUI controller exited before WebView2 was ready: $($controller.ExitCode)" }
-        try {
-            $version = Invoke-RestMethod "$endpoint/json/version" -TimeoutSec 2 -NoProxy
-            if ([string]::IsNullOrEmpty($version.webSocketDebuggerUrl)) { throw 'WebView2 endpoint has no debugger identity' }
-            $version | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $outputRoot 'webview-version.json') -Encoding utf8NoBOM
-            break
-        } catch [System.Net.Http.HttpRequestException] {
-            # Only connection refusal during the bounded startup window is
-            # retryable. HTTP/protocol/authentication errors remain failures.
-            if ($_.Exception.InnerException -isnot [Net.Sockets.SocketException] -or
-                $_.Exception.InnerException.SocketErrorCode -ne [Net.Sockets.SocketError]::ConnectionRefused) { throw }
-            $lastConnectionError = $_.Exception.Message
-            if ([DateTime]::UtcNow -ge $deadline) { throw "WebView2 startup deadline: $lastConnectionError" }
-            Start-Sleep -Milliseconds 200
-        }
-    }
+    Import-Module (Join-Path $PSScriptRoot 'webview_probe.psm1') -Force
+    $version = Wait-CfwWebView2 -Controller $controller -Endpoint $endpoint -ProbeAttempts $probeAttempts
+    $version | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $outputRoot 'webview-version.json') -Encoding utf8NoBOM
     $launch = Get-Content -LiteralPath (Join-Path $outputRoot 'launch.json') -Raw | ConvertFrom-Json
     if ($launch.source -cne $Source -or $launch.integrity_rid -ne 8192 -or $launch.administrator_member -or $launch.desktop_is_fixture) {
         throw 'GUI did not run as the admitted ordinary-user product image'
@@ -148,7 +134,51 @@ try {
     }
 } catch {
     $failure = $_
-    $_ | Out-String | Set-Content -LiteralPath (Join-Path $outputRoot 'failure.txt') -Encoding utf8NoBOM
+    ($_.Exception.ToString() + "`n" + $_.ScriptStackTrace) |
+        Set-Content -LiteralPath (Join-Path $outputRoot 'failure.txt') -Encoding utf8NoBOM
+    try {
+        $launchPath = Join-Path $outputRoot 'launch.json'
+        if (Test-Path -LiteralPath $launchPath -PathType Leaf) {
+            $observedLaunch = Get-Content -LiteralPath $launchPath -Raw | ConvertFrom-Json
+            if ($observedLaunch.source -cne $Source -or $observedLaunch.integrity_rid -ne 8192 -or
+                $observedLaunch.administrator_member -or $observedLaunch.desktop_is_fixture) { throw 'Invalid native launch receipt' }
+            $receipt.ordinary_user = $true
+            # Preserve only this GUI's descendants. Do not collect unrelated
+            # process command lines, environment variables or user data.
+            $parents = @([uint32]$observedLaunch.process_id)
+            $descendants = [Collections.Generic.List[object]]::new()
+            for ($depth = 0; $depth -lt 4 -and $parents.Count -gt 0; $depth++) {
+                $next = @()
+                foreach ($parentId in $parents) {
+                    foreach ($child in @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$parentId")) {
+                        if ($descendants.Count -ge 128) { throw 'GUI diagnostic process bound exceeded' }
+                        $descendants.Add(($child | Select-Object ProcessId, ParentProcessId, CreationDate, Name, ExecutablePath))
+                        $next += [uint32]$child.ProcessId
+                    }
+                }
+                $parents = $next
+            }
+            ConvertTo-Json -InputObject $descendants.ToArray() -Depth 5 |
+                Set-Content -LiteralPath (Join-Path $outputRoot 'gui-descendants.json') -Encoding utf8NoBOM
+        }
+        $logs = Join-Path $userState 'logs'
+        if (Test-Path -LiteralPath $logs -PathType Container) {
+            $files = @(Get-ChildItem -LiteralPath $logs -File -Recurse)
+            if ($files.Count -gt 64) { throw 'GUI diagnostic file count bound exceeded' }
+            foreach ($file in $files) {
+                if (($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $file.Length -gt 2MB) {
+                    throw 'GUI diagnostic file is not a bounded regular log'
+                }
+                $relative = [IO.Path]::GetRelativePath($logs, $file.FullName)
+                $destination = Join-Path (Join-Path $outputRoot 'application-logs') $relative
+                New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) -ErrorAction Stop | Out-Null
+                Copy-Item -LiteralPath $file.FullName -Destination $destination -ErrorAction Stop
+            }
+        }
+    } catch {
+        ($_.Exception.ToString() + "`n" + $_.ScriptStackTrace) |
+            Set-Content -LiteralPath (Join-Path $outputRoot 'diagnostic-capture-failure.txt') -Encoding utf8NoBOM
+    }
 } finally {
     # On failure retain the installation and transaction logs for runner
     # teardown. Never mask a failed/unknown MSI result with manual removal.
@@ -167,5 +197,7 @@ try {
         $controller.Dispose()
     }
     $receipt | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $outputRoot 'receipt.json') -Encoding utf8NoBOM
+    ConvertTo-Json -InputObject $probeAttempts.ToArray() -Depth 5 |
+        Set-Content -LiteralPath (Join-Path $outputRoot 'webview-startup-attempts.json') -Encoding utf8NoBOM
 }
 if ($null -ne $failure) { throw $failure }

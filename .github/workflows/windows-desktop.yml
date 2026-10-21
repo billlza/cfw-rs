@@ -51,6 +51,11 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ steps.pins.outputs.PYTHON_VERSION }}
+      - name: Verify bounded WebView2 startup observation
+        run: |
+          python -m unittest discover -s scripts/tests -p test_windows_webview_probe.py -v 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/webview-probe-tests.log')
+          if ($LASTEXITCODE -ne 0) { throw 'WebView2 readiness boundary tests failed' }
       - name: Build the pinned native engine for the installed desktop
         run: |
           $evidence = Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence'

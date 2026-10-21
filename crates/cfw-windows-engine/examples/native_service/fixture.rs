@@ -116,6 +116,9 @@ pub(super) fn main() -> Result<()> {
     if args.len() == 2 && args[1] == "--installed-maintenance-validation" {
         return maintenance::run();
     }
+    if args.len() == 4 && args[1] == "--installed-maintenance-client" {
+        return maintenance::client(&args[2], &args[3]);
+    }
     if args.len() == 2 && args[1] == "--desktop-process-validation" {
         return restricted::run_desktop_process_observation();
     }

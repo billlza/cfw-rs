@@ -25,7 +25,7 @@ mod startup;
 mod supervisor;
 pub use local_cleanup::VerifiedLocalCleanup;
 pub use recovery::ProxyRecoveryObservation;
-pub use startup::VerifiedOffAdmission;
+pub use startup::{ObservedRecordedOff, VerifiedOffAdmission};
 
 /// The service owns one instance behind its lifecycle guard. This component
 /// binds native callers and persists policy; the runtime supervisor still owns

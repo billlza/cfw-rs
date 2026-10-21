@@ -4,6 +4,23 @@ use super::super::{RuntimeProcessObservation, RuntimeProcessState};
 use super::*;
 use crate::authority_journal::RecoveryAction;
 
+/// Fresh native checking of an existing protected Off record. Constructing
+/// this observation publishes no authority transition and grants no lease.
+pub struct ObservedRecordedOff {
+    record: AuthorityCommittedState,
+    processes: RuntimeProcessObservation,
+    retired: bool,
+    empty_controller: bool,
+}
+impl ObservedRecordedOff {
+    pub fn record(&self) -> &AuthorityCommittedState {
+        &self.record
+    }
+    pub fn processes(&self) -> &RuntimeProcessObservation {
+        &self.processes
+    }
+}
+
 pub struct VerifiedOffAdmission {
     prior: AuthorityCommittedState,
     processes: RuntimeProcessObservation,
@@ -21,10 +38,11 @@ impl VerifiedOffAdmission {
     }
 }
 impl WindowsAuthority {
-    /// Called by the trusted service supervisor after open/reload, before
-    /// offering new operations. No user request can supply these observations.
+    /// Observe an existing Off record after open/reload without entering Off
+    /// in this controller or publishing a new revision. Recovery of an already
+    /// pending journal publication still follows the normal journal contract.
     /// Active, Preparing, Stopping, Quarantined and unknown records are rejected.
-    pub fn verify_recorded_off(&mut self) -> Result<VerifiedOffAdmission> {
+    pub fn observe_recorded_off(&mut self) -> Result<ObservedRecordedOff> {
         require_service()?;
         let target = self.machine.recorded_off_target()?;
         let empty_controller = self.owner_session.is_none()
@@ -57,21 +75,39 @@ impl WindowsAuthority {
         if !retired {
             return Err(AuthorityError::CleanupUnproven);
         }
+        self.recheck_recorded_off(&target)?;
+        Ok(ObservedRecordedOff {
+            record: target,
+            processes,
+            retired,
+            empty_controller,
+        })
+    }
+
+    /// Called by the trusted service supervisor before offering operations.
+    /// Admission is a state transition; maintenance observations use the method
+    /// above so repeated reads cannot advance the durable authority revision.
+    pub fn verify_recorded_off(&mut self) -> Result<VerifiedOffAdmission> {
+        let observed = self.observe_recorded_off()?;
+        let target = observed.record;
+        let processes = observed.processes;
         // Schema-6 Off is committed only after all owned runtime effects have
         // retired, or before any runtime has been admitted. Subsequent grants
         // must first change this protected record. External/user-owned network
         // settings are not relabelled as application-owned cleanup obligations.
+        // The private observation constructor has checked an empty controller
+        // and exact native retirement before any of these conditions are set.
         let proof = CleanupEvidence {
             binding: CleanupBinding::RecordedOff(target.clone()),
             revision: target.revision(),
             lease_id: None,
-            proxy_listener_closed: retired,
-            system_proxy_restored: retired,
-            tunnel_engine_stopped: retired,
-            packet_pump_closed: retired,
-            managed_tunnel_off: retired,
-            endpoints_closed: empty_controller && retired,
-            secret_buffers_cleared: empty_controller && retired,
+            proxy_listener_closed: observed.retired,
+            system_proxy_restored: observed.retired,
+            tunnel_engine_stopped: observed.retired,
+            packet_pump_closed: observed.retired,
+            managed_tunnel_off: observed.retired,
+            endpoints_closed: observed.empty_controller && observed.retired,
+            secret_buffers_cleared: observed.empty_controller && observed.retired,
         };
         // Re-read the anchored journal after native observation as well. The
         // normal supervisor also holds its lifecycle guard through this call.

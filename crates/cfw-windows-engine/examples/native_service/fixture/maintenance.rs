@@ -183,6 +183,18 @@ pub(super) fn exercise() -> Result<()> {
             let late = record()?.ok_or("missing late interruption marker")?;
             assert_eq!(late["phase"]["state"], "preparing");
             assert_eq!(product.query()?.dwCurrentState, SERVICE_STOPPED);
+            let resumed = installation
+                .prepare_service_maintenance(transaction)
+                .map_err(|e| e.to_string())?;
+            assert_eq!(resumed["retained_process_exit_observed"], false);
+            assert_eq!(resumed["authority"]["root"], prepared["authority"]["root"]);
+            let revision = prepared["authority"]["revision"]
+                .as_u64()
+                .ok_or("missing prepared revision")?;
+            assert_eq!(
+                resumed["authority"]["revision"].as_u64(),
+                revision.checked_add(1)
+            );
             let rollback = installation
                 .rollback_service_maintenance(transaction)
                 .map_err(|e| e.to_string())?;
@@ -196,7 +208,8 @@ pub(super) fn exercise() -> Result<()> {
             assert_eq!(idle["startup_restored"], false);
             Ok(
                 serde_json::json!({"source":transport::installation()?.source,
-            "document":"cfw-installed-service-maintenance-v1","prepared":prepared,
+            "document":"cfw-installed-service-maintenance-v1","prepared":prepared,"resumed":resumed,
+            "late_preparation_resumed":true,
             "injected_failure_after_intent_retained":true,"injected_failure_after_disable_retained":true,
             "prepared_idempotent":true,"foreign_transaction_rejected":true,
             "disabled_start_refused":true,"pending_marker_blocks_startup":true,
@@ -265,24 +278,7 @@ pub(super) fn run() -> Result<()> {
         }
         let name = format!("CFW-scm-fixture-{}-a", Uuid::new_v4());
         let mut service = Installed::create(&manager, name.clone(), &image)?;
-        let result = (|| {
-            let mut channel = ServiceChannel::connect(
-                &name,
-                ServiceClientRole::Desktop,
-                verified(&image, expected)?,
-            )
-            .map_err(|e| e.to_string())?;
-            let reply = channel
-                .request(
-                    b"installed-maintenance",
-                    Instant::now() + Duration::from_secs(90),
-                )
-                .map_err(|e| e.to_string())?;
-            if reply.as_bytes() != b"maintenance-ok" {
-                return Err("maintenance receipt reply mismatch".into());
-            }
-            Ok(())
-        })();
+        let result = transport::run_maintenance_desktop(root.path(), &name, expected);
         let cleanup = service.remove();
         match (result, cleanup) {
             (Ok(()), Ok(())) => Ok(()),
@@ -290,4 +286,49 @@ pub(super) fn run() -> Result<()> {
             (Err(e), Err(c)) => Err(format!("{e}; fixture service removal: {c}")),
         }
     })
+}
+
+pub(super) fn client(name: &str, hex: &str) -> Result<()> {
+    if std::env::var("CFW_NATIVE_SERVICE_MUTATION_TESTS").as_deref() != Ok("1") {
+        return Err("maintenance Desktop requires disposable CI opt-in".into());
+    }
+    let id = name
+        .strip_prefix("CFW-scm-fixture-")
+        .and_then(|s| s.strip_suffix("-a"))
+        .ok_or("invalid maintenance fixture service")?;
+    let parsed = Uuid::parse_str(id).map_err(|e| e.to_string())?;
+    if parsed.is_nil() || parsed.to_string() != id {
+        return Err("noncanonical fixture service".into());
+    }
+    let (image, expected) = transport::service_image()?;
+    let expected_hex: String = expected.iter().map(|byte| format!("{byte:02x}")).collect();
+    if hex != expected_hex {
+        return Err("maintenance fixture source mismatch".into());
+    }
+    let mut channel = ServiceChannel::connect(
+        name,
+        ServiceClientRole::Desktop,
+        verified(&image, expected)?,
+    )
+    .map_err(|e| e.to_string())?;
+    let reply = channel
+        .request(
+            b"installed-maintenance",
+            Instant::now() + Duration::from_secs(90),
+        )
+        .map_err(|e| e.to_string())?;
+    if reply.as_bytes() != b"maintenance-ok" {
+        return Err("maintenance receipt reply mismatch".into());
+    }
+    let root = std::env::current_exe().map_err(|e| e.to_string())?;
+    let root = root.parent().ok_or("missing admitted Desktop directory")?;
+    let report = serde_json::json!({"success":true,"role":"desktop","maintenance_request_acknowledged":true});
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(root.join(format!("{name}-desktop-client.json")))
+        .map_err(|e| e.to_string())?;
+    file.write_all(&serde_json::to_vec(&report).map_err(|e| e.to_string())?)
+        .and_then(|()| file.sync_all())
+        .map_err(|e| e.to_string())
 }

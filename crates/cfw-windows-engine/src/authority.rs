@@ -18,6 +18,8 @@ pub use client::AuthorityChannel;
 #[cfg(windows)]
 pub use dispatch::{AuthorizedReply, DispatchError};
 #[cfg(windows)]
+pub use native::ObservedRecordedOff;
+#[cfg(windows)]
 pub use native::ProxyRecoveryObservation;
 #[cfg(windows)]
 pub use native::VerifiedLocalCleanup;

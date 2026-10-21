@@ -58,7 +58,15 @@ fn bind(record: &Record, transaction: Uuid, installation: &InstalledRuntime) -> 
 fn fresh_off() -> Result<AuthoritySnapshot> {
     let root = InstalledRuntime::machine_root()?;
     let mut authority = WindowsAuthority::reopen(&root.join("journal"), SERVICE_NAME)?;
-    Ok(authority.verify_recorded_off()?.snapshot().clone())
+    let observation = authority.observe_recorded_off()?;
+    let record = observation.record();
+    // This describes the freshly checked protected record. The temporary
+    // controller remains Recovering and cannot grant a new runtime operation.
+    Ok(AuthoritySnapshot {
+        state: record.state(),
+        revision: Some(record.revision()),
+        root: Some(record.root().clone()),
+    })
 }
 fn prepare(
     installation: &InstalledRuntime,

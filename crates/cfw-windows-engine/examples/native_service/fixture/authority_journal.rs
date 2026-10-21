@@ -246,6 +246,7 @@ pub(super) fn exercise(name: &str, command: &[u8], owner: &NativeUserSession) ->
     match command {
         b"authority-journal" if name.ends_with("-a") => {
             existing_authority_admission()?;
+            recorded_off_observation(owner)?;
             enrollment_faults()?;
             allocation_faults()?;
             allocation_checkpoint()?;
@@ -356,6 +357,36 @@ fn existing_authority_admission() -> Result<()> {
         })?;
     }
     Ok(())
+}
+
+fn recorded_off_observation(owner: &NativeUserSession) -> Result<()> {
+    use cfw_windows_engine::authority::WindowsAuthority;
+    with_case(|store, path, scope| {
+        let prior = cycle(store, owner)?;
+        assert!(prior.root().epoch > 0);
+        let mut controller = WindowsAuthority::reopen(path, scope).map_err(|e| e.to_string())?;
+        for _ in 0..2 {
+            let observed = controller
+                .observe_recorded_off()
+                .map_err(|e| e.to_string())?;
+            assert_eq!(observed.record(), &prior);
+            assert!(observed.processes().processes_retired());
+            assert_eq!(controller.snapshot().state, AuthorityState::Recovering);
+            assert!(controller.lease_owner().is_none());
+            assert_eq!(
+                store.recover().map_err(|e| e.to_string())?.committed,
+                Some(prior.clone())
+            );
+        }
+        // Startup admission is intentionally different: a previously used
+        // runtime root publishes a new reconciliation revision.
+        let admitted = controller
+            .verify_recorded_off()
+            .map_err(|e| e.to_string())?;
+        assert_eq!(admitted.snapshot().revision, Some(prior.revision() + 1));
+        assert_eq!(admitted.snapshot().state, AuthorityState::Off);
+        Ok(())
+    })
 }
 
 fn enrollment_faults() -> Result<()> {
@@ -648,7 +679,7 @@ fn rollback_and_missing_identity(owner: &NativeUserSession) -> Result<()> {
     })
 }
 fn first_report() -> serde_json::Value {
-    serde_json::json!({"success":true,"fault_runs":19,"existing_authority_admission_cases":6,"missing_authority_not_enrolled":true,"allocation_fault_cases":4,"allocation_checkpoint_cases":1,"unused_allocations_survive_checkpoint":true,"temporary_cases":4,"identity_and_rollback_cases":4,"whole_sid_logon_session_retained":true,"off_requires_verification":true,"active_requires_reattestation":true,"checkpoint_recovery_and_cleanup":true,"full_authority_state_machine_proven":false,"power_loss_tested":false})
+    serde_json::json!({"success":true,"fault_runs":19,"existing_authority_admission_cases":6,"missing_authority_not_enrolled":true,"off_observation_does_not_publish":true,"allocation_fault_cases":4,"allocation_checkpoint_cases":1,"unused_allocations_survive_checkpoint":true,"temporary_cases":4,"identity_and_rollback_cases":4,"whole_sid_logon_session_retained":true,"off_requires_verification":true,"active_requires_reattestation":true,"checkpoint_recovery_and_cleanup":true,"full_authority_state_machine_proven":false,"power_loss_tested":false})
 }
 fn second_report() -> serde_json::Value {
     serde_json::json!({"success":true,"writer_process_exited":true,"revision":5,"allocated_generation":1,"state":"active","recovery_action":"reattest_owner","owner_matches_native_console":true,"configuration_identity_preserved":true,"executable_lease_restored":false})

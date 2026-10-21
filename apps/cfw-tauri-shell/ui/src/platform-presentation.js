@@ -31,6 +31,18 @@ export function platformPresentation(operatingSystem) {
   }
 }
 
+// The native payload names the platform's startup mechanism differently.
+// Resolve it once at the UI boundary instead of rendering a missing Mac field.
+export function platformStartupDesign(operatingSystem, design) {
+  platformPresentation(operatingSystem);
+  const windows = operatingSystem === "windows";
+  const value = windows ? design?.startup_strategy : design?.launchd_strategy;
+  if (typeof value !== "string" || !value.trim()) {
+    throw new TypeError("host startup strategy is invalid");
+  }
+  return { label: windows ? "Start at Login" : "launchd", value };
+}
+
 export function proxyEnvironmentCommands(operatingSystem, port) {
   platformPresentation(operatingSystem);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {

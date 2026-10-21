@@ -35,6 +35,9 @@
     const heading = await page.locator('#page-title').innerText();
     const content = await page.locator('#page').innerText();
     if (!heading.trim() || !content.trim()) throw new Error(`Empty shared page: ${id}`);
+    if (id === 'feedback' && !content.includes(backend.platform.startup_strategy)) {
+      throw new Error('Windows startup architecture is missing from the Feedback page');
+    }
     await page.screenshot({ path: `${id}.png` });
     pages.push({ id, heading, content, snapshot: await page.locator('body').ariaSnapshot() });
   }

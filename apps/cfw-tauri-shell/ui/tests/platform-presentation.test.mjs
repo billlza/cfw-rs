@@ -1,7 +1,26 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { platformPresentation, proxyEnvironmentCommands } from "../src/platform-presentation.js";
+import { platformPresentation, platformStartupDesign, proxyEnvironmentCommands } from "../src/platform-presentation.js";
 import { catalogs, SUPPORTED_LOCALES } from "../src/i18n.js";
+
+test("Windows startup design uses its native field while Mac retains launchd", () => {
+  assert.deepEqual(platformStartupDesign("windows", { startup_strategy: "Windows startup approval" }), {
+    label: "Start at Login", value: "Windows startup approval",
+  });
+  assert.deepEqual(platformStartupDesign("macos", { launchd_strategy: "SMAppService Login Item" }), {
+    label: "launchd", value: "SMAppService Login Item",
+  });
+});
+
+test("missing or mismatched startup metadata cannot become an empty platform row", () => {
+  for (const os of ["windows", "macos"]) {
+    for (const design of [null, {}, { startup_strategy: "", launchd_strategy: " " }, { startup_strategy: 3, launchd_strategy: true }]) {
+      assert.throws(() => platformStartupDesign(os, design), /startup strategy is invalid/u);
+    }
+  }
+  assert.throws(() => platformStartupDesign("windows", { launchd_strategy: "Mac only" }), /startup strategy is invalid/u);
+  assert.throws(() => platformStartupDesign("linux", { startup_strategy: "unknown" }), /operating system is invalid/u);
+});
 
 test("proxy environment commands preserve the actual listener and each shell's assignment syntax", () => {
   for (const port of [1, 7890, 65535]) {

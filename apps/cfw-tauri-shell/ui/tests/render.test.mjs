@@ -234,6 +234,14 @@ const DIAGNOSTICS = {
   unavailable: ["default_route_interface", "hardware_port", "bsd_device", "recommended_clash_proxy_services"],
 };
 
+const WINDOWS_PLATFORM_DESIGN = Object.freeze({
+  target: "windows-x64",
+  system_proxy_strategy: "Current-user Windows proxy with owned restoration",
+  helper_strategy: "Windows authority service and ordinary-user Agent",
+  startup_strategy: "Current-user sign-in registration; Windows controls startup approval",
+  tun_strategy: "Not available in this development build",
+});
+
 const responses = {
   boot_payload: {
     native_ui: { profile_menu: false, runtime_settings: false, general_switches: false, prompt_dialog: false, window_glass: false },
@@ -891,12 +899,13 @@ test("Windows network details keep user proxy settings separate and escape adapt
 });
 
 test("About and Feedback retain the host's Windows version and architecture", async () => {
-  const original = { product: state.payload.product, dialog: state.glassDialog, page: state.activePage };
+  const original = { product: state.payload.product, platform: state.platform, dialog: state.glassDialog, page: state.activePage };
   try {
     state.payload.product = {
       ...original.product, name: "Clash for Windows", operating_system: "windows",
       minimum_os_version: "10.0.26100", architecture: "x64",
     };
+    state.platform = WINDOWS_PLATFORM_DESIGN;
     state.glassDialog = { kind: "product-about", payload: { phase: "idle" } };
     await renderPage("general");
     assert.match(glassRoot.innerHTML, /aria-label="About Clash for Windows"/u);
@@ -905,6 +914,9 @@ test("About and Feedback retain the host's Windows version and architecture", as
     assert.doesNotMatch(glassRoot.innerHTML, /macOS 15\.0|Clash for Mac/u);
     state.glassDialog = null;
     const feedback = await renderPage("feedback");
+    assert.ok(feedback.includes(WINDOWS_PLATFORM_DESIGN.startup_strategy));
+    assert.match(feedback, /<dt>Start at Login<\/dt>/u);
+    assert.doesNotMatch(feedback, /<dt>launchd<\/dt>/u);
     assert.ok(feedback.includes("x64 · Windows 10.0.26100 or later"));
     assert.doesNotMatch(feedback, /ARM64 macOS only|macOS 15\.0/u);
     state.payload.product = { ...state.payload.product, minimum_os_version: null };
@@ -918,6 +930,7 @@ test("About and Feedback retain the host's Windows version and architecture", as
     assert.doesNotMatch(unqualified, /Windows.*(?:null|undefined|15\.0|or later)/u);
   } finally {
     state.payload.product = original.product;
+    state.platform = original.platform;
     state.glassDialog = original.dialog;
     await renderPage(original.page);
   }
@@ -2936,13 +2949,7 @@ test("Windows settings use native platform descriptions and reject a macOS desig
   const platform = state.platform;
   try {
     state.payload.product = { ...product, name: "Clash for Windows", operating_system: "windows", architecture: "x64" };
-    state.platform = {
-      target: "windows-x64",
-      system_proxy_strategy: "Current-user Windows proxy with owned restoration",
-      helper_strategy: "Windows authority service and ordinary-user Agent",
-      startup_strategy: "Current-user sign-in registration; Windows controls startup approval",
-      tun_strategy: "Not available in this development build",
-    };
+    state.platform = WINDOWS_PLATFORM_DESIGN;
     const html = await renderPage("settings");
     for (const text of ["Windows protected storage", "File Explorer", "system tray", "Not available in this development build"]) {
       assert.ok(html.includes(text), text);

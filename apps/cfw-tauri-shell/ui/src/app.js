@@ -5,7 +5,7 @@ import { createNativeGeneralSwitches } from "./native-general-switches.js";
 import { createNativePromptDialog, promptDialogFrame } from "./native-prompt-dialog.js";
 import { createWindowGlass } from "./window-glass.js";
 import { navIcon } from "./nav-icons.js";
-import { platformPresentation, proxyEnvironmentCommands } from "./platform-presentation.js";
+import { platformPresentation, platformStartupDesign, proxyEnvironmentCommands } from "./platform-presentation.js";
 import { networkDiagnosticsView } from "./network-diagnostics.js";
 import { t, setLocale, getLocale, SUPPORTED_LOCALES, LANGUAGE_OPTIONS } from "./i18n.js";
 import {
@@ -2588,6 +2588,7 @@ function renderFeedback() {
       ? t("Current build v{value1} — the menu bar Clash for Mac → Check for Update… also works.", { value1: escapeHtml(String(version)) })
       : t("Current build v{value1} — check for updates from the tray menu.", { value1: escapeHtml(String(version)) });
   const platform = state.platform;
+  const startupDesign = platform ? platformStartupDesign(product.operating_system, platform) : null;
   return `
     <div class="feedback-layout">
       <section class="panel hero-panel">
@@ -2613,10 +2614,10 @@ function renderFeedback() {
         <h3>${escapeHtml(t("How this build runs the network"))}</h3>
         ${platform ? `
           <dl class="ports-list feedback-list">
-            <div><dt>${escapeHtml(t("system proxy"))}</dt><dd>${escapeHtml(platform.system_proxy_strategy ?? "")}</dd></div>
-            <div><dt>tunnel</dt><dd>${escapeHtml(platform.tun_strategy ?? "")}</dd></div>
-            <div><dt>helper</dt><dd>${escapeHtml(platform.helper_strategy ?? "")}</dd></div>
-            <div><dt>launchd</dt><dd>${escapeHtml(platform.launchd_strategy ?? "")}</dd></div>
+            <div><dt>${escapeHtml(t("system proxy"))}</dt><dd>${escapeHtml(t(platform.system_proxy_strategy ?? ""))}</dd></div>
+            <div><dt>tunnel</dt><dd>${escapeHtml(t(platform.tun_strategy ?? ""))}</dd></div>
+            <div><dt>helper</dt><dd>${escapeHtml(t(platform.helper_strategy ?? ""))}</dd></div>
+            <div><dt>${escapeHtml(t(startupDesign.label))}</dt><dd>${escapeHtml(t(startupDesign.value))}</dd></div>
           </dl>
         ` : `<p class="muted">${escapeHtml(t("Platform design is unavailable."))}</p>`}
       </section>
@@ -4313,7 +4314,9 @@ async function loadRetirementStatus() {
 
 async function loadPlatformDesign() {
   try {
-    state.platform = await invoke("current_platform_design");
+    const platform = await invoke("current_platform_design");
+    platformStartupDesign(state.payload.product.operating_system, platform);
+    state.platform = platform;
   } catch (error) {
     state.platform = null;
     appendLog("error", "shell", t("Unable to read the platform design: {error}", { error: errorText(error) }));

@@ -10,6 +10,8 @@ pub(super) fn observe() -> Result<serde_json::Value> {
     let observed: process_identity::ProcessIdentity =
         process_identity::current_process_identity(&executable)
             .map_err(|error| format!("observe current desktop identity: {error}"))?;
+    let by_pid = process_identity::process_identity(std::process::id(), &executable)
+        .map_err(|error| format!("observe desktop launch process: {error}"))?;
     let wire = serde_json::to_value(&observed).map_err(|e| e.to_string())?;
     let decoded: process_identity::ProcessIdentity =
         serde_json::from_value(wire.clone()).map_err(|e| e.to_string())?;
@@ -18,6 +20,7 @@ pub(super) fn observe() -> Result<serde_json::Value> {
     let processes = process_identity::exact_processes(&executable)
         .map_err(|error| format!("enumerate current desktop logon: {error}"))?;
     if !observed.is_this_process()
+        || by_pid != observed
         || decoded != observed
         || !present
         || !processes.contains(&observed)

@@ -205,18 +205,29 @@ async fn admit_child(
 }
 
 pub(crate) fn run(transaction: &str) -> i32 {
-    let result = run_inner(transaction);
+    let transaction = match parse_transaction(transaction) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("Windows update argument admission: {error}");
+            return crate::launch::STARTUP_USAGE_EXIT_CODE;
+        }
+    };
+    let mut handed_off = false;
+    let result = run_inner(transaction, &mut handed_off);
     match result {
         Ok(()) => 0,
         Err(error) => {
             eprintln!("Windows update finisher: {error}");
-            show_failure(&error);
+            // Before admission the still-running dashboard handles the failure.
+            // Only a finisher that could have taken over needs its own dialog.
+            if handed_off {
+                show_failure(&error);
+            }
             70
         }
     }
 }
-fn run_inner(value: &str) -> Result<(), String> {
-    let transaction = parse_transaction(value)?;
+fn run_inner(transaction: Uuid, handed_off: &mut bool) -> Result<(), String> {
     let home = super::app_home().map_err(|e| e.to_string())?;
     let handoff = UpdateHandoff::open(&home, transaction).map_err(|e| e.to_string())?;
     let installed = InstalledRuntime::open().map_err(|e| e.to_string())?;
@@ -236,6 +247,7 @@ fn run_inner(value: &str) -> Result<(), String> {
     {
         return Err("Windows finisher does not match this handoff".into());
     }
+    *handed_off = true;
     let mut record = journal.change(
         &record,
         Phase::Finishing {

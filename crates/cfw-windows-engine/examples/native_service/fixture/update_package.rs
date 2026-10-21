@@ -18,6 +18,7 @@ pub(super) fn observe() -> Result<serde_json::Value> {
         .require_desktop_process()
         .map_err(|e| e.to_string())?;
     let release = installed.release();
+    let original = installed.snapshot();
     if release.version != "0.5.0" || release.build != 1 {
         return Err("unexpected protected installed release".into());
     }
@@ -91,8 +92,26 @@ pub(super) fn observe() -> Result<serde_json::Value> {
         return Err("ordinary Desktop lost the signed package identity".into());
     }
     let signature_key = package.publisher().spki_sha256();
-    let resources =
-        windows_staged::WindowsStagedResources::new(staging, package).map_err(|e| e.to_string())?;
+    // These are retained claims, not Minisign proof. This fixture exercises
+    // native inspection/custody; the GUI separately authenticates release bytes.
+    let target = cfw_core::update::ReleaseTarget::WindowsX64;
+    let archive_name = target.archive_name(&package.identity().version);
+    let authorization = cfw_core::update::UpdateAuthorization {
+        version: package.identity().version.clone(),
+        download_url: target.download_url(&package.identity().version, &archive_name),
+        archive_name,
+        signature: "unverified-claim-outside-this-native-inspection-fixture".into(),
+    };
+    let resources = windows_staged::WindowsStagedResources::new(
+        staging,
+        package,
+        authorization.clone(),
+        original.clone(),
+    )
+    .map_err(|e| e.to_string())?;
+    if resources.authorization != authorization || resources.original != original {
+        return Err("staged desktop resources changed the retained release expectations".into());
+    }
     // The actual desktop owner must retain both the native candidate and the
     // lifecycle lease while it waits for install/cancel. A path-only state
     // would let either operation below replace or remove verified bytes.

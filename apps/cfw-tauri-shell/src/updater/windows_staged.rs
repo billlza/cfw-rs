@@ -1,5 +1,5 @@
 //! Native resources retained while a verified MSI is offered to the user.
-use super::contract::UpdateAuthorization;
+use cfw_core::update::UpdateAuthorization;
 use cfw_windows_engine::runtime_host::InstallationSnapshot;
 use cfw_windows_engine::update_package::{InspectedMsi, PackageError, StagingError, UpdateStaging};
 

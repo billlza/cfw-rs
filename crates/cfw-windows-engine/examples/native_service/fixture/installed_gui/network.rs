@@ -2,7 +2,7 @@
 //! options are compared without putting raw proxy/PAC strings in artifacts.
 use super::*;
 use cfw_windows_engine::{ProxySettings, WindowsSystemProxy};
-use std::io::Read;
+use std::{collections::BTreeSet, io::Read};
 
 fn connect_observation(address: std::net::SocketAddr, seconds: u64) -> serde_json::Value {
     let started = std::time::Instant::now();
@@ -21,7 +21,7 @@ fn connect_observation(address: std::net::SocketAddr, seconds: u64) -> serde_jso
     }
 }
 
-fn listener_observation(port: u16) -> Result<Vec<(u32, std::net::SocketAddr)>> {
+fn listener_observation(port: u16) -> Result<BTreeSet<(u32, std::net::SocketAddr)>> {
     cfw_windows_engine::observe_tcp_listeners_at_port(port).map_err(|error| error.to_string())
 }
 

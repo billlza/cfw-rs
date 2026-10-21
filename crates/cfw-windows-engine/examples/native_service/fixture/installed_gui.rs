@@ -1,8 +1,9 @@
 //! Launch the actual installed desktop with the fixture's existing medium
-//! token and private desktop. There are no product test flags or IPC substitutes.
+//! token and observed input desktop. There are no product test flags or IPC substitutes.
 use super::*;
 use std::os::windows::io::AsHandle;
 
+mod input_desktop;
 mod paint_probe;
 
 pub(super) fn run() -> Result<()> {
@@ -27,7 +28,7 @@ pub(super) fn run() -> Result<()> {
     let path = cfw_windows_engine::runtime_host::InstalledRuntime::desktop_path()
         .map_err(|e| e.to_string())?;
     let token = restricted::token()?;
-    let mut desktop = desktop::Desktop::new()?;
+    let mut desktop = input_desktop::InputDesktop::open()?;
     let output = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -101,7 +102,8 @@ pub(super) fn run() -> Result<()> {
                 "administrator_member": false, "image": observed,
                 "image_sha256": cfw_singbox_config::sha256_hex(&std::fs::read(&path).map_err(|e| e.to_string())?),
                 "installed_release": installed.release(), "desktop_is_fixture": false,
-                "private_desktop": true, "physical_display_exercised": false,
+                "private_desktop": false, "desktop_observation": desktop.observation(),
+                "physical_display_exercised": false,
                 "release_accepted": false
             }),
         )?;

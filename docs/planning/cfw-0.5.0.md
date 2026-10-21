@@ -27,6 +27,15 @@ Windows 库/二进制交叉 Clippy 通过；原生日志测试交给托管 Windo
 执行；本机完整 MSVC example 检查仍被缺失 Windows SDK 的 `assert.h` 阻断，不能
 视为 Rust 编译通过。开发包未签名；真实显示、网络模式、完整更新和发布仍是开放项。
 
+首轮真实桌面安装流程 `312e6653` 在
+[桌面作业](https://github.com/billlza/cfw-rs/actions/runs/39579956427)的引擎构建前失败：
+严格的源码洁净检查发现桌面构建后的工作区变化；安装包和 GUI 尚未执行。固定依赖
+Tauri 2.7.0 的构建路径调用 schema 生成器，Windows 目标会在源码目录生成尚未
+跟踪的 `gen/schemas/windows-schema.json`，并可能更新通用 schema。首轮没有保存
+`git status`，不能断言没有其他变化。流程现改为在桌面生成步骤前构建引擎，保留
+原有完整洁净检查；桌面构建后保存状态、schema 和差异，并拒绝 schema 输出之外
+的任何源码变化。失败日志、带哈希的产物及未执行阶段继续保留。
+
 以下保留各历史检查点及失败因果；其中编译错误数量、fixture 范围和未生成 EXE
 等描述只适用于各段注明的源码，不覆盖上面的当前检查点。
 

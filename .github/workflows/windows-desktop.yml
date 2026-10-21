@@ -51,6 +51,20 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ steps.pins.outputs.PYTHON_VERSION }}
+      - name: Build the pinned native engine for the installed desktop
+        run: |
+          $evidence = Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence'
+          $engineRoot = Join-Path $env:RUNNER_TEMP 'cfw-desktop-engine'
+          try {
+            python scripts/windows_engine.py build --repository "$pwd" --output $engineRoot 2>&1 |
+              Tee-Object -FilePath (Join-Path $evidence 'engine-build.log')
+            if ($LASTEXITCODE -ne 0) { throw 'Installed desktop engine build or GA contract tests failed' }
+          } finally {
+            $artifacts = Join-Path $engineRoot 'artifacts'
+            if (Test-Path -LiteralPath $artifacts -PathType Container) {
+              Copy-Item -LiteralPath $artifacts -Destination (Join-Path $evidence 'engine') -Recurse -ErrorAction Stop
+            }
+          }
       - name: Prepare pinned npm and shared UI
         env:
           CFW_NPM_VERSION: ${{ steps.pins.outputs.NPM_VERSION }}
@@ -223,20 +237,27 @@ jobs:
             update_handoff_exercised = $false
             release_accepted = $false
           } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $evidence 'startup-receipt.json') -Encoding utf8NoBOM
-      - name: Build the pinned native engine for the installed desktop
+      - name: Preserve and verify desktop-generated source changes
         run: |
           $evidence = Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence'
-          $engineRoot = Join-Path $env:RUNNER_TEMP 'cfw-desktop-engine'
-          try {
-            python scripts/windows_engine.py build --repository "$pwd" --output $engineRoot 2>&1 |
-              Tee-Object -FilePath (Join-Path $evidence 'engine-build.log')
-            if ($LASTEXITCODE -ne 0) { throw 'Installed desktop engine build or GA contract tests failed' }
-          } finally {
-            $artifacts = Join-Path $engineRoot 'artifacts'
-            if (Test-Path -LiteralPath $artifacts -PathType Container) {
-              Copy-Item -LiteralPath $artifacts -Destination (Join-Path $evidence 'engine') -Recurse -ErrorAction Stop
+          $status = @(git status --porcelain=v1 --untracked-files=all)
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot observe desktop build source status' }
+          $status | Set-Content -LiteralPath (Join-Path $evidence 'desktop-generated-source-status.txt') -Encoding utf8NoBOM
+          git diff -- apps/cfw-tauri-shell/gen/schemas/ |
+            Set-Content -LiteralPath (Join-Path $evidence 'desktop-generated-schemas.diff') -Encoding utf8NoBOM
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot preserve generated schema differences' }
+          $generated = @(
+            'apps/cfw-tauri-shell/gen/schemas/windows-schema.json',
+            'apps/cfw-tauri-shell/gen/schemas/desktop-schema.json',
+            'apps/cfw-tauri-shell/gen/schemas/acl-manifests.json',
+            'apps/cfw-tauri-shell/gen/schemas/capabilities.json'
+          )
+          foreach ($entry in $status) {
+            if ($entry.Length -lt 4 -or $generated -cnotcontains $entry.Substring(3)) {
+              throw "Desktop build changed a source outside Tauri's generated schemas: $entry"
             }
           }
+          Copy-Item -LiteralPath 'apps/cfw-tauri-shell/gen/schemas' -Destination (Join-Path $evidence 'generated-schemas') -Recurse -ErrorAction Stop
       - name: Build the real desktop development MSI
         run: |
           $evidence = Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence'

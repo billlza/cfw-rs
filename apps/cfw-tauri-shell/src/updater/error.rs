@@ -390,17 +390,19 @@ mod tests {
         );
         // A review that could not finish is not a storage condition the user
         // can relieve by freeing space.
-        for error in [
-            UpdateError::PreviousAttempt(ReviewError::Unavailable("detail".into())),
-            #[cfg(target_os = "macos")]
-            UpdateError::PreviousAttempt(ReviewError::RecordDiscarded("detail".into())),
-        ] {
-            assert_eq!(
-                error.failure().category,
-                FailureCategory::Internal,
-                "{error}"
-            );
-        }
+        assert_eq!(
+            UpdateError::PreviousAttempt(ReviewError::Unavailable("detail".into()))
+                .failure()
+                .category,
+            FailureCategory::Internal
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            UpdateError::PreviousAttempt(ReviewError::RecordDiscarded("detail".into()))
+                .failure()
+                .category,
+            FailureCategory::Internal
+        );
     }
 
     #[test]

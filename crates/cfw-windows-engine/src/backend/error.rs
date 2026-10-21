@@ -149,6 +149,7 @@ fn transport_kind(error: &ServiceTransportError) -> Kind {
             crate::ServicePeerError::Native { .. }
             | crate::ServicePeerError::NotRunning { .. }
             | crate::ServicePeerError::Exited
+            | crate::ServicePeerError::TerminationPending { .. }
             | crate::ServicePeerError::ConnectionClosed => Kind::GlobalAuthorityUnavailable,
             _ => Kind::GlobalAuthorityIdentityRejected,
         },

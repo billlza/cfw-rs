@@ -13,6 +13,7 @@ mod desktop;
 mod local_recovery;
 mod recovery;
 pub(crate) use desktop::run as desktop;
+const CRASH_EXIT_CODE: u32 = 0xcf01;
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -480,8 +481,7 @@ fn crash_restart(
     if unsafe { CompareObjectHandles(old.as_raw_handle(), target.as_raw_handle()) } == 0 {
         return Err("service crash target process object changed".into());
     }
-    const EXIT: u32 = 0xcf01;
-    if unsafe { TerminateProcess(target.as_raw_handle(), EXIT) } == 0 {
+    if unsafe { TerminateProcess(target.as_raw_handle(), CRASH_EXIT_CODE) } == 0 {
         return Err(error("crash disposable service"));
     }
     require_exit(old)?;
@@ -489,7 +489,7 @@ fn crash_restart(
     if unsafe { GetExitCodeProcess(old.as_raw_handle(), &mut code) } == 0 {
         return Err(error("read crashed service exit code"));
     }
-    if code != EXIT {
+    if code != CRASH_EXIT_CODE {
         return Err("service exit did not match the injected crash".into());
     }
     service.wait(SERVICE_STOPPED)?;
@@ -601,6 +601,12 @@ pub(crate) fn receipt(root: &Path, receipts: &Path, source: &str, mode: Mode) ->
 
 fn transport_loss(error: &ServiceTransportError) -> bool {
     match error {
+        // Only the exact injected crash status can account for a teardown
+        // observation. Independent retained-handle exit/Job-zero/Off barriers
+        // remain required before this scenario can finish successfully.
+        ServiceTransportError::Endpoint(ServicePeerError::TerminationPending {
+            exit_code, ..
+        }) => *exit_code == CRASH_EXIT_CODE,
         ServiceTransportError::Closed => true,
         ServiceTransportError::Io(error) => matches!(error.raw_os_error(), Some(109 | 232 | 233)),
         ServiceTransportError::Endpoint(

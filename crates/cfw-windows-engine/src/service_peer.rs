@@ -14,7 +14,9 @@ use std::{
 };
 
 use windows_sys::Win32::{
-    Foundation::{FILETIME, INVALID_HANDLE_VALUE, LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT},
+    Foundation::{
+        FILETIME, INVALID_HANDLE_VALUE, LocalFree, STILL_ACTIVE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    },
     Security::{
         ACCESS_ALLOWED_ACE, ACE_HEADER, ACL_SIZE_INFORMATION, AclSizeInformation,
         Authorization::{GetSecurityInfo, SE_SERVICE},
@@ -33,8 +35,8 @@ use windows_sys::Win32::{
         Services::*,
         SystemServices::{ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE},
         Threading::{
-            GetProcessId, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-            PROCESS_SYNCHRONIZE, WaitForSingleObject,
+            GetExitCodeProcess, GetProcessId, GetProcessTimes, OpenProcess,
+            PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, WaitForSingleObject,
         },
     },
 };
@@ -121,6 +123,18 @@ pub enum ServicePeerError {
     WrongProcess,
     #[error("Windows service process has exited")]
     Exited,
+    /// A native termination status exists, but the observed process wait was
+    /// not signaled. This rejects the peer; it is not a cleanup/exit receipt.
+    #[error(
+        "Windows service process termination is pending (exit={exit_code}, created={creation_filetime}, exited={exit_filetime}): {source}"
+    )]
+    TerminationPending {
+        exit_code: u32,
+        creation_filetime: u64,
+        exit_filetime: u64,
+        #[source]
+        source: crate::Error,
+    },
     #[error("Windows service connection had an incomplete or failed message exchange")]
     ConnectionClosed,
     #[error("Windows service process image: {0}")]
@@ -526,7 +540,7 @@ fn verify_process_image(
     }
     match observed_wait {
         WAIT_OBJECT_0 => Err(ServicePeerError::Exited),
-        WAIT_TIMEOUT => image.map_err(ServicePeerError::from),
+        WAIT_TIMEOUT => image.map_err(|error| image_failure_with_pending_wait(process, error)),
         _ => match image {
             // Preserve the original image failure if lifetime observation also
             // fails. Neither path admits a peer or claims it has exited.
@@ -534,6 +548,50 @@ fn verify_process_image(
             Ok(()) => Err(native("observe service process after image query")),
         },
     }
+}
+
+fn image_failure_with_pending_wait(
+    process: &OwnedHandle,
+    source: crate::Error,
+) -> ServicePeerError {
+    // Image queries can become inaccessible during native process teardown,
+    // before its process object is signaled. Error 5 alone never establishes
+    // that state: require successful observations on this retained object.
+    // If either extra query fails or remains ambiguous, preserve the original
+    // rejection. No peer is admitted and no resource is declared retired here.
+    if matches!(&source, crate::Error::Operation { operation: "query live process image", source }
+        if source.raw_os_error() == Some(5))
+    {
+        let mut exit_code = 0;
+        let mut times = [FILETIME::default(); 4];
+        if unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut exit_code) } != 0
+            && exit_code != STILL_ACTIVE as u32
+            && unsafe {
+                GetProcessTimes(
+                    process.as_raw_handle(),
+                    &mut times[0],
+                    &mut times[1],
+                    &mut times[2],
+                    &mut times[3],
+                )
+            } != 0
+        {
+            let as_ticks = |time: FILETIME| {
+                u64::from(time.dwLowDateTime) | (u64::from(time.dwHighDateTime) << 32)
+            };
+            let creation_filetime = as_ticks(times[0]);
+            let exit_filetime = as_ticks(times[1]);
+            if creation_filetime != 0 && exit_filetime >= creation_filetime {
+                return ServicePeerError::TerminationPending {
+                    exit_code,
+                    creation_filetime,
+                    exit_filetime,
+                    source,
+                };
+            }
+        }
+    }
+    ServicePeerError::Executable(source)
 }
 
 fn trusted_admin_sid(sid: PSID) -> bool {

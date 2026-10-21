@@ -50,6 +50,9 @@ function New-RuntimeMsiFixture {
         throw 'Runtime MSI source identity mismatch'
     }
     if ((Get-RuntimeMsiProductState $ProductCode) -ne -1) { throw 'Refusing an existing MSI product registration' }
+    $build = (Get-Content -LiteralPath $Manifest -Raw | ConvertFrom-Json).build_number
+    if ($build -notin @(1, 2)) { throw 'Unexpected native MSI qualification build' }
+    $msiVersion = "0.5.$build"
     $tools = Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'WiX Toolset v3.14/bin'
     $candle = Join-Path $tools 'candle.exe'
     $light = Join-Path $tools 'light.exe'
@@ -68,7 +71,7 @@ function New-RuntimeMsiFixture {
     $transaction = [guid]::NewGuid().ToString('D')
     $arguments = @('-nologo', '-wx', '-arch', 'x64', '-out', $object,
         "-dRuntime=$Runtime", "-dDesktop=$Desktop", "-dEngine=$Engine", "-dManifest=$Manifest",
-        "-dProductCode=$ProductCode", "-dMaintenanceTransaction=$transaction", $definition)
+        "-dProductCode=$ProductCode", "-dMsiVersion=$msiVersion", "-dMaintenanceTransaction=$transaction", $definition)
     & $candle @arguments 2>&1 | Tee-Object -FilePath (Join-Path $Evidence 'compile.log') | Out-Host
     if ($LASTEXITCODE -ne 0) { throw 'Runtime MSI fixture compilation failed' }
     & $light -nologo -wx -ext $binder -out $package $object 2>&1 | Tee-Object -FilePath (Join-Path $Evidence 'link.log') | Out-Host
@@ -76,7 +79,7 @@ function New-RuntimeMsiFixture {
     $boundManifest = Get-Content -LiteralPath $Manifest -Raw | ConvertFrom-Json
     if ($boundManifest.msi_product_code -cne $ProductCode -or $boundManifest.msi_package_code -ceq '{00000000-0000-0000-0000-000000000000}') { throw 'Runtime manifest was not bound to its generated MSI identity' }
     $result = [pscustomobject]@{
-        source=$Source; path=$package; product_code=$ProductCode; package_code=$boundManifest.msi_package_code
+        source=$Source; path=$package; product_code=$ProductCode; package_code=$boundManifest.msi_package_code; msi_version=$msiVersion
         package_sha256=(Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash.ToLowerInvariant()
         maintenance_transaction=$transaction; manifest_sha256=(Get-FileHash -LiteralPath $Manifest -Algorithm SHA256).Hash.ToLowerInvariant()
         build_number=$boundManifest.build_number
@@ -88,7 +91,7 @@ function New-RuntimeMsiFixture {
 function Invoke-RuntimeMsi {
     param([Parameter(Mandatory)]$Fixture,
           [ValidateSet('failed-install','install','failed-maintenance','uninstall')][string]$Operation,
-          [string]$Evidence, [string]$ExpectedProductCode, [string]$ExpectedPackageCode)
+          [string]$Evidence, [string]$ExpectedProductCode, [string]$ExpectedPackageCode, [string]$ExpectedMsiVersion)
     Assert-RuntimeMsiOptIn
     if ((Get-FileHash -LiteralPath $Fixture.path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $Fixture.package_sha256) {
         throw 'Runtime MSI fixture bytes changed after authoring'
@@ -122,8 +125,9 @@ function Invoke-RuntimeMsi {
         if ($expectedState -eq 5) {
             $result.registration = Get-RuntimeMsiRegistration $ExpectedProductCode
             if ([string]::IsNullOrEmpty($ExpectedPackageCode)) { $ExpectedPackageCode = $Fixture.package_code }
+            if ([string]::IsNullOrEmpty($ExpectedMsiVersion)) { $ExpectedMsiVersion = $Fixture.msi_version }
             if ($result.registration.PackageCode -cne $ExpectedPackageCode -or
-                $result.registration.VersionString -cne '0.5.0' -or
+                $result.registration.VersionString -cne $ExpectedMsiVersion -or
                 $result.registration.ProductName -cne 'CFW Runtime Installation Fixture' -or
                 $result.registration.AssignmentType -cne '1') { throw 'Machine MSI registration does not match the original installed package' }
         }
@@ -136,7 +140,7 @@ function Invoke-RuntimeMsi {
         if ($expectedCode -eq 1603) {
             $content = Get-Content -LiteralPath $log -Raw
             $validationIndex = $content.IndexOf('Executing op: CustomActionSchedule(Action=ValidateInstalledRuntime,', [StringComparison]::Ordinal)
-            $failureIndex = $content.IndexOf('CustomAction FailAfterInstallServices returned actual error code 1', [StringComparison]::Ordinal)
+            $failureIndex = $content.IndexOf('CustomAction FailAfterReplacement returned actual error code 1', [StringComparison]::Ordinal)
             if ($validationIndex -lt 0 -or $failureIndex -le $validationIndex) {
                 throw 'MSI failed outside the injected deferred-action/rollback boundary'
             }

@@ -100,6 +100,7 @@ try {
         throw 'MSI installed a different runtime manifest'
     }
     $manifestBytes = [IO.File]::ReadAllBytes($manifestPath)
+    $manifestWriteTime = [IO.File]::GetLastWriteTimeUtc($manifestPath)
     $check = & $runtimePath --check-installation $msi.manifest_sha256
     if ($LASTEXITCODE -ne 0 -or -not ($check | ConvertFrom-Json).installation_verified) { throw 'Protected package was not admitted' }
     $release = ($check | ConvertFrom-Json).release
@@ -109,9 +110,12 @@ try {
     }
     $cases.Add('protected_fixed_location_package_admitted')
     $cases.Add('protected_release_build_and_msi_identities_observed')
-    foreach ($expected in @($msiCandidate.manifest_sha256, 'invalid')) {
-        $rejected = & $runtimePath --check-installation $expected 2>&1
-        if ($LASTEXITCODE -eq 0) { throw 'Wrong expected installed manifest was accepted' }
+    foreach ($counterexample in @(
+        @($msiCandidate.manifest_sha256, 'installed manifest differs from the expected release'),
+        @('invalid', 'Windows runtime installation manifest is invalid')
+    )) {
+        $rejected = & $runtimePath --check-installation $counterexample[0] 2>&1
+        if ($LASTEXITCODE -eq 0 -or "$rejected" -notlike "*$($counterexample[1])*") { throw 'Wrong expected installed manifest was not rejected at its identity boundary' }
     }
     $msiReport.wrong_manifest_expectations_rejected = $true
     foreach ($mode in @('--prepare-maintenance', '--rollback-maintenance')) {
@@ -149,6 +153,9 @@ try {
     Set-Acl -LiteralPath $manifestPath -AclObject $unsafeAcl
     Require-Rejected 'unprivileged_manifest_writer_rejected'
     Set-Acl -LiteralPath $manifestPath -AclObject $safeAcl
+    # Restore the complete pre-counterexample file state. A deliberately
+    # modified timestamp would mark the unversioned MSI file as user-edited.
+    [IO.File]::SetLastWriteTimeUtc($manifestPath, $manifestWriteTime)
 
     for ($iteration = 0; $iteration -lt 2; $iteration++) {
         Invoke-ServiceCommand @('start', $serviceName)
@@ -215,7 +222,7 @@ try {
     $null = $oldProcess.Handle
     try {
         $msiInFlight = 'failed-maintenance'
-        $msiReport.failed_maintenance = Invoke-RuntimeMsi -Fixture $msiCandidate -Operation $msiInFlight -Evidence $msiEvidence -ExpectedProductCode $msi.product_code -ExpectedPackageCode $msi.package_code
+        $msiReport.failed_maintenance = Invoke-RuntimeMsi -Fixture $msiCandidate -Operation $msiInFlight -Evidence $msiEvidence -ExpectedProductCode $msi.product_code -ExpectedPackageCode $msi.package_code -ExpectedMsiVersion $msi.msi_version
         $msiInFlight = $null
         if (-not $oldProcess.WaitForExit(10000) -or $oldProcess.ExitCode -ne 0) { throw 'MSI maintenance did not retire the original service process cleanly' }
     } finally { $oldProcess.Dispose() }

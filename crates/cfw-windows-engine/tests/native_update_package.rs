@@ -42,6 +42,7 @@ fn native_authenticode_and_msi_identity_match_the_requested_release() {
     assert_eq!(package.identity().build, 2);
     assert_eq!(package.identity().architecture, "x64");
     assert_eq!(package.identity().minimum_windows_version, "10.0.19041");
+    assert_eq!(package.identity().runtime_manifest_sha256, "ab".repeat(32));
     assert_eq!(package.publisher(), &publisher);
     let digest: [u8; 32] = Sha256::digest(fs::read(&path).unwrap()).into();
     assert_eq!(package.sha256(), digest);
@@ -60,7 +61,12 @@ fn a_trusted_certificate_with_the_same_subject_but_another_key_is_not_the_publis
 
 #[test]
 fn unsigned_tampered_and_untrusted_signatures_fail_before_metadata_is_admitted() {
-    for name in ["unsigned.msi", "tampered.msi", "untrusted.msi"] {
+    for name in [
+        "unsigned.msi",
+        "tampered.msi",
+        "tampered-runtime-manifest.msi",
+        "untrusted.msi",
+    ] {
         assert!(
             matches!(rejection(name), PackageError::Signature(_)),
             "{name}"
@@ -113,6 +119,27 @@ fn signed_release_build_and_os_requirements_are_enforced() {
             "{name}"
         );
     }
+}
+
+#[test]
+fn signed_package_requires_a_canonical_target_manifest_digest() {
+    for name in [
+        "short-runtime-manifest.msi",
+        "uppercase-runtime-manifest.msi",
+        "invalid-runtime-manifest.msi",
+    ] {
+        assert!(
+            matches!(
+                rejection(name),
+                PackageError::Invalid("runtime manifest SHA-256")
+            ),
+            "{name}"
+        );
+    }
+    assert!(matches!(
+        rejection("missing-runtime-manifest.msi"),
+        PackageError::Native { .. }
+    ));
 }
 
 #[test]

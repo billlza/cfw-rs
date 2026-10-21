@@ -77,6 +77,7 @@ fn the_installed_worker_verifies_a_real_signed_unicode_msi() {
     assert_eq!(package.identity().build, 2);
     assert_eq!(package.identity().architecture, "x64");
     assert_eq!(package.identity().minimum_windows_version, "10.0.19041");
+    assert_eq!(package.identity().runtime_manifest_sha256, "ab".repeat(32));
     assert_eq!(
         package.publisher(),
         &AuthenticodePublisher::observe(&fixture("publisher.exe")).unwrap()
@@ -95,12 +96,25 @@ fn worker_rejections_preserve_signature_and_release_failure_categories() {
     for (name, expected) in [
         ("unsigned.msi", WorkerFailureCategory::Authenticity),
         ("tampered.msi", WorkerFailureCategory::Authenticity),
+        (
+            "tampered-runtime-manifest.msi",
+            WorkerFailureCategory::Authenticity,
+        ),
         ("untrusted.msi", WorkerFailureCategory::Authenticity),
         ("other-publisher.msi", WorkerFailureCategory::Authenticity),
         ("wrong-release.msi", WorkerFailureCategory::Package),
         ("wrong-product.msi", WorkerFailureCategory::Package),
         ("replayed-build.msi", WorkerFailureCategory::Package),
         ("future-windows.msi", WorkerFailureCategory::Package),
+        ("short-runtime-manifest.msi", WorkerFailureCategory::Package),
+        (
+            "uppercase-runtime-manifest.msi",
+            WorkerFailureCategory::Package,
+        ),
+        (
+            "invalid-runtime-manifest.msi",
+            WorkerFailureCategory::Package,
+        ),
     ] {
         let temporary = tempfile::tempdir().unwrap();
         match inspect(&fixture(name), &temporary.path().join("worker")) {

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::{io::Write, time::Duration};
 use uuid::Uuid;
 
-const PROTOCOL: u32 = 1;
+const PROTOCOL: u32 = 2;
 const MAX_REQUEST: usize = 16 * 1024;
 const MAX_DETAIL: usize = 512;
 
@@ -93,6 +93,7 @@ impl InstalledPackageInspector {
             || windows_version(&observation.identity.minimum_windows_version)?
                 > expectation.system_version
             || observation.publisher_spki_sha256 == [0; 32]
+            || require_manifest_digest(&observation.identity.runtime_manifest_sha256).is_err()
         {
             return Err(PackageError::WorkerProtocol);
         }

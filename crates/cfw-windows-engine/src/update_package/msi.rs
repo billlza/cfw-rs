@@ -1,6 +1,6 @@
 use super::{
     MsiIdentity, PRODUCT_IDENTIFIER, PackageError, PackageExpectation, Result, UPGRADE_CODE,
-    canonical_version, combine, wide_path, windows_version,
+    canonical_version, combine, require_manifest_digest, wide_path, windows_version,
 };
 use std::{path::Path, ptr::null};
 use windows_sys::Win32::{
@@ -58,6 +58,8 @@ fn identity(database: &Handle, expectation: &PackageExpectation) -> Result<MsiId
     if windows_version(&minimum_windows_version)? > expectation.system_version {
         return Err(PackageError::Requirement("minimum Windows version"));
     }
+    let runtime_manifest_sha256 = property(database, "CFW_RUNTIME_MANIFEST_SHA256")?;
+    require_manifest_digest(&runtime_manifest_sha256)?;
     let product_code = canonical_guid(&property(database, "ProductCode")?)?;
     let mut raw = 0;
     // SAFETY: live database, no alternate path, zero updates requests read-only.
@@ -94,6 +96,7 @@ fn identity(database: &Handle, expectation: &PackageExpectation) -> Result<MsiId
             package_code,
             architecture: "x64".into(),
             minimum_windows_version,
+            runtime_manifest_sha256,
         })
     })();
     summary.finish(result)

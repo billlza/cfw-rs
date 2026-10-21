@@ -57,6 +57,7 @@ function New-MinimalDatabase([string]$Path, [hashtable]$Overrides, [string]$Temp
         CFW_RELEASE_VERSION = '0.5.0'
         CFW_BUILD_NUMBER = '2'
         CFW_MINIMUM_WINDOWS_VERSION = '10.0.19041'
+        CFW_RUNTIME_MANIFEST_SHA256 = ('ab' * 32)
     }
     foreach ($key in $Overrides.Keys) {
         if ($null -eq $Overrides[$key]) { $properties.Remove($key) } else { $properties[$key] = $Overrides[$key] }
@@ -173,6 +174,8 @@ function New-WixControl {
     <Property Id="CFW_RELEASE_VERSION" Value="0.5.0" />
     <Property Id="CFW_BUILD_NUMBER" Value="2" />
     <Property Id="CFW_MINIMUM_WINDOWS_VERSION" Value="10.0.19041" />
+    <!-- Inspection-only declared target; this fixture never installs a runtime. -->
+    <Property Id="CFW_RUNTIME_MANIFEST_SHA256" Value="$('ab' * 32)" />
     <Property Id="MSIRESTARTMANAGERCONTROL" Value="DisableShutdown" />
     <Directory Id="TARGETDIR" Name="SourceDir">
       <Directory Id="ProgramFiles64Folder">
@@ -293,19 +296,28 @@ try {
     Sign-File (Join-Path $root 'other-publisher.msi') $certificates[1]
     New-Database (Join-Path $root 'untrusted.msi') @{}
     Sign-File (Join-Path $root 'untrusted.msi') $certificates[2] $false
-    New-SignedDatabase 'tampered.msi'
-    $installer = New-Object -ComObject WindowsInstaller.Installer
-    $database = $null
-    $view = $null
-    try {
-        # Reflection marshals inline cmdlet output as PSObject, not BSTR.
-        [string]$tamperedPath = Join-Path $root 'tampered.msi'
-        $database = Invoke-Msi $installer 'OpenDatabase' @($tamperedPath, 1)
-        $view = Invoke-Msi $database 'OpenView' @("UPDATE ``Property`` SET ``Value`` = 'changed' WHERE ``Property`` = 'ProductName'")
-        Invoke-Msi $view 'Execute' @()
-        Invoke-Msi $view 'Close' @()
-        Invoke-Msi $database 'Commit' @()
-    } finally { Release-Msi $view; Release-Msi $database; Release-Msi $installer }
+    foreach ($tamper in @(
+        @('tampered.msi', 'ProductName', 'changed'),
+        @('tampered-runtime-manifest.msi', 'CFW_RUNTIME_MANIFEST_SHA256', ('cd' * 32))
+    )) {
+        New-SignedDatabase $tamper[0]
+        $installer = New-Object -ComObject WindowsInstaller.Installer
+        $database = $null
+        $view = $null
+        $record = $null
+        try {
+            # Reflection marshals inline cmdlet output as PSObject, not BSTR.
+            [string]$tamperedPath = Join-Path $root $tamper[0]
+            $database = Invoke-Msi $installer 'OpenDatabase' @($tamperedPath, 1)
+            $view = Invoke-Msi $database 'OpenView' @('UPDATE `Property` SET `Value` = ? WHERE `Property` = ?')
+            $record = Invoke-Msi $installer 'CreateRecord' @(2)
+            Set-MsiProperty $record 'StringData' @(1, [string]$tamper[2])
+            Set-MsiProperty $record 'StringData' @(2, [string]$tamper[1])
+            Invoke-Msi $view 'Execute' @($record)
+            Invoke-Msi $view 'Close' @()
+            Invoke-Msi $database 'Commit' @()
+        } finally { Release-Msi $record; Release-Msi $view; Release-Msi $database; Release-Msi $installer }
+    }
     foreach ($case in @(
         @('wrong-product.msi', @{CFW_PRODUCT_ID='com.bill.clashformac'}),
         @('wrong-name.msi', @{ProductName='Clash for Mac'}),
@@ -321,6 +333,10 @@ try {
         @('overflow-build.msi', @{CFW_BUILD_NUMBER='18446744073709551616'}),
         @('future-windows.msi', @{CFW_MINIMUM_WINDOWS_VERSION='11.0.1'}),
         @('invalid-minimum-os.msi', @{CFW_MINIMUM_WINDOWS_VERSION='10.0.019041'}),
+        @('missing-runtime-manifest.msi', @{CFW_RUNTIME_MANIFEST_SHA256=$null}),
+        @('short-runtime-manifest.msi', @{CFW_RUNTIME_MANIFEST_SHA256=('ab' * 31)}),
+        @('uppercase-runtime-manifest.msi', @{CFW_RUNTIME_MANIFEST_SHA256=('AB' * 32)}),
+        @('invalid-runtime-manifest.msi', @{CFW_RUNTIME_MANIFEST_SHA256=('gg' * 32)}),
         @('oversized-product.msi', @{CFW_PRODUCT_ID=('x' * 257)}),
         @('missing-product.msi', @{CFW_PRODUCT_ID=$null})
     )) { New-SignedDatabase $case[0] $case[1] }

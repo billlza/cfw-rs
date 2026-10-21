@@ -107,6 +107,9 @@ pub struct MsiIdentity {
     pub package_code: String,
     pub architecture: String,
     pub minimum_windows_version: String,
+    /// Exact post-install manifest bytes declared by the authenticated MSI.
+    /// This is an expected value, not proof that installation has occurred.
+    pub runtime_manifest_sha256: String,
 }
 
 /// Retains the verified file and all its ancestors, excluding data writes,
@@ -261,4 +264,15 @@ fn combine<T>(result: Result<T>, cleanup: Result<()>) -> Result<T> {
             cleanup: Box::new(cleanup),
         }),
     }
+}
+
+fn require_manifest_digest(value: &str) -> Result<()> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(PackageError::Invalid("runtime manifest SHA-256"));
+    }
+    Ok(())
 }

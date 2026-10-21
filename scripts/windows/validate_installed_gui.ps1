@@ -31,7 +31,10 @@ $playwrightOutput = Join-Path $outputRoot 'output/playwright'
 New-Item -ItemType Directory -Path $playwrightOutput -ErrorAction Stop | Out-Null
 $cli = Join-Path $PSScriptRoot 'gui/node_modules/@playwright/cli/playwright-cli.js'
 $pagesScript = Join-Path $PSScriptRoot 'gui/pages.js'
-$node = (Get-Command node -CommandType Application).Source
+Import-Module (Join-Path $PSScriptRoot '../node_runtime.psm1') -Force
+$node = Get-CfwPinnedNode
+[ordered]@{ executable=$node; version=(& $node --version) } |
+    ConvertTo-Json | Set-Content -LiteralPath (Join-Path $outputRoot 'node-runtime.json') -Encoding utf8NoBOM
 $session = 'cfw-installed-' + [guid]::NewGuid().ToString('N')
 $receipt = [ordered]@{
     source=$Source; package_sha256=$package.package_sha256; installed=$null; uninstalled=$null

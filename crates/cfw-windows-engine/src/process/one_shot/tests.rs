@@ -186,9 +186,9 @@ fn cancellation_counterexample(trial: usize) {
 #[test]
 fn cancellation_records_job_membership_and_native_process_signals() {
     use windows_sys::Win32::{
-        Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT},
+        Foundation::{FILETIME, WAIT_OBJECT_0, WAIT_TIMEOUT},
         System::Threading::{
-            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+            GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
             PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, TerminateProcess, WaitForSingleObject,
         },
     };
@@ -246,6 +246,29 @@ fn cancellation_records_job_membership_and_native_process_signals() {
             };
             assert!(!raw.is_null(), "{}", std::io::Error::last_os_error());
             let handle = unsafe { OwnedHandle::from_raw_handle(raw) };
+            let mut times = [FILETIME::default(); 4];
+            assert_ne!(
+                unsafe {
+                    GetProcessTimes(
+                        handle.as_raw_handle(),
+                        &mut times[0],
+                        &mut times[1],
+                        &mut times[2],
+                        &mut times[3],
+                    )
+                },
+                0,
+                "{}",
+                std::io::Error::last_os_error()
+            );
+            let created =
+                u64::from(times[0].dwLowDateTime) | (u64::from(times[0].dwHighDateTime) << 32);
+            assert_eq!(created, peer.identity().process_creation_time());
+            owner
+                .assets
+                .executable
+                .verify_process_image(&handle)
+                .unwrap();
             let mut member = 0;
             assert_ne!(
                 unsafe {

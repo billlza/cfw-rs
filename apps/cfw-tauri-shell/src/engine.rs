@@ -193,6 +193,7 @@ pub(crate) struct StagedEndpointRebind {
     replacement: EngineEndpointBinding,
 }
 
+#[cfg(target_os = "macos")]
 impl StagedEndpointRebind {
     pub(crate) fn settings(&self) -> &EngineSettings {
         self.replacement.controller.settings()
@@ -240,10 +241,12 @@ impl ManagedEngine {
         read_active_controller_access(&self.endpoints, generation, config_digest)
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn record_endpoint_runtime(&self, snapshot: &EngineSnapshot) -> Result<(), String> {
         record_endpoint_runtime(&self.endpoints, snapshot)
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn stage_endpoint_rebind(
         &self,
         conflict: BackendErrorKind,
@@ -251,6 +254,7 @@ impl ManagedEngine {
         stage_endpoint_rebind(&self.endpoints, &self.coordinator, conflict)
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn commit_endpoint_rebind(
         &self,
         staged: StagedEndpointRebind,

@@ -556,10 +556,10 @@ pub(super) fn review(home: &Path) -> Result<InstallOutcome, ReviewError> {
         UpdateStaging::recover(home).map_err(|e| ReviewError::Unavailable(e.to_string()))?;
         return Ok(InstallOutcome::None);
     };
-    if let Some(process) = record.finisher() {
-        if process_identity_exists(process).map_err(ReviewError::Unavailable)? {
-            return Err(ReviewError::InstallationInProgress);
-        }
+    if let Some(process) = record.finisher()
+        && process_identity_exists(process).map_err(ReviewError::Unavailable)?
+    {
+        return Err(ReviewError::InstallationInProgress);
     }
     let (expected, outcome) = match &record.phase {
         Phase::Finished {

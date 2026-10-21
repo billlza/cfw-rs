@@ -144,14 +144,14 @@ jobs:
           cargo clippy --locked -p cfw-tauri-shell --all-targets -- -D warnings 2>&1 |
             Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/clippy.log')
           if ($LASTEXITCODE -ne 0) { throw 'Windows desktop Clippy failed' }
-      - name: Verify Windows updater handoff contracts
+      - name: Verify Windows desktop and updater contracts
         run: |
           cargo test --locked -p cfw-tauri-shell --test windows_update_journal -- --test-threads=1 2>&1 |
             Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-update-journal-tests.log')
           if ($LASTEXITCODE -ne 0) { throw 'Windows updater journal or process lease verification failed' }
-          cargo test --locked -p cfw-tauri-shell --bin clash-for-mac updater:: -- --test-threads=1 2>&1 |
-            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/updater-tests.log')
-          if ($LASTEXITCODE -ne 0) { throw 'Windows updater state, download or handoff verification failed' }
+          cargo test --locked -p cfw-tauri-shell --bin clash-for-mac -- --test-threads=1 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/desktop-tests.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Windows desktop or updater verification failed' }
       - name: Build the desktop development executable
         run: |
           cargo build --locked -p cfw-tauri-shell --bin clash-for-mac 2>&1 |
@@ -170,6 +170,54 @@ jobs:
             installed_runtime_exercised = $false
             release_accepted = $false
           } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/build-receipt.json') -Encoding utf8NoBOM
+      - name: Execute copied desktop startup admission
+        run: |
+          $evidence = Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence'
+          $binary = Join-Path $evidence 'Clash for Windows.exe'
+          $cases = @(
+            @{ name='invalid-finisher-transaction'; arguments=@('--finish-update-v1', 'not-a-transaction'); exit=64; message='Windows update argument admission:' },
+            @{ name='invalid-update-restart'; arguments=@('--resume-update-v1', 'not-a-transaction'); exit=78; message='update restart admission failed:' },
+            @{ name='apple-maintenance-refused'; arguments=@('--service-maintenance-v2', 'status'); exit=64; message='startup argument admission failed:' }
+          )
+          $receipts = @()
+          foreach ($case in $cases) {
+            $start = [System.Diagnostics.ProcessStartInfo]::new()
+            $start.FileName = $binary
+            $start.WorkingDirectory = $evidence
+            $start.UseShellExecute = $false
+            $start.RedirectStandardOutput = $true
+            $start.RedirectStandardError = $true
+            foreach ($argument in $case.arguments) { $start.ArgumentList.Add($argument) }
+            $process = [System.Diagnostics.Process]::new()
+            $process.StartInfo = $start
+            try {
+              if (-not $process.Start()) { throw "Cannot start copied desktop: $($case.name)" }
+              $stdout = $process.StandardOutput.ReadToEndAsync()
+              $stderr = $process.StandardError.ReadToEndAsync()
+              $exited = $process.WaitForExit(15000)
+              if (-not $exited) {
+                $process.Kill($true)
+                $process.WaitForExit()
+              }
+              $output = $stdout.GetAwaiter().GetResult()
+              $errors = $stderr.GetAwaiter().GetResult()
+              ($output + $errors) | Set-Content -LiteralPath (Join-Path $evidence "$($case.name).log") -Encoding utf8NoBOM
+              if (-not $exited) { throw "Copied desktop startup admission timed out: $($case.name)" }
+              if ($process.ExitCode -ne $case.exit -or -not $errors.Contains($case.message)) {
+                throw "Copied desktop did not reach the expected admission boundary: $($case.name), exit=$($process.ExitCode)"
+              }
+              $receipts += [ordered]@{ name=$case.name; exit_code=$process.ExitCode }
+            } finally { $process.Dispose() }
+          }
+          [ordered]@{
+            source = (git rev-parse HEAD)
+            sha256 = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
+            cases = $receipts
+            native_gui_exercised = $false
+            installed_runtime_exercised = $false
+            update_handoff_exercised = $false
+            release_accepted = $false
+          } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $evidence 'startup-receipt.json') -Encoding utf8NoBOM
       - name: Preserve desktop build output and diagnostics
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6

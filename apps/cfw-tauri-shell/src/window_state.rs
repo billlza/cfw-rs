@@ -340,17 +340,25 @@ mod tests {
     #[tokio::test]
     async fn a_blocked_settings_write_never_holds_the_window_event_lock() {
         use cfw_core::{AppPaths, SettingsStore, UiPreferences};
-        use std::os::fd::AsRawFd;
         use std::sync::Arc;
 
         let root = tempfile::tempdir().unwrap();
         let store = SettingsStore::new(AppPaths::from_app_home(root.path().join("app")));
         store.write(&UiPreferences::default()).unwrap();
-        let file_lock = std::fs::File::open(&store.paths().app_home).unwrap();
-        assert_eq!(
-            unsafe { libc::flock(file_lock.as_raw_fd(), libc::LOCK_EX) },
-            0
-        );
+        #[cfg(target_os = "macos")]
+        let file_lock = {
+            use std::os::fd::AsRawFd;
+            let lock = std::fs::File::open(&store.paths().app_home).unwrap();
+            assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+            lock
+        };
+        #[cfg(windows)]
+        let file_lock =
+            cfw_windows_storage::PrivateDirectory::open_existing(&store.paths().app_home)
+                .unwrap()
+                .unwrap()
+                .write()
+                .unwrap();
         let manager = Arc::new(WindowBoundsManager::default());
         manager.configure(true).unwrap();
         let writer = manager.clone();
@@ -381,7 +389,7 @@ mod tests {
         observer.join().unwrap();
         assert!(
             matches!(observed, Ok(Some(_))),
-            "AppKit events waited on a blocked filesystem write"
+            "native window events waited on a blocked filesystem write"
         );
         assert!(!manager.lock().unwrap().enabled);
     }

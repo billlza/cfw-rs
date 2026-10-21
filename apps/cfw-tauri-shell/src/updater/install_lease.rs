@@ -9,10 +9,9 @@ const RECORD_DOCUMENT: PrivateDocument = PrivateDocument {
     maximum_bytes: 4096,
 };
 
-/// Held by the installer process from before it unregisters services until the
-/// bundles are exchanged. A dashboard refuses to start while it is held, so no
-/// instance of the application can re-register services underneath the
-/// exchange.
+/// Held by the installer process while it replaces the installation. A
+/// dashboard refuses to start while it is held, so it cannot register services
+/// or use files during a macOS bundle exchange or a Windows MSI transaction.
 #[derive(Debug)]
 pub(crate) struct UpdateInstallLease {
     _file: File,

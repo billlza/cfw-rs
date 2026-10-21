@@ -35,6 +35,7 @@ pub(super) enum EndpointSelectionError {
         "the configured local proxy port {0} is already reserved; choose a different port or automatic selection"
     )]
     ConfiguredPortUnavailable(u16),
+    #[cfg(any(target_os = "macos", test))]
     #[error("persisted {role} port {port} is outside the fixed candidate range")]
     InvalidPersistedPort { role: EndpointRole, port: u16 },
     #[error("no bounded loopback TCP port is available for the {role}")]
@@ -94,6 +95,7 @@ impl EndpointCandidateCursor {
         Ok((cursor.settings.clone(), cursor))
     }
 
+    #[cfg(any(target_os = "macos", test))]
     pub(super) fn from_persisted(settings: EngineSettings) -> Result<Self, EndpointSelectionError> {
         if settings.mixed_port < 1024 {
             return Err(EndpointSelectionError::InvalidPersistedPort {
@@ -233,6 +235,7 @@ fn candidate_ports(preferred: u16) -> [u16; CANDIDATE_COUNT] {
     })
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn candidate_index(preferred: u16, selected: u16) -> Option<usize> {
     candidate_ports(preferred)
         .iter()

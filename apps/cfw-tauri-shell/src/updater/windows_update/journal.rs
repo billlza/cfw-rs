@@ -180,10 +180,9 @@ impl Record {
         if let Phase::Installing {
             process, installer, ..
         } = &self.phase
+            && process.pid == installer.pid
         {
-            if process.pid == installer.pid {
-                return Err(bad());
-            }
+            return Err(bad());
         }
         if let Phase::Finished {
             exit_code,

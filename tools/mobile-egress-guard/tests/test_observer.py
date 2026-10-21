@@ -24,7 +24,7 @@ B = observer.key_digest(KEY_B)
 def policy():
     return {
         "interface": "wg-users",
-        "peers": {A: {"id": "alpha", "session_limit_bytes": 1_000, "rate_limit_bps": 800}},
+        "peers": {A: {"id": "alpha", "session_alert_bytes": 1_000, "rate_alert_bps": 800}},
     }
 
 
@@ -35,7 +35,7 @@ class ObserverTests(unittest.TestCase):
             obj = {
                 "version": 1, "interface": "wg-users",
                 "peers": [
-                    {"id": "alpha", "public_key": KEY_A, "session_limit_bytes": 1000, "rate_limit_bps": 800}
+                    {"id": "alpha", "public_key": KEY_A, "session_alert_bytes": 1000, "rate_alert_bps": 800}
                 ],
             }
             path.write_text(json.dumps(obj))
@@ -46,11 +46,11 @@ class ObserverTests(unittest.TestCase):
             path.write_text('{"version":1,"version":1}')
             with self.assertRaises(observer.GuardError):
                 observer.load_policy(path)
-            obj["peers"][0]["rate_limit_bps"] = True
+            obj["peers"][0]["rate_alert_bps"] = True
             path.write_text(json.dumps(obj))
             with self.assertRaises(observer.GuardError):
                 observer.load_policy(path)
-            obj["peers"][0]["rate_limit_bps"] = 800
+            obj["peers"][0]["rate_alert_bps"] = 800
             obj["peers"][0]["public_key"] = "AAAAAAAA"
             path.write_text(json.dumps(obj))
             with self.assertRaises(observer.GuardError):
@@ -80,20 +80,33 @@ class ObserverTests(unittest.TestCase):
         self.assertEqual(later["peers"][0]["interval_bytes"], 1300)
         self.assertEqual(
             [alert["code"] for alert in later["alerts"]],
-            ["session_budget_exceeded", "observed_rate_exceeded"],
+            ["session_alert_threshold_exceeded", "rate_alert_threshold_exceeded"],
         )
         self.assertNotIn(KEY_A, json.dumps(later))
         self.assertNotIn(KEY_A, json.dumps(state))
 
+
+    def test_empty_or_missing_configured_peers_is_not_reported_safe(self):
+        no_peers, _ = observer.evaluate(policy(), {}, None, 1_000_000_000)
+        self.assertEqual(no_peers["status"], "alert")
+        self.assertEqual(
+            {a["code"] for a in no_peers["alerts"]},
+            {"empty_peer_observation", "configured_peer_missing"},
+        )
+        with_unknown, _ = observer.evaluate(policy(), {B: (1, 2)}, None, 1_000_000_000)
+        self.assertEqual(
+            {a["code"] for a in with_unknown["alerts"]},
+            {"unregistered_peer", "configured_peer_missing"},
+        )
 
     def test_subsecond_observations_preserve_actual_rate_interval(self):
         first, state = observer.evaluate(policy(), {A: (1, 1)}, None, 1_000_000_000)
         self.assertEqual(first["status"], "ok")
         second, state = observer.evaluate(policy(), {A: (2, 2)}, state, 1_500_000_000)
         self.assertEqual(second["peers"][0]["interval_bytes"], 2)
-        self.assertNotIn("observed_rate_exceeded", [a["code"] for a in second["alerts"]])
+        self.assertNotIn("rate_alert_threshold_exceeded", [a["code"] for a in second["alerts"]])
         third, state = observer.evaluate(policy(), {A: (100, 100)}, state, 1_500_000_001)
-        self.assertIn("observed_rate_exceeded", [a["code"] for a in third["alerts"]])
+        self.assertIn("rate_alert_threshold_exceeded", [a["code"] for a in third["alerts"]])
 
     def test_unknown_peer_and_counter_reset_remain_visible(self):
         first, state = observer.evaluate(policy(), {A: (800, 100)}, None, 100_000_000_000)
@@ -147,7 +160,7 @@ class ObserverTests(unittest.TestCase):
             obj = {
                 "version": 1, "interface": "wg-users",
                 "peers": [{"id": "alpha", "public_key": KEY_A,
-                           "session_limit_bytes": 1000, "rate_limit_bps": 800}],
+                           "session_alert_bytes": 1000, "rate_alert_bps": 800}],
             }
             policy_file = root / "policy.json"
             sample_file = root / "sample.tsv"
@@ -165,7 +178,7 @@ class ObserverTests(unittest.TestCase):
             output = StringIO()
             with redirect_stdout(output):
                 self.assertEqual(observer.main(options), 2)
-            self.assertIn("session_budget_exceeded", output.getvalue())
+            self.assertIn("session_alert_threshold_exceeded", output.getvalue())
 
 
 if __name__ == "__main__":

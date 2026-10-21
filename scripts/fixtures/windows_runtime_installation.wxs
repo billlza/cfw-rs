@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Disposable native qualification package, never a distributable installer.
+     Its Desktop is an authenticated test client. It deliberately has no GUI,
+     upgrade authoring, publisher signature, or automatic service startup. -->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="$(var.ProductCode)" Name="CFW Runtime Installation Fixture" Language="1033"
+           Version="0.5.0" Manufacturer="CFW validation fixture"
+           UpgradeCode="{7ECD99B2-CFE4-51EA-868B-544E2A12E25D}">
+    <Package Id="$(var.PackageCode)" InstallerVersion="500" Compressed="yes"
+             InstallScope="perMachine" Platform="x64" />
+    <MediaTemplate EmbedCab="yes" />
+    <Property Id="MSIRESTARTMANAGERCONTROL" Value="DisableShutdown" />
+    <Property Id="ARPNOREPAIR" Value="1" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <Condition Message="Native MSI qualification requires rollback support.">NOT RollbackDisabled</Condition>
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="Clash for Windows">
+          <Component Id="Runtime" Guid="{79AE532C-19BC-4C90-8A0A-58A142BA872B}" Win64="yes">
+            <CreateFolder>
+              <PermissionEx Id="PackageDirectoryAcl" Sddl="O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)" />
+            </CreateFolder>
+            <File Id="RuntimeFile" Name="cfw-windows-runtime.exe" Source="$(var.Runtime)" KeyPath="yes">
+              <PermissionEx Id="RuntimeAcl" Sddl="O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)" />
+            </File>
+            <ServiceInstall Id="Authority" Name="CFWAuthority" DisplayName="CFW Authority"
+                            Type="ownProcess" Start="demand" ErrorControl="normal" Account="LocalSystem">
+              <PermissionEx Id="AuthorityAcl" Sddl="D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;CCLCSWLORC;;;AU)" />
+            </ServiceInstall>
+            <ServiceControl Id="AuthorityControl" Name="CFWAuthority" Stop="both" Remove="uninstall" Wait="yes" />
+          </Component>
+          <Component Id="Desktop" Guid="{2A16BB76-1A95-437E-A42C-152A61EF7E8C}" Win64="yes">
+            <File Id="DesktopFile" Name="Clash for Windows.exe" Source="$(var.Desktop)" KeyPath="yes">
+              <PermissionEx Id="DesktopAcl" Sddl="O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)" />
+            </File>
+          </Component>
+          <Component Id="Engine" Guid="{0E17DA78-E1DB-4C1E-A946-117B2065EFF1}" Win64="yes">
+            <File Id="EngineFile" Name="cfw-engine-host.exe" Source="$(var.Engine)" KeyPath="yes">
+              <PermissionEx Id="EngineAcl" Sddl="O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)" />
+            </File>
+          </Component>
+          <Component Id="Manifest" Guid="{BDFA1B4B-3166-48D8-A2B1-7F1705CC1AE7}" Win64="yes">
+            <File Id="ManifestFile" Name="runtime-installation-v2.json" Source="$(var.Manifest)" KeyPath="yes">
+              <PermissionEx Id="ManifestAcl" Sddl="O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)" />
+            </File>
+          </Component>
+        </Directory>
+      </Directory>
+    </Directory>
+    <Feature Id="RuntimeFixture" Level="1">
+      <ComponentRef Id="Runtime" /><ComponentRef Id="Desktop" />
+      <ComponentRef Id="Engine" /><ComponentRef Id="Manifest" />
+    </Feature>
+    <!-- These installed-image entrypoints retain their ordinary exact-path
+         admission. The rollback is scheduled before preparation, so it runs
+         after Windows Installer has restored files and service registration. -->
+    <CustomAction Id="RollbackRuntimeMaintenance" FileKey="RuntimeFile"
+                  ExeCommand="--rollback-maintenance $(var.MaintenanceTransaction)"
+                  Execute="rollback" Impersonate="no" Return="check" />
+    <CustomAction Id="PrepareRuntimeMaintenance" FileKey="RuntimeFile"
+                  ExeCommand="--prepare-maintenance $(var.MaintenanceTransaction)"
+                  Execute="deferred" Impersonate="no" Return="check" />
+    <CustomAction Id="ValidateInstalledRuntime" FileKey="RuntimeFile" ExeCommand="--check-installation"
+                  Execute="deferred" Impersonate="no" Return="check" />
+    <!-- A real rejected runtime command supplies a nonzero deferred-action
+         result after files and the service have been installed. No product
+         error path or compiler check is bypassed to inject this failure. -->
+    <CustomAction Id="FailAfterInstallServices" FileKey="RuntimeFile" ExeCommand="--cfw-msi-fixture-failure"
+                  Execute="deferred" Impersonate="no" Return="check" />
+    <InstallExecuteSequence>
+      <Custom Action="RollbackRuntimeMaintenance" After="InstallInitialize">Installed AND CFW_FIXTURE_MAINTENANCE = 1</Custom>
+      <Custom Action="PrepareRuntimeMaintenance" After="RollbackRuntimeMaintenance">Installed AND CFW_FIXTURE_MAINTENANCE = 1</Custom>
+      <Custom Action="ValidateInstalledRuntime" After="InstallServices">NOT REMOVE~="ALL"</Custom>
+      <Custom Action="FailAfterInstallServices" After="ValidateInstalledRuntime">NOT REMOVE~="ALL" AND CFW_FIXTURE_FAIL = 1</Custom>
+    </InstallExecuteSequence>
+  </Product>
+</Wix>

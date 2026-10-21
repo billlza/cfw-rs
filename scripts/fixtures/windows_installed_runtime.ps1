@@ -19,7 +19,16 @@ $runtimePath = Join-Path $package 'cfw-windows-runtime.exe'
 $desktopPath = Join-Path $package 'Clash for Windows.exe'
 $enginePath = Join-Path $package 'cfw-engine-host.exe'
 $manifestPath = Join-Path $package 'runtime-installation-v2.json'
-$created = $false
+$msi = $null
+$msiInFlight = $null
+$msiEvidence = Join-Path $Receipts 'msi'
+$msiReport = [ordered]@{
+    source=$Source; document='cfw-runtime-msi-qualification-v1'
+    failed_fresh_install=$null; installed=$null; failed_maintenance=$null; uninstalled=$null
+    fresh_rollback_removed_files_and_service=$false; maintenance_rollback=$null
+    uninstall_removed_files_and_service=$false; desktop_is_fixture=$true
+    new_version_upgrade_exercised=$false; updater_handoff_exercised=$false; release_accepted=$false
+}
 $failure = $null
 $teardownFailure = $null
 $probes = @()
@@ -29,12 +38,6 @@ $cases = [System.Collections.Generic.List[string]]::new()
 function Invoke-ServiceCommand([string[]]$Arguments) {
     $output = & sc.exe @Arguments 2>&1
     if ($LASTEXITCODE -ne 0) { throw "SCM command failed ($LASTEXITCODE): $output" }
-}
-function Protect-Package([string]$Path, [bool]$Directory) {
-    $acl = if ($Directory) { [System.Security.AccessControl.DirectorySecurity]::new() } else { [System.Security.AccessControl.FileSecurity]::new() }
-    $inherit = if ($Directory) { 'OICI' } else { '' }
-    $acl.SetSecurityDescriptorSddlForm("O:BAG:BAD:P(A;$inherit;FA;;;SY)(A;$inherit;FA;;;BA)(A;$inherit;0x1200a9;;;BU)")
-    Set-Acl -LiteralPath $Path -AclObject $acl
 }
 function Require-Rejected([string]$Case) {
     $output = & $runtimePath --check-installation 2>&1
@@ -53,23 +56,36 @@ function Stop-Installed {
     } finally { $service.Dispose() }
 }
 try {
-    New-Item -ItemType Directory -Path $package | Out-Null
-    Protect-Package $package $true
-    Copy-Item -LiteralPath $Runtime -Destination $runtimePath
-    Copy-Item -LiteralPath $DesktopFixture -Destination $desktopPath
-    Copy-Item -LiteralPath $Engine -Destination $enginePath
-    foreach ($path in @($runtimePath, $desktopPath, $enginePath)) { Protect-Package $path $false }
+    Import-Module (Join-Path $PSScriptRoot 'windows_runtime_msi.psm1') -Force
+    if (Test-Path -LiteralPath $msiEvidence) { throw 'MSI qualification evidence directory already exists' }
+    New-Item -ItemType Directory -Path $msiEvidence | Out-Null
     $manifest = [ordered]@{
         schema_version = 2; product_version = '0.5.0'; build_number = 1
         msi_product_code = '{E66ACF84-7639-4707-BC01-0A370C9B2E3E}'
         msi_package_code = '{E58D1FC6-A003-4849-900C-45D6861E75D9}'
         architecture = 'x86_64'; engine_version = $EngineVersion
-        runtime_sha256 = (Get-FileHash -LiteralPath $runtimePath -Algorithm SHA256).Hash.ToLowerInvariant()
-        desktop_sha256 = (Get-FileHash -LiteralPath $desktopPath -Algorithm SHA256).Hash.ToLowerInvariant()
-        engine_sha256 = (Get-FileHash -LiteralPath $enginePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        runtime_sha256 = (Get-FileHash -LiteralPath $Runtime -Algorithm SHA256).Hash.ToLowerInvariant()
+        desktop_sha256 = (Get-FileHash -LiteralPath $DesktopFixture -Algorithm SHA256).Hash.ToLowerInvariant()
+        engine_sha256 = (Get-FileHash -LiteralPath $Engine -Algorithm SHA256).Hash.ToLowerInvariant()
     }
-    $manifest | ConvertTo-Json | Set-Content -LiteralPath $manifestPath -Encoding utf8NoBOM
-    Protect-Package $manifestPath $false
+    $manifestInput = Join-Path $msiEvidence 'manifest.json'
+    $manifest | ConvertTo-Json | Set-Content -LiteralPath $manifestInput -Encoding utf8NoBOM
+    $msi = New-RuntimeMsiFixture -Runtime $Runtime -Desktop $DesktopFixture -Engine $Engine -Manifest $manifestInput `
+        -ProductCode $manifest.msi_product_code -PackageCode $manifest.msi_package_code -Source $Source -Evidence $msiEvidence
+    $msiInFlight = 'failed-install'
+    $msiReport.failed_fresh_install = Invoke-RuntimeMsi -Fixture $msi -Operation $msiInFlight -Evidence $msiEvidence
+    $msiInFlight = $null
+    if ((Test-Path -LiteralPath $package) -or (Test-Path -LiteralPath $machineState) -or
+        @([System.ServiceProcess.ServiceController]::GetServices() | Where-Object ServiceName -CEQ $serviceName).Count -ne 0) {
+        throw 'Failed fresh MSI installation did not roll back its files/service before any runtime enrollment'
+    }
+    $msiReport.fresh_rollback_removed_files_and_service = $true
+    $msiInFlight = 'install'
+    $msiReport.installed = Invoke-RuntimeMsi -Fixture $msi -Operation $msiInFlight -Evidence $msiEvidence
+    $msiInFlight = $null
+    if ((Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash -cne (Get-FileHash -LiteralPath $manifestInput -Algorithm SHA256).Hash) {
+        throw 'MSI installed a different runtime manifest'
+    }
     $manifestBytes = [IO.File]::ReadAllBytes($manifestPath)
     $check = & $runtimePath --check-installation
     if ($LASTEXITCODE -ne 0 -or -not ($check | ConvertFrom-Json).installation_verified) { throw 'Protected package was not admitted' }
@@ -116,9 +132,6 @@ try {
     Require-Rejected 'unprivileged_manifest_writer_rejected'
     Set-Acl -LiteralPath $manifestPath -AclObject $safeAcl
 
-    Invoke-ServiceCommand @('create', $serviceName, 'binPath=', ('"' + $runtimePath + '"'), 'type=', 'own', 'start=', 'demand', 'obj=', 'LocalSystem')
-    $created = $true
-    Invoke-ServiceCommand @('sdset', $serviceName, 'D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;CCLCSWLORC;;;AU)')
     for ($iteration = 0; $iteration -lt 2; $iteration++) {
         Invoke-ServiceCommand @('start', $serviceName)
         $service = [System.ServiceProcess.ServiceController]::new($serviceName)
@@ -167,15 +180,66 @@ try {
     $cases.Add('authenticated_desktop_queries_production_off')
     $cases.Add('service_restart_preserves_durable_lineage')
     $cases.Add('scm_stop_waits_for_off_and_process_exit')
+
+    # Exercise the real deferred SYSTEM preparation and rollback entrypoints
+    # inside a failing Windows Installer repair. The package bytes are the same;
+    # this proves rollback of the original installation, not a version upgrade.
+    Invoke-ServiceCommand @('start', $serviceName)
+    $service = [System.ServiceProcess.ServiceController]::new($serviceName)
+    try { $service.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(30)) } finally { $service.Dispose() }
+    $before = & $desktopPath --installed-host-probe
+    if ($LASTEXITCODE -ne 0) { throw 'Pre-MSI maintenance probe failed' }
+    $before = $before | ConvertFrom-Json
+    if ($before.snapshot.state -cne 'off' -or -not $before.authenticated_product_service) { throw 'MSI maintenance did not begin from authenticated Off' }
+    $observed = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
+    $oldProcess = [Diagnostics.Process]::GetProcessById($observed.ProcessId)
+    $null = $oldProcess.Handle
+    try {
+        $msiInFlight = 'failed-maintenance'
+        $msiReport.failed_maintenance = Invoke-RuntimeMsi -Fixture $msi -Operation $msiInFlight -Evidence $msiEvidence
+        $msiInFlight = $null
+        if (-not $oldProcess.WaitForExit(10000) -or $oldProcess.ExitCode -ne 0) { throw 'MSI maintenance did not retire the original service process cleanly' }
+    } finally { $oldProcess.Dispose() }
+    $observed = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
+    if ($observed.State -cne 'Stopped' -or $observed.StartMode -cne 'Manual') { throw 'MSI rollback did not restore the original stopped, demand-start service' }
+    $check = & $runtimePath --check-installation
+    if ($LASTEXITCODE -ne 0 -or -not ($check | ConvertFrom-Json).installation_verified) { throw 'MSI rollback did not restore an admitted installation' }
+    if ((Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash -cne (Get-FileHash -LiteralPath $manifestInput -Algorithm SHA256).Hash) { throw 'MSI rollback changed the installed manifest' }
+    Invoke-ServiceCommand @('start', $serviceName)
+    $service = [System.ServiceProcess.ServiceController]::new($serviceName)
+    try { $service.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(30)) } finally { $service.Dispose() }
+    $after = & $desktopPath --installed-host-probe
+    if ($LASTEXITCODE -ne 0) { throw 'Product service restart after MSI rollback failed' }
+    $after = $after | ConvertFrom-Json
+    if ($after.snapshot.state -cne 'off' -or -not $after.authenticated_product_service -or
+        ($before.lineage | ConvertTo-Json -Compress) -cne ($after.lineage | ConvertTo-Json -Compress) -or
+        $after.snapshot.revision -ne ($before.snapshot.revision + 1)) { throw 'MSI rollback/restart did not preserve authority lineage and exact startup revision' }
+    $msiReport.maintenance_rollback = [ordered]@{
+        before=$before; after=$after; original_service_process_exited=$true
+        original_start_type_restored=$true; original_manifest_restored=$true
+        restart_after_rollback=$true; rollback_started_runtime=$false; active_proxy_drain_exercised=$false
+    }
 } catch { $failure = $_.ToString() }
 finally {
     try {
-        if ($created) { Stop-Installed; Invoke-ServiceCommand @('delete', $serviceName) }
-        # This intentionally retains protected, nonsecret state until VM teardown.
-        # Installed uninstall/migration is a separate product implementation.
-        if (Test-Path -LiteralPath $package) { Remove-Item -LiteralPath $package -Recurse -Force }
+        if ($null -ne $msiInFlight) {
+            $completionPath = Join-Path $msiEvidence "$msiInFlight.json"
+            if (-not (Test-Path -LiteralPath $completionPath) -or -not (Get-Content -LiteralPath $completionPath -Raw | ConvertFrom-Json).completed) {
+                throw 'MSI transaction state is unknown; no competing teardown transaction was started'
+            }
+        }
+        if ($null -ne $msi -and (Get-RuntimeMsiProductState $msi.product_code) -eq 5) {
+            # This is fixture teardown from an already Off runtime. It does not
+            # qualify interactive uninstall while another user's GUI is active.
+            Stop-Installed
+            $msiReport.uninstalled = Invoke-RuntimeMsi -Fixture $msi -Operation 'uninstall' -Evidence $msiEvidence
+            if (Test-Path -LiteralPath $package) { throw 'MSI uninstall left installed files behind' }
+            if (@([System.ServiceProcess.ServiceController]::GetServices() | Where-Object ServiceName -CEQ $serviceName).Count -ne 0) { throw 'MSI uninstall left the service behind' }
+            $msiReport.uninstall_removed_files_and_service = $true
+        }
         if (@([System.ServiceProcess.ServiceController]::GetServices() | Where-Object ServiceName -CEQ $serviceName).Count -ne 0) { throw 'Temporary product service was not removed' }
     } catch { $teardownFailure = $_.ToString() }
+    $msiReport | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $Receipts 'installed-msi-receipt.json') -Encoding utf8NoBOM
     [ordered]@{ product_source=$Source; cases=$cases.ToArray(); probes=$probes; failure=$failure; teardown_failure=$teardownFailure; desktop_is_fixture=$true; product_service_executable=$true; product_agent_entrypoint_executed=$agentExecuted; protected_state_retained_until_vm_teardown=$true; release_accepted=$false } |
         ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $Receipts 'installed-runtime-receipt.json') -Encoding utf8NoBOM
 }

@@ -46,7 +46,13 @@ pub(crate) fn require_system_service_identity() -> Result<crate::NativePeerProce
         || identity.is_app_container()
         || identity.is_restricted()
     {
-        return Err(ServicePeerError::InvalidServiceProcessIdentity);
+        return Err(ServicePeerError::InvalidServiceProcessIdentity {
+            local_system: identity.is_local_system(),
+            session_id: identity.session_id(),
+            integrity_rid: identity.integrity_rid(),
+            app_container: identity.is_app_container(),
+            restricted: identity.is_restricted(),
+        });
     }
     Ok(own)
 }
@@ -216,7 +222,10 @@ mod tests {
         );
         assert!(matches!(
             configure_service_process_observation(),
-            Err(ServicePeerError::InvalidServiceProcessIdentity)
+            Err(ServicePeerError::InvalidServiceProcessIdentity {
+                local_system: false,
+                ..
+            })
         ));
     }
 }

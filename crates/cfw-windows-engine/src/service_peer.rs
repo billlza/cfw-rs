@@ -87,9 +87,15 @@ pub enum ServicePeerError {
     #[error("Windows service installation expectation is invalid")]
     InvalidExpectation,
     #[error(
-        "Windows service observation setup requires the SYSTEM primary identity in session zero"
+        "Windows service observation setup requires the SYSTEM primary identity in session zero (system={local_system}, session={session_id}, integrity={integrity_rid:#x}, app_container={app_container}, restricted={restricted})"
     )]
-    InvalidServiceProcessIdentity,
+    InvalidServiceProcessIdentity {
+        local_system: bool,
+        session_id: u32,
+        integrity_rid: u32,
+        app_container: bool,
+        restricted: bool,
+    },
     #[error("Windows service process observation permissions did not match after setup: {detail}")]
     ObservationSecurityMismatch { detail: String },
     #[error("Windows service primary identity: {0}")]

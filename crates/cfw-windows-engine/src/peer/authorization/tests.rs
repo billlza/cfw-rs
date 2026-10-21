@@ -146,7 +146,10 @@ fn ordinary_process_cannot_query_a_console_user_token_through_the_service_api() 
     assert!(matches!(
         LiveConsoleSession::observe(),
         Err(ServiceAuthorizationError::Observer(
-            ServicePeerError::InvalidServiceProcessIdentity
+            ServicePeerError::InvalidServiceProcessIdentity {
+                local_system: false,
+                ..
+            }
         ))
     ));
     let after = NativePeerProcess::open(std::process::id()).unwrap();

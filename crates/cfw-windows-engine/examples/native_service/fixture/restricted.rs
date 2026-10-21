@@ -829,7 +829,10 @@ fn client_body(name: &str, hex: &str, case: ClientCase) -> Result<()> {
             if !matches!(
                 LiveConsoleSession::observe(),
                 Err(ServiceAuthorizationError::Observer(
-                    ServicePeerError::InvalidServiceProcessIdentity
+                    ServicePeerError::InvalidServiceProcessIdentity {
+                        local_system: false,
+                        ..
+                    }
                 ))
             ) {
                 return Err("ordinary Desktop accessed the privileged console observer".into());

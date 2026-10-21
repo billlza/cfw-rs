@@ -26,13 +26,14 @@ const maxRequest = maxConfig + 4096
 const maxProbeRequest = maxConfig + 65536
 
 type request struct {
-	Protocol int             `json:"protocol"`
-	Session  string          `json:"session"`
-	ID       uint64          `json:"id"`
-	Op       string          `json:"op"`
-	Digest   string          `json:"digest,omitempty"`
-	Config   json.RawMessage `json:"config,omitempty"`
-	Probe    json.RawMessage `json:"probe,omitempty"`
+	Protocol int               `json:"protocol"`
+	Session  string            `json:"session"`
+	ID       uint64            `json:"id"`
+	Op       string            `json:"op"`
+	Digest   string            `json:"digest,omitempty"`
+	Config   json.RawMessage   `json:"config,omitempty"`
+	Probe    json.RawMessage   `json:"probe,omitempty"`
+	Tunnel   *packetAttachment `json:"tunnel,omitempty"`
 }
 
 type response struct {
@@ -82,7 +83,7 @@ func readRequest(r io.Reader) (request, error) {
 			return request{}, errors.New("envelope_duplicate")
 		}
 		switch name {
-		case "protocol", "session", "id", "op", "digest", "config", "probe":
+		case "protocol", "session", "id", "op", "digest", "config", "probe", "tunnel":
 		default:
 			return request{}, errors.New("envelope_field")
 		}
@@ -140,6 +141,7 @@ func canonicalHex(value string, size int) bool {
 func run(input io.Reader, output io.Writer) int {
 	var instance *box.Box
 	var cancel context.CancelFunc
+	var packets packetRuntime
 	defer func() {
 		if instance != nil {
 			// EOF/protocol failure is emergency cleanup, never a stopped receipt.
@@ -147,6 +149,10 @@ func run(input io.Reader, output io.Writer) int {
 		}
 		if cancel != nil {
 			cancel()
+		}
+		if packets != nil {
+			// An emergency close never produces a stopped receipt.
+			_ = packets.Close()
 		}
 	}()
 	session, state, digest := "", "idle", ""
@@ -175,10 +181,19 @@ func run(input io.Reader, output io.Writer) int {
 			clear(message.Config)
 			return 2
 		}
+		if message.Op != "hello" && message.Tunnel != nil {
+			clear(message.Config)
+			return 2
+		}
 		switch message.Op {
 		case "hello":
 			if len(message.Config) != 0 || message.Digest != "" {
 				errorCode = "invalid_request"
+			} else if message.Tunnel != nil {
+				packets, err = openPacketRuntime(*message.Tunnel)
+				if err != nil {
+					errorCode = "invalid_packet_capability"
+				}
 			}
 		case "start", "check":
 			if state != "idle" || len(message.Config) == 0 || len(message.Config) > maxConfig || !canonicalHex(message.Digest, 32) {
@@ -197,6 +212,20 @@ func run(input io.Reader, output io.Writer) int {
 			// either persist secrets or corrupt control frames.
 			if options.Log != nil && options.Log.Output != "" && options.Log.Output != "stderr" {
 				errorCode = "invalid_log_output"
+				break
+			}
+			if packets != nil {
+				if message.Op != "start" {
+					errorCode = "invalid_packet_operation"
+					break
+				}
+				ctx, err = packets.Prepare(ctx, options)
+				if err != nil {
+					errorCode = "invalid_packet_config"
+					break
+				}
+			} else if message.Op == "start" && hasTunnel(options) {
+				errorCode = "packet_capability_required"
 				break
 			}
 			instance, err = box.New(box.Options{Context: ctx, Options: options})
@@ -223,9 +252,13 @@ func run(input io.Reader, output io.Writer) int {
 				errorCode = "start_failed"
 				break
 			}
+			if packets != nil && packets.Failure() != nil {
+				errorCode = "packet_io_failed"
+				break
+			}
 			state, digest = "running", message.Digest
 		case "probe":
-			if state != "idle" || len(message.Config) == 0 || len(message.Config) > maxConfig || !canonicalHex(message.Digest, 32) {
+			if packets != nil || state != "idle" || len(message.Config) == 0 || len(message.Config) > maxConfig || !canonicalHex(message.Digest, 32) {
 				errorCode = "invalid_probe"
 				break
 			}
@@ -237,6 +270,8 @@ func run(input io.Reader, output io.Writer) int {
 		case "observe":
 			if state != "running" || len(message.Config) != 0 || message.Digest != digest {
 				errorCode = "invalid_observation"
+			} else if packets != nil && packets.Failure() != nil {
+				errorCode = "packet_io_failed"
 			}
 		case "stop":
 			if state != "running" || len(message.Config) != 0 || message.Digest != digest {
@@ -245,6 +280,9 @@ func run(input io.Reader, output io.Writer) int {
 			}
 			closeErr := instance.Close()
 			instance = nil
+			if packets != nil {
+				closeErr = errors.Join(closeErr, packets.Close(), packets.Failure())
+			}
 			cancel()
 			cancel = nil
 			if closeErr != nil {

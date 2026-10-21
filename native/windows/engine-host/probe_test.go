@@ -103,7 +103,7 @@ func TestProfileProbeCannotRunInsideAnOwnedRuntime(t *testing.T) {
 	probe := probeRequest(t, config, probeOptions{[]string{"direct"}, 100, "", ""})
 	probe.ID = 3
 	var output bytes.Buffer
-	if run(bytes.NewReader(messages(t, hello(), request{protocol, testSession, 2, "start", testDigest, json.RawMessage(config), nil}, probe)), &output) == 0 {
+	if run(bytes.NewReader(messages(t, hello(), request{protocol, testSession, 2, "start", testDigest, json.RawMessage(config), nil, nil}, probe)), &output) == 0 {
 		t.Fatal("probe ran inside active runtime")
 	}
 	replies := responses(t, output.Bytes())

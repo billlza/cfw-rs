@@ -39,6 +39,13 @@ type packetDevice struct {
 	closeErr  error
 	failureMu sync.Mutex
 	failure   error
+	linkMu    sync.Mutex
+	link      packetLink
+}
+
+type packetLink interface {
+	start() error
+	stop()
 }
 
 var _ tun.Tun = (*packetDevice)(nil)
@@ -73,7 +80,11 @@ func newPacketDevice(handle windows.Handle, name string, mtu uint32) (_ *packetD
 	if err := windows.GetNamedPipeServerProcessId(handle, &server); err != nil {
 		return nil, err
 	}
-	if flags != windows.PIPE_TYPE_MESSAGE || state != windows.PIPE_READMODE_MESSAGE || instances != 1 || server == 0 ||
+	// Windows also reports PIPE_REJECT_REMOTE_CLIENTS here (observed 0x0c
+	// for a private message client). That additional restriction is valid;
+	// server ends, byte pipes and unknown flag bits still fail admission.
+	const allowedFlags = windows.PIPE_TYPE_MESSAGE | windows.PIPE_REJECT_REMOTE_CLIENTS
+	if flags&windows.PIPE_TYPE_MESSAGE == 0 || flags & ^uint32(allowedFlags) != 0 || state != windows.PIPE_READMODE_MESSAGE || instances != 1 || server == 0 ||
 		input < mtu || output < mtu || input > maximumPacketPipeBuffer || output > maximumPacketPipeBuffer {
 		return nil, fmt.Errorf("%w: flags=%#x state=%#x instances=%d server_present=%t input=%d output=%d mtu=%d",
 			errPacketContract, flags, state, instances, server != 0, input, output, mtu)
@@ -143,6 +154,14 @@ func (p *packetDevice) Start() error {
 	if !p.state.CompareAndSwap(0, 1) {
 		return errPacketInactive
 	}
+	p.linkMu.Lock()
+	link := p.link
+	p.linkMu.Unlock()
+	if link != nil {
+		if err := link.start(); err != nil {
+			return p.fail(err)
+		}
+	}
 	return nil
 }
 
@@ -208,7 +227,10 @@ func (p *packetDevice) fail(err error) error {
 		p.failure = err
 	}
 	p.failureMu.Unlock()
-	return errors.Join(err, p.Close())
+	// A read/dispatch worker can discover failure itself. Close native I/O
+	// here; the external owner calls Close to join that worker. Waiting for
+	// our own dispatch loop here would deadlock packet-error recovery.
+	return errors.Join(err, p.shutdown())
 }
 
 func (p *packetDevice) Failure() error {
@@ -218,6 +240,17 @@ func (p *packetDevice) Failure() error {
 }
 
 func (p *packetDevice) Close() error {
+	err := p.shutdown()
+	p.linkMu.Lock()
+	link := p.link
+	p.linkMu.Unlock()
+	if link != nil {
+		link.stop()
+	}
+	return err
+}
+
+func (p *packetDevice) shutdown() error {
 	p.closeOnce.Do(func() {
 		p.state.Store(2)
 		p.closeErr = p.file.Close()

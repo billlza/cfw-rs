@@ -305,6 +305,28 @@ func TestPacketDeviceLifecycleDoesNotMutateAuthorityRoutes(t *testing.T) {
 	}
 }
 
+func TestPacketDeviceRefusesByteReadAndServerEndpoints(t *testing.T) {
+	peer, client := packetTestPair(t, windows.FILE_FLAG_OVERLAPPED)
+	mode := uint32(windows.PIPE_READMODE_BYTE)
+	if err := windows.SetNamedPipeHandleState(client, &mode, nil, nil); err != nil {
+		t.Fatal(errors.Join(err, windows.CloseHandle(client)))
+	}
+	if device, err := newPacketDevice(client, packetTestName, 1500); err == nil || device != nil {
+		t.Fatal("byte-read endpoint was admitted")
+	}
+	process, err := windows.GetCurrentProcess()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var server windows.Handle
+	if err := windows.DuplicateHandle(process, windows.Handle(peer.Fd()), process, &server, 0, false, windows.DUPLICATE_SAME_ACCESS); err != nil {
+		t.Fatal(err)
+	}
+	if device, err := newPacketDevice(server, packetTestName, 1500); err == nil || device != nil {
+		t.Fatal("server endpoint was admitted as an engine capability")
+	}
+}
+
 func TestPacketDeviceInheritedCapability(t *testing.T) {
 	const handleVariable = "CFW_PACKET_TEST_INHERITED_HANDLE"
 	if encoded := os.Getenv(handleVariable); encoded != "" {

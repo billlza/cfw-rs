@@ -67,9 +67,9 @@ func hello() request { return request{Protocol: protocol, Session: testSession, 
 
 func TestOwnedInstanceStartsObservesAndCloses(t *testing.T) {
 	input := messages(t, hello(),
-		request{protocol, testSession, 2, "start", testDigest, json.RawMessage(`{"log":{"disabled":true},"outbounds":[{"type":"direct","tag":"direct"}]}`), nil},
-		request{protocol, testSession, 3, "observe", testDigest, nil, nil},
-		request{protocol, testSession, 4, "stop", testDigest, nil, nil})
+		request{protocol, testSession, 2, "start", testDigest, json.RawMessage(`{"log":{"disabled":true},"outbounds":[{"type":"direct","tag":"direct"}]}`), nil, nil},
+		request{protocol, testSession, 3, "observe", testDigest, nil, nil, nil},
+		request{protocol, testSession, 4, "stop", testDigest, nil, nil, nil})
 	var output bytes.Buffer
 	if code := run(bytes.NewReader(input), &output); code != 0 {
 		t.Fatalf("exit %d: %s", code, output.Bytes())
@@ -114,10 +114,10 @@ func TestMalformedFramesAndClosedEnvelope(t *testing.T) {
 
 func TestStaleIdentityAndSequenceCannotControlInstance(t *testing.T) {
 	for _, wrong := range []request{
-		{2, testSession, 2, "observe", "", nil, nil},
-		{protocol, strings.Repeat("a", 32), 2, "observe", "", nil, nil},
-		{protocol, testSession, 1, "observe", "", nil, nil},
-		{protocol, testSession, 2, "hello", "", nil, nil},
+		{2, testSession, 2, "observe", "", nil, nil, nil},
+		{protocol, strings.Repeat("a", 32), 2, "observe", "", nil, nil, nil},
+		{protocol, testSession, 1, "observe", "", nil, nil, nil},
+		{protocol, testSession, 2, "hello", "", nil, nil, nil},
 	} {
 		var output bytes.Buffer
 		if run(bytes.NewReader(messages(t, hello(), wrong)), &output) == 0 {
@@ -137,7 +137,7 @@ func TestConfigurationFailureIsExplicitAndRedacted(t *testing.T) {
 	} {
 		for _, operation := range []string{"start", "check"} {
 			var output bytes.Buffer
-			input := messages(t, hello(), request{protocol, testSession, 2, operation, testDigest, json.RawMessage(configuration), nil})
+			input := messages(t, hello(), request{protocol, testSession, 2, operation, testDigest, json.RawMessage(configuration), nil, nil})
 			if run(bytes.NewReader(input), &output) == 0 {
 				t.Fatal("bad config accepted")
 			}
@@ -167,7 +167,7 @@ func TestCheckConstructsAndClosesWithoutOpeningListeners(t *testing.T) {
 	defer controller.Close()
 	configuration := json.RawMessage(`{"log":{"disabled":true},"inbounds":[{"type":"mixed","listen":"127.0.0.1","listen_port":` + strconv.Itoa(mixed.Addr().(*net.TCPAddr).Port) + `}],"outbounds":[{"type":"direct","tag":"direct"}],"experimental":{"clash_api":{"external_controller":"` + controller.Addr().String() + `","secret":"check-only-secret"}}}`)
 	var output bytes.Buffer
-	if code := run(bytes.NewReader(messages(t, hello(), request{protocol, testSession, 2, "check", testDigest, configuration, nil})), &output); code != 0 {
+	if code := run(bytes.NewReader(messages(t, hello(), request{protocol, testSession, 2, "check", testDigest, configuration, nil, nil})), &output); code != 0 {
 		t.Fatalf("check failed: %d, %s", code, output.Bytes())
 	}
 	replies := responses(t, output.Bytes())
@@ -182,9 +182,9 @@ func TestCheckConstructsAndClosesWithoutOpeningListeners(t *testing.T) {
 func TestCheckCannotValidateAnActiveInstanceOrMalformedCandidate(t *testing.T) {
 	configuration := json.RawMessage(`{"log":{"disabled":true},"outbounds":[{"type":"direct","tag":"direct"}]}`)
 	for _, input := range [][]byte{
-		messages(t, hello(), request{protocol, testSession, 2, "check", "bad-digest", configuration, nil}),
-		messages(t, hello(), request{protocol, testSession, 2, "check", testDigest, nil, nil}),
-		messages(t, hello(), request{protocol, testSession, 2, "start", testDigest, configuration, nil}, request{protocol, testSession, 3, "check", testDigest, configuration, nil}),
+		messages(t, hello(), request{protocol, testSession, 2, "check", "bad-digest", configuration, nil, nil}),
+		messages(t, hello(), request{protocol, testSession, 2, "check", testDigest, nil, nil, nil}),
+		messages(t, hello(), request{protocol, testSession, 2, "start", testDigest, configuration, nil, nil}, request{protocol, testSession, 3, "check", testDigest, configuration, nil, nil}),
 	} {
 		var output bytes.Buffer
 		if run(bytes.NewReader(input), &output) == 0 {
@@ -201,7 +201,7 @@ func TestCheckCannotValidateAnActiveInstanceOrMalformedCandidate(t *testing.T) {
 func TestEOFAndInvalidOperationsCannotProduceStoppedReceipt(t *testing.T) {
 	for _, op := range []string{"stop", "observe", "unsupported"} {
 		var output bytes.Buffer
-		input := messages(t, hello(), request{protocol, testSession, 2, op, testDigest, nil, nil})
+		input := messages(t, hello(), request{protocol, testSession, 2, op, testDigest, nil, nil, nil})
 		if run(bytes.NewReader(input), &output) == 0 {
 			t.Fatal("operation accepted without running engine")
 		}

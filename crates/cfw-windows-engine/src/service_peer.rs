@@ -41,6 +41,8 @@ use windows_sys::Win32::{
 
 use crate::VerifiedExecutable;
 
+#[cfg(feature = "native-service-validation")]
+mod lifetime_probe;
 pub(crate) mod maintenance;
 mod observation;
 pub use observation::configure_service_process_observation;
@@ -513,7 +515,16 @@ fn verify_process_image(
     // but before/during the image query. Even a successful image read cannot
     // attest a now-retired peer. Classify exit only from the retained kernel
     // object, never from an AccessDenied code or a replacement process's PID.
-    match unsafe { WaitForSingleObject(process.as_raw_handle(), 0) } {
+    let observed_wait = unsafe { WaitForSingleObject(process.as_raw_handle(), 0) };
+    #[cfg(feature = "native-service-validation")]
+    if let Err(crate::Error::Operation {
+        operation: "query live process image",
+        source,
+    }) = &image
+    {
+        lifetime_probe::record(process, observed_wait, source);
+    }
+    match observed_wait {
         WAIT_OBJECT_0 => Err(ServicePeerError::Exited),
         WAIT_TIMEOUT => image.map_err(ServicePeerError::from),
         _ => match image {

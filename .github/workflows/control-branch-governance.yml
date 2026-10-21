@@ -1,0 +1,34 @@
+name: Control branch governance
+
+on:
+  pull_request:
+    paths:
+      - "tools/branch-governance/**"
+      - "docs/planning/control-plane-branch-*"
+      - ".github/workflows/control-branch-governance.yml"
+  push:
+    branches:
+      - "chore/control-plane-branch-governance"
+    paths:
+      - "tools/branch-governance/**"
+      - "docs/planning/control-plane-branch-*"
+      - ".github/workflows/control-branch-governance.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  branch-audit:
+    name: Offline Git ancestry audit contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.13"
+      - name: Compile read-only auditor
+        run: python -m py_compile tools/branch-governance/audit.py
+      - name: Test divergence, containment, ref safety and no writes
+        run: python -m unittest discover -s tools/branch-governance/tests -v

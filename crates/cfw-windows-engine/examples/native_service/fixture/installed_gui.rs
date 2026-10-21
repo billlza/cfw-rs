@@ -173,6 +173,13 @@ pub(super) fn run() -> Result<()> {
         if exit != 0 {
             return Err(format!("installed GUI exited with {exit}"));
         }
+        network::verify_exit_network(
+            &source,
+            &receipts,
+            info.dwProcessId,
+            peer.identity().process_creation_time(),
+            &original_proxy,
+        )?;
         Ok(())
     })();
     // An already elapsed wait_until deadline does not poll the kernel object.

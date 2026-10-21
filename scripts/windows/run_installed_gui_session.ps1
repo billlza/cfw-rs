@@ -2,7 +2,7 @@ param(
     [Parameter(Mandatory)][string]$Launcher,
     [Parameter(Mandatory)][string]$Source,
     [Parameter(Mandatory)][string]$Output,
-    [Parameter(Mandatory)][ValidateSet('fresh-off', 'local-proxy')][string]$Scenario,
+    [Parameter(Mandatory)][ValidateSet('fresh-off', 'local-proxy', 'system-proxy-quit')][string]$Scenario,
     [Parameter(Mandatory)][ref]$SessionResult
 )
 Set-StrictMode -Version Latest
@@ -30,6 +30,7 @@ $receipt = [ordered]@{
     debugger_detach_preserved_gui=$false; debugger_detached_before_exit_wait=$false
     imported_profile_id=$null; active_runtime=$null; proxy_port=$null
     http_forwarding_verified=$false; listener_released=$false; engine_stopped=$false; user_proxy_unchanged=$false
+    wininet_proxy_verified=$false; active_quit_exercised=$false; original_user_proxy_restored=$false
     startup_registration_exercised=$false; actual_sign_in_exercised=$false
     physical_display_exercised=$false; network_mode_exercised=$false; release_accepted=$false
 }
@@ -50,15 +51,19 @@ function Invoke-Playwright([string]$Name, [string[]]$Arguments) {
         return ($result -join "`n")
     } finally { Pop-Location }
 }
-function Invoke-GuiScenario([ValidateSet('startup-registration', 'network-start', 'network-stop', 'quit')][string]$Name) {
+function Invoke-GuiScenario([ValidateSet('startup-off', 'startup-registration', 'network-start', 'network-stop', 'system-proxy-start', 'quit')][string]$Name) {
     $observer = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'gui/observe.js'))
-    $scenario = [IO.File]::ReadAllText((Join-Path $PSScriptRoot "gui/$Name.js"))
+    $scenarioFile = if ($Name -ceq 'quit') { 'quit-with-state' } else { $Name }
+    $scenarioCode = [IO.File]::ReadAllText((Join-Path $PSScriptRoot "gui/$scenarioFile.js"))
+    $quitInput = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'gui/quit.js'))
+    $controllerObserver = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'gui/controller.js'))
+    $scenarioName = $Scenario | ConvertTo-Json -Compress
     $path = Join-Path $playwrightOutput "$Name.scenario.js"
-    $code = "(async (page) => {`nconst observeNative = (`n" + $observer + "`n);`nreturn await (`n" + $scenario + "`n)(page, observeNative);`n})"
+    $code = "(async (page) => {`nconst observeNative = (`n" + $observer + "`n);`nconst quitInput = (`n" + $quitInput + "`n);`nconst observeController = (`n" + $controllerObserver + "`n);`nreturn await (`n" + $scenarioCode + "`n)(page, observeNative, " + $scenarioName + ", quitInput, observeController);`n})"
     [IO.File]::WriteAllText($path, $code)
     return Invoke-Playwright $Name @('--raw', 'run-code', "--filename=$path")
 }
-function Invoke-NativeNetworkProbe([ValidateSet('http', 'closed')][string]$Operation, [int]$Port, $LaunchReceipt) {
+function Invoke-NativeNetworkProbe([ValidateSet('http', 'closed', 'system-http')][string]$Operation, [int]$Port, $LaunchReceipt) {
     $start = [Diagnostics.ProcessStartInfo]::new($Launcher)
     $start.UseShellExecute = $false
     $start.RedirectStandardOutput = $true
@@ -83,10 +88,19 @@ function Invoke-NativeNetworkProbe([ValidateSet('http', 'closed')][string]$Opera
             $record.operation -cne $Operation -or $record.gui_process_id -ne $LaunchReceipt.process_id -or
             $record.gui_process_creation_time -ne $LaunchReceipt.process_creation_time -or
             -not $record.gui_same_user_session -or $record.proxy_address -cne "127.0.0.1:$Port" -or
-            $record.user_proxy_sha256 -cne $LaunchReceipt.user_proxy_before_sha256 -or -not $record.user_proxy_unchanged -or
-            $record.http_forwarding_verified -ne ($Operation -ceq 'http') -or
+            $record.original_user_proxy_sha256 -cne $LaunchReceipt.user_proxy_before_sha256 -or
+            $record.http_forwarding_verified -ne ($Operation -cne 'closed') -or
             $record.listener_refused -ne ($Operation -ceq 'closed') -or $record.release_accepted) {
             throw 'Native network proof differs from the UI-owned runtime and original user proxy'
+        }
+        if ($Operation -ceq 'system-http') {
+            if (-not $record.system_proxy_applied -or -not $record.applied_user_proxy_unchanged -or
+                -not $record.wininet_via_proxy_verified -or ($record.wininet_request_flags -band 4) -ne 4 -or
+                $record.user_proxy_unchanged -or $record.user_proxy_sha256 -ceq $LaunchReceipt.user_proxy_before_sha256) {
+                throw 'WinINet did not observe the GUI-owned system proxy'
+            }
+        } elseif ($record.user_proxy_sha256 -cne $LaunchReceipt.user_proxy_before_sha256 -or -not $record.user_proxy_unchanged) {
+            throw 'LocalProxy changed the original native user proxy'
         }
         return $record
     } finally {
@@ -131,6 +145,9 @@ try {
     Invoke-Playwright 'attach' @('attach', "--cdp=$endpoint") | Out-Null
     $attached = $true
     Invoke-Playwright 'initial-snapshot' @('snapshot') | Out-Null
+    $initialOff = (Invoke-GuiScenario 'startup-off') | ConvertFrom-Json
+    if (-not $initialOff.initial_off_verified -or $initialOff.release_accepted) { throw 'Native startup reconciliation was not observed' }
+    $initialOff | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'startup-off.json') -Encoding utf8NoBOM
     if ($Scenario -ceq 'fresh-off') {
         $result = Invoke-Playwright 'pages' @('--raw', 'run-code', "--filename=$pagesScript")
         $pages = $result | ConvertFrom-Json
@@ -144,7 +161,7 @@ try {
             throw 'The installed GUI did not verify its startup registration transaction'
         }
         $receipt.startup_registration_exercised = $true
-    } else {
+    } elseif ($Scenario -ceq 'local-proxy') {
         $started = (Invoke-GuiScenario 'network-start') | ConvertFrom-Json
         $started | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'network-start.json') -Encoding utf8NoBOM
         if (-not $started.controller_verified) { throw 'GUI network case did not verify its real controller' }
@@ -171,6 +188,24 @@ try {
         $receipt.engine_stopped = $true
         $receipt.listener_released = $true
         $receipt.network_mode_exercised = $true
+    } else {
+        $started = (Invoke-GuiScenario 'system-proxy-start') | ConvertFrom-Json
+        $started | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'system-proxy-start.json') -Encoding utf8NoBOM
+        if (-not $started.controller_verified) { throw 'SystemProxy GUI did not verify its actual controller' }
+        $receipt.controller_verified = $true
+        $proxyPort = [int]$started.settings.effective.mixed_port
+        if ($proxyPort -lt 1 -or $proxyPort -gt 65535) { throw 'GUI system proxy port is invalid' }
+        $receipt.native_gui_exercised = $true
+        $receipt.imported_profile_id = $started.before.profiles.profiles[0].id
+        $receipt.proxy_port = $proxyPort
+        $receipt.active_runtime = $started.active.snapshot.state.runtime
+        $systemHttp = Invoke-NativeNetworkProbe 'system-http' $proxyPort $launch
+        $receipt.http_forwarding_verified = $systemHttp.http_forwarding_verified
+        $receipt.wininet_proxy_verified = $systemHttp.wininet_via_proxy_verified
+        $receipt.network_mode_exercised = $true
+        [ordered]@{ source=$Source; gui_process_id=$launch.process_id; gui_process_creation_time=$launch.process_creation_time;
+            proxy_port=$proxyPort; mode='system_proxy' } | ConvertTo-Json |
+            Set-Content -LiteralPath (Join-Path $outputRoot 'exit-network-expectation.json') -Encoding utf8NoBOM
     }
     Invoke-Playwright 'console' @('console', 'error') | Out-Null
     # CDP attachment is a test-owned resource. First prove that releasing it
@@ -190,7 +225,12 @@ try {
     $attached = $true
     $quit = (Invoke-GuiScenario 'quit') | ConvertFrom-Json
     if (-not $quit.quit_click_completed -or $quit.native_exit_verified) { throw 'Quit input receipt is invalid' }
-    $quit | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $outputRoot 'quit-input.json') -Encoding utf8NoBOM
+    $quit | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'quit-input.json') -Encoding utf8NoBOM
+    if ($Scenario -ceq 'system-proxy-quit') {
+        $beforeQuit = $quit.before.snapshot.state.runtime | ConvertTo-Json -Depth 20 -Compress
+        $startedRuntime = $started.active.snapshot.state.runtime | ConvertTo-Json -Depth 20 -Compress
+        if ($beforeQuit -cne $startedRuntime) { throw 'Active Quit did not target the started SystemProxy runtime' }
+    }
     Invoke-Playwright 'detach' @('detach') | Out-Null
     $attached = $false
     $receipt.debugger_detached_before_exit_wait = $true
@@ -209,7 +249,20 @@ try {
         throw 'GUI exit did not preserve the original native user proxy options'
     }
     $receipt.graceful_exit_observed = $true
-    $receipt.user_proxy_unchanged = $true
+    $receipt.user_proxy_unchanged = $Scenario -cne 'system-proxy-quit'
+    $receipt.original_user_proxy_restored = $true
+    if ($Scenario -ceq 'system-proxy-quit') {
+        $afterQuit = Get-Content -LiteralPath (Join-Path $outputRoot 'exit-network.json') -Raw | ConvertFrom-Json
+        if ($afterQuit.source -cne $Source -or $afterQuit.gui_process_id -ne $launch.process_id -or
+            $afterQuit.gui_process_creation_time -ne $launch.process_creation_time -or $afterQuit.mode -cne 'system_proxy' -or
+            $afterQuit.proxy_address -cne "127.0.0.1:$proxyPort" -or -not $afterQuit.observed_after_retained_gui_exit -or
+            -not $afterQuit.listener_refused -or -not $afterQuit.original_user_proxy_restored -or
+            $afterQuit.user_proxy_sha256 -cne $launch.user_proxy_before_sha256 -or $afterQuit.release_accepted) {
+            throw 'Active Quit did not prove proxy restoration and listener retirement after native exit'
+        }
+        $receipt.listener_released = $true
+        $receipt.active_quit_exercised = $true
+    }
 } catch {
     $failure = $_
     ($_.Exception.ToString() + "`n" + $_.ScriptStackTrace) |

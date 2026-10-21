@@ -506,45 +506,97 @@ pub(super) fn rejected_report() -> serde_json::Value {
 }
 
 pub(super) fn traffic(proxy: std::net::SocketAddr) -> Result<()> {
-    let server = reserve()?;
-    server.set_nonblocking(true).map_err(|e| e.to_string())?;
-    let destination = server.local_addr().map_err(|e| e.to_string())?;
+    http_fixture(reserve()?, |destination| {
+        let mut socket = TcpStream::connect_timeout(&proxy, Duration::from_secs(5))
+            .map_err(|error| error.to_string())?;
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .map_err(|error| error.to_string())?;
+        socket
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .map_err(|error| error.to_string())?;
+        write!(socket,"GET http://{destination}/agent-lifecycle HTTP/1.1\r\nHost: {destination}\r\nConnection: close\r\n\r\n").map_err(|error| error.to_string())?;
+        let mut bytes = String::new();
+        socket
+            .take(65536)
+            .read_to_string(&mut bytes)
+            .map_err(|error| error.to_string())?;
+        if !bytes.starts_with("HTTP/1.1 200") || !bytes.ends_with("cfw-user-agent") {
+            return Err("runtime proxy traffic response mismatch".into());
+        }
+        Ok(())
+    })
+}
+
+/// Uses a private interface so the product's intentional localhost bypass
+/// does not turn the WinINet request into direct traffic. UDP connect selects
+/// the local route without transmitting a packet to the reserved destination.
+pub(super) fn system_proxy_traffic() -> Result<u32> {
+    let route =
+        std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).map_err(|error| error.to_string())?;
+    route
+        .connect((Ipv4Addr::new(192, 0, 2, 1), 9))
+        .map_err(|error| error.to_string())?;
+    let std::net::IpAddr::V4(local) = route.local_addr().map_err(|error| error.to_string())?.ip()
+    else {
+        return Err("native system proxy fixture requires an IPv4 interface".into());
+    };
+    if !local.is_private() {
+        return Err("native system proxy fixture requires a private interface".into());
+    }
+    let listener = TcpListener::bind((local, 0)).map_err(|error| error.to_string())?;
+    http_fixture(listener, |destination| {
+        let observed = cfw_windows_engine::native_http_validation::request(&format!(
+            "http://{destination}/agent-lifecycle"
+        ))?;
+        if observed.body != "cfw-user-agent" || !observed.used_proxy() {
+            return Err(
+                "WinINet did not carry the expected fixture response through the configured proxy"
+                    .into(),
+            );
+        }
+        Ok(observed.request_flags)
+    })
+}
+
+fn http_fixture<T>(
+    server: TcpListener,
+    request: impl FnOnce(std::net::SocketAddr) -> Result<T>,
+) -> Result<T> {
+    server
+        .set_nonblocking(true)
+        .map_err(|error| error.to_string())?;
+    let destination = server.local_addr().map_err(|error| error.to_string())?;
     thread::scope(|scope| {
-        let worker=scope.spawn(move||->Result<()> {
-            let deadline=Instant::now()+Duration::from_secs(5);
-            let (mut socket,_)=loop {match server.accept(){Ok(value)=>break value,Err(e) if e.kind()==io::ErrorKind::WouldBlock && Instant::now()<deadline=>thread::sleep(Duration::from_millis(5)),Err(e)=>return Err(e.to_string())}};
-            socket.set_nonblocking(false).map_err(|e|e.to_string())?;
-            socket.set_read_timeout(Some(Duration::from_secs(5))).map_err(|e|e.to_string())?;
-            socket.set_write_timeout(Some(Duration::from_secs(5))).map_err(|e|e.to_string())?;
-            let mut header=Vec::new();
-            while !header.ends_with(b"\r\n\r\n") {let mut byte=[0];socket.read_exact(&mut byte).map_err(|e|e.to_string())?;header.push(byte[0]);if header.len()>8192{return Err("runtime HTTP request exceeded bound".into());}}
-            if !header.starts_with(b"GET /agent-lifecycle HTTP/1.1\r\n") {return Err("runtime HTTP request mismatch".into());}
-            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 14\r\nConnection: close\r\n\r\ncfw-user-agent").map_err(|e|e.to_string())
-        });
-        let response = (|| -> Result<()> {
-            let mut socket = TcpStream::connect_timeout(&proxy, Duration::from_secs(5))
-                .map_err(|e| e.to_string())?;
-            socket
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .map_err(|e| e.to_string())?;
-            socket
-                .set_write_timeout(Some(Duration::from_secs(5)))
-                .map_err(|e| e.to_string())?;
-            write!(socket,"GET http://{destination}/agent-lifecycle HTTP/1.1\r\nHost: {destination}\r\nConnection: close\r\n\r\n").map_err(|e|e.to_string())?;
-            let mut bytes = String::new();
-            socket
-                .take(65536)
-                .read_to_string(&mut bytes)
-                .map_err(|e| e.to_string())?;
-            if !bytes.starts_with("HTTP/1.1 200") || !bytes.ends_with("cfw-user-agent") {
-                return Err("runtime proxy traffic response mismatch".into());
+        let worker = scope.spawn(move || -> Result<()> {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let (mut socket, _) = loop {
+                match server.accept() {
+                    Ok(value) => break value,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
+                    Err(error) => return Err(error.to_string()),
+                }
+            };
+            socket.set_nonblocking(false).map_err(|error| error.to_string())?;
+            socket.set_read_timeout(Some(Duration::from_secs(5))).map_err(|error| error.to_string())?;
+            socket.set_write_timeout(Some(Duration::from_secs(5))).map_err(|error| error.to_string())?;
+            let mut header = Vec::new();
+            while !header.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                socket.read_exact(&mut byte).map_err(|error| error.to_string())?;
+                header.push(byte[0]);
+                if header.len() > 8192 { return Err("runtime HTTP request exceeded bound".into()); }
             }
-            Ok(())
-        })();
+            if !header.starts_with(b"GET /agent-lifecycle HTTP/1.1\r\n") {
+                return Err("runtime HTTP request mismatch".into());
+            }
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 14\r\nConnection: close\r\n\r\ncfw-user-agent").map_err(|error| error.to_string())
+        });
+        let response = request(destination);
         let server = worker.join().map_err(|_| "runtime HTTP server panicked")?;
         match (response, server) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
             (Err(client), Err(server)) => Err(format!("{client}; server: {server}")),
         }
     })

@@ -252,81 +252,13 @@ fn cleanup(
     Ok(())
 }
 
-struct InternetHandle(*mut std::ffi::c_void);
-impl Drop for InternetHandle {
-    fn drop(&mut self) {
-        unsafe { InternetCloseHandle(self.0) };
-    }
-}
-
 fn wininet_http(url: &str) -> String {
-    let agent: Vec<u16> = "CFW native proxy validation\0".encode_utf16().collect();
-    let session = InternetHandle(unsafe {
-        InternetOpenW(
-            agent.as_ptr(),
-            INTERNET_OPEN_TYPE_PRECONFIG,
-            null(),
-            null(),
-            0,
-        )
-    });
+    let observed = cfw_windows_engine::native_http_validation::request(url).unwrap();
     assert!(
-        !session.0.is_null(),
-        "WinINet session: {}",
-        std::io::Error::last_os_error()
+        observed.used_proxy(),
+        "WinINet did not use the current-user proxy"
     );
-    for option in [
-        INTERNET_OPTION_CONNECT_TIMEOUT,
-        INTERNET_OPTION_SEND_TIMEOUT,
-        INTERNET_OPTION_RECEIVE_TIMEOUT,
-    ] {
-        let timeout = 5000_u32;
-        assert_ne!(
-            unsafe { InternetSetOptionW(session.0, option, (&timeout as *const u32).cast(), 4) },
-            0
-        );
-    }
-    let url: Vec<u16> = url.encode_utf16().chain([0]).collect();
-    let request = InternetHandle(unsafe {
-        InternetOpenUrlW(
-            session.0,
-            url.as_ptr(),
-            null(),
-            0,
-            INTERNET_FLAG_RELOAD
-                | INTERNET_FLAG_NO_CACHE_WRITE
-                | INTERNET_FLAG_NO_UI
-                | INTERNET_FLAG_NO_AUTO_REDIRECT,
-            0,
-        )
-    });
-    assert!(
-        !request.0.is_null(),
-        "WinINet request: {}",
-        std::io::Error::last_os_error()
-    );
-    let mut bytes = Vec::new();
-    loop {
-        let mut buffer = [0_u8; 1024];
-        let mut read = 0;
-        assert_ne!(
-            unsafe {
-                InternetReadFile(
-                    request.0,
-                    buffer.as_mut_ptr().cast(),
-                    buffer.len() as u32,
-                    &mut read,
-                )
-            },
-            0
-        );
-        if read == 0 {
-            break;
-        }
-        bytes.extend_from_slice(&buffer[..read as usize]);
-        assert!(bytes.len() < 8192);
-    }
-    String::from_utf8(bytes).unwrap()
+    observed.body
 }
 
 fn header(stream: &mut TcpStream) -> String {

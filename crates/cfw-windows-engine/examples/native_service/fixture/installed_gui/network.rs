@@ -107,7 +107,7 @@ pub(super) fn proxy_digest(snapshot: &ProxySettings) -> Result<String> {
 }
 
 pub(super) fn probe(operation: &str, port: &str) -> Result<()> {
-    if !["http", "closed"].contains(&operation) {
+    if !["http", "closed", "system-http"].contains(&operation) {
         return Err("unknown GUI network probe".into());
     }
     let (source, receipts) = validation_context()?;
@@ -156,15 +156,46 @@ pub(super) fn probe(operation: &str, port: &str) -> Result<()> {
     }
     let before = proxy_snapshot()?;
     let digest = proxy_digest(&before)?;
-    if launch["user_proxy_before_sha256"].as_str() != Some(digest.as_str()) {
-        return Err("LocalProxy changed the original user proxy options before traffic".into());
-    }
+    let original_digest = launch["user_proxy_before_sha256"]
+        .as_str()
+        .ok_or("missing original user proxy digest")?;
+    let system_proxy = operation == "system-http";
+    let native_user_proxy = if system_proxy {
+        let state =
+            cfw_windows_engine::observe_lan_proxy_state().map_err(|error| error.to_string())?;
+        let ports =
+            cfw_windows_engine::observe_lan_proxy_ports().map_err(|error| error.to_string())?;
+        if !state.manual_proxy_enabled
+            || state.auto_config_enabled
+            || state.auto_detect_enabled
+            || ports != BTreeSet::from([port])
+            || digest == original_digest
+        {
+            return Err(
+                "GUI SystemProxy did not install the expected manual proxy endpoint".into(),
+            );
+        }
+        Some(
+            serde_json::json!({"manual_proxy_enabled":state.manual_proxy_enabled,
+            "auto_config_enabled":state.auto_config_enabled,"auto_detect_enabled":state.auto_detect_enabled,
+            "ports":ports}),
+        )
+    } else {
+        if original_digest != digest {
+            return Err("LocalProxy changed the original user proxy options before traffic".into());
+        }
+        None
+    };
     let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    if operation == "http" {
+    let wininet_request_flags = if system_proxy {
+        Some(super::super::user_agent::system_proxy_traffic()?)
+    } else if operation == "http" {
         super::super::user_agent::traffic(address)?;
+        None
     } else {
         verify_closed_listener(&source, &receipts, address)?;
-    }
+        None
+    };
     // This public observation revalidates identity/liveness on the retained
     // process object before and after querying its image, without reopening PID.
     if gui
@@ -178,7 +209,7 @@ pub(super) fn probe(operation: &str, port: &str) -> Result<()> {
     }
     if proxy_snapshot()? != before {
         return Err(format!(
-            "LocalProxy changed user proxy options during the {operation} probe"
+            "user proxy options changed during the {operation} probe"
         ));
     }
     write(
@@ -189,9 +220,76 @@ pub(super) fn probe(operation: &str, port: &str) -> Result<()> {
             "operation": operation,
             "gui_process_id": pid, "gui_process_creation_time": gui.identity().process_creation_time(),
             "gui_same_user_session": true, "proxy_address": address.to_string(),
-            "http_forwarding_verified": operation == "http", "listener_refused": operation == "closed",
+            "http_forwarding_verified": operation != "closed", "listener_refused": operation == "closed",
             "user_proxy_sha256": digest,
-            "user_proxy_unchanged": true, "release_accepted": false
+            "user_proxy_unchanged": !system_proxy, "original_user_proxy_sha256":original_digest,
+            "system_proxy_applied":system_proxy,"applied_user_proxy_unchanged":system_proxy,
+            "native_user_proxy":native_user_proxy,
+            "wininet_request_flags":wininet_request_flags,"wininet_via_proxy_verified":system_proxy,
+            "release_accepted": false
+        }),
+    )
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExitNetworkExpectation {
+    source: String,
+    gui_process_id: u32,
+    gui_process_creation_time: u64,
+    proxy_port: u16,
+    mode: String,
+}
+
+/// Called by the launcher only after its retained GUI process signaled with
+/// exit code zero. A declared active-Quit case must also restore its original
+/// proxy snapshot and release the selected listener; other scenarios omit it.
+pub(super) fn verify_exit_network(
+    source: &str,
+    receipts: &Path,
+    pid: u32,
+    created: u64,
+    original: &ProxySettings,
+) -> Result<()> {
+    let file = match std::fs::File::open(receipts.join("exit-network-expectation.json")) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+    };
+    let mut bytes = Vec::new();
+    file.take(4097)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() > 4096 {
+        return Err("GUI exit network expectation exceeds its bound".into());
+    }
+    let expected: ExitNetworkExpectation =
+        serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    if expected.source != source
+        || expected.gui_process_id != pid
+        || expected.gui_process_creation_time != created
+        || expected.proxy_port == 0
+        || expected.mode != "system_proxy"
+    {
+        return Err("active GUI exit observation differs from the retained process".into());
+    }
+    if proxy_snapshot()? != *original {
+        return Err("active GUI exit did not restore the original user proxy".into());
+    }
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], expected.proxy_port));
+    verify_closed_listener(source, receipts, address)?;
+    if proxy_snapshot()? != *original {
+        return Err("original user proxy changed during post-exit listener observation".into());
+    }
+    write(
+        receipts,
+        "exit-network.json",
+        &serde_json::json!({
+            "source":source,"gui_process_id":pid,"gui_process_creation_time":created,
+            "mode":"system_proxy","proxy_address":address.to_string(),
+            "observed_after_retained_gui_exit":true,"listener_refused":true,
+            "original_user_proxy_restored":true,"user_proxy_sha256":proxy_digest(original)?,
+            "release_accepted":false
         }),
     )
 }

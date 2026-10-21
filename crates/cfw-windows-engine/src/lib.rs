@@ -66,6 +66,14 @@ pub use service_transport::{
 };
 #[cfg(windows)]
 mod listeners;
+#[cfg(all(
+    windows,
+    any(
+        feature = "native-engine-validation",
+        feature = "native-service-validation"
+    )
+))]
+pub mod native_http_validation;
 #[cfg(all(windows, feature = "native-service-validation"))]
 pub mod native_wintun_validation;
 #[cfg(windows)]

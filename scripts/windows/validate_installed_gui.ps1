@@ -30,13 +30,14 @@ $outputRoot = (Resolve-Path -LiteralPath $Output).Path
 $receipt = [ordered]@{
     source=$Source; package_sha256=$package.package_sha256; installed=$null; uninstalled=$null
     engine_notices_installed=$false
-    fresh_off_session=$null; local_proxy_session=$null
+    fresh_off_session=$null; local_proxy_session=$null; system_proxy_quit_session=$null
     native_gui_exercised=$false; ordinary_user=$false; page_count=0; graceful_exit_observed=$false
     startup_registration_exercised=$false; actual_sign_in_exercised=$false
     physical_display_exercised=$false; network_mode_exercised=$false; release_accepted=$false
 }
 $fresh = $null
 $network = $null
+$systemProxy = $null
 $failure = $null
 
 function Invoke-Installer([string]$Mode, [string]$Name) {
@@ -92,6 +93,20 @@ try {
         ($fresh.process_id -eq $network.process_id -and $fresh.process_creation_time -eq $network.process_creation_time)) {
         throw 'The separate GUI LocalProxy lifecycle did not pass'
     }
+    $systemProxyRoot = Join-Path $outputRoot 'system-proxy-quit'
+    New-Item -ItemType Directory -Path $systemProxyRoot -ErrorAction Stop | Out-Null
+    & $sessionScript -Launcher $Launcher -Source $Source -Output $systemProxyRoot -Scenario 'system-proxy-quit' -SessionResult ([ref]$systemProxy)
+    if (-not $systemProxy.graceful_exit_observed -or -not $systemProxy.network_mode_exercised -or
+        -not $systemProxy.http_forwarding_verified -or -not $systemProxy.wininet_proxy_verified -or
+        -not $systemProxy.active_quit_exercised -or -not $systemProxy.listener_released -or
+        -not $systemProxy.original_user_proxy_restored -or $systemProxy.imported_profile_id -cne $network.imported_profile_id -or
+        $systemProxy.active_runtime.context.installation_id -cne $network.active_runtime.context.installation_id -or
+        $systemProxy.active_runtime.context.config_epoch -lt $network.active_runtime.context.config_epoch -or
+        ($systemProxy.active_runtime.context.config_epoch -eq $network.active_runtime.context.config_epoch -and
+            $systemProxy.active_runtime.context.generation -le $network.active_runtime.context.generation) -or
+        ($systemProxy.process_id -eq $network.process_id -and $systemProxy.process_creation_time -eq $network.process_creation_time)) {
+        throw 'The separate SystemProxy HTTP and active Quit lifecycle did not pass'
+    }
     $receipt.uninstalled = Invoke-Installer '/x' 'uninstall'
     if ((Test-Path -LiteralPath $installedDirectory) -or
         @([ServiceProcess.ServiceController]::GetServices() | Where-Object ServiceName -CEQ 'CFWAuthority').Count -ne 0) {
@@ -104,15 +119,16 @@ try {
 } finally {
     $receipt.fresh_off_session = $fresh
     $receipt.local_proxy_session = $network
+    $receipt.system_proxy_quit_session = $systemProxy
     if ($null -ne $fresh) {
         $receipt.native_gui_exercised = $fresh.native_gui_exercised
         $receipt.page_count = $fresh.page_count
         $receipt.startup_registration_exercised = $fresh.startup_registration_exercised
     }
-    if ($null -ne $fresh -and $null -ne $network) {
-        $receipt.ordinary_user = $fresh.ordinary_user -and $network.ordinary_user
-        $receipt.graceful_exit_observed = $fresh.graceful_exit_observed -and $network.graceful_exit_observed
-        $receipt.network_mode_exercised = $network.network_mode_exercised
+    if ($null -ne $fresh -and $null -ne $network -and $null -ne $systemProxy) {
+        $receipt.ordinary_user = $fresh.ordinary_user -and $network.ordinary_user -and $systemProxy.ordinary_user
+        $receipt.graceful_exit_observed = $fresh.graceful_exit_observed -and $network.graceful_exit_observed -and $systemProxy.graceful_exit_observed
+        $receipt.network_mode_exercised = $network.network_mode_exercised -and $systemProxy.network_mode_exercised
     }
     $receipt | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'receipt.json') -Encoding utf8NoBOM
 }

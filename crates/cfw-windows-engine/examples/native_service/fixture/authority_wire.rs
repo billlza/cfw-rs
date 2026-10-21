@@ -186,8 +186,9 @@ impl Validation {
         let (phase, revision, rejection) = expected
             .get(scoped.requests)
             .ok_or("unexpected wire fixture request")?;
-        assert_eq!(controller.snapshot().state, *phase);
-        assert_eq!(controller.snapshot().revision, Some(*revision));
+        // Preserve a real operation rejection before checking the success
+        // state. A failure may deliberately enter Recovering; asserting Off
+        // first would hide the native error that caused that transition.
         match (reply.rejection(), rejection) {
             (None, None)
             | (Some(AuthorityError::Ticket), Some(Rejection::Ticket))
@@ -200,6 +201,8 @@ impl Validation {
                 return Err("native authority admitted a rejected fixture command".into());
             }
         }
+        assert_eq!(controller.snapshot().state, *phase);
+        assert_eq!(controller.snapshot().revision, Some(*revision));
         scoped.requests += 1;
         if scoped.requests == 10 {
             scoped.verify_reopen_with_live_runtime(1)?;

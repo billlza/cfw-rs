@@ -277,7 +277,7 @@ fn main() {
     // runs after them, so its absence alone cannot locate a stalled shutdown.
     #[cfg(target_os = "windows")]
     let builder = builder.plugin(
-        tauri::plugin::Builder::new("lifecycle-diagnostics")
+        tauri::plugin::Builder::<tauri::Wry, ()>::new("lifecycle-diagnostics")
             .on_event(|app, event| {
                 if matches!(event, RunEvent::Exit) {
                     diagnostics::record(

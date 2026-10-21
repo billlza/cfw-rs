@@ -144,6 +144,14 @@ jobs:
           cargo clippy --locked -p cfw-tauri-shell --all-targets -- -D warnings 2>&1 |
             Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/clippy.log')
           if ($LASTEXITCODE -ne 0) { throw 'Windows desktop Clippy failed' }
+      - name: Verify Windows updater handoff contracts
+        run: |
+          cargo test --locked -p cfw-tauri-shell --test windows_update_journal -- --test-threads=1 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-update-journal-tests.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Windows updater journal or process lease verification failed' }
+          cargo test --locked -p cfw-tauri-shell --bin clash-for-mac updater:: -- --test-threads=1 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/updater-tests.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Windows updater state, download or handoff verification failed' }
       - name: Build the desktop development executable
         run: |
           cargo build --locked -p cfw-tauri-shell --bin clash-for-mac 2>&1 |

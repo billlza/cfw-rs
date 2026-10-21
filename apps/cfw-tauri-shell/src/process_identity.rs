@@ -11,6 +11,8 @@ mod native;
 pub(crate) use native::ProcessStartIdentity;
 #[cfg(target_os = "macos")]
 pub(crate) use native::observe_exact_process;
+#[cfg(windows)]
+pub(crate) use native::process_identity;
 pub(crate) use native::{
     ProcessIdentity, current_process_identity, exact_processes, process_identity_exists,
 };

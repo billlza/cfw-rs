@@ -36,6 +36,64 @@ const EMBEDDED_TAURI_CONFIG: &str = include_str!("../../tauri.conf.json");
 const MAX_TRUSTED_COMMENT_BYTES: usize = 1024;
 const MAX_ARCHIVE_NAME_BYTES: usize = 255;
 
+/// Re-authenticate an already pinned candidate after process handoff, without
+/// downloading again. Callers retain native file/ancestor pins through install.
+#[cfg(windows)]
+pub(super) fn verify_existing_archive(
+    authorization: &UpdateAuthorization,
+    path: &Path,
+) -> Result<[u8; 32]> {
+    let input = std::fs::File::open(path).map_err(|e| UpdateError::Staging {
+        stage: "reopen-authorized-package",
+        kind: e.kind(),
+    })?;
+    verify_archive_reader(
+        &embedded_public_key()?,
+        authorization,
+        input,
+        MAX_UPDATE_ARCHIVE_BYTES,
+    )
+}
+
+#[cfg(any(windows, test))]
+fn verify_archive_reader(
+    key: &PublicKey,
+    authorization: &UpdateAuthorization,
+    mut input: impl std::io::Read,
+    maximum: u64,
+) -> Result<[u8; 32]> {
+    let signature = decode_signature(&authorization.signature)?;
+    let mut verifier = key
+        .verify_stream(&signature)
+        .map_err(|_| UpdateError::SignatureVerification)?;
+    let mut digest = Sha256::new();
+    let mut total = 0_u64;
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        let count = input.read(&mut buffer).map_err(|e| UpdateError::Staging {
+            stage: "read-authorized-package",
+            kind: e.kind(),
+        })?;
+        if count == 0 {
+            break;
+        }
+        total = total
+            .checked_add(count as u64)
+            .filter(|n| *n <= maximum)
+            .ok_or(UpdateError::ArchiveTooLarge { maximum })?;
+        verifier.update(&buffer[..count]);
+        digest.update(&buffer[..count]);
+    }
+    if total == 0 {
+        return Err(UpdateError::EmptyArchive);
+    }
+    verifier
+        .finalize()
+        .map_err(|_| UpdateError::SignatureVerification)?;
+    validate_signature_archive(&signature, &authorization.archive_name)?;
+    Ok(digest.finalize().into())
+}
+
 /// Downloads the authorized archive and returns the SHA-256 of the exact
 /// Minisign-authenticated bytes, for binding subsequent native inspection.
 ///
@@ -450,6 +508,30 @@ mod tests {
             download_url: "https://github.com/billlza/cfw-rs/releases/download/v9.9.9/test".into(),
             signature: STANDARD.encode(TEST_SIGNATURE),
         }
+    }
+
+    #[test]
+    fn offline_handoff_rechecks_bytes_signature_archive_name_and_size() {
+        let key = test_key();
+        let auth = authorization("test");
+        assert_eq!(
+            verify_archive_reader(&key, &auth, &b"test"[..], 4).unwrap(),
+            <[u8; 32]>::from(Sha256::digest(b"test"))
+        );
+        for bytes in [&b"tesT"[..], &b"tes"[..], &b"test!"[..]] {
+            assert!(matches!(
+                verify_archive_reader(&key, &auth, bytes, 16),
+                Err(UpdateError::SignatureVerification)
+            ));
+        }
+        assert!(matches!(
+            verify_archive_reader(&key, &authorization("another"), &b"test"[..], 4),
+            Err(UpdateError::SignatureArchiveMismatch)
+        ));
+        assert!(matches!(
+            verify_archive_reader(&key, &auth, &b"test"[..], 3),
+            Err(UpdateError::ArchiveTooLarge { maximum: 3 })
+        ));
     }
 
     fn bounds(declared_length: Option<u64>) -> ArchiveBounds {

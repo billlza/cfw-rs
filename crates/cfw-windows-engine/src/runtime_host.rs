@@ -19,7 +19,10 @@ pub use agent::run_agent;
 #[cfg(windows)]
 pub use desktop::InstalledDesktop;
 #[cfg(windows)]
-pub use installation::{InstalledRelease, InstalledRuntime, UserPaths};
+pub use installation::{
+    InstallationSnapshot, InstalledRelease, InstalledRuntime, ObservedInstallation,
+    UpdateFinisherImage, UserPaths,
+};
 #[cfg(windows)]
 pub use service::run_service;
 
@@ -51,6 +54,9 @@ pub enum HostError {
     #[cfg(windows)]
     #[error("Windows runtime private storage: {0}")]
     Storage(#[from] cfw_windows_storage::Error),
+    #[cfg(windows)]
+    #[error(transparent)]
+    UpdateStaging(#[from] crate::update_package::StagingError),
     #[cfg(windows)]
     #[error("Windows service maintenance record: {0}")]
     MaintenanceRecord(#[from] cfw_windows_storage::MachineRecordError),

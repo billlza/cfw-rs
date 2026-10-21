@@ -130,7 +130,8 @@ impl ReleaseTarget {
     }
 }
 
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateAuthorization {
     pub version: String,
     pub archive_name: String,
@@ -147,6 +148,20 @@ impl std::fmt::Debug for UpdateAuthorization {
             .field("download_url", &self.download_url)
             .field("signature", &"<minisign signature>")
             .finish()
+    }
+}
+
+impl UpdateAuthorization {
+    /// Recheck persisted release-byte expectations without inventing presentation
+    /// metadata. This validates fields only; the signature still needs verification.
+    pub fn validate_for(&self, target: ReleaseTarget) -> Result<(), UpdateContractError> {
+        let url =
+            Url::parse(&self.download_url).map_err(|_| UpdateContractError::InvalidDownloadUrl)?;
+        let checked = validate_authorization_fields(target, &self.version, &url, &self.signature)?;
+        if &checked != self {
+            return Err(UpdateContractError::UnexpectedDownloadUrl);
+        }
+        Ok(())
     }
 }
 
@@ -191,6 +206,23 @@ pub fn validate_update(
     signature: &str,
     raw_manifest: &Value,
 ) -> Result<UpdateAuthorization, UpdateContractError> {
+    let authorization = validate_authorization_fields(target, version, download_url, signature)?;
+    validate_raw_manifest(
+        target,
+        raw_manifest,
+        version,
+        &authorization.download_url,
+        signature,
+    )?;
+    Ok(authorization)
+}
+
+fn validate_authorization_fields(
+    target: ReleaseTarget,
+    version: &str,
+    download_url: &Url,
+    signature: &str,
+) -> Result<UpdateAuthorization, UpdateContractError> {
     let parsed_version =
         Version::parse(version).map_err(|_| UpdateContractError::InvalidVersion)?;
     if parsed_version.to_string() != version {
@@ -204,7 +236,6 @@ pub fn validate_update(
     let archive_name = target.archive_name(version);
     let expected_url = target.download_url(version, &archive_name);
     validate_download_url(download_url, &expected_url)?;
-    validate_raw_manifest(target, raw_manifest, version, &expected_url, signature)?;
 
     Ok(UpdateAuthorization {
         version: version.to_owned(),

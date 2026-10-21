@@ -6,6 +6,7 @@ use std::io::ErrorKind;
 use std::os::unix::ffi::OsStrExt as _;
 #[cfg(target_os = "macos")]
 use std::os::unix::fs::MetadataExt as _;
+#[cfg(target_os = "macos")]
 use std::path::Path;
 #[cfg(target_os = "macos")]
 use std::path::PathBuf;
@@ -14,7 +15,9 @@ use std::path::PathBuf;
 use cfw_platform::ReleaseSignedComponent;
 use thiserror::Error;
 
+#[cfg(target_os = "macos")]
 pub(super) const BUNDLE_IDENTIFIER: &str = "com.bill.clashformac";
+#[cfg(target_os = "macos")]
 pub(super) const INFO_PLIST: &str = "Contents/Info.plist";
 
 /// Reasons this installation cannot be replaced in place. Each one is a
@@ -30,6 +33,7 @@ pub(crate) enum InstallAdmissionError {
     #[cfg(windows)]
     #[error("the protected Windows installation could not be admitted: {0}")]
     WindowsInstallationUnavailable(String),
+    #[cfg(target_os = "macos")]
     #[error("cannot inspect the installed application ({0:?})")]
     InstallMetadataUnavailable(ErrorKind),
     #[cfg(target_os = "macos")]
@@ -40,6 +44,7 @@ pub(crate) enum InstallAdmissionError {
     ApplicationsNotWritable,
     #[error("the installed application does not describe a valid release identity")]
     InstalledIdentityInvalid,
+    #[cfg(target_os = "macos")]
     #[error("update staging is not on the same volume as the installed application")]
     StagingVolumeMismatch,
 }
@@ -52,12 +57,14 @@ impl InstallAdmissionError {
             Self::NotInApplications => "not_in_applications",
             #[cfg(windows)]
             Self::WindowsInstallationUnavailable(_) => "windows_installation_unavailable",
+            #[cfg(target_os = "macos")]
             Self::InstallMetadataUnavailable(_) => "install_metadata_unavailable",
             #[cfg(target_os = "macos")]
             Self::BundleNotUserOwned => "bundle_not_user_owned",
             #[cfg(target_os = "macos")]
             Self::ApplicationsNotWritable => "applications_not_writable",
             Self::InstalledIdentityInvalid => "installed_identity_invalid",
+            #[cfg(target_os = "macos")]
             Self::StagingVolumeMismatch => "staging_volume_mismatch",
         }
     }
@@ -221,6 +228,7 @@ fn writable(directory: &Path) -> Result<bool, InstallAdmissionError> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(target_os = "macos")]
 pub(super) enum BundleIdentityError {
     Unreadable,
     WrongIdentifier,
@@ -230,6 +238,7 @@ pub(super) enum BundleIdentityError {
 
 /// Reads the product identifier, marketing version and build number of an
 /// application bundle. The build must be a canonical positive decimal.
+#[cfg(target_os = "macos")]
 pub(super) fn read_bundle_identity(bundle: &Path) -> Result<BundleIdentity, BundleIdentityError> {
     let info = bundle.join(INFO_PLIST);
     let metadata = fs::symlink_metadata(&info).map_err(|_| BundleIdentityError::Unreadable)?;

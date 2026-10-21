@@ -5,6 +5,39 @@ use cfw_windows_storage::{Error as StorageError, PrivateDirectory};
 use std::{fs, io, path::Path, process::Command};
 use uuid::Uuid;
 
+#[test]
+fn handoff_custody_precedes_namespace_transfer_and_does_not_trust_payload_bytes() {
+    use cfw_windows_engine::update_package::UpdateHandoff;
+    let temporary = tempfile::tempdir().unwrap();
+    let home = temporary.path().join("home");
+    let id = Uuid::new_v4();
+    let staging = UpdateStaging::create(&home, id).unwrap();
+    staging
+        .directory()
+        .write()
+        .unwrap()
+        .replace("package.msi", b"not yet authenticated", 64)
+        .unwrap();
+    let handoff = UpdateHandoff::open(&home, id).unwrap();
+    assert_eq!(handoff.package(), staging.package());
+    assert_eq!(
+        fs::read(handoff.package()).unwrap(),
+        b"not yet authenticated"
+    );
+    assert_eq!(
+        fs::write(handoff.package(), b"changed")
+            .unwrap_err()
+            .raw_os_error(),
+        Some(32)
+    );
+    drop(staging);
+    let successor = UpdateStaging::open_existing(&home, id).unwrap().unwrap();
+    assert_eq!(successor.root(), handoff.root());
+    assert!(fs::rename(handoff.package(), handoff.root().join("changed.msi")).is_err());
+    drop(handoff);
+    successor.remove().unwrap();
+}
+
 fn absent(path: &Path) {
     assert!(
         matches!(fs::symlink_metadata(path), Err(error) if error.kind() == io::ErrorKind::NotFound)

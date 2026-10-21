@@ -41,6 +41,10 @@ pub(crate) enum LaunchMode {
     FinishUpdate {
         transaction: String,
     },
+    #[cfg(windows)]
+    ResumeAfterUpdate {
+        transaction: String,
+    },
     #[cfg(all(target_os = "macos", feature = "physical-release-evidence"))]
     PacketEvidence,
 }
@@ -63,6 +67,11 @@ impl std::fmt::Debug for LaunchMode {
                 .debug_struct("FinishUpdate")
                 .field("transaction", transaction)
                 .finish(),
+            #[cfg(windows)]
+            Self::ResumeAfterUpdate { transaction } => formatter
+                .debug_struct("ResumeAfterUpdate")
+                .field("transaction", transaction)
+                .finish(),
             #[cfg(all(target_os = "macos", feature = "physical-release-evidence"))]
             Self::PacketEvidence => formatter.write_str("PacketEvidence"),
         }
@@ -72,6 +81,17 @@ impl std::fmt::Debug for LaunchMode {
 pub(crate) fn parse_launch_mode(arguments: &[OsString]) -> Result<LaunchMode, String> {
     if arguments.is_empty() {
         return Ok(LaunchMode::Dashboard);
+    }
+    #[cfg(windows)]
+    if let [flag, transaction] = arguments
+        && flag == "--resume-update-v1"
+    {
+        let transaction = transaction
+            .to_str()
+            .ok_or("update restart transaction is not UTF-8")?;
+        return Ok(LaunchMode::ResumeAfterUpdate {
+            transaction: transaction.to_owned(),
+        });
     }
     #[cfg(target_os = "macos")]
     if let [flag, action] = arguments

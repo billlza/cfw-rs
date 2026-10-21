@@ -23,10 +23,13 @@ use windows_sys::{
     core::GUID,
 };
 mod security;
+mod update;
+pub use update::{InstallationSnapshot, ObservedInstallation, UpdateFinisherImage};
 
 /// Version claims from the fixed, ACL-protected installation manifest.
 /// These are not a publisher-signature or successful MSI transaction receipt.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InstalledRelease {
     pub version: String,
     pub build: u64,
@@ -79,6 +82,10 @@ impl InstalledRuntime {
     /// incoming request or adjacent unsigned hash receipt. Installer-managed
     /// ownership/DACL is required before any manifest field is consumed.
     pub fn open() -> Result<Self> {
+        Self::open_version(None)
+    }
+
+    fn open_version(expected: Option<&str>) -> Result<Self> {
         cfw_windows_storage::require_process_identity()?;
         let root = known_folder(&FOLDERID_ProgramFiles)?.join(PACKAGE_DIRECTORY);
         let package = crate::process::hold_path(&root, true)?;
@@ -92,7 +99,10 @@ impl InstalledRuntime {
         let mut bytes = Vec::new();
         file.take((MAX_MANIFEST + 1) as u64)
             .read_to_end(&mut bytes)?;
-        let decoded = Manifest::decode(&bytes)?;
+        let decoded = match expected {
+            None => Manifest::decode(&bytes)?,
+            Some(version) => Manifest::decode_for_version(&bytes, version)?,
+        };
         Ok(Self {
             _package: package,
             _manifest: manifest,

@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 const DIRECTORY: &str = "updates-msi-v1";
 const PACKAGE: &str = "package.msi";
+pub(super) const FINISHER: &str = "finish-update.exe";
 const MAX_TRANSACTIONS: usize = 64;
 const MAX_FILES: usize = 8;
 
@@ -44,6 +45,17 @@ pub struct UpdateStaging {
 }
 
 impl UpdateStaging {
+    pub fn finisher(&self) -> PathBuf {
+        self.root.join(FINISHER)
+    }
+
+    pub(crate) fn belongs_to(&self, home: &Path) -> bool {
+        self.root.parent() == Some(home.join(DIRECTORY).as_path())
+    }
+
+    pub(crate) fn handoff_root(home: &Path, transaction: Uuid) -> Result<PathBuf, StagingError> {
+        Ok(home.join(DIRECTORY).join(transaction_name(transaction)?))
+    }
     pub fn create(app_home: &Path, transaction: Uuid) -> Result<Self, StagingError> {
         let name = transaction_name(transaction)?;
         let home = PrivateDirectory::open_or_create(app_home).map_err(storage("open home"))?;

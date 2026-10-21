@@ -82,7 +82,7 @@ security-framework = { version = "=3.7.0", default-features = false }
 [target.'cfg(windows)'.dependencies]
 cfw-windows-engine = { path = "../../crates/cfw-windows-engine" }
 cfw-windows-storage = { path = "../../crates/cfw-windows-storage" }
-windows-sys = { version = "=0.61.2", features = ["Win32_Storage_FileSystem", "Win32_System_Diagnostics_Etw"] }
+windows-sys = { version = "=0.61.2", features = ["Win32_Storage_FileSystem", "Win32_System_Diagnostics_Etw", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 dispatch2 = "=0.3.1"

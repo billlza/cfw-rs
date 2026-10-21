@@ -15,10 +15,12 @@ use std::{
 use semver::Version;
 use sha2::{Digest, Sha256};
 
+mod handoff;
 mod msi;
 mod signature;
 mod staging;
 mod worker;
+pub use handoff::UpdateHandoff;
 pub use staging::{StagingError, UpdateStaging};
 pub(crate) use worker::run_stdio;
 pub use worker::{InstalledPackageInspector, WorkerFailureCategory};
@@ -45,6 +47,8 @@ pub enum PackageError {
     File(#[from] crate::Error),
     #[error("Windows package observer: {0}")]
     Observer(#[from] cfw_windows_storage::Error),
+    #[error(transparent)]
+    Staging(#[from] StagingError),
     #[error("Windows package I/O: {0}")]
     Io(#[from] std::io::Error),
     #[error("Windows package verification worker rejected the candidate ({category:?}): {detail}")]

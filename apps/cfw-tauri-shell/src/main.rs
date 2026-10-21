@@ -152,6 +152,27 @@ fn emit_startup_error(app: &tauri::AppHandle, kind: &str, message: String) {
     }
 }
 
+fn admit_dashboard_launch() -> LaunchContext {
+    let available = settings_store().and_then(|store| {
+        store.ensure_layout().map_err(|error| error.to_string())?;
+        #[cfg(target_os = "macos")]
+        MigrationHandoffLease::acquire(&store.paths().app_home).map(std::mem::drop)?;
+        // The installer process holds this lease while it unregisters
+        // services and exchanges the bundles. No dashboard may start
+        // underneath that exchange.
+        UpdateInstallLease::acquire(&store.paths().app_home)
+            .map(std::mem::drop)
+            .map_err(|error| error.to_string())
+    });
+    if let Err(error) = available {
+        eprintln!(
+            "dashboard launch blocked while a migration handoff or update installation is active: {error}"
+        );
+        std::process::exit(STARTUP_ADMISSION_EXIT_CODE);
+    }
+    LaunchContext::dashboard()
+}
+
 fn main() {
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     let launch_arguments = match parse_launch_mode(&arguments) {
@@ -162,25 +183,14 @@ fn main() {
         }
     };
     let launch = match launch_arguments {
-        LaunchMode::Dashboard => {
-            let available = settings_store().and_then(|store| {
-                store.ensure_layout().map_err(|error| error.to_string())?;
-                #[cfg(target_os = "macos")]
-                MigrationHandoffLease::acquire(&store.paths().app_home).map(std::mem::drop)?;
-                // The installer process holds this lease while it unregisters
-                // services and exchanges the bundles. No dashboard may start
-                // underneath that exchange.
-                UpdateInstallLease::acquire(&store.paths().app_home)
-                    .map(std::mem::drop)
-                    .map_err(|error| error.to_string())
-            });
-            if let Err(error) = available {
-                eprintln!(
-                    "dashboard launch blocked while a migration handoff or update installation is active: {error}"
-                );
+        LaunchMode::Dashboard => admit_dashboard_launch(),
+        #[cfg(windows)]
+        LaunchMode::ResumeAfterUpdate { transaction } => {
+            if let Err(error) = updater::wait_for_finisher_exit(&transaction) {
+                eprintln!("update restart admission failed: {error}");
                 std::process::exit(STARTUP_ADMISSION_EXIT_CODE);
             }
-            LaunchContext::dashboard()
+            admit_dashboard_launch()
         }
         #[cfg(target_os = "macos")]
         LaunchMode::MigrationHandoff { token } => {

@@ -182,6 +182,8 @@ enum Access {
     Lock,
     Inspect,
     RemoveNode,
+    PinnedRead,
+    SharedLog,
 }
 
 pub struct PrivateDirectory {
@@ -198,6 +200,48 @@ pub struct WriteTransaction {
 }
 
 impl PrivateDirectory {
+    /// Retain a private regular file while excluding data writes and replacement.
+    /// Callers using its pathname must also retain their ancestor path pins.
+    pub fn open_pinned_file(&self, name: &str, maximum: usize) -> Result<File, Error> {
+        record_name(name)?;
+        if maximum == 0 {
+            return Err(Error::InvalidLimit);
+        }
+        let _transaction = self.read()?;
+        let file = open_relative(
+            &self.inner.file,
+            name,
+            FILE_OPEN,
+            false,
+            Access::PinnedRead,
+            None,
+        )?;
+        verify_file(&self.inner, &file, maximum, ReadPolicy::Private)?;
+        Ok(file)
+    }
+
+    /// Create a private diagnostic log that an external installer may append.
+    /// Its live handle excludes deletion/replacement; log content is untrusted
+    /// diagnostics and must never authorize installation or recovery.
+    pub fn open_shared_log(&self, name: &str, maximum: usize) -> Result<File, Error> {
+        record_name(name)?;
+        if maximum == 0 {
+            return Err(Error::InvalidLimit);
+        }
+        let _transaction = self.write()?;
+        let file = open_relative(
+            &self.inner.file,
+            name,
+            FILE_OPEN_IF,
+            false,
+            Access::SharedLog,
+            Some(&self.inner.security),
+        )?;
+        verify_file(&self.inner, &file, maximum, ReadPolicy::Private)?;
+        self.inner.file.sync_all().map_err(Error::CommitUncertain)?;
+        Ok(file)
+    }
+
     pub fn open_existing(path: &Path) -> Result<Option<Self>, Error> {
         validate_path(path)?;
         let security = Security::current()?;
@@ -761,6 +805,8 @@ fn open_relative_units(
         Access::Lock => (FILE_GENERIC_READ | FILE_GENERIC_WRITE, false),
         Access::Inspect => (FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE, true),
         Access::RemoveNode => (FILE_READ_ATTRIBUTES | DELETE | SYNCHRONIZE, true),
+        Access::PinnedRead => (FILE_GENERIC_READ, false),
+        Access::SharedLog => (FILE_GENERIC_READ | FILE_GENERIC_WRITE, false),
     };
     if directory == Some(true) {
         rights |= FILE_TRAVERSE;
@@ -790,7 +836,7 @@ fn open_relative_units(
         FILE_SHARE_DELETE
     } else {
         FILE_SHARE_READ
-            | if matches!(access, Access::ReadSnapshot) {
+            | if matches!(access, Access::ReadSnapshot | Access::PinnedRead) {
                 0
             } else {
                 FILE_SHARE_WRITE

@@ -1,23 +1,19 @@
+#[cfg(target_os = "macos")]
 use std::path::Path;
 
 use serde::Serialize;
 use thiserror::Error;
 
 use super::error::FailureCategory;
+#[cfg(target_os = "macos")]
 use super::journal::{
     InstallJournal, InstallPhase, InstallRecord, Recorded, UpdateInstallLease,
     UpdateInstallLeaseError,
 };
 #[cfg(target_os = "macos")]
 use super::staging::remove_all;
+#[cfg(target_os = "macos")]
 use crate::process_identity::ProcessIdentity;
-
-#[cfg(windows)]
-fn remove_all(app_home: &Path) -> std::io::Result<()> {
-    cfw_windows_engine::update_package::UpdateStaging::recover(app_home)
-        .map(|_| ())
-        .map_err(std::io::Error::other)
-}
 
 /// What the last installation attempt left behind, reported once to the
 /// dashboard that starts after it.
@@ -42,6 +38,7 @@ pub(crate) enum ReviewError {
     Unavailable(String),
     /// The stored record was not one this version can interpret. It and its
     /// staging were removed, so later installations are not blocked by it.
+    #[cfg(target_os = "macos")]
     #[error("an update installation record this version cannot interpret was discarded: {0}")]
     RecordDiscarded(String),
 }
@@ -51,6 +48,7 @@ impl ReviewError {
         match self {
             Self::InstallationInProgress => "install_in_progress",
             Self::Unavailable(_) => "previous_attempt_unreviewable",
+            #[cfg(target_os = "macos")]
             Self::RecordDiscarded(_) => "update_record_discarded",
         }
     }
@@ -60,7 +58,9 @@ impl ReviewError {
             Self::InstallationInProgress => FailureCategory::Busy,
             // Neither is a lack of space or a volume the user can change: the
             // detail is in the diagnostic journal.
-            Self::Unavailable(_) | Self::RecordDiscarded(_) => FailureCategory::Internal,
+            Self::Unavailable(_) => FailureCategory::Internal,
+            #[cfg(target_os = "macos")]
+            Self::RecordDiscarded(_) => FailureCategory::Internal,
         }
     }
 }
@@ -76,6 +76,7 @@ impl ReviewError {
 /// An attempt that is still in flight is left alone. The installer holds the
 /// installation lease while it works, and before it is admitted the dashboard
 /// that handed off is still running.
+#[cfg(target_os = "macos")]
 pub(super) fn review_previous_attempt(
     app_home: &Path,
     running_version: &str,
@@ -120,6 +121,7 @@ pub(super) fn review_previous_attempt(
     Ok(outcome)
 }
 
+#[cfg(target_os = "macos")]
 fn classify(record: &InstallRecord, running_version: &str) -> InstallOutcome {
     let failed = |code: &str| InstallOutcome::Failed {
         version: record.to.version.clone(),
@@ -151,7 +153,7 @@ fn classify(record: &InstallRecord, running_version: &str) -> InstallOutcome {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use std::fs;
 

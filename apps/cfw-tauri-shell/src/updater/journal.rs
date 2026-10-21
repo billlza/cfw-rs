@@ -5,13 +5,11 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::admission::BundleIdentity;
-use crate::private_store::{
-    AtomicWriteError, LockFileError, PrivateDirectory, PrivateDocument, PrivateReadError,
-};
+use crate::private_store::{AtomicWriteError, PrivateDirectory, PrivateDocument, PrivateReadError};
 use crate::process_identity::ProcessIdentity;
 
 const SCHEMA_VERSION: u16 = 1;
-const LEASE_FILE: &str = "update-install-v1.lock";
+pub(super) use super::install_lease::{UpdateInstallLease, UpdateInstallLeaseError};
 const RECORD_DOCUMENT: PrivateDocument = PrivateDocument {
     subject: "update installation record",
     file: "update-install-v1.json",
@@ -307,58 +305,6 @@ fn write_record(directory: &PrivateDirectory, record: &InstallRecord) -> Result<
                 format!("update installation record durability is uncertain: {message}")
             }
         })
-}
-
-/// Held by the installer process from before it unregisters services until the
-/// bundles are exchanged. A dashboard refuses to start while it is held, so no
-/// instance of the application can re-register services underneath the
-/// exchange.
-#[derive(Debug)]
-pub(crate) struct UpdateInstallLease {
-    _file: File,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum UpdateInstallLeaseError {
-    /// Another process holds the lease: an installation is in progress.
-    Held,
-    Unavailable(String),
-}
-
-impl std::fmt::Display for UpdateInstallLeaseError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Held => formatter.write_str("an update installation is in progress"),
-            Self::Unavailable(detail) => {
-                write!(
-                    formatter,
-                    "update installation lease is unavailable: {detail}"
-                )
-            }
-        }
-    }
-}
-
-impl UpdateInstallLease {
-    pub(crate) fn acquire(app_home: &Path) -> Result<Self, UpdateInstallLeaseError> {
-        PrivateDirectory::open_or_create(app_home, RECORD_DOCUMENT)
-            .map_err(UpdateInstallLeaseError::Unavailable)?
-            .acquire_lock_file(LEASE_FILE)
-            .map(|file| Self { _file: file })
-            .map_err(|error| match error {
-                LockFileError::Busy => UpdateInstallLeaseError::Held,
-                LockFileError::UnsafeMetadata => {
-                    UpdateInstallLeaseError::Unavailable("lock file has unsafe metadata".into())
-                }
-                #[cfg(unix)]
-                LockFileError::Open(error) | LockFileError::Inspect(error) => {
-                    UpdateInstallLeaseError::Unavailable(error.to_string())
-                }
-                LockFileError::Lock(error) => {
-                    UpdateInstallLeaseError::Unavailable(error.to_string())
-                }
-            })
-    }
 }
 
 #[cfg(test)]

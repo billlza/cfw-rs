@@ -79,6 +79,31 @@ fn windows_metadata_names_one_msi_and_its_independent_versioned_release() {
 }
 
 #[test]
+fn persisted_authorization_revalidates_the_release_family_and_exact_archive() {
+    let original = admit(
+        ReleaseTarget::WindowsX64,
+        &manifest(ReleaseTarget::WindowsX64, "0.5.1"),
+    )
+    .unwrap();
+    let decoded: UpdateAuthorization =
+        serde_json::from_slice(&serde_json::to_vec(&original).unwrap()).unwrap();
+    decoded.validate_for(ReleaseTarget::WindowsX64).unwrap();
+    assert!(decoded.validate_for(ReleaseTarget::MacArm64).is_err());
+    for field in ["version", "download_url", "archive_name", "signature"] {
+        let mut value = serde_json::to_value(&decoded).unwrap();
+        value[field] = serde_json::json!("");
+        let changed: UpdateAuthorization = serde_json::from_value(value).unwrap();
+        assert!(
+            changed.validate_for(ReleaseTarget::WindowsX64).is_err(),
+            "{field}"
+        );
+    }
+    let mut extra = serde_json::to_value(&decoded).unwrap();
+    extra["trusted"] = serde_json::json!(true);
+    assert!(serde_json::from_value::<UpdateAuthorization>(extra).is_err());
+}
+
+#[test]
 fn release_families_cannot_accept_each_others_manifests_or_asset_names() {
     for (target, other) in [
         (ReleaseTarget::WindowsX64, ReleaseTarget::MacArm64),

@@ -67,9 +67,14 @@ impl ProcessIdentity {
 }
 
 pub(crate) fn current_process_identity(executable: &Path) -> Result<ProcessIdentity, String> {
+    process_identity(std::process::id(), executable)
+}
+
+pub(crate) fn process_identity(pid: u32, executable: &Path) -> Result<ProcessIdentity, String> {
     let observer = NativePeerProcess::open(std::process::id()).map_err(message)?;
+    let process = NativePeerProcess::open(pid).map_err(message)?;
     let expected = canonical_executable(executable)?;
-    observe(&observer, &observer, &expected)?
+    observe(&observer, &process, &expected)?
         .ok_or_else(|| "this process is not running the expected executable".into())
 }
 

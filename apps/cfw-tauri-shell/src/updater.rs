@@ -1,31 +1,49 @@
 mod admission;
+#[cfg(target_os = "macos")]
 mod archive;
 mod contract;
 mod download;
 mod error;
+#[cfg(target_os = "macos")]
 mod finisher;
+mod install_lease;
+#[cfg(target_os = "macos")]
 mod journal;
 mod metadata;
 mod outcome;
+#[cfg(target_os = "macos")]
 mod services;
+#[cfg(target_os = "macos")]
 mod staged_bundle;
+#[cfg(target_os = "macos")]
 mod staging;
 mod state;
 #[cfg(windows)]
 mod windows_staged;
+#[cfg(windows)]
+mod windows_update;
 
 #[cfg(windows)]
 type StagedResources = windows_staged::WindowsStagedResources;
 #[cfg(target_os = "macos")]
 type StagedResources = ();
 
+#[cfg(target_os = "macos")]
 use std::fs::File;
+#[cfg(target_os = "macos")]
 use std::os::unix::process::CommandExt as _;
+#[cfg(target_os = "macos")]
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+#[cfg(target_os = "macos")]
+use std::process::Child;
+#[cfg(target_os = "macos")]
+use std::process::{Command, Stdio};
+use std::time::Duration;
+#[cfg(target_os = "macos")]
+use std::time::Instant;
 
 use cfw_core::DiagnosticTopic;
+#[cfg(target_os = "macos")]
 use cfw_platform::ReleaseSignedComponent;
 #[cfg(target_os = "macos")]
 use cfw_platform::operating_system_version;
@@ -33,7 +51,9 @@ use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
 use crate::commands::open_trusted_external_url;
+#[cfg(target_os = "macos")]
 use crate::lifecycle::{begin_update_lifecycle, prepare_update_exit};
+#[cfg(target_os = "macos")]
 use crate::process_identity::{current_process_identity, process_identity_exists};
 use admission::{
     BundleIdentity, InstallAdmissionError, admit_running_installation, runs_from_installed_location,
@@ -43,9 +63,13 @@ use archive::extract_bundle;
 use contract::UpdateAuthorization;
 use download::download_verified_archive;
 use error::{FailureCategory, Result, UpdateError, UpdateFailure};
+#[cfg(target_os = "macos")]
 use journal::{InstallJournal, InstallRecord, UpdateInstallLeaseError};
 use metadata::check_bounded_update;
-use outcome::{InstallOutcome, ReviewError, review_previous_attempt};
+#[cfg(target_os = "macos")]
+use outcome::review_previous_attempt;
+use outcome::{InstallOutcome, ReviewError};
+#[cfg(target_os = "macos")]
 use services::require_removable_services;
 #[cfg(target_os = "macos")]
 use staged_bundle::{StagedBundleError, StagedExpectation, verify_staged_bundle};
@@ -55,14 +79,20 @@ use staging::StagingArea;
 use state::DownloadCancellation;
 use state::{Cancelled, StagedUpdate};
 
+#[cfg(target_os = "macos")]
 use crate::launch::FINISH_UPDATE_FLAG;
+#[cfg(target_os = "macos")]
 pub(crate) use finisher::run as run_update_finisher;
-pub(crate) use journal::UpdateInstallLease;
+pub(crate) use install_lease::UpdateInstallLease;
+#[cfg(windows)]
+pub(crate) use windows_update::{run as run_update_finisher, wait_for_finisher_exit};
 pub(crate) type UpdaterSecurityState = state::UpdaterSecurityState<StagedResources>;
 
 const PROGRESS_EVENT: &str = "cfw://update-progress";
+#[cfg(target_os = "macos")]
 const INSTALLER_LOG: &str = "update-installer.log";
 /// Earlier attempts stay in the installer log until it outgrows this.
+#[cfg(target_os = "macos")]
 const INSTALLER_LOG_LIMIT: u64 = 1024 * 1024;
 /// Lets the renderer receive the hand-off result before the window closes.
 const EXIT_AFTER_HANDOFF: Duration = Duration::from_millis(250);
@@ -71,7 +101,9 @@ const EXIT_AFTER_HANDOFF: Duration = Duration::from_millis(250);
 /// window teardown must not be the reason, so the process ends by then.
 const EXIT_DEADLINE: Duration = Duration::from_secs(5);
 /// How long the installer process may take to hold the installation lease.
+#[cfg(target_os = "macos")]
 const INSTALLER_ADMISSION_TIMEOUT: Duration = Duration::from_secs(15);
+#[cfg(target_os = "macos")]
 const INSTALLER_ADMISSION_POLL: Duration = Duration::from_millis(50);
 
 #[tauri::command]
@@ -387,6 +419,7 @@ async fn prepare_windows_release(
         }
         emit_progress(app, "verifying", version, 0, None)?;
         let requested = authorization.version.clone();
+        let staged_authorization = authorization.clone();
         let expected = installed.clone();
         let cancellation = lease.cancellation.clone();
         let (identity, resources) = blocking(move || -> Result<_> {
@@ -399,6 +432,7 @@ async fn prepare_windows_release(
                 InstallAdmissionError::WindowsInstallationUnavailable(e.to_string())
             })?;
             let release = current.release();
+            let original = current.snapshot();
             if release.version != expected.version || release.build != expected.build {
                 return Err(InstallAdmissionError::InstalledIdentityInvalid.into());
             }
@@ -419,7 +453,7 @@ async fn prepare_windows_release(
                 version: package.identity().version.clone(),
                 build: package.identity().build,
             };
-            let resources = StagedResources::new(staging, package)?;
+            let resources = StagedResources::new(staging, package, staged_authorization, original)?;
             Ok((identity, resources))
         })
         .await??;
@@ -522,18 +556,7 @@ pub(crate) async fn commit_update_install(
                 .version
                 .clone();
             commit.handed_off();
-            let exiting = app.clone();
-            tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(EXIT_AFTER_HANDOFF).await;
-                exiting.exit(0);
-            });
-            std::thread::spawn(|| {
-                std::thread::sleep(EXIT_DEADLINE);
-                eprintln!(
-                    "the dashboard did not exit after the update hand-off; ending the process"
-                );
-                std::process::exit(0);
-            });
+            exit_after_handoff(app.clone());
             Ok(serde_json::json!({ "version": version }))
         }
         Ok(HandOff::InstallerDidNotStart(error)) => {
@@ -543,17 +566,43 @@ pub(crate) async fn commit_update_install(
             commit.handed_off();
             app.restart()
         }
+        #[cfg(windows)]
+        Ok(HandOff::ExitRequired(error)) => {
+            let failure = report(&app, &error);
+            commit.handed_off();
+            exit_after_handoff(app.clone());
+            Err(failure)
+        }
         Err(error) => Err(report(&app, &error)),
     }
 }
+
+fn exit_after_handoff(app: AppHandle) {
+    let exiting = app;
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(EXIT_AFTER_HANDOFF).await;
+        exiting.exit(0);
+    });
+    std::thread::spawn(|| {
+        std::thread::sleep(EXIT_DEADLINE);
+        eprintln!("the dashboard did not exit after the update hand-off; ending the process");
+        std::process::exit(0);
+    });
+}
+
+#[cfg(windows)]
+use windows_update::hand_off;
 
 enum HandOff {
     Started,
     /// The core is already stopped for exit, but no installer process holds
     /// the installation. The attempt is recorded as aborted when possible.
     InstallerDidNotStart(UpdateError),
+    #[cfg(windows)]
+    ExitRequired(UpdateError),
 }
 
+#[cfg(target_os = "macos")]
 async fn hand_off(app: &AppHandle, staged: &StagedUpdate) -> Result<HandOff> {
     if admit_running_installation()? != staged.installed {
         return Err(InstallAdmissionError::InstalledIdentityInvalid.into());
@@ -619,6 +668,7 @@ async fn hand_off(app: &AppHandle, staged: &StagedUpdate) -> Result<HandOff> {
 /// Starts the installer process and waits until it holds the installation
 /// lease. Only then may this process exit: an installer that never got that
 /// far would leave the user without an application.
+#[cfg(target_os = "macos")]
 async fn start_installer(
     app_home: &Path,
     transaction: &Uuid,
@@ -637,6 +687,7 @@ async fn start_installer(
     admitted
 }
 
+#[cfg(target_os = "macos")]
 async fn wait_for_installer_admission(
     installer: &mut Child,
     app_home: &Path,
@@ -678,11 +729,13 @@ async fn wait_for_installer_admission(
 /// Tells the installer's lasting hold on the lease from the momentary probe
 /// of another dashboard that is just starting: only a lease found held on two
 /// consecutive observations counts.
+#[cfg(target_os = "macos")]
 #[derive(Default)]
 struct LeaseWatch {
     held_before: bool,
 }
 
+#[cfg(target_os = "macos")]
 impl LeaseWatch {
     fn held_by_the_installer(&mut self, held: bool) -> bool {
         let lasting = held && self.held_before;
@@ -694,6 +747,7 @@ impl LeaseWatch {
 /// Opens the installer's private log for appending, never through a link.
 /// Earlier attempts stay readable until the log outgrows its bound; then it
 /// starts over.
+#[cfg(target_os = "macos")]
 fn open_installer_log(app_home: &Path) -> std::io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt as _;
 
@@ -715,6 +769,7 @@ fn open_installer_log(app_home: &Path) -> std::io::Result<File> {
 
 /// Starts the installer mode of the installed executable in its own process
 /// group, so it outlives this dashboard. Its diagnostics go to the log.
+#[cfg(target_os = "macos")]
 fn spawn_installer(transaction: &Uuid, log: File) -> std::io::Result<Child> {
     Command::new(ReleaseSignedComponent::MainExecutable.path())
         .arg(FINISH_UPDATE_FLAG)
@@ -762,6 +817,7 @@ async fn ensure_previous_attempt_reviewed(app: &AppHandle) -> Result<()> {
         return Ok(());
     };
     let app_home = app_home()?;
+    #[cfg(target_os = "macos")]
     let reviewed = blocking(move || {
         review_previous_attempt(
             &app_home,
@@ -770,11 +826,14 @@ async fn ensure_previous_attempt_reviewed(app: &AppHandle) -> Result<()> {
         )
     })
     .await?;
+    #[cfg(windows)]
+    let reviewed = blocking(move || windows_update::review(&app_home)).await?;
     match reviewed {
         Ok(outcome) => {
             record_reviewed_outcome(app, &outcome);
             review.complete(outcome)
         }
+        #[cfg(target_os = "macos")]
         Err(discarded @ ReviewError::RecordDiscarded(_)) => {
             // Reported as the failure it is, but dealt with: nothing is left
             // that a later installation could trip over.
@@ -850,7 +909,7 @@ fn report(app: &AppHandle, error: &UpdateError) -> UpdateFailure {
     failure
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use std::os::unix::fs::PermissionsExt as _;
 

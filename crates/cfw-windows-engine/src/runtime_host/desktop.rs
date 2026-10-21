@@ -21,6 +21,9 @@ use std::{
 pub struct InstalledDesktop {
     installation: InstalledRuntime,
     paths: UserPaths,
+    // Held without write/delete sharing for the entire desktop lifetime. The
+    // service image below has a different role and cannot admit this process.
+    desktop_image: crate::VerifiedExecutable,
     image: Arc<crate::VerifiedExecutable>,
     credentials: WindowsCredentialLifecycle,
     generations: WindowsEngineGenerationStore,
@@ -29,7 +32,8 @@ pub struct InstalledDesktop {
 impl InstalledDesktop {
     pub fn open() -> Result<Self> {
         let installation = InstalledRuntime::open()?;
-        installation.require_desktop_process()?;
+        let desktop_image = installation.desktop()?;
+        crate::NativePeerProcess::open(std::process::id())?.verify_executable(&desktop_image)?;
         let paths = installation.user_paths()?;
         let image = Arc::new(installation.runtime()?);
         let credentials = WindowsCredentialLifecycle::new(
@@ -43,6 +47,7 @@ impl InstalledDesktop {
         Ok(Self {
             installation,
             paths,
+            desktop_image,
             image,
             credentials,
             generations,
@@ -61,11 +66,41 @@ impl InstalledDesktop {
     pub fn paths(&self) -> &UserPaths {
         &self.paths
     }
+    fn require_current_process(&self) -> Result<()> {
+        // Re-observe the live process and exact file identity on every call.
+        // Rehashing an immutable, already retained image on every status poll
+        // adds file-size-dependent work to a two-second observation boundary.
+        crate::NativePeerProcess::open(std::process::id())?
+            .verify_executable(&self.desktop_image)?;
+        Ok(())
+    }
+
+    #[cfg(feature = "native-service-validation")]
+    pub fn desktop_identity_timing_for_validation(&self) -> Result<serde_json::Value> {
+        let mut samples = Vec::with_capacity(3);
+        for _ in 0..3 {
+            let start = Instant::now();
+            self.installation.require_desktop_process()?;
+            let fresh_micros = start.elapsed().as_micros();
+            let start = Instant::now();
+            self.require_current_process()?;
+            let retained_micros = start.elapsed().as_micros();
+            samples.push(
+                serde_json::json!({"fresh_hash_and_identity_micros":fresh_micros,
+                "retained_file_identity_micros":retained_micros}),
+            );
+        }
+        Ok(
+            serde_json::json!({"image_bytes":std::fs::metadata(self.desktop_image.path())?.len(),
+            "fresh_and_retained_identity_checks_passed":true,"samples":samples,
+            "status_timeout_changed":false,"release_accepted":false}),
+        )
+    }
     /// Read-only authorization before a shared application mode transition.
     /// An owned proxy may be restored; a foreign proxy or changed journal is
     /// never taken over. Activation still rechecks policy under its own lock.
     pub(crate) fn authorize_system_proxy(&self, restoration_only: bool) -> Result<()> {
-        self.installation.require_desktop_process()?;
+        self.require_current_process()?;
         crate::user_agent::launcher::medium_process()?;
         self.storage.proxy().authorize(restoration_only)?;
         Ok(())
@@ -79,7 +114,7 @@ impl InstalledDesktop {
         let candidate = crate::CheckedProbeConfiguration::new(request)?;
         let deadline = deadline.min(Instant::now() + Duration::from_secs(30));
         remaining(deadline)?;
-        self.installation.require_desktop_process()?;
+        self.require_current_process()?;
         crate::user_agent::launcher::medium_process()?;
         let lock = cfw_windows_storage::PrivateUserMutex::acquire(
             "profile-probe-v1",
@@ -114,7 +149,7 @@ impl InstalledDesktop {
         }
     }
     pub(crate) fn observe_authority(&self, deadline: Instant) -> Result<AuthoritySnapshot> {
-        self.installation.require_desktop_process()?;
+        self.require_current_process()?;
         let mut channel = AuthorityChannel::connect(
             SERVICE_NAME,
             ServiceClientRole::Desktop,
@@ -146,7 +181,7 @@ impl InstalledDesktop {
         request: CheckedStartConfiguration,
         deadline: Instant,
     ) -> Result<DesktopUserAgent> {
-        self.installation.require_desktop_process()?;
+        self.require_current_process()?;
         Ok(DesktopUserAgent::prepare_checked(
             &self.credentials,
             Arc::clone(&self.image),
@@ -167,7 +202,7 @@ impl InstalledDesktop {
         let candidate = CheckedStartConfiguration::new(request)?;
         let deadline = deadline.min(Instant::now() + Duration::from_secs(30));
         remaining(deadline)?;
-        self.installation.require_desktop_process()?;
+        self.require_current_process()?;
         crate::user_agent::launcher::medium_process()?;
         let lineage = self.generations.load_lineage_until(deadline)?;
         if candidate.context().installation_id != lineage.session.installation_id

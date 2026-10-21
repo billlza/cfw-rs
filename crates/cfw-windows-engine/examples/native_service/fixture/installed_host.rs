@@ -109,6 +109,9 @@ pub(super) fn exercise() -> Result<()> {
     progress.record("open_desktop", 0)?;
     let desktop =
         cfw_windows_engine::runtime_host::InstalledDesktop::open().map_err(|e| e.to_string())?;
+    let desktop_admission = desktop
+        .desktop_identity_timing_for_validation()
+        .map_err(|error| error.to_string())?;
     let paths = desktop.paths();
     let generations = desktop.generations();
     let storage = desktop.storage();
@@ -275,7 +278,7 @@ pub(super) fn exercise() -> Result<()> {
     progress.record("complete", 2)?;
     println!(
         "{}",
-        serde_json::json!({"source":std::env::var("CFW_NATIVE_SERVICE_SOURCE").map_err(|e|e.to_string())?,"product_service":true,"product_agent":true,"desktop_is_fixture":true,"medium_integrity":true,"configuration_checks":configuration_checks,"modes":modes,"release_accepted":false})
+        serde_json::json!({"source":std::env::var("CFW_NATIVE_SERVICE_SOURCE").map_err(|e|e.to_string())?,"product_service":true,"product_agent":true,"desktop_is_fixture":true,"medium_integrity":true,"desktop_admission":desktop_admission,"configuration_checks":configuration_checks,"modes":modes,"release_accepted":false})
     );
     Ok(())
 }

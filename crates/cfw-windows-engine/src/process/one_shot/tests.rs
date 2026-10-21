@@ -28,11 +28,14 @@ fn observed(path: &Path) -> Option<NativePeerProcess> {
     Some(process)
 }
 
-fn assert_retired(process: &NativePeerProcess) {
-    assert!(matches!(
-        process.revalidate(),
-        Err(PeerIdentityError::Exited)
-    ));
+fn assert_retired(process: &NativePeerProcess, role: &str) {
+    let outcome = process.revalidate();
+    assert!(
+        matches!(&outcome, Err(PeerIdentityError::Exited)),
+        "{role} pid={} creation_filetime={} retirement observation: {outcome:?}",
+        process.process_id(),
+        process.identity().process_creation_time(),
+    );
 }
 
 #[test]
@@ -119,6 +122,7 @@ fn waiting_counterexample(mode: &[u8; 4], large: bool) {
             .borrow()
             .as_ref()
             .expect("the fixture entered its waiting mode"),
+        "deadline worker",
     );
     if large {
         let marker: serde_json::Value =
@@ -130,6 +134,16 @@ fn waiting_counterexample(mode: &[u8; 4], large: bool) {
 
 #[test]
 fn cancellation_retires_the_exact_worker_descendant_and_inherited_pipe() {
+    // A native CI failure did not retain the observed result or distinguish
+    // the root from its descendant. Exercise the unchanged immediate-exit
+    // requirement repeatedly and preserve those facts on the first failure.
+    for trial in 0..64 {
+        cancellation_counterexample(trial);
+    }
+    println!("native worker cancellation: 64 complete root/descendant retirement trials");
+}
+
+fn cancellation_counterexample(trial: usize) {
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("worker");
     let children = RefCell::new((None, None));
@@ -158,12 +172,14 @@ fn cancellation_retires_the_exact_worker_descendant_and_inherited_pipe() {
             .0
             .as_ref()
             .expect("worker observed before cancellation"),
+        &format!("cancellation trial {trial} worker"),
     );
     assert_retired(
         children
             .1
             .as_ref()
             .expect("descendant observed before cancellation"),
+        &format!("cancellation trial {trial} descendant"),
     );
 }
 

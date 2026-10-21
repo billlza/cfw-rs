@@ -88,7 +88,7 @@ try {
     $env:CFW_NATIVE_PACKAGE_WORKER_FIXTURE = Join-Path $Fixtures 'counterexample-worker.exe'
     Copy-Item -LiteralPath 'target/debug/examples/native-update-worker-fixture.exe' -Destination $env:CFW_NATIVE_PACKAGE_WORKER_FIXTURE
     Copy-Item -LiteralPath $env:CFW_NATIVE_PACKAGE_WORKER_FIXTURE -Destination (Join-Path $Evidence 'worker-counterexample.exe')
-    cargo test --locked -p cfw-windows-engine --lib --features native-package-validation process::one_shot::tests -- --test-threads=1 2>&1 |
+    cargo test --locked -p cfw-windows-engine --lib --features native-package-validation process::one_shot::tests -- --test-threads=1 --nocapture 2>&1 |
         Tee-Object -FilePath (Join-Path $Evidence 'worker-transport-tests.log')
     if ($LASTEXITCODE -ne 0) { throw 'Native worker timeout/cancellation/pipe cleanup failed' }
     $transportPassed = $true

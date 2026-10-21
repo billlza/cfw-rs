@@ -13,7 +13,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-mod library;
+use crate::tunnel as library;
+mod packets;
 mod recovery;
 use library::{Library, observe, wait_absent};
 type Result<T> = std::result::Result<T, String>;
@@ -50,10 +51,18 @@ fn record(output: &Path, name: &str, value: &Value) -> Result<()> {
         .map_err(|error| error.to_string())
 }
 
-/// CLI used exclusively by native-wintun-probe. No command installs a product
-/// service or writes routes, DNS, firewall rules, or adapter IP configuration.
+/// CLI used exclusively by native-wintun-probe. The packet command temporarily
+/// configures one fixed test address and host route on its own adapter. Neither
+/// command installs a product service or changes DNS, firewall or default routes.
 pub fn run(arguments: &[String]) -> Result<()> {
     let source = source()?;
+    if arguments.len() == 3 && arguments[0] == "--packet-roundtrip" {
+        return packets::run(
+            &PathBuf::from(&arguments[1]),
+            &PathBuf::from(&arguments[2]),
+            &source,
+        );
+    }
     if arguments.len() == 3 && arguments[0] == "--adapter-owner" {
         return owner(&PathBuf::from(&arguments[1]), &arguments[2], &source);
     }
@@ -76,13 +85,17 @@ pub fn run(arguments: &[String]) -> Result<()> {
         "dll_sha256":crate::runtime_host::wintun_image_pin().map_err(|error| error.to_string())?.sha256,"release_accepted":false}),
     )?;
     let result = (|| {
-        let library = Library::load(&dll)?;
+        let library = Library::load_for_validation(&dll).map_err(|error| error.to_string())?;
         let observed = (|| {
-            let adapter = library.create(uuid::Uuid::new_v4())?;
+            let adapter = library
+                .create(uuid::Uuid::new_v4())
+                .map_err(|error| error.to_string())?;
             let luid = adapter.luid();
-            let name = adapter.name.clone();
-            let session = adapter.session()?;
-            let driver_version = adapter.driver_version()?;
+            let name = adapter.name().to_owned();
+            let session = adapter.session(1500).map_err(|error| error.to_string())?;
+            let driver_version = adapter
+                .driver_version()
+                .map_err(|error| error.to_string())?;
             record(
                 &output,
                 "normal-live.json",
@@ -92,7 +105,7 @@ pub fn run(arguments: &[String]) -> Result<()> {
             )?;
             drop(session);
             drop(adapter);
-            wait_absent(luid, &name)?;
+            wait_absent(luid, &name).map_err(|error| error.to_string())?;
             record(
                 &output,
                 "normal-retired.json",
@@ -102,7 +115,7 @@ pub fn run(arguments: &[String]) -> Result<()> {
             abrupt_owner_exit(&library, &dll, &output, &source)?;
             Ok(())
         })();
-        let closed = library.close();
+        let closed = library.close().map_err(|error| error.to_string());
         match (observed, closed) {
             (Ok(()), Ok(())) => Ok(()),
             (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
@@ -138,15 +151,15 @@ struct OwnerReady {
 
 fn owner(dll: &Path, id: &str, source: &str) -> Result<()> {
     let id = uuid::Uuid::parse_str(id).map_err(|error| error.to_string())?;
-    let library = Library::load(dll)?;
-    let adapter = library.create(id)?;
-    let _session = adapter.session()?;
+    let library = Library::load_for_validation(dll).map_err(|error| error.to_string())?;
+    let adapter = library.create(id).map_err(|error| error.to_string())?;
+    let _session = adapter.session(1500).map_err(|error| error.to_string())?;
     let peer = NativePeerProcess::open(std::process::id()).map_err(|error| error.to_string())?;
     let ready = OwnerReady {
         source: source.into(),
         process_id: peer.process_id(),
         process_creation_time: peer.identity().process_creation_time(),
-        name: adapter.name.clone(),
+        name: adapter.name().to_owned(),
         luid: adapter.luid(),
         session_started: true,
     };
@@ -186,11 +199,16 @@ fn terminate_child(child: &mut Child) -> Result<ExitStatus> {
 
 fn abrupt_owner_exit(library: &Library, dll: &Path, output: &Path, source: &str) -> Result<()> {
     let control_id = uuid::Uuid::new_v4();
-    let control = library.create(control_id)?;
-    let control_session = control.session()?;
+    let control = library
+        .create(control_id)
+        .map_err(|error| error.to_string())?;
+    let control_session = control.session(1500).map_err(|error| error.to_string())?;
     let control_luid = control.luid();
-    let control_name = control.name.clone();
-    if library::interface_identity(control_luid, &control_name)? != control_id {
+    let control_name = control.name().to_owned();
+    if library::interface_identity(control_luid, &control_name)
+        .map_err(|error| error.to_string())?
+        != control_id
+    {
         return Err("control adapter GUID differs from its creation identity".into());
     }
     record(
@@ -202,7 +220,7 @@ fn abrupt_owner_exit(library: &Library, dll: &Path, output: &Path, source: &str)
         }),
     )?;
     let id = uuid::Uuid::new_v4();
-    let name = format!("CFW-TUN-probe-{id}");
+    let name = format!("CFW-TUN-{id}");
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
     let mut child = Command::new(&executable)
         .arg("--adapter-owner")
@@ -253,7 +271,10 @@ fn abrupt_owner_exit(library: &Library, dll: &Path, output: &Path, source: &str)
                 != executable
                     .canonicalize()
                     .map_err(|error| error.to_string())?
-            || observe(ready.luid)?.as_deref() != Some(name.as_str())
+            || observe(ready.luid)
+                .map_err(|error| error.to_string())?
+                .as_deref()
+                != Some(name.as_str())
         {
             return Err(
                 "adapter readiness differs from the launched owner and native interface".into(),
@@ -317,7 +338,8 @@ fn abrupt_owner_exit(library: &Library, dll: &Path, output: &Path, source: &str)
     // leave an adapter present. Preserve this observation, then require exact
     // retained-device recovery and independent interface absence.
     let recovered = (|| {
-        let automatic = library::absence_within_deadline(ready.luid, &name)?;
+        let automatic = library::absence_within_deadline(ready.luid, &name)
+            .map_err(|error| error.to_string())?;
         record(
             output,
             "abrupt-before-recovery.json",
@@ -345,7 +367,10 @@ fn abrupt_owner_exit(library: &Library, dll: &Path, output: &Path, source: &str)
         (Err(error), Err(cleanup)) => Err(format!("{error}; device observer cleanup: {cleanup}")),
     };
     let control_result = (|| {
-        if library::interface_identity(control_luid, &control_name)? != control_id {
+        if library::interface_identity(control_luid, &control_name)
+            .map_err(|error| error.to_string())?
+            != control_id
+        {
             return Err("adapter recovery changed the live control adapter".into());
         }
         record(
@@ -359,16 +384,18 @@ fn abrupt_owner_exit(library: &Library, dll: &Path, output: &Path, source: &str)
     })();
     drop(control_session);
     drop(control);
-    let control_cleanup = library::wait_absent(control_luid, &control_name).and_then(|()| {
-        record(
-            output,
-            "recovery-control-retired.json",
-            &json!({
-                "source":source,"luid":control_luid,"name":control_name,
-                "adapter_absence_observed":true,"release_accepted":false
-            }),
-        )
-    });
+    let control_cleanup = library::wait_absent(control_luid, &control_name)
+        .map_err(|error| error.to_string())
+        .and_then(|()| {
+            record(
+                output,
+                "recovery-control-retired.json",
+                &json!({
+                    "source":source,"luid":control_luid,"name":control_name,
+                    "adapter_absence_observed":true,"release_accepted":false
+                }),
+            )
+        });
     let failures: Vec<_> = [result, control_result, control_cleanup]
         .into_iter()
         .filter_map(Result::err)

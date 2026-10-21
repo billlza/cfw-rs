@@ -1,14 +1,19 @@
 //! Wintun 0.14.1 ABI, from the header in the hash-pinned official distribution.
-//! This probe creates its own adapter handles and never calls OpenAdapter or
-//! DeleteDriver. It does not establish product routing or recovery admission.
-use super::{Result, native_error};
+//! Owned handles only: never OpenAdapter or DeleteDriver. Routing and durable
+//! authority admission remain separate from this low-level driver boundary.
+use super::{Error, Result, native_error};
 use crate::VerifiedExecutable;
+#[cfg(feature = "native-service-validation")]
+use std::path::Path;
 use std::{
     ffi::{OsString, c_void},
     mem::size_of,
     os::windows::ffi::{OsStrExt, OsStringExt},
-    path::{Path, PathBuf},
+    path::PathBuf,
     ptr::{NonNull, null_mut},
+};
+#[cfg(feature = "native-service-validation")]
+use std::{
     thread,
     time::{Duration, Instant},
 };
@@ -37,6 +42,10 @@ type StartSession = unsafe extern "system" fn(*mut c_void, u32) -> *mut c_void;
 type EndSession = unsafe extern "system" fn(*mut c_void);
 type ReadWaitEvent = unsafe extern "system" fn(*mut c_void) -> *mut c_void;
 type DriverVersion = unsafe extern "system" fn() -> u32;
+type ReceivePacket = unsafe extern "system" fn(*mut c_void, *mut u32) -> *mut u8;
+type ReleasePacket = unsafe extern "system" fn(*mut c_void, *const u8);
+type AllocatePacket = unsafe extern "system" fn(*mut c_void, u32) -> *mut u8;
+type SendPacket = unsafe extern "system" fn(*mut c_void, *const u8);
 
 struct Module(Option<NonNull<c_void>>);
 impl Module {
@@ -58,7 +67,7 @@ impl Drop for Module {
     }
 }
 
-pub(super) struct Library {
+pub struct Library {
     module: Module,
     _image: VerifiedExecutable,
     create: CreateAdapter,
@@ -66,18 +75,26 @@ pub(super) struct Library {
     luid: GetAdapterLuid,
     start: StartSession,
     end: EndSession,
-    event: ReadWaitEvent,
+    pub(super) event: ReadWaitEvent,
     version: DriverVersion,
+    pub(super) receive: ReceivePacket,
+    pub(super) release: ReleasePacket,
+    pub(super) allocate: AllocatePacket,
+    pub(super) send: SendPacket,
 }
 impl Library {
-    pub(super) fn load(path: &Path) -> Result<Self> {
-        let pin = crate::runtime_host::wintun_image_pin().map_err(|error| error.to_string())?;
-        let image = VerifiedExecutable::open(
-            path,
-            pin.digest().map_err(|error| error.to_string())?,
-            pin.version,
-        )
-        .map_err(|error| error.to_string())?;
+    pub fn load(installation: &crate::runtime_host::InstalledRuntime) -> Result<Self> {
+        Self::from_verified(installation.wintun()?)
+    }
+
+    #[cfg(feature = "native-service-validation")]
+    pub(crate) fn load_for_validation(path: &Path) -> Result<Self> {
+        let pin = crate::runtime_host::wintun_image_pin()?;
+        Self::from_verified(VerifiedExecutable::open(path, pin.digest()?, pin.version)?)
+    }
+
+    fn from_verified(image: VerifiedExecutable) -> Result<Self> {
+        let path = image.path();
         let mut wide: Vec<_> = path.as_os_str().encode_wide().collect();
         if wide.contains(&0) {
             return Err("Wintun path contains NUL".into());
@@ -101,9 +118,7 @@ impl Library {
             return Err(native_error("observe loaded Wintun image"));
         }
         let actual = PathBuf::from(OsString::from_wide(&actual[..length]));
-        image
-            .verify_image_file(&actual)
-            .map_err(|error| error.to_string())?;
+        image.verify_image_file(&actual)?;
         macro_rules! symbol {
             ($name:literal, $kind:ty) => {{
                 let function =
@@ -123,15 +138,22 @@ impl Library {
             end: symbol!("WintunEndSession", EndSession),
             event: symbol!("WintunGetReadWaitEvent", ReadWaitEvent),
             version: symbol!("WintunGetRunningDriverVersion", DriverVersion),
+            receive: symbol!("WintunReceivePacket", ReceivePacket),
+            release: symbol!("WintunReleaseReceivePacket", ReleasePacket),
+            allocate: symbol!("WintunAllocateSendPacket", AllocatePacket),
+            send: symbol!("WintunSendPacket", SendPacket),
             module,
             _image: image,
         })
     }
 
-    pub(super) fn create(&self, id: uuid::Uuid) -> Result<Adapter<'_>> {
-        let name = format!("CFW-TUN-probe-{id}");
+    pub fn create(&self, id: uuid::Uuid) -> Result<Adapter<'_>> {
+        if id.is_nil() {
+            return Err("adapter identity is nil".into());
+        }
+        let name = format!("CFW-TUN-{id}");
         let wide: Vec<_> = name.encode_utf16().chain(Some(0)).collect();
-        let kind: Vec<_> = "CFW validation".encode_utf16().chain(Some(0)).collect();
+        let kind: Vec<_> = "Clash for Windows".encode_utf16().chain(Some(0)).collect();
         let (data1, data2, data3, data4) = id.as_fields();
         let guid = GUID {
             data1,
@@ -153,44 +175,55 @@ impl Library {
         match observe(luid)? {
             Some(name) if name == adapter.name => {}
             Some(_) => {
-                return Err(format!(
-                    "created Wintun LUID {luid} has a different native alias"
-                ));
+                return Err(
+                    format!("created Wintun LUID {luid} has a different native alias").into(),
+                );
             }
             None => {
                 return Err(format!(
                     "created Wintun LUID {luid} is absent from the native interface table"
-                ));
+                )
+                .into());
             }
+        }
+        if interface_identity(luid, &adapter.name)? != id {
+            return Err("created adapter GUID differs from its requested identity".into());
         }
         Ok(adapter)
     }
 
-    pub(super) fn close(mut self) -> Result<()> {
+    pub fn close(mut self) -> Result<()> {
         self.module.close()
     }
 }
 
-pub(super) struct Adapter<'a> {
-    library: &'a Library,
+pub struct Adapter<'a> {
+    pub(super) library: &'a Library,
     handle: NonNull<c_void>,
-    pub(super) name: String,
+    name: String,
 }
 impl Adapter<'_> {
-    pub(super) fn luid(&self) -> u64 {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub fn luid(&self) -> u64 {
         let mut luid = NET_LUID_LH { Value: 0 };
         unsafe {
             (self.library.luid)(self.handle.as_ptr(), &mut luid);
             luid.Value
         }
     }
-    pub(super) fn session(&self) -> Result<Session<'_>> {
+    pub fn session(&self, mtu: u16) -> Result<Session<'_>> {
+        super::packet::validate_mtu(mtu)?;
         // Wintun's documented minimum: two finite 128-KiB rings.
-        let handle = NonNull::new(unsafe { (self.library.start)(self.handle.as_ptr(), 0x20000) })
-            .ok_or_else(|| native_error("start Wintun packet session"))?;
+        let handle = NonNull::new(unsafe {
+            (self.library.start)(self.handle.as_ptr(), super::RING_CAPACITY_BYTES)
+        })
+        .ok_or_else(|| native_error("start Wintun packet session"))?;
         let session = Session {
             adapter: self,
             handle,
+            mtu,
         };
         let event = unsafe { (self.library.event)(handle.as_ptr()) };
         if event.is_null() {
@@ -209,7 +242,7 @@ impl Adapter<'_> {
         }
         Ok(session)
     }
-    pub(super) fn driver_version(&self) -> Result<u32> {
+    pub fn driver_version(&self) -> Result<u32> {
         let version = unsafe { (self.library.version)() };
         if version == 0 {
             return Err(native_error("observe running Wintun driver"));
@@ -222,9 +255,10 @@ impl Drop for Adapter<'_> {
         unsafe { (self.library.close_adapter)(self.handle.as_ptr()) };
     }
 }
-pub(super) struct Session<'a> {
-    adapter: &'a Adapter<'a>,
-    handle: NonNull<c_void>,
+pub struct Session<'a> {
+    pub(super) adapter: &'a Adapter<'a>,
+    pub(super) handle: NonNull<c_void>,
+    pub(super) mtu: u16,
 }
 impl Drop for Session<'_> {
     fn drop(&mut self) {
@@ -232,11 +266,11 @@ impl Drop for Session<'_> {
     }
 }
 
-pub(super) fn observe(luid: u64) -> Result<Option<String>> {
+pub fn observe(luid: u64) -> Result<Option<String>> {
     row(luid)?.map(|row| alias(&row)).transpose()
 }
 
-pub(super) fn interface_identity(luid: u64, name: &str) -> Result<uuid::Uuid> {
+pub fn interface_identity(luid: u64, name: &str) -> Result<uuid::Uuid> {
     let row = row(luid)?.ok_or("owned adapter is absent")?;
     if alias(&row)? != name {
         return Err("adapter alias no longer matches its owner".into());
@@ -263,10 +297,10 @@ fn row(luid: u64) -> Result<Option<MIB_IF_ROW2>> {
         return Ok(None);
     }
     if status != 0 {
-        return Err(format!(
-            "observe adapter: {}",
-            std::io::Error::from_raw_os_error(status as i32)
-        ));
+        return Err(Error::Native {
+            operation: "observe adapter",
+            source: std::io::Error::from_raw_os_error(status as i32),
+        });
     }
     if unsafe { row.InterfaceLuid.Value } != luid {
         return Err("adapter observation changed its requested LUID".into());
@@ -280,10 +314,11 @@ fn alias(row: &MIB_IF_ROW2) -> Result<String> {
         .iter()
         .position(|value| *value == 0)
         .ok_or("unterminated adapter alias")?;
-    String::from_utf16(&row.Alias[..end]).map_err(|error| error.to_string())
+    String::from_utf16(&row.Alias[..end]).map_err(|error| Error::Contract(error.to_string()))
 }
 
-pub(super) fn wait_absent(luid: u64, name: &str) -> Result<()> {
+#[cfg(feature = "native-service-validation")]
+pub fn wait_absent(luid: u64, name: &str) -> Result<()> {
     if absence_within_deadline(luid, name)? {
         Ok(())
     } else {
@@ -291,7 +326,8 @@ pub(super) fn wait_absent(luid: u64, name: &str) -> Result<()> {
     }
 }
 
-pub(super) fn absence_within_deadline(luid: u64, name: &str) -> Result<bool> {
+#[cfg(feature = "native-service-validation")]
+pub fn absence_within_deadline(luid: u64, name: &str) -> Result<bool> {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         match observe(luid)? {

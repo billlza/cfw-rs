@@ -33,6 +33,8 @@ mod proxy_endpoints;
 #[cfg(any(windows, test))]
 pub mod runtime_host;
 #[cfg(any(windows, test))]
+pub mod tunnel;
+#[cfg(any(windows, test))]
 pub mod user_agent;
 #[cfg(any(windows, test))]
 pub use configuration::{

@@ -58,7 +58,8 @@ impl OwnedDevice {
         {
             return Err("adapter recovery owner differs from the launched child".into());
         }
-        let guid = library::interface_identity(ready.luid, &ready.name)?;
+        let guid = library::interface_identity(ready.luid, &ready.name)
+            .map_err(|error| error.to_string())?;
         if guid != requested {
             return Err("created adapter GUID differs from the requested probe identity".into());
         }
@@ -112,7 +113,9 @@ impl OwnedDevice {
     fn revalidate_device(&self) -> Result<()> {
         if instance_id(self.set.0, &self.device)? != self.instance_id
             || network_guid(self.set.0, &self.device)? != self.interface_guid
-            || library::interface_identity(self.luid, &self.name)? != self.interface_guid
+            || library::interface_identity(self.luid, &self.name)
+                .map_err(|error| error.to_string())?
+                != self.interface_guid
         {
             return Err("retained Wintun device identity changed".into());
         }
@@ -159,7 +162,7 @@ impl OwnedDevice {
         if installed.Flags & (DI_NEEDREBOOT | DI_NEEDRESTART) != 0 {
             return Err("owned adapter removal requires restart; cleanup is not complete".into());
         }
-        library::wait_absent(self.luid, &self.name)
+        library::wait_absent(self.luid, &self.name).map_err(|error| error.to_string())
     }
 }
 

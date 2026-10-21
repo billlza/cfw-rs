@@ -62,6 +62,9 @@ jobs:
       - name: Build the isolated native lifecycle probe
         run: |
           $evidence = Join-Path $env:RUNNER_TEMP 'cfw-wintun-validation'
+          cargo test --locked -p cfw-windows-engine --lib --features native-service-validation packet 2>&1 |
+            Tee-Object -FilePath (Join-Path $evidence 'packet-contract-tests.log') | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw 'Wintun packet boundary tests failed' }
           cargo clippy --locked -p cfw-windows-engine --features native-service-validation --example native-wintun-probe -- -D warnings 2>&1 |
             Tee-Object -FilePath (Join-Path $evidence 'clippy.log')
           if ($LASTEXITCODE -ne 0) { throw 'Wintun lifecycle probe Clippy failed' }

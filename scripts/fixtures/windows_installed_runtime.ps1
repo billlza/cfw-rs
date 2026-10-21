@@ -168,11 +168,16 @@ try {
     $freshProbe = Read-InstalledProbe
     $freshActivation = Read-MsiReport 'install' 'fresh_service'
     Assert-RunningReceipt $freshActivation.fresh_service $freshProbe
-    if ($freshProbe.snapshot.revision -ne ($freshRetired.authority.revision + 1) -or
-        ($freshProbe.snapshot.root | ConvertTo-Json -Compress) -cne ($freshRetired.authority.root | ConvertTo-Json -Compress)) {
-        throw 'Fresh retry did not preserve the retained authority and startup revision'
-    }
     $msiReport.fresh_activation = [ordered]@{ activation=$freshActivation; probe=$freshProbe }
+    # Before any runtime preparation, the protected genesis remains revision 1.
+    # Machine::reconcile verifies fresh Off without appending a runtime record.
+    # A retired runtime (exercised below) instead commits a new startup revision.
+    if ($freshRetired.authority.revision -ne 1 -or $freshRetired.authority.root.epoch -ne 0 -or
+        $freshRetired.authority.root.generation -ne 0 -or
+        ($freshProbe.snapshot | ConvertTo-Json -Compress) -cne ($freshRetired.authority | ConvertTo-Json -Compress) -or
+        ($freshProbe.snapshot | ConvertTo-Json -Compress) -cne ($freshActivation.authority | ConvertTo-Json -Compress)) {
+        throw 'Fresh retry did not preserve the exact unused genesis while independently proving Off'
+    }
     Stop-Installed
     if ((Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash -cne (Get-FileHash -LiteralPath $manifestInput -Algorithm SHA256).Hash) {
         throw 'MSI installed a different runtime manifest'

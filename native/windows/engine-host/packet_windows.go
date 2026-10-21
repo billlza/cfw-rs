@@ -5,6 +5,7 @@ package main
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -60,7 +61,7 @@ func newPacketDevice(handle windows.Handle, name string, mtu uint32) (_ *packetD
 		}
 	}()
 	if mtu < 1280 || mtu > 9000 || !packetAdapterName(name) {
-		return nil, errPacketContract
+		return nil, fmt.Errorf("%w: mtu=%d canonical_adapter=%t", errPacketContract, mtu, packetAdapterName(name))
 	}
 	var flags, output, input, instances, state, server uint32
 	if err := windows.GetNamedPipeInfo(handle, &flags, &output, &input, &instances); err != nil {
@@ -74,7 +75,8 @@ func newPacketDevice(handle windows.Handle, name string, mtu uint32) (_ *packetD
 	}
 	if flags != windows.PIPE_TYPE_MESSAGE || state != windows.PIPE_READMODE_MESSAGE || instances != 1 || server == 0 ||
 		input < mtu || output < mtu || input > maximumPacketPipeBuffer || output > maximumPacketPipeBuffer {
-		return nil, errPacketContract
+		return nil, fmt.Errorf("%w: flags=%#x state=%#x instances=%d server_present=%t input=%d output=%d mtu=%d",
+			errPacketContract, flags, state, instances, server != 0, input, output, mtu)
 	}
 	// The engine must not pass this capability to any subsequent child.
 	if err := windows.SetHandleInformation(handle, windows.HANDLE_FLAG_INHERIT, 0); err != nil {

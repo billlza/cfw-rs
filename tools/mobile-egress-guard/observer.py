@@ -245,12 +245,14 @@ def save_state(path: Path, data: dict) -> None:
 
 def evaluate(policy: dict, samples: dict[str, tuple[int, int]],
              previous: dict | None, observed_at: int) -> tuple[dict, dict]:
+    # Nanosecond precision prevents repeated checks in the same wall-clock second
+    # from overwriting each other or triggering a false clock rollback.
     bounded_integer(observed_at, positive=True)
     if previous is not None and observed_at <= previous["observed_at"]:
         raise GuardError("observation clock did not advance; retained the last trusted state")
     prior = previous["peers"] if previous else {}
     uncertain = set(previous["uncertain"]) if previous else set()
-    elapsed = observed_at - previous["observed_at"] if previous else None
+    elapsed_ns = observed_at - previous["observed_at"] if previous else None
     details = []
     alerts = []
     for digest, (rx, tx) in sorted(samples.items()):
@@ -268,7 +270,7 @@ def evaluate(policy: dict, samples: dict[str, tuple[int, int]],
                 uncertain.add(digest)
             else:
                 delta = rx - old["rx"] + tx - old["tx"]
-                if rule and delta * 8 > rule["rate_limit_bps"] * elapsed:
+                if rule and delta * 8 * 1_000_000_000 > rule["rate_limit_bps"] * elapsed_ns:
                     alerts.append({"code": "observed_rate_exceeded", "peer": alias})
         if digest in uncertain:
             alerts.append({"code": "counter_reset_or_mismatch", "peer": alias})
@@ -285,7 +287,7 @@ def evaluate(policy: dict, samples: dict[str, tuple[int, int]],
     }
     report = {
         "version": 1,
-        "observed_at": dt.datetime.fromtimestamp(observed_at, dt.timezone.utc).isoformat(),
+        "observed_at": dt.datetime.fromtimestamp(observed_at / 1_000_000_000, dt.timezone.utc).isoformat(),
         "interface": policy["interface"],
         "status": "alert" if alerts else "ok",
         "peer_count": len(samples),
@@ -318,7 +320,7 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 observation = observe_via_ssh(opt.ssh_host, policy["interface"])
             samples = parse_transfer(observation)
-            report, next_state = evaluate(policy, samples, previous, int(time.time()))
+            report, next_state = evaluate(policy, samples, previous, time.time_ns())
             save_state(state_path, next_state)
         print(json.dumps(report, ensure_ascii=False, sort_keys=True))
         return 2 if report["status"] == "alert" else 0

@@ -38,7 +38,7 @@ func packetTCPExchange(t *testing.T, peer *os.File, mtu, family int) {
 	if err := server.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	remote := server.Addr().(*net.TCPAddr).AddrPort()
+	remote := packetTestRemote(family, server.Addr().(*net.TCPAddr).AddrPort().Port())
 	local := netip.AddrPortFrom(source, 34568)
 	body := fmt.Sprintf("cfw-native-tcp-ipv%d-mtu%d", family, mtu)
 	expected := []byte(fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(body), body))

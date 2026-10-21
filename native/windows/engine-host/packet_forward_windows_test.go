@@ -35,7 +35,15 @@ func (w *packetResponseObserver) Write(data []byte) (int, error) {
 }
 
 func packetForwardConfig(mtu int) json.RawMessage {
-	return json.RawMessage(fmt.Sprintf(`{"log":{"disabled":true},"inbounds":[{"type":"tun","tag":"tun-in","mtu":%d,"stack":"gvisor","address":["192.0.2.1/30","2001:db8:1::1/126"],"auto_route":false}],"outbounds":[{"type":"direct","tag":"direct"}],"route":{"final":"direct"}}`, mtu))
+	return json.RawMessage(fmt.Sprintf(`{"log":{"disabled":true},"inbounds":[{"type":"tun","tag":"tun-in","mtu":%d,"stack":"gvisor","address":["192.0.2.1/30","2001:db8:1::1/126"],"auto_route":false}],"outbounds":[{"type":"direct","tag":"direct"}],"route":{"final":"direct","rules":[{"ip_cidr":["192.0.2.123/32"],"action":"route","outbound":"direct","override_address":"127.0.0.1"},{"ip_cidr":["2001:db8:2::123/128"],"action":"route","outbound":"direct","override_address":"::1"}]}}`, mtu))
+}
+
+func packetTestRemote(family int, port uint16) netip.AddrPort {
+	address := "192.0.2.123"
+	if family == 6 {
+		address = "2001:db8:2::123"
+	}
+	return netip.AddrPortFrom(netip.MustParseAddr(address), port)
 }
 
 func packetHello(handle windows.Handle, mtu int) request {
@@ -109,6 +117,37 @@ func TestPacketTunnelRejectsMalformedInputBeforeRunningObservation(t *testing.T)
 	}
 }
 
+func TestPacketTunnelPreservesUpstreamLoopbackReflection(t *testing.T) {
+	peer, handle := packetTestPair(t, windows.FILE_FLAG_OVERLAPPED)
+	reflected := 0
+	output := &packetResponseObserver{observe: func(value response) {
+		if value.ID != 2 || value.State != "running" || value.Error != "" {
+			return
+		}
+		// The original failed fixture used loopback destinations. Keep the
+		// exact counterexample: the pinned filter returns these IP packets
+		// unchanged instead of treating them as forwardable unicast traffic.
+		for _, endpoints := range [][2]string{{"192.0.2.2", "127.0.0.1"}, {"2001:db8:1::2", "::1"}} {
+			packet := packetUDPFrame(netip.AddrPortFrom(netip.MustParseAddr(endpoints[0]), 34567),
+				netip.AddrPortFrom(netip.MustParseAddr(endpoints[1]), 54321), []byte("cfw-loopback-counterexample"))
+			if n, err := peer.Write(packet); err != nil || n != len(packet) {
+				t.Fatal("loopback counterexample write", n, err)
+			}
+			buffer := make([]byte, 1500)
+			if n, err := peer.Read(buffer); err != nil || n != len(packet) || !bytes.Equal(buffer[:n], packet) {
+				t.Fatal("upstream loopback packet handling changed", n, err)
+			}
+			reflected++
+		}
+	}}
+	input := messages(t, packetHello(handle, 1500),
+		request{Protocol: protocol, Session: testSession, ID: 2, Op: "start", Digest: testDigest, Config: packetForwardConfig(1500)},
+		request{Protocol: protocol, Session: testSession, ID: 3, Op: "stop", Digest: testDigest})
+	if code := run(bytes.NewReader(input), output); code != 0 || reflected != 2 {
+		t.Fatalf("loopback counterexample did not complete: %d, %d; %s", code, reflected, output.Bytes())
+	}
+}
+
 func TestPacketTunnelRefusesUnownedNetworkConfiguration(t *testing.T) {
 	configurations := []string{
 		`{"outbounds":[{"type":"direct"}]}`,
@@ -159,7 +198,7 @@ func packetUDPExchange(t *testing.T, peer *os.File, mtu, family int) {
 	if err := server.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	remote := server.LocalAddr().(*net.UDPAddr).AddrPort()
+	remote := packetTestRemote(family, server.LocalAddr().(*net.UDPAddr).AddrPort().Port())
 	local := netip.AddrPortFrom(source, 34567)
 	payload := bytes.Repeat([]byte(fmt.Sprintf("cfw-packet-forward-ipv%d-mtu%d", family, mtu)), mtu)
 	payload = payload[:mtu-headerBytes-8]

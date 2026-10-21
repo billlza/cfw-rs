@@ -19,8 +19,13 @@ public static class CfwRuntimeMsiQualification {
     [DllImport("msi.dll", EntryPoint="MsiQueryProductStateW", CharSet=CharSet.Unicode, ExactSpelling=true)]
     public static extern int ProductState(string productCode);
     [DllImport("msi.dll", EntryPoint="MsiGetProductInfoExW", CharSet=CharSet.Unicode, ExactSpelling=true)]
-    public static extern uint ProductInfo(string productCode, string userSid, uint context,
-                                         string property, StringBuilder value, ref uint length);
+    private static extern uint ProductInfo(string productCode, string userSid, uint context,
+                                          string property, StringBuilder value, ref uint length);
+    public static uint MachineProductInfo(string productCode, string property, StringBuilder value, ref uint length) {
+        // PowerShell converts $null to String.Empty for a .NET string argument.
+        // MSIINSTALLCONTEXT_MACHINE requires an actual null SID pointer.
+        return ProductInfo(productCode, null, 4, property, value, ref length);
+    }
 }
 '@
     }
@@ -34,7 +39,7 @@ function Get-RuntimeMsiRegistration([string]$ProductCode) {
         [uint32]$length = 4096
         # MSIINSTALLCONTEXT_MACHINE (4), with no user SID. A registration in
         # the current user's context is not a per-machine installation receipt.
-        $status = [CfwRuntimeMsiQualification]::ProductInfo($ProductCode, $null, 4, $property, $value, [ref]$length)
+        $status = [CfwRuntimeMsiQualification]::MachineProductInfo($ProductCode, $property, $value, [ref]$length)
         if ($status -ne 0 -or $length -eq 0 -or $length -ge 4096 -or $value.Length -ne $length) {
             throw "Machine MSI property lookup failed: $property (status $status, length $length)"
         }

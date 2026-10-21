@@ -343,6 +343,54 @@ fn cancellation_records_job_membership_and_native_process_signals() {
 }
 
 #[test]
+fn retirement_rejects_a_census_that_missed_later_descendants() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("worker");
+    let assets = spawn_assets_for(
+        fixture(),
+        &directory,
+        None,
+        child::Program::PackageInspection,
+    )
+    .unwrap();
+    // The root is still suspended. This real census cannot include the child
+    // that it will create once exchange resumes it.
+    let early_witnesses = RetirementWitnesses::capture(&assets).unwrap();
+    let mut owner = OneShot {
+        assets,
+        io: None,
+        assigned: false,
+        closed: false,
+    };
+    let children = RefCell::new((None, None));
+    let operation = owner.exchange(
+        b"tree".to_vec(),
+        Instant::now() + Duration::from_secs(10),
+        &|| {
+            let mut children = children.borrow_mut();
+            if children.0.is_none() {
+                children.0 = observed(&directory.join("worker.json"));
+            }
+            if children.1.is_none() {
+                children.1 = observed(&directory.join("descendant.json"));
+            }
+            children.0.is_some() && children.1.is_some()
+        },
+    );
+    owner.retire(true).unwrap();
+    assert!(matches!(operation, Err(Error::Cancelled)));
+    assert!(matches!(
+        early_witnesses.wait(&owner.assets.job, Instant::now() + CLEANUP),
+        Err(Error::Protocol(
+            "inspection Job retirement population is incomplete"
+        ))
+    ));
+    let (worker, descendant) = children.into_inner();
+    assert_retired(&worker.unwrap(), "census regression worker");
+    assert_retired(&descendant.unwrap(), "census regression descendant");
+}
+
+#[test]
 fn precreation_cancellation_and_invalid_bounds_create_no_working_directory() {
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("worker");

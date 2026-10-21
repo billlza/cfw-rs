@@ -897,6 +897,10 @@ fn wait_process(child: &NativeChild, deadline: Instant) -> Result<(), Error> {
 }
 
 fn active_processes(job: &OwnedHandle) -> Result<u32, Error> {
+    Ok(job_accounting(job)?.ActiveProcesses)
+}
+
+fn job_accounting(job: &OwnedHandle) -> Result<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, Error> {
     let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
     if unsafe {
         QueryInformationJobObject(
@@ -910,5 +914,5 @@ fn active_processes(job: &OwnedHandle) -> Result<u32, Error> {
     {
         return Err(std::io::Error::last_os_error().into());
     }
-    Ok(accounting.ActiveProcesses)
+    Ok(accounting)
 }

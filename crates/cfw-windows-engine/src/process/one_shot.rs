@@ -1,8 +1,12 @@
 //! One read-only request in a verified, suspended-then-admitted native worker.
 //! The existing explicit handle list and atomic cleanup Job are shared with
-//! engine launch. A result requires successful exit, drained I/O and an empty Job.
+//! engine launch. A result requires observed process exits, drained I/O and an
+//! empty Job whose lifetime process population is completely accounted for.
 use super::*;
 use std::io::Write;
+
+mod retirement;
+use retirement::RetirementWitnesses;
 
 const MAX_REQUEST: usize = 16 * 1024;
 pub(crate) const MAX_REPLY: usize = 4096;
@@ -161,6 +165,10 @@ impl OneShot {
             return Ok(());
         }
         let end = Instant::now() + CLEANUP;
+        // Capture exact members before termination can remove them from Job
+        // accounting. Capture failure must not prevent the owned Job/pipe
+        // cleanup below, but it must prevent a successful cleanup result.
+        let witnesses = RetirementWitnesses::capture(&self.assets);
         if abort {
             if self.assigned {
                 // SAFETY: only this worker and its descendants belong to this
@@ -197,6 +205,7 @@ impl OneShot {
                 Err(error) => return Err(error),
             }
         }
+        witnesses?.wait(&self.assets.job, end)?;
         self.closed = true;
         Ok(())
     }

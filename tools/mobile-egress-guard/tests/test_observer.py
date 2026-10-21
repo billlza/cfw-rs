@@ -71,11 +71,11 @@ class ObserverTests(unittest.TestCase):
                 observer.parse_transfer(text)
 
     def test_first_sample_then_rate_alert_and_budget_alert(self):
-        initial, state = observer.evaluate(policy(), {A: (100, 100)}, None, 100)
+        initial, state = observer.evaluate(policy(), {A: (100, 100)}, None, 100_000_000_000)
         self.assertEqual(initial["status"], "ok")
         self.assertTrue(initial["first_observation"])
         self.assertIsNone(initial["peers"][0]["interval_bytes"])
-        later, state = observer.evaluate(policy(), {A: (800, 700)}, state, 110)
+        later, state = observer.evaluate(policy(), {A: (800, 700)}, state, 110_000_000_000)
         self.assertEqual(later["status"], "alert")
         self.assertEqual(later["peers"][0]["interval_bytes"], 1300)
         self.assertEqual(
@@ -85,24 +85,34 @@ class ObserverTests(unittest.TestCase):
         self.assertNotIn(KEY_A, json.dumps(later))
         self.assertNotIn(KEY_A, json.dumps(state))
 
-    def test_unknown_peer_and_counter_reset_remain_visible(self):
-        first, state = observer.evaluate(policy(), {A: (800, 100)}, None, 100)
+
+    def test_subsecond_observations_preserve_actual_rate_interval(self):
+        first, state = observer.evaluate(policy(), {A: (1, 1)}, None, 1_000_000_000)
         self.assertEqual(first["status"], "ok")
-        second, state = observer.evaluate(policy(), {A: (4, 100), B: (0, 10)}, state, 101)
+        second, state = observer.evaluate(policy(), {A: (2, 2)}, state, 1_500_000_000)
+        self.assertEqual(second["peers"][0]["interval_bytes"], 2)
+        self.assertNotIn("observed_rate_exceeded", [a["code"] for a in second["alerts"]])
+        third, state = observer.evaluate(policy(), {A: (100, 100)}, state, 1_500_000_001)
+        self.assertIn("observed_rate_exceeded", [a["code"] for a in third["alerts"]])
+
+    def test_unknown_peer_and_counter_reset_remain_visible(self):
+        first, state = observer.evaluate(policy(), {A: (800, 100)}, None, 100_000_000_000)
+        self.assertEqual(first["status"], "ok")
+        second, state = observer.evaluate(policy(), {A: (4, 100), B: (0, 10)}, state, 101_000_000_000)
         self.assertEqual(second["status"], "alert")
         self.assertEqual({v["code"] for v in second["alerts"]},
                          {"unregistered_peer", "counter_reset_or_mismatch"})
-        third, state = observer.evaluate(policy(), {A: (20, 100)}, state, 102)
+        third, state = observer.evaluate(policy(), {A: (20, 100)}, state, 102_000_000_000)
         self.assertIn("counter_reset_or_mismatch", [v["code"] for v in third["alerts"]])
         with self.assertRaisesRegex(observer.GuardError, "clock"):
-            observer.evaluate(policy(), {A: (30, 120)}, state, 102)
+            observer.evaluate(policy(), {A: (30, 120)}, state, 102_000_000_000)
 
     def test_private_atomic_state_and_reject_symlink_or_loose_permissions(self):
         with tempfile.TemporaryDirectory() as root:
             destination = Path(root) / "state" / "current.json"
             with observer.exclusive_state(destination):
                 self.assertIsNone(observer.load_state(destination))
-                _, state = observer.evaluate(policy(), {A: (7, 8)}, None, 100)
+                _, state = observer.evaluate(policy(), {A: (7, 8)}, None, 100_000_000_000)
                 observer.save_state(destination, state)
                 self.assertEqual(observer.load_state(destination), state)
                 self.assertFalse(destination.stat().st_mode & 0o077)

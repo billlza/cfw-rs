@@ -14,6 +14,7 @@ use std::{
 };
 
 mod library;
+mod recovery;
 use library::{Library, observe, wait_absent};
 type Result<T> = std::result::Result<T, String>;
 const PINS: &str = include_str!(concat!(
@@ -129,7 +130,7 @@ pub fn run(arguments: &[String]) -> Result<()> {
                 &json!({"source":source,"luid":luid,"name":name,
                 "adapter_absence_observed":true,"release_accepted":false}),
             )?;
-            abrupt_owner_exit(&dll, &output, &source)?;
+            abrupt_owner_exit(&library, &dll, &output, &source)?;
             Ok(())
         })();
         let closed = library.close();
@@ -144,6 +145,7 @@ pub fn run(arguments: &[String]) -> Result<()> {
         "result.json",
         &json!({"source":source,"success":result.is_ok(),
         "failure":result.as_ref().err(),"normal_and_forced_owner_exit_exercised":result.is_ok(),
+        "crash_recovery_strategy":"retained_device_instance","service_restart_recovery_exercised":false,
         "explicit_route_dns_firewall_writes":false,"packet_traffic_verified":false,
         "product_tunnel_backend_exercised":false,"release_accepted":false}),
     );
@@ -213,7 +215,23 @@ fn terminate_child(child: &mut Child) -> Result<ExitStatus> {
     }
 }
 
-fn abrupt_owner_exit(dll: &Path, output: &Path, source: &str) -> Result<()> {
+fn abrupt_owner_exit(library: &Library, dll: &Path, output: &Path, source: &str) -> Result<()> {
+    let control_id = uuid::Uuid::new_v4();
+    let control = library.create(control_id)?;
+    let control_session = control.session()?;
+    let control_luid = control.luid();
+    let control_name = control.name.clone();
+    if library::interface_identity(control_luid, &control_name)? != control_id {
+        return Err("control adapter GUID differs from its creation identity".into());
+    }
+    record(
+        output,
+        "recovery-control-live.json",
+        &json!({
+            "source":source,"luid":control_luid,"name":control_name,
+            "interface_guid":control_id.to_string(),"session_started":true
+        }),
+    )?;
     let id = uuid::Uuid::new_v4();
     let name = format!("CFW-TUN-probe-{id}");
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
@@ -277,11 +295,43 @@ fn abrupt_owner_exit(dll: &Path, output: &Path, source: &str) -> Result<()> {
             "abrupt-live.json",
             &serde_json::to_value(&ready).map_err(|error| error.to_string())?,
         )?;
-        Ok(ready)
+        let wrong_guid = recovery::OwnedDevice::retain(
+            &ready,
+            peer.retain().map_err(|error| error.to_string())?,
+            control_id,
+        );
+        match wrong_guid {
+            Err(error)
+                if error == "created adapter GUID differs from the requested probe identity" => {}
+            Err(error) => {
+                return Err(format!(
+                    "foreign GUID rejection was not established: {error}"
+                ));
+            }
+            Ok(_) => return Err("foreign adapter GUID was admitted for recovery".into()),
+        }
+        let device = recovery::OwnedDevice::retain(&ready, peer, id)?;
+        let live_removal = device.remove_after_owner_exit();
+        if live_removal != Err("live adapter owner cannot be recovered".into()) {
+            return Err(format!(
+                "live adapter owner removal was not rejected before mutation: {live_removal:?}"
+            ));
+        }
+        record(
+            output,
+            "abrupt-device-binding.json",
+            &json!({
+                "source":source,"process_id":ready.process_id,"process_creation_time":ready.process_creation_time,
+                "luid":ready.luid,"name":ready.name,"interface_guid":device.interface_guid.to_string(),
+                "device_instance_id":device.instance_id,"live_owner_removal_rejected":true,
+                "foreign_guid_rejected":true
+            }),
+        )?;
+        Ok((ready, device))
     })();
     let exit = terminate_child(&mut child);
-    let (ready, status) = match (outcome, exit) {
-        (Ok(ready), Ok(status)) => (ready, status),
+    let (ready, device, status) = match (outcome, exit) {
+        (Ok((ready, device)), Ok(status)) => (ready, device, status),
         (Err(error), Ok(_)) | (Ok(_), Err(error)) => return Err(error),
         (Err(error), Err(cleanup)) => return Err(format!("{error}; child cleanup: {cleanup}")),
     };
@@ -294,11 +344,69 @@ fn abrupt_owner_exit(dll: &Path, output: &Path, source: &str) -> Result<()> {
         &json!({"source":source,"process_id":ready.process_id,
         "process_creation_time":ready.process_creation_time,"exit_code":status.code(),"retained_child_exit_observed":true}),
     )?;
-    wait_absent(ready.luid, &name)?;
-    record(
-        output,
-        "abrupt-retired.json",
-        &json!({"source":source,"luid":ready.luid,"name":name,
-        "adapter_absence_observed":true,"release_accepted":false}),
-    )
+    // The original native experiment proved that abrupt process exit can
+    // leave an adapter present. Preserve this observation, then require exact
+    // retained-device recovery and independent interface absence.
+    let recovered = (|| {
+        let automatic = library::absence_within_deadline(ready.luid, &name)?;
+        record(
+            output,
+            "abrupt-before-recovery.json",
+            &json!({
+                "source":source,"luid":ready.luid,"name":name,
+                "automatic_absence_observed":automatic,"observation_limit_ms":15000,
+                "release_accepted":false
+            }),
+        )?;
+        if !automatic {
+            device.remove_after_owner_exit()?;
+        }
+        record(
+            output,
+            "abrupt-retired.json",
+            &json!({"source":source,"luid":ready.luid,"name":name,
+        "adapter_absence_observed":true,"automatic_absence_observed":automatic,
+        "explicit_owned_device_removal":!automatic,"release_accepted":false}),
+        )
+    })();
+    let closed = device.close();
+    let result = match (recovered, closed) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(cleanup)) => Err(format!("{error}; device observer cleanup: {cleanup}")),
+    };
+    let control_result = (|| {
+        if library::interface_identity(control_luid, &control_name)? != control_id {
+            return Err("adapter recovery changed the live control adapter".into());
+        }
+        record(
+            output,
+            "recovery-control-preserved.json",
+            &json!({
+                "source":source,"luid":control_luid,"name":control_name,
+                "interface_guid":control_id.to_string(),"live_control_preserved":true
+            }),
+        )
+    })();
+    drop(control_session);
+    drop(control);
+    let control_cleanup = library::wait_absent(control_luid, &control_name).and_then(|()| {
+        record(
+            output,
+            "recovery-control-retired.json",
+            &json!({
+                "source":source,"luid":control_luid,"name":control_name,
+                "adapter_absence_observed":true,"release_accepted":false
+            }),
+        )
+    });
+    let failures: Vec<_> = [result, control_result, control_cleanup]
+        .into_iter()
+        .filter_map(Result::err)
+        .collect();
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
 }

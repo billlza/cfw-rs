@@ -229,6 +229,24 @@ impl Drop for Session<'_> {
 }
 
 pub(super) fn observe(luid: u64) -> Result<Option<String>> {
+    row(luid)?.map(|row| alias(&row)).transpose()
+}
+
+pub(super) fn interface_identity(luid: u64, name: &str) -> Result<uuid::Uuid> {
+    let row = row(luid)?.ok_or("owned adapter is absent")?;
+    if alias(&row)? != name {
+        return Err("adapter alias no longer matches its owner".into());
+    }
+    let guid = row.InterfaceGuid;
+    Ok(uuid::Uuid::from_fields(
+        guid.data1,
+        guid.data2,
+        guid.data3,
+        &guid.data4,
+    ))
+}
+
+fn row(luid: u64) -> Result<Option<MIB_IF_ROW2>> {
     if luid == 0 || size_of::<NET_LUID_LH>() != 8 {
         return Err("invalid native adapter identity".into());
     }
@@ -249,28 +267,38 @@ pub(super) fn observe(luid: u64) -> Result<Option<String>> {
     if unsafe { row.InterfaceLuid.Value } != luid {
         return Err("adapter observation changed its requested LUID".into());
     }
+    Ok(Some(row))
+}
+
+fn alias(row: &MIB_IF_ROW2) -> Result<String> {
     let end = row
         .Alias
         .iter()
         .position(|value| *value == 0)
         .ok_or("unterminated adapter alias")?;
-    Ok(Some(
-        String::from_utf16(&row.Alias[..end]).map_err(|error| error.to_string())?,
-    ))
+    String::from_utf16(&row.Alias[..end]).map_err(|error| error.to_string())
 }
 
 pub(super) fn wait_absent(luid: u64, name: &str) -> Result<()> {
+    if absence_within_deadline(luid, name)? {
+        Ok(())
+    } else {
+        Err("owned Wintun adapter remains after its owner retired".into())
+    }
+}
+
+pub(super) fn absence_within_deadline(luid: u64, name: &str) -> Result<bool> {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         match observe(luid)? {
-            None => return Ok(()),
+            None => return Ok(true),
             Some(observed) if observed == name && Instant::now() < deadline => {
                 thread::sleep(Duration::from_millis(50))
             }
             Some(observed) if observed != name => {
                 return Err("adapter LUID now belongs to another identity".into());
             }
-            Some(_) => return Err("owned Wintun adapter remains after its owner retired".into()),
+            Some(_) => return Ok(false),
         }
     }
 }

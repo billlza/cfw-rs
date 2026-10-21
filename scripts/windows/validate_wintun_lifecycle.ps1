@@ -41,8 +41,20 @@ try {
     $receipt = Get-Content -LiteralPath (Join-Path $outputRoot 'native/result.json') -Raw | ConvertFrom-Json
     if ($receipt.source -cne $Source -or -not $receipt.success -or $null -ne $receipt.failure -or
         -not $receipt.normal_and_forced_owner_exit_exercised -or $receipt.explicit_route_dns_firewall_writes -or
+        $receipt.crash_recovery_strategy -cne 'retained_device_instance' -or $receipt.service_restart_recovery_exercised -or
         $receipt.packet_traffic_verified -or $receipt.product_tunnel_backend_exercised -or $receipt.release_accepted) {
         throw 'Wintun lifecycle receipt is invalid or overstates its scope'
+    }
+    $binding = Get-Content -LiteralPath (Join-Path $outputRoot 'native/abrupt-device-binding.json') -Raw | ConvertFrom-Json
+    $retired = Get-Content -LiteralPath (Join-Path $outputRoot 'native/abrupt-retired.json') -Raw | ConvertFrom-Json
+    $control = Get-Content -LiteralPath (Join-Path $outputRoot 'native/recovery-control-preserved.json') -Raw | ConvertFrom-Json
+    if ($binding.source -cne $Source -or $retired.source -cne $Source -or $control.source -cne $Source -or
+        -not $binding.live_owner_removal_rejected -or -not $binding.foreign_guid_rejected -or
+        $binding.luid -ne $retired.luid -or $binding.name -cne $retired.name -or
+        -not $retired.adapter_absence_observed -or -not $control.live_control_preserved -or
+        $control.interface_guid -ceq $binding.interface_guid -or
+        $retired.explicit_owned_device_removal -eq $retired.automatic_absence_observed) {
+        throw 'Wintun owned recovery or live control observation is incomplete'
     }
 } catch {
     $primaryFailure = $_.Exception.ToString()

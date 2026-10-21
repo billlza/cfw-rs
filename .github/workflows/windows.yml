@@ -75,7 +75,7 @@ jobs:
           if ((Get-FileHash $copied -Algorithm SHA256).Hash.ToLowerInvariant() -cne $digest) { throw 'Copied Wintun probe changed' }
           [ordered]@{ source=(git rev-parse HEAD); filename='native-wintun-probe.exe'; bytes=(Get-Item $copied).Length; sha256=$digest } |
             ConvertTo-Json | Set-Content -LiteralPath (Join-Path $evidence 'probe.json') -Encoding utf8NoBOM
-      - name: Observe actual adapter retirement after normal and abrupt owner exit
+      - name: Observe normal adapter retirement and owned recovery after abrupt exit
         env:
           CFW_NATIVE_TUN_MUTATION_TESTS: '1'
         run: |

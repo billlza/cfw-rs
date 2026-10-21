@@ -2,6 +2,19 @@
 use std::path::Path;
 type Result<T> = std::result::Result<T, String>;
 
+/// SCM services have no captured terminal. A join failure must retain the
+/// native assertion/error message in the existing failed-service receipt.
+pub(super) fn worker_panic(worker: &str, payload: Box<dyn std::any::Any + Send>) -> String {
+    let message = payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied());
+    match message {
+        Some(message) => format!("{worker} panicked: {message}"),
+        None => format!("{worker} panicked with a non-string payload"),
+    }
+}
+
 pub(super) fn collect_fixture_diagnostics(root: &Path, output: &Path) -> Result<()> {
     for entry in std::fs::read_dir(root).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
@@ -144,6 +157,29 @@ pub(super) fn with_diagnostics(
 #[cfg(test)]
 mod diagnostic_tests {
     use super::*;
+    #[test]
+    fn worker_join_preserves_both_string_panic_payloads_and_unknown_type_failure() {
+        for payload in [
+            Box::new("native operation failed") as Box<dyn std::any::Any + Send>,
+            Box::new(String::from("native operation failed")),
+            Box::new(7u32),
+        ] {
+            let text = payload.is::<String>() || payload.is::<&str>();
+            let failed = std::thread::spawn(move || std::panic::resume_unwind(payload));
+            let result = failed
+                .join()
+                .map_err(|payload| worker_panic("connection", payload));
+            assert_eq!(
+                result.unwrap_err(),
+                if text {
+                    "connection panicked: native operation failed"
+                } else {
+                    "connection panicked with a non-string payload"
+                }
+            );
+        }
+    }
+
     #[test]
     fn cleanup_panic_still_exports_diagnostics_and_remains_a_panic() {
         let root = tempfile::tempdir().unwrap();

@@ -397,7 +397,10 @@ pub(super) fn serve(name: &str, status_handle: SERVICE_STATUS_HANDLE) -> Result<
         match worker.join() {
             Ok(Ok(())) => {}
             Ok(Err(error)) => failures.push(error),
-            Err(_) => failures.push("fixture transport worker panicked".into()),
+            Err(payload) => failures.push(diagnostics::worker_panic(
+                "fixture transport worker",
+                payload,
+            )),
         }
     }
     if let Err(error) = running {
@@ -466,10 +469,9 @@ fn serve_connections(
                 let mut index = 0;
                 while index < workers.len() {
                     if workers[index].is_finished() {
-                        workers
-                            .swap_remove(index)
-                            .join()
-                            .map_err(|_| "fixture connection worker panicked")??;
+                        workers.swap_remove(index).join().map_err(|payload| {
+                            diagnostics::worker_panic("fixture connection worker", payload)
+                        })??;
                     } else {
                         index += 1;
                     }
@@ -511,7 +513,10 @@ fn serve_connections(
             match worker.join() {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => failures.push(error),
-                Err(_) => failures.push("fixture connection worker panicked".into()),
+                Err(payload) => failures.push(diagnostics::worker_panic(
+                    "fixture connection worker",
+                    payload,
+                )),
             }
         }
         if failures.is_empty() {

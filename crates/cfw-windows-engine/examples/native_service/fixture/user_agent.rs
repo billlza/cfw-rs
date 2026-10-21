@@ -70,6 +70,7 @@ pub(super) struct Validation {
     cleanup_rejections: Vec<&'static str>,
     local_live_stop_rejected: bool,
     process_observations: Vec<serde_json::Value>,
+    pending_stop_observations: Vec<serde_json::Value>,
 }
 impl Validation {
     pub(super) fn new() -> Self {
@@ -83,6 +84,7 @@ impl Validation {
             cleanup_rejections: Vec::new(),
             local_live_stop_rejected: false,
             process_observations: Vec::new(),
+            pending_stop_observations: Vec::new(),
         }
     }
     pub(super) fn handle(
@@ -108,34 +110,42 @@ impl Validation {
                 .observe_runtime_processes()
                 .map_err(|e| e.to_string())?;
             if !observation.processes_retired() {
-                return Err("runtime processes still alive after held Agent exit".into());
-            }
-            self.process_observations
-                .push(authority_wire::process_report("retired", &observation));
-            if controller
-                .cleanup_target()
-                .ok_or("missing stop context")?
-                .operation
-                .mode
-                == cfw_engine_api::authority_v1::AuthorityMode::LocalProxy
-            {
-                let completed = controller
-                    .reconcile_local_stop()
-                    .map_err(|e| e.to_string())?;
-                if !self.local_live_stop_rejected || completed.snapshot().state != AuthorityState::Off
+                // A stopped acknowledgement or an Agent process wait is not
+                // independent proof of an empty Job. Preserve Stopping and
+                // let the existing bounded Desktop observer wait for cleanup.
+                // Keep one nonsecret observation per acknowledged stop.
+                if self.pending_stop_observations.len() < self.stopped {
+                    self.pending_stop_observations
+                        .push(authority_wire::process_report("stop_pending", &observation));
+                }
+            } else {
+                self.process_observations
+                    .push(authority_wire::process_report("retired", &observation));
+                if controller
+                    .cleanup_target()
+                    .ok_or("missing stop context")?
+                    .operation
+                    .mode
+                    == cfw_engine_api::authority_v1::AuthorityMode::LocalProxy
+                {
+                    let completed = controller
+                        .reconcile_local_stop()
+                        .map_err(|e| e.to_string())?;
+                    if !self.local_live_stop_rejected || completed.snapshot().state != AuthorityState::Off
                     || completed.snapshot().revision != snapshot.revision.and_then(|v| v.checked_add(1))
                     || controller.recovery_target().is_none_or(|m| m.operation().is_some()
                         || m.transition() != cfw_windows_engine::authority_journal::JournalTransition::GlobalOff)
                 { return Err("LocalProxy stop did not commit exact production GlobalOff".into()); }
-                write_report(
-                    &authority_journal::root()?.join("runtime-stop-local-service.json"),
-                    &serde_json::json!({
-                        "prior":completed.prior(),"processes":authority_wire::process_report("normal_stop", completed.processes()),
-                        "snapshot":completed.snapshot(),"metadata":controller.recovery_target(),
-                        "production_cleanup":true,"live_stopped_owner_rejected":true,"lease_released":controller.lease_owner().is_none(),
-                    }),
-                )?;
-                self.reconciled += 1;
+                    write_report(
+                        &authority_journal::root()?.join("runtime-stop-local-service.json"),
+                        &serde_json::json!({
+                            "prior":completed.prior(),"processes":authority_wire::process_report("normal_stop", completed.processes()),
+                            "snapshot":completed.snapshot(),"metadata":controller.recovery_target(),
+                            "production_cleanup":true,"live_stopped_owner_rejected":true,"lease_released":controller.lease_owner().is_none(),
+                        }),
+                    )?;
+                    self.reconciled += 1;
+                }
             }
         }
         let ready = matches!(command.command(), Command::Ready(_));
@@ -265,6 +275,7 @@ impl Validation {
                     "same_owner_new_connection_rejected",
                 ]
             || self.process_observations.len() != 6
+            || self.pending_stop_observations.len() != 2
         {
             return Err(format!(
                 "incomplete runtime sequence: ready={}, stopped={}, reconciled={}, heartbeat={}, rejected_bindings={}",
@@ -278,6 +289,14 @@ impl Validation {
         write_report(
             &authority_journal::root()?.join("user-agent.wire-validation.json"),
             &serde_json::json!({"ready_reports":self.ready,"stopped_reports":self.stopped,"heartbeats":self.heartbeats,"rejected_bindings":self.rejected_bindings,"system_runtime_job_observed":true,"job_failure_boundaries_verified":true,"process_observations":self.process_observations,"nested_engine_membership_observed":true,"engine_keeper_survives_agent_reference_release":true,"job_reopened_after_service_handles_closed":true,"live_member_without_job_name_rejected":true,"live_processes_block_reconcile":true,"ordinary_agent_job_rights_denied":true,"global_cleanup_observations_injected":false,"production_system_proxy_stop":true,"production_local_proxy_stop":true,"local_recovery_while_live_rejected":true,"injected_cleanup_modes":[],"synthetic_runtime_reports":false,"full_service_backend_proven":false}),
+        )?;
+        write_report(
+            &authority_journal::root()?.join("runtime-stop-pending-service.json"),
+            &serde_json::json!({
+                "document":"cfw-runtime-stop-pending-v1",
+                "observations":self.pending_stop_observations,
+                "pending_is_not_global_off":true,
+            }),
         )
     }
 }

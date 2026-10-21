@@ -86,7 +86,7 @@ pub(super) fn run(
             ))
             .map_err(|e| e.to_string())?,
         name.into(),
-        service_image,
+        Arc::clone(&service_image),
         assets,
     )
     .map_err(|e| e.to_string())?;
@@ -146,6 +146,31 @@ pub(super) fn run(
         }
     {
         return Err("runtime cleanup/Stopped receipt missing".into());
+    }
+    if !restart_case {
+        // Exercise the pending state deterministically while this real Job
+        // member is still alive. An acknowledgement must not make it Off or
+        // cause the fixture to close the authenticated observation channel.
+        let mut observer = cfw_windows_engine::authority::AuthorityChannel::connect(
+            name,
+            ServiceClientRole::UserAgent,
+            Arc::clone(&service_image),
+        )
+        .map_err(|e| e.to_string())?;
+        let response = observer
+            .request(
+                Request::new(Command::Observe).map_err(|e| e.to_string())?,
+                Instant::now() + LIMIT,
+            )
+            .map_err(|e| e.to_string())?;
+        let cfw_windows_engine::authority::wire::Response::Observed(snapshot) = response else {
+            return Err("live stopped Agent did not receive an Authority observation".into());
+        };
+        if snapshot.state != AuthorityState::Stopping
+            || snapshot.root.as_ref() != Some(&context.operation.root)
+        {
+            return Err("live stopped Agent was admitted as globally retired".into());
+        }
     }
     if proxy.snapshot().map_err(|e| e.to_string())? != settings
         || proxy.inspect().map_err(|e| e.to_string())?

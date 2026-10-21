@@ -2,7 +2,7 @@ name: Windows desktop development build
 
 on:
   push:
-    branches: [lza/cfw-0.5.0-windows-shell]
+    branches: [lza/cfw-0.5.0-windows-shell, lza/cfw-worker-retirement]
   workflow_dispatch:
 
 permissions:
@@ -15,6 +15,9 @@ concurrency:
 jobs:
   desktop:
     name: Windows x64 shared desktop application
+    # The focused ownership branch runs the complete package/worker lane;
+    # ordinary desktop pushes still run both jobs and all release boundaries.
+    if: github.ref_name != 'lza/cfw-worker-retirement'
     runs-on: windows-2025
     timeout-minutes: 50
     defaults:

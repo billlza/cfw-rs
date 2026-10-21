@@ -184,6 +184,133 @@ fn cancellation_counterexample(trial: usize) {
 }
 
 #[test]
+fn cancellation_records_job_membership_and_native_process_signals() {
+    use windows_sys::Win32::{
+        Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT},
+        System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+            PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, TerminateProcess, WaitForSingleObject,
+        },
+    };
+
+    // The public run() counterexample above stays unchanged. Drive the same
+    // owner methods here to inspect its Job before it is closed; this probe
+    // distinguishes escape from a gap between Job accounting and signaling.
+    for trial in 0..64 {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("worker");
+        let assets = spawn_assets_for(
+            fixture(),
+            &directory,
+            None,
+            child::Program::PackageInspection,
+        )
+        .unwrap();
+        let mut owner = OneShot {
+            assets,
+            io: None,
+            assigned: false,
+            closed: false,
+        };
+        let children = RefCell::new((None, None));
+        let operation = owner.exchange(
+            b"tree".to_vec(),
+            Instant::now() + Duration::from_secs(10),
+            &|| {
+                let mut children = children.borrow_mut();
+                if children.0.is_none() {
+                    children.0 = observed(&directory.join("worker.json"));
+                }
+                if children.1.is_none() {
+                    children.1 = observed(&directory.join("descendant.json"));
+                }
+                children.0.is_some() && children.1.is_some()
+            },
+        );
+        let (worker, descendant) = children.into_inner();
+        let before_active = active_processes(&owner.assets.job).unwrap();
+        let witnesses = [
+            ("worker", worker.unwrap()),
+            ("descendant", descendant.unwrap()),
+        ]
+        .map(|(role, peer)| {
+            peer.verify_executable(&owner.assets.executable).unwrap();
+            // Retain this exact live fixture process. Termination access is
+            // used only to clean a failed probe, after recording failure.
+            let raw = unsafe {
+                OpenProcess(
+                    PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE | PROCESS_TERMINATE,
+                    0,
+                    peer.process_id(),
+                )
+            };
+            assert!(!raw.is_null(), "{}", std::io::Error::last_os_error());
+            let handle = unsafe { OwnedHandle::from_raw_handle(raw) };
+            let mut member = 0;
+            assert_ne!(
+                unsafe {
+                    IsProcessInJob(
+                        handle.as_raw_handle(),
+                        owner.assets.job.as_raw_handle(),
+                        &mut member,
+                    )
+                },
+                0,
+                "{}",
+                std::io::Error::last_os_error()
+            );
+            (role, peer, handle, member != 0)
+        });
+        let retired = owner.retire(true);
+        let after_active = active_processes(&owner.assets.job).unwrap();
+        drop(owner);
+        let mut samples = Vec::new();
+        let mut all_signaled = true;
+        for (role, peer, handle, member) in &witnesses {
+            let wait = unsafe { WaitForSingleObject(handle.as_raw_handle(), 0) };
+            assert!(
+                matches!(wait, WAIT_OBJECT_0 | WAIT_TIMEOUT),
+                "{}",
+                std::io::Error::last_os_error()
+            );
+            let mut exit = 0;
+            assert_ne!(
+                unsafe { GetExitCodeProcess(handle.as_raw_handle(), &mut exit) },
+                0
+            );
+            all_signaled &= *member && wait == WAIT_OBJECT_0;
+            samples.push(serde_json::json!({
+                "role": role, "pid": peer.process_id(),
+                "creation_filetime": peer.identity().process_creation_time(),
+                "owned_job_member_before_cancel": member,
+                "wait_after_retire": wait, "exit_code_after_retire": exit,
+                "identity_revalidation": format!("{:?}", peer.revalidate())
+            }));
+        }
+        let receipt = serde_json::json!({
+            "document": "cfw-worker-job-retirement-probe-v1", "trial": trial,
+            "job_active_before_cancel": before_active, "job_active_after_retire": after_active,
+            "cleanup_returned_ok": retired.is_ok(), "processes": samples
+        });
+        println!("{receipt}");
+        for (_, _, handle, _) in &witnesses {
+            if wait_until(handle, Instant::now()).unwrap() != WaitOutcome::Signaled {
+                assert_ne!(unsafe { TerminateProcess(handle.as_raw_handle(), 3) }, 0);
+                assert_eq!(
+                    wait_until(handle, Instant::now() + CLEANUP).unwrap(),
+                    WaitOutcome::Signaled
+                );
+            }
+        }
+        assert!(matches!(operation, Err(Error::Cancelled)));
+        assert!(
+            retired.is_ok() && after_active == 0 && all_signaled,
+            "{receipt}"
+        );
+    }
+}
+
+#[test]
 fn precreation_cancellation_and_invalid_bounds_create_no_working_directory() {
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("worker");

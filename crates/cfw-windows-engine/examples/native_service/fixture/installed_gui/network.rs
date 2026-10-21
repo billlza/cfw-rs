@@ -21,10 +21,8 @@ fn connect_observation(address: std::net::SocketAddr, seconds: u64) -> serde_jso
     }
 }
 
-fn listener_observation(port: u16) -> Result<serde_json::Value> {
-    let listeners = cfw_windows_engine::observe_tcp_listeners_at_port(port)
-        .map_err(|error| error.to_string())?;
-    serde_json::to_value(listeners).map_err(|error| error.to_string())
+fn listener_observation(port: u16) -> Result<Vec<(u32, std::net::SocketAddr)>> {
+    cfw_windows_engine::observe_tcp_listeners_at_port(port).map_err(|error| error.to_string())
 }
 
 fn verify_closed_listener(
@@ -33,7 +31,10 @@ fn verify_closed_listener(
     address: std::net::SocketAddr,
 ) -> Result<()> {
     let before = listener_observation(address.port())?;
-    let primary = connect_observation(address, 2);
+    // Native target/control observations at abe0692d both timed out at 2 s,
+    // then returned WSAECONNREFUSED just after 2 s with a 5 s deadline. Keep
+    // the bounded refusal requirement and independently require no listeners.
+    let primary = connect_observation(address, 5);
     let after = listener_observation(address.port())?;
     write(
         receipts,
@@ -43,13 +44,16 @@ fn verify_closed_listener(
             "release_accepted": false
         }),
     )?;
-    if primary["connection_refused"].as_bool() == Some(true) {
+    if primary["connection_refused"].as_bool() == Some(true)
+        && before.is_empty()
+        && after.is_empty()
+    {
         return Ok(());
     }
 
-    // Preserve the original two-second failure. A known listener followed by
+    // Preserve the primary failure. A known listener followed by
     // its close distinguishes host connect timing from a surviving product
-    // listener. Longer attempts are diagnostics only, never acceptance fallback.
+    // listener. Control/repeated attempts are diagnostics, never acceptance fallback.
     let control = std::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
         .map_err(|error| error.to_string())?;
     let control_address = control.local_addr().map_err(|error| error.to_string())?;
@@ -77,7 +81,7 @@ fn verify_closed_listener(
         }),
     )?;
     Err(format!(
-        "stopped GUI listener did not refuse the original probe: {primary}"
+        "stopped GUI listener release is unproven: probe={primary}, before={before:?}, after={after:?}"
     ))
 }
 

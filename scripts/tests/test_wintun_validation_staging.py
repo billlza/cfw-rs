@@ -24,7 +24,15 @@ class WintunStagingTests(unittest.TestCase):
             bundle.writestr("wintun/bin/amd64/wintun.dll", dll)
             bundle.writestr("wintun/LICENSE.txt", license_text)
             if extra is not None:
-                bundle.writestr(extra, b"unexpected")
+                # ZipInfo's constructor normalizes backslashes on Windows and
+                # truncates NULs. Write the requested raw name into both ZIP
+                # headers so the rejection test sees the same bytes on every OS.
+                entry = zipfile.ZipInfo()
+                entry.filename = extra
+                bundle.writestr(entry, b"unexpected")
+        if extra is not None:
+            with zipfile.ZipFile(archive) as bundle:
+                self.assertEqual(bundle.infolist()[-1].orig_filename, extra)
         pins = {"WINTUN_VERSION": "0.14.1", "WINTUN_ARCHIVE_SHA256": stage.sha256(archive),
                 "WINTUN_WINDOWS_AMD64_SHA256": hashlib.sha256(dll).hexdigest(),
                 "WINTUN_BINARY_LICENSE_PATH": "LICENSE.txt", "WINTUN_BINARY_LICENSE_SHA256": hashlib.sha256(license_text).hexdigest()}
@@ -49,7 +57,7 @@ class WintunStagingTests(unittest.TestCase):
                 self.assertFalse((root / "out").exists())
 
     def test_unsafe_and_case_colliding_members_are_rejected(self):
-        for member in ["../escaped", "WINTUN/LICENSE.TXT", "C:/escaped", "wintun\\escaped"]:
+        for member in ["../escaped", "WINTUN/LICENSE.TXT", "C:/escaped", "wintun\\escaped", "wintun/hidden\x00suffix"]:
             with self.subTest(member=member), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary); archive, pins = self.fixture(root, member)
                 with self.assertRaises(RuntimeError):

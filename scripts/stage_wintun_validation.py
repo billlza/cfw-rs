@@ -28,12 +28,15 @@ def stage_archive(repository: Path, archive: Path, output: Path, pins: dict[str,
         names = set()
         total = 0
         for entry in bundle.infolist():
-            path = PurePosixPath(entry.filename)
-            require(not path.is_absolute() and ".." not in path.parts and ":" not in entry.filename and "\\" not in entry.filename,
+            # Inspect the archive spelling before zipfile's platform-dependent
+            # separator conversion or NUL truncation can hide an invalid name.
+            name = entry.orig_filename
+            path = PurePosixPath(name)
+            require(name == entry.filename and not path.is_absolute() and ".." not in path.parts and ":" not in name and "\\" not in name,
                     "unsafe Wintun archive member")
             require(not stat.S_ISLNK(entry.external_attr >> 16), "Wintun archive contains a symlink")
-            require(entry.filename.casefold() not in names, "duplicate Wintun archive member")
-            names.add(entry.filename.casefold())
+            require(name.casefold() not in names, "duplicate Wintun archive member")
+            names.add(name.casefold())
             total += entry.file_size
             require(entry.file_size <= 2 * 1024 * 1024 and total <= 16 * 1024 * 1024, "Wintun members exceed their bound")
         dll = bundle.read("wintun/bin/amd64/wintun.dll")

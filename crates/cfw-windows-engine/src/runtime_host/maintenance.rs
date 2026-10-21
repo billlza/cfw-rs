@@ -22,6 +22,7 @@ struct Record {
     manifest_sha256: String,
     target_manifest_sha256: Option<String>,
     original_start: u32,
+    original_running: bool,
     phase: Phase,
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -39,6 +40,12 @@ enum Phase {
     Committed {
         off: AuthoritySnapshot,
     },
+    /// Block target startup before MSI restores any original files.
+    RetiringTarget {
+        off: AuthoritySnapshot,
+    },
+    /// Only the original image may restart while rollback completes.
+    RestoringOriginal,
 }
 impl Record {
     fn preparing(
@@ -46,13 +53,15 @@ impl Record {
         manifest_sha256: String,
         target_manifest_sha256: Option<String>,
         original_start: u32,
+        original_running: bool,
     ) -> Result<Self> {
         let value = Self {
-            schema_version: 2,
+            schema_version: 3,
             transaction,
             manifest_sha256,
             target_manifest_sha256,
             original_start,
+            original_running,
             phase: Phase::Preparing,
         };
         value.validate()?;
@@ -61,7 +70,7 @@ impl Record {
     fn validate(&self) -> Result<()> {
         // These are the native SERVICE_AUTO_START and SERVICE_DEMAND_START
         // values. Disabled is an operation result, never an original default.
-        if self.schema_version != 2
+        if self.schema_version != 3
             || self.transaction.is_nil()
             || !matches!(self.original_start, 2 | 3)
             || self.manifest_sha256.len() != 64
@@ -82,15 +91,20 @@ impl Record {
         }
         if matches!(
             self.phase,
-            Phase::Committing { .. } | Phase::Committed { .. }
+            Phase::Committing { .. }
+                | Phase::Committed { .. }
+                | Phase::RetiringTarget { .. }
+                | Phase::RestoringOriginal
         ) && self.target_manifest_sha256.is_none()
         {
             return Err(HostError::State(
                 "committed maintenance has no target manifest",
             ));
         }
-        if let Phase::Prepared { off } | Phase::Committing { off } | Phase::Committed { off } =
-            &self.phase
+        if let Phase::Prepared { off }
+        | Phase::Committing { off }
+        | Phase::Committed { off }
+        | Phase::RetiringTarget { off } = &self.phase
         {
             let root = off
                 .root
@@ -130,8 +144,11 @@ impl Record {
     }
 
     fn permits_start(&self, manifest: &str) -> bool {
-        matches!(self.phase, Phase::Committed { .. })
-            && self.target_manifest_sha256.as_deref() == Some(manifest)
+        match self.phase {
+            Phase::Committed { .. } => self.target_manifest_sha256.as_deref() == Some(manifest),
+            Phase::RestoringOriginal => self.original_running && self.manifest_sha256 == manifest,
+            _ => false,
+        }
     }
     fn encode(&self) -> Result<Vec<u8>> {
         self.validate()?;
@@ -160,7 +177,7 @@ mod tests {
     use super::*;
     use cfw_engine_api::authority_v1::RootContext;
     fn record() -> Record {
-        Record::preparing(Uuid::from_u128(1), "ab".repeat(32), None, 3).unwrap()
+        Record::preparing(Uuid::from_u128(1), "ab".repeat(32), None, 3, true).unwrap()
     }
     #[test]
     fn maintenance_record_requires_exact_transaction_start_mode_and_manifest_identity() {
@@ -168,6 +185,7 @@ mod tests {
         Record::decode(&original).unwrap();
         for (key, value) in [
             ("schema_version", serde_json::json!(1)),
+            ("schema_version", serde_json::json!(2)),
             ("transaction", serde_json::json!(Uuid::nil())),
             ("original_start", serde_json::json!(4)),
             ("manifest_sha256", serde_json::json!("AB".repeat(32))),
@@ -220,7 +238,8 @@ mod tests {
         let original = "ab".repeat(32);
         let target = "cd".repeat(32);
         let mut value =
-            Record::preparing(transaction, original.clone(), Some(target.clone()), 2).unwrap();
+            Record::preparing(transaction, original.clone(), Some(target.clone()), 2, true)
+                .unwrap();
         let off = AuthoritySnapshot {
             state: AuthorityState::Off,
             revision: Some(8),
@@ -257,7 +276,8 @@ mod tests {
             "gg".repeat(32),
         ] {
             assert!(
-                Record::preparing(Uuid::from_u128(1), "ab".repeat(32), Some(target), 3).is_err()
+                Record::preparing(Uuid::from_u128(1), "ab".repeat(32), Some(target), 3, false)
+                    .is_err()
             );
         }
         let mut value = record();
@@ -278,5 +298,43 @@ mod tests {
             },
         };
         assert!(value.encode().is_err());
+    }
+
+    #[test]
+    fn rollback_admission_tracks_the_original_running_state_and_never_admits_target() {
+        let original = "ab".repeat(32);
+        let target = "cd".repeat(32);
+        for was_running in [true, false] {
+            let mut value = Record::preparing(
+                Uuid::from_u128(1),
+                original.clone(),
+                Some(target.clone()),
+                3,
+                was_running,
+            )
+            .unwrap();
+            value.phase = Phase::RestoringOriginal;
+            let decoded = Record::decode(&value.encode().unwrap()).unwrap();
+            assert_eq!(decoded.permits_start(&original), was_running);
+            assert!(!decoded.permits_start(&target));
+            assert!(!decoded.permits_start(&"ef".repeat(32)));
+            value.phase = Phase::RetiringTarget {
+                off: AuthoritySnapshot {
+                    state: AuthorityState::Off,
+                    revision: Some(8),
+                    root: Some(RootContext {
+                        installation_id: Uuid::from_u128(2),
+                        epoch: 1,
+                        generation: 1,
+                    }),
+                },
+            };
+            Record::decode(&value.encode().unwrap()).unwrap();
+            assert!(!value.permits_start(&original));
+            assert!(!value.permits_start(&target));
+        }
+        let mut service_only = record();
+        service_only.phase = Phase::RestoringOriginal;
+        assert!(service_only.encode().is_err());
     }
 }

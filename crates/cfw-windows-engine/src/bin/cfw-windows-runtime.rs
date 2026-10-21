@@ -29,26 +29,45 @@ fn run() -> Result<(), String> {
     installation
         .require_runtime_process()
         .map_err(|e| e.to_string())?;
-    if args.len() == 2 && args[0] == "--fresh-install-maintenance" {
-        let report = installation
-            .retire_completed_maintenance_for_fresh_install(
-                args[1]
-                    .to_str()
-                    .ok_or("target manifest digest is not Unicode")?,
+    if args.len() == 2
+        && matches!(
+            args[0].to_str(),
+            Some(
+                "--fresh-install-maintenance"
+                    | "--activate-fresh-install"
+                    | "--retire-fresh-install"
             )
-            .map_err(|e| e.to_string())?;
+        )
+    {
+        let target = args[1]
+            .to_str()
+            .ok_or("target manifest digest is not Unicode")?;
+        let report = match args[0].to_str() {
+            Some("--fresh-install-maintenance") => {
+                installation.retire_completed_maintenance_for_fresh_install(target)
+            }
+            Some("--activate-fresh-install") => installation.activate_fresh_installation(target),
+            Some("--retire-fresh-install") => installation.retire_fresh_installation(target),
+            _ => return Err("unexpected fresh installation operation".into()),
+        }
+        .map_err(|e| e.to_string())?;
         println!("{report}");
         return Ok(());
     }
     if (args.len() == 2
         && matches!(
             args[0].to_str(),
-            Some("--prepare-maintenance" | "--rollback-maintenance")
+            Some("--prepare-maintenance" | "--rollback-maintenance" | "--rollback-update")
         ))
         || (args.len() == 3
             && matches!(
                 args[0].to_str(),
-                Some("--prepare-update" | "--commit-update")
+                Some(
+                    "--prepare-update"
+                        | "--commit-update"
+                        | "--activate-update"
+                        | "--retire-update-target"
+                )
             ))
     {
         let value = args[1]
@@ -64,6 +83,7 @@ fn run() -> Result<(), String> {
             Some("--rollback-maintenance") => {
                 installation.rollback_service_maintenance(transaction)
             }
+            Some("--rollback-update") => installation.rollback_update_maintenance(transaction),
             Some("--prepare-update") => installation.prepare_update_maintenance(
                 transaction,
                 args[2]
@@ -71,6 +91,18 @@ fn run() -> Result<(), String> {
                     .ok_or("target manifest digest is not Unicode")?,
             ),
             Some("--commit-update") => installation.commit_update_maintenance(
+                transaction,
+                args[2]
+                    .to_str()
+                    .ok_or("target manifest digest is not Unicode")?,
+            ),
+            Some("--activate-update") => installation.activate_update_maintenance(
+                transaction,
+                args[2]
+                    .to_str()
+                    .ok_or("target manifest digest is not Unicode")?,
+            ),
+            Some("--retire-update-target") => installation.retire_update_target(
                 transaction,
                 args[2]
                     .to_str()

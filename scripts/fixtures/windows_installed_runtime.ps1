@@ -24,11 +24,13 @@ $msiCandidate = $null
 $msiInFlight = $null
 $msiEvidence = Join-Path $Receipts 'msi'
 $msiReport = [ordered]@{
-    source=$Source; document='cfw-runtime-msi-qualification-v2'
+    source=$Source; document='cfw-runtime-msi-qualification-v3'
     failed_fresh_install=$null; installed=$null; failed_maintenance=$null; uninstalled=$null
     fresh_rollback_removed_files_and_service=$false; maintenance_rollback=$null
     uninstall_removed_files_and_service=$false; desktop_is_fixture=$true
     wrong_manifest_expectations_rejected=$false; new_build_manifest_rollback_exercised=$false
+    failed_fresh_commit=$null; fresh_commit_rollback=$null; fresh_activation=$null
+    failed_stopped_maintenance=$null; stopped_rollback=$null
     failed_commit=$null; commit_failure_rollback=$null; upgraded=$null; upgrade_commit=$null
     reinstalled=$null; reinstallation=$null; uninstalled_reinstalled=$null
     new_build_upgrade_committed=$false; completed_history_reinstall_exercised=$false
@@ -60,19 +62,18 @@ function Stop-Installed {
         }
     } finally { $service.Dispose() }
 }
-function Start-InstalledProbe {
-    Invoke-ServiceCommand @('start', $serviceName)
-    $service = [System.ServiceProcess.ServiceController]::new($serviceName)
-    try { $service.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(30)) } finally { $service.Dispose() }
+function Read-InstalledProbe {
+    $observed = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
+    if ($observed.State -cne 'Running' -or $observed.ProcessId -eq 0) { throw 'MSI did not leave an already-running service' }
     $raw = & $desktopPath --installed-host-probe
     if ($LASTEXITCODE -ne 0) { throw 'Installed service startup probe failed' }
     $probe = $raw | ConvertFrom-Json
     if ($probe.snapshot.state -cne 'off' -or -not $probe.authenticated_product_service) { throw 'Restarted service did not report authenticated Off' }
     return $probe
 }
-function Assert-StoppedInstallation($Fixture) {
+function Assert-Installation($Fixture, [string]$ExpectedState = 'Running') {
     $observed = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
-    if ($observed.State -cne 'Stopped' -or $observed.StartMode -cne 'Manual') { throw 'MSI did not leave the service stopped with its original startup configuration' }
+    if ($observed.State -cne $ExpectedState -or $observed.StartMode -cne 'Manual') { throw 'MSI did not restore the expected service state and startup configuration' }
     $raw = & $runtimePath --check-installation $Fixture.manifest_sha256
     if ($LASTEXITCODE -ne 0) { throw 'MSI result did not admit its exact installed manifest' }
     $check = $raw | ConvertFrom-Json
@@ -82,9 +83,33 @@ function Assert-StoppedInstallation($Fixture) {
         throw 'Installed MSI result differs from the expected package identity'
     }
 }
-function Assert-RestartLineage($Before, $After) {
+function Assert-RestartLineage($Before, $After, [int]$Starts = 1) {
     if (($Before.lineage | ConvertTo-Json -Compress) -cne ($After.lineage | ConvertTo-Json -Compress) -or
-        $After.snapshot.revision -ne ($Before.snapshot.revision + 1)) { throw 'MSI restart did not preserve lineage and the exact startup revision' }
+        $After.snapshot.revision -ne ($Before.snapshot.revision + $Starts)) { throw 'MSI restart did not preserve lineage and the exact startup revision' }
+}
+function Read-MsiReport([string]$Operation, [string]$Field) {
+    $content = Get-Content -LiteralPath (Join-Path $msiEvidence "$Operation.log") -Raw
+    $reports = @([regex]::Matches($content, '(?m)^WixQuietExec64:  (\{.*\})\r?$') | ForEach-Object {
+        $value = $_.Groups[1].Value | ConvertFrom-Json
+        if ($value.PSObject.Properties.Name -ccontains $Field) { $value }
+    })
+    if ($reports.Count -ne 1) { throw "Missing or ambiguous native MSI receipt: $Operation / $Field" }
+    return $reports[0]
+}
+function Assert-ActivatedProcessRetired($Activation, $Retirement) {
+    if (-not $Activation.started_by_action -or -not $Retirement.retained_process_exit_observed -or
+        $Activation.process_id -ne $Retirement.retired_service.process_id -or
+        $Activation.process_creation_time -ne $Retirement.retired_service.process_creation_time -or
+        $Retirement.authority.state -cne 'off') { throw 'MSI did not retire the exact activated service process into Off' }
+}
+function Assert-RunningReceipt($Service, $Probe) {
+    $observed = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
+    $process = [Diagnostics.Process]::GetProcessById($observed.ProcessId)
+    try {
+        if (-not $Service.started_by_action -or $Service.process_id -ne $observed.ProcessId -or
+            $Service.process_creation_time -ne $process.StartTime.ToUniversalTime().ToFileTimeUtc() -or
+            $Probe.snapshot.state -cne 'off') { throw 'Running SCM process differs from the MSI activation receipt' }
+    } finally { $process.Dispose() }
 }
 try {
     Import-Module (Join-Path $PSScriptRoot 'windows_runtime_msi.psm1') -Force
@@ -123,9 +148,32 @@ try {
         throw 'Failed fresh MSI installation did not roll back its files/service before any runtime enrollment'
     }
     $msiReport.fresh_rollback_removed_files_and_service = $true
+    # Fail after fresh service activation. Its exact process must retire before
+    # MSI removes files; already-enrolled authority data is deliberately retained.
+    $msiInFlight = 'failed-fresh-commit'
+    $msiReport.failed_fresh_commit = Invoke-RuntimeMsi -Fixture $msi -Operation $msiInFlight -Evidence $msiEvidence
+    $msiInFlight = $null
+    if ((Test-Path -LiteralPath $package) -or
+        @([System.ServiceProcess.ServiceController]::GetServices() | Where-Object ServiceName -CEQ $serviceName).Count -ne 0) {
+        throw 'Late fresh-install rollback retained package files or its service'
+    }
+    $freshStarted = Read-MsiReport 'failed-fresh-commit' 'fresh_service'
+    $freshRetired = Read-MsiReport 'failed-fresh-commit' 'fresh_service_retired'
+    Assert-ActivatedProcessRetired $freshStarted.fresh_service $freshRetired
+    $msiReport.fresh_commit_rollback = [ordered]@{ activation=$freshStarted; retirement=$freshRetired; files_and_service_removed=$true; enrolled_authority_retained=$true }
     $msiInFlight = 'install'
     $msiReport.installed = Invoke-RuntimeMsi -Fixture $msi -Operation $msiInFlight -Evidence $msiEvidence
     $msiInFlight = $null
+    Assert-Installation $msi
+    $freshProbe = Read-InstalledProbe
+    $freshActivation = Read-MsiReport 'install' 'fresh_service'
+    Assert-RunningReceipt $freshActivation.fresh_service $freshProbe
+    if ($freshProbe.snapshot.revision -ne ($freshRetired.authority.revision + 1) -or
+        ($freshProbe.snapshot.root | ConvertTo-Json -Compress) -cne ($freshRetired.authority.root | ConvertTo-Json -Compress)) {
+        throw 'Fresh retry did not preserve the retained authority and startup revision'
+    }
+    $msiReport.fresh_activation = [ordered]@{ activation=$freshActivation; probe=$freshProbe }
+    Stop-Installed
     if ((Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash -cne (Get-FileHash -LiteralPath $manifestInput -Algorithm SHA256).Hash) {
         throw 'MSI installed a different runtime manifest'
     }
@@ -148,18 +196,20 @@ try {
         if ($LASTEXITCODE -eq 0 -or "$rejected" -notlike "*$($counterexample[1])*") { throw 'Wrong expected installed manifest was not rejected at its identity boundary' }
     }
     $msiReport.wrong_manifest_expectations_rejected = $true
-    foreach ($mode in @('--prepare-maintenance', '--rollback-maintenance')) {
+    foreach ($mode in @('--prepare-maintenance', '--rollback-maintenance', '--rollback-update')) {
         $rejected = & $runtimePath $mode 'c40a7b13-74b7-4543-a5c0-55de82b9dad6' 2>&1
         if ($LASTEXITCODE -eq 0 -or "$rejected" -notmatch 'requires the SYSTEM primary identity') {
             throw "Ordinary installer caller was not refused before maintenance: $mode; $rejected"
         }
     }
-    foreach ($mode in @('--prepare-update', '--commit-update')) {
+    foreach ($mode in @('--prepare-update', '--commit-update', '--activate-update', '--retire-update-target')) {
         $rejected = & $runtimePath $mode 'c40a7b13-74b7-4543-a5c0-55de82b9dad6' $msiCandidate.manifest_sha256 2>&1
         if ($LASTEXITCODE -eq 0 -or "$rejected" -notmatch 'requires the SYSTEM primary identity') { throw "Ordinary update-maintenance caller was not refused: $mode" }
     }
-    $rejected = & $runtimePath --fresh-install-maintenance $msi.manifest_sha256 2>&1
-    if ($LASTEXITCODE -eq 0 -or "$rejected" -notmatch 'requires the SYSTEM primary identity') { throw 'Ordinary fresh-install caller was not refused' }
+    foreach ($mode in @('--fresh-install-maintenance', '--activate-fresh-install', '--retire-fresh-install')) {
+        $rejected = & $runtimePath $mode $msi.manifest_sha256 2>&1
+        if ($LASTEXITCODE -eq 0 -or "$rejected" -notmatch 'requires the SYSTEM primary identity') { throw "Ordinary fresh-install caller was not refused: $mode" }
+    }
     $cases.Add('non_system_maintenance_entrypoints_rejected')
 
     foreach ($case in @(
@@ -263,23 +313,20 @@ try {
         if (-not $oldProcess.WaitForExit(10000) -or $oldProcess.ExitCode -ne 0) { throw 'MSI maintenance did not retire the original service process cleanly' }
     } finally { $oldProcess.Dispose() }
     $observed = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
-    if ($observed.State -cne 'Stopped' -or $observed.StartMode -cne 'Manual') { throw 'MSI rollback did not restore the original stopped, demand-start service' }
+    if ($observed.State -cne 'Running' -or $observed.StartMode -cne 'Manual') { throw 'MSI rollback did not restore the originally running service' }
     $check = & $runtimePath --check-installation $msi.manifest_sha256
     if ($LASTEXITCODE -ne 0 -or -not ($check | ConvertFrom-Json).installation_verified) { throw 'MSI rollback did not restore an admitted installation' }
     if ((Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash -cne (Get-FileHash -LiteralPath $manifestInput -Algorithm SHA256).Hash) { throw 'MSI rollback changed the installed manifest' }
-    Invoke-ServiceCommand @('start', $serviceName)
-    $service = [System.ServiceProcess.ServiceController]::new($serviceName)
-    try { $service.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(30)) } finally { $service.Dispose() }
-    $after = & $desktopPath --installed-host-probe
-    if ($LASTEXITCODE -ne 0) { throw 'Product service restart after MSI rollback failed' }
-    $after = $after | ConvertFrom-Json
+    $after = Read-InstalledProbe
+    $rollback = Read-MsiReport 'failed-maintenance' 'original_service'
+    Assert-RunningReceipt $rollback.original_service $after
     if ($after.snapshot.state -cne 'off' -or -not $after.authenticated_product_service -or
         ($before.lineage | ConvertTo-Json -Compress) -cne ($after.lineage | ConvertTo-Json -Compress) -or
         $after.snapshot.revision -ne ($before.snapshot.revision + 1)) { throw 'MSI rollback/restart did not preserve authority lineage and exact startup revision' }
     $msiReport.maintenance_rollback = [ordered]@{
         before=$before; after=$after; original_service_process_exited=$true
         original_start_type_restored=$true; original_manifest_restored=$true
-        restart_after_rollback=$true; rollback_started_runtime=$false; active_proxy_drain_exercised=$false
+        restart_after_rollback=$true; rollback_started_runtime=$true; active_proxy_drain_exercised=$false
     }
     $msiReport.new_build_manifest_rollback_exercised = $true
 
@@ -295,16 +342,35 @@ try {
         $msiInFlight = $null
         if (-not $oldProcess.WaitForExit(10000) -or $oldProcess.ExitCode -ne 0) { throw 'Late MSI rollback did not retire the original service cleanly' }
     } finally { $oldProcess.Dispose() }
-    Assert-StoppedInstallation $msi
-    $afterLate = Start-InstalledProbe
-    Assert-RestartLineage $beforeLate $afterLate
+    Assert-Installation $msi
+    $afterLate = Read-InstalledProbe
+    Assert-RestartLineage $beforeLate $afterLate 2
+    $activated = Read-MsiReport 'failed-commit' 'target_service'
+    $retired = Read-MsiReport 'failed-commit' 'target_retired'
+    Assert-ActivatedProcessRetired $activated.target_service $retired
+    $restored = Read-MsiReport 'failed-commit' 'original_service'
+    Assert-RunningReceipt $restored.original_service $afterLate
     $msiReport.commit_failure_rollback = [ordered]@{
         before=$beforeLate; after=$afterLate; original_manifest_restored=$true
         original_start_type_restored=$true; original_service_process_exited=$true
-        runtime_started_by_rollback=$false
+        runtime_started_by_rollback=$true; target_activation=$activated; target_retirement=$retired; original_restoration=$restored
     }
 
-    $beforeUpgrade = $afterLate
+    Stop-Installed
+    $msiInFlight = 'failed-stopped-maintenance'
+    $msiReport.failed_stopped_maintenance = Invoke-RuntimeMsi -Fixture $msiCandidate -Operation $msiInFlight -Evidence $msiEvidence -ExpectedProductCode $msi.product_code -ExpectedPackageCode $msi.package_code -ExpectedMsiVersion $msi.msi_version
+    $msiInFlight = $null
+    Assert-Installation $msi 'Stopped'
+    $stoppedRollback = Read-MsiReport 'failed-stopped-maintenance' 'original_service'
+    if ($stoppedRollback.original_running -or $null -ne $stoppedRollback.original_service -or -not $stoppedRollback.startup_restored) {
+        throw 'MSI rollback started an originally stopped service'
+    }
+    $msiReport.stopped_rollback = $stoppedRollback
+    Invoke-ServiceCommand @('start', $serviceName)
+    $service = [System.ServiceProcess.ServiceController]::new($serviceName)
+    try { $service.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(30)) } finally { $service.Dispose() }
+    $beforeUpgrade = Read-InstalledProbe
+    Assert-RestartLineage $afterLate $beforeUpgrade
     $observed = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
     $oldProcess = [Diagnostics.Process]::GetProcessById($observed.ProcessId)
     $null = $oldProcess.Handle
@@ -314,13 +380,15 @@ try {
         $msiInFlight = $null
         if (-not $oldProcess.WaitForExit(10000) -or $oldProcess.ExitCode -ne 0) { throw 'Successful MSI upgrade did not retire the original service cleanly' }
     } finally { $oldProcess.Dispose() }
-    Assert-StoppedInstallation $msiCandidate
-    $afterUpgrade = Start-InstalledProbe
+    Assert-Installation $msiCandidate
+    $afterUpgrade = Read-InstalledProbe
     Assert-RestartLineage $beforeUpgrade $afterUpgrade
+    $upgradeActivation = Read-MsiReport 'upgrade' 'target_service'
+    Assert-RunningReceipt $upgradeActivation.target_service $afterUpgrade
     $msiReport.upgrade_commit = [ordered]@{
         before=$beforeUpgrade; after=$afterUpgrade; target_manifest_installed=$true
         original_start_type_restored=$true; original_service_process_exited=$true
-        runtime_started_by_commit=$false; protected_lineage_preserved=$true
+        runtime_started_by_commit=$true; activation=$upgradeActivation; protected_lineage_preserved=$true
     }
     $msiReport.new_build_upgrade_committed = $true
 
@@ -337,10 +405,12 @@ try {
     $msiInFlight = 'reinstall'
     $msiReport.reinstalled = Invoke-RuntimeMsi -Fixture $msi -Operation $msiInFlight -Evidence $msiEvidence
     $msiInFlight = $null
-    Assert-StoppedInstallation $msi
-    $afterReinstall = Start-InstalledProbe
+    Assert-Installation $msi
+    $afterReinstall = Read-InstalledProbe
     Assert-RestartLineage $afterUpgrade $afterReinstall
-    $msiReport.reinstallation = [ordered]@{ before=$afterUpgrade; after=$afterReinstall; original_manifest_installed=$true; protected_lineage_preserved=$true }
+    $reinstallActivation = Read-MsiReport 'reinstall' 'fresh_service'
+    Assert-RunningReceipt $reinstallActivation.fresh_service $afterReinstall
+    $msiReport.reinstallation = [ordered]@{ before=$afterUpgrade; after=$afterReinstall; activation=$reinstallActivation; original_manifest_installed=$true; protected_lineage_preserved=$true }
     $msiReport.completed_history_reinstall_exercised = $true
 } catch { $failure = $_.ToString() }
 finally {

@@ -14,6 +14,23 @@ pub(crate) struct ServiceControl {
     image: VerifiedExecutable,
     command: Vec<u16>,
 }
+pub(crate) struct StartedService {
+    process: OwnedHandle,
+    process_id: u32,
+    created_at: u64,
+    started_by_action: bool,
+}
+#[derive(serde::Serialize)]
+pub(crate) struct RetiredService {
+    process_id: u32,
+    process_creation_time: u64,
+}
+impl StartedService {
+    pub(crate) fn receipt(&self) -> serde_json::Value {
+        serde_json::json!({"process_id":self.process_id,"process_creation_time":self.created_at,
+            "started_by_action":self.started_by_action})
+    }
+}
 impl ServiceControl {
     /// A missing service is observed only from SCM's explicit not-found code.
     /// Marked-for-deletion, access and I/O errors cannot admit a fresh install.
@@ -58,6 +75,7 @@ impl ServiceControl {
                 SERVICE_QUERY_CONFIG
                     | SERVICE_QUERY_STATUS
                     | SERVICE_STOP
+                    | SERVICE_START
                     | SERVICE_CHANGE_CONFIG
                     | READ_CONTROL,
             )
@@ -94,20 +112,8 @@ impl ServiceControl {
         }
         Ok(status)
     }
-    /// Stop exactly one admitted live process. Already-stopped services use
-    /// the separate native absence check, never a fabricated process exit.
-    pub(crate) fn drain(&self, expected_start: u32, deadline: Instant) -> Result<bool> {
-        if !matches!(expected_start, SERVICE_AUTO_START | SERVICE_DEMAND_START)
-            || self.start_type()? != expected_start
-        {
-            return Err(ServicePeerError::ConfigurationMismatch);
-        }
-        let status = self.status()?;
-        if status.dwCurrentState == SERVICE_STOPPED {
-            self.require_stopped(expected_start)?;
-            return Ok(false);
-        }
-        let pid = validate_status(&status)?;
+    fn retain_running(&self, started_by_action: bool) -> Result<StartedService> {
+        let pid = validate_status(&self.status()?)?;
         let raw = unsafe {
             OpenProcess(
                 PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
@@ -119,11 +125,11 @@ impl ServiceControl {
             return Err(native("retain maintenance service process"));
         }
         let process = unsafe { OwnedHandle::from_raw_handle(raw) };
-        let created = process_creation(&process, pid)?;
+        let created_at = process_creation(&process, pid)?;
         verify_process_image(&self.image, &process)?;
         let peer = crate::NativePeerProcess::open(pid)?;
         let identity = peer.identity();
-        if identity.process_creation_time() != created
+        if identity.process_creation_time() != created_at
             || !identity.is_local_system()
             || identity.session_id() != 0
             || identity.integrity_rid() != 0x4000
@@ -132,6 +138,123 @@ impl ServiceControl {
         {
             return Err(ServicePeerError::WrongProcess);
         }
+        let running = StartedService {
+            process,
+            process_id: pid,
+            created_at,
+            started_by_action,
+        };
+        self.verify_running(&running)?;
+        Ok(running)
+    }
+    pub(crate) fn verify_running(&self, running: &StartedService) -> Result<()> {
+        self.start_type()?;
+        if running_process(&self.service)? != running.process_id
+            || process_creation(&running.process, running.process_id)? != running.created_at
+        {
+            return Err(ServicePeerError::WrongProcess);
+        }
+        match unsafe { WaitForSingleObject(running.process.as_raw_handle(), 0) } {
+            WAIT_TIMEOUT => Ok(()),
+            WAIT_OBJECT_0 => Err(ServicePeerError::Exited),
+            _ => Err(native("observe maintenance service liveness")),
+        }
+    }
+    /// Capture the original stable state before publishing maintenance intent.
+    /// Pending states are not silently classified as stopped.
+    pub(crate) fn is_running(&self) -> Result<bool> {
+        let start = self.start_type()?;
+        match self.status()?.dwCurrentState {
+            SERVICE_RUNNING => {
+                self.retain_running(false)?;
+                Ok(true)
+            }
+            SERVICE_STOPPED => {
+                self.require_stopped(start)?;
+                Ok(false)
+            }
+            _ => Err(ServicePeerError::Maintenance(
+                "service is changing state before maintenance",
+            )),
+        }
+    }
+    /// SYSTEM only; callers must release the maintenance record lock before
+    /// this call, since the service authenticates that record during startup.
+    pub(crate) fn start(&self, expected_start: u32, deadline: Instant) -> Result<StartedService> {
+        if !matches!(expected_start, SERVICE_AUTO_START | SERVICE_DEMAND_START)
+            || self.start_type()? != expected_start
+        {
+            return Err(ServicePeerError::ConfigurationMismatch);
+        }
+        let started_by_action = match self.status()?.dwCurrentState {
+            SERVICE_RUNNING => return self.retain_running(false),
+            // A retry may observe startup initiated before its caller exited.
+            SERVICE_START_PENDING => false,
+            SERVICE_STOPPED => {
+                self.require_stopped(expected_start)?;
+                if unsafe { StartServiceW(self.service.0, 0, null()) } == 0 {
+                    return Err(native("start installed service"));
+                }
+                true
+            }
+            _ => {
+                return Err(ServicePeerError::Maintenance(
+                    "service cannot start from its current state",
+                ));
+            }
+        };
+        loop {
+            if Instant::now() >= deadline {
+                return Err(ServicePeerError::Maintenance(
+                    "service startup exceeded its deadline",
+                ));
+            }
+            if self.start_type()? != expected_start {
+                return Err(ServicePeerError::ConfigurationMismatch);
+            }
+            match self.status()?.dwCurrentState {
+                SERVICE_RUNNING => return self.retain_running(started_by_action),
+                SERVICE_START_PENDING => thread::sleep(Duration::from_millis(50)),
+                _ => {
+                    return Err(ServicePeerError::Maintenance(
+                        "service did not reach Running during startup",
+                    ));
+                }
+            }
+        }
+    }
+    /// Stop exactly one admitted live process. Already-stopped services use
+    /// the separate native absence check, never a fabricated process exit.
+    pub(crate) fn drain(
+        &self,
+        expected_start: u32,
+        deadline: Instant,
+    ) -> Result<Option<RetiredService>> {
+        if !matches!(expected_start, SERVICE_AUTO_START | SERVICE_DEMAND_START)
+            || self.start_type()? != expected_start
+        {
+            return Err(ServicePeerError::ConfigurationMismatch);
+        }
+        let status = loop {
+            let status = self.status()?;
+            if status.dwCurrentState != SERVICE_START_PENDING {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                return Err(ServicePeerError::Maintenance(
+                    "service initialization did not settle before drain",
+                ));
+            }
+            thread::sleep(Duration::from_millis(50));
+        };
+        if status.dwCurrentState == SERVICE_STOPPED {
+            self.require_stopped(expected_start)?;
+            return Ok(None);
+        }
+        let running = self.retain_running(false)?;
+        let pid = running.process_id;
+        let created = running.created_at;
+        let process = running.process;
         if self.start_type()? != expected_start || running_process(&self.service)? != pid {
             return Err(ServicePeerError::WrongProcess);
         }
@@ -185,7 +308,10 @@ impl ServiceControl {
                     }
                     if status.dwCurrentState == SERVICE_STOPPED {
                         self.require_stopped(expected_start)?;
-                        return Ok(true);
+                        return Ok(Some(RetiredService {
+                            process_id: pid,
+                            process_creation_time: created,
+                        }));
                     }
                 }
                 WAIT_TIMEOUT => {}

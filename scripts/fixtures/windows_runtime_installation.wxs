@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Disposable native qualification package, never a distributable installer.
      Its Desktop is an authenticated test client. It deliberately has no GUI,
-     publisher signature, or automatic service startup. -->
+     or publisher signature. Its SYSTEM actions qualify service availability. -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
   <Product Id="$(var.ProductCode)" Name="CFW Runtime Installation Fixture" Language="1033"
            Version="$(var.MsiVersion)" Manufacturer="CFW validation fixture"
@@ -64,13 +64,21 @@
          Direct EXE actions discard the runtime's diagnostic output. All
          arguments are fixed here; no shell or caller-provided path is used. -->
     <SetProperty Id="RollbackRuntimeMaintenance" Before="RollbackRuntimeMaintenance" Sequence="execute"
-                 Value="&quot;[#RuntimeFile]&quot; --rollback-maintenance $(var.MaintenanceTransaction)" />
+                 Value="&quot;[#RuntimeFile]&quot; --rollback-update $(var.MaintenanceTransaction)" />
     <SetProperty Id="PrepareRuntimeMaintenance" Before="PrepareRuntimeMaintenance" Sequence="execute"
                  Value="&quot;[#RuntimeFile]&quot; --prepare-update $(var.MaintenanceTransaction) __CFW_TARGET_MANIFEST_SHA256__" />
     <SetProperty Id="CommitRuntimeMaintenance" Before="CommitRuntimeMaintenance" Sequence="execute"
                  Value="&quot;[#RuntimeFile]&quot; --commit-update $(var.MaintenanceTransaction) __CFW_TARGET_MANIFEST_SHA256__" />
     <SetProperty Id="FreshInstallMaintenance" Before="FreshInstallMaintenance" Sequence="execute"
                  Value="&quot;[#RuntimeFile]&quot; --fresh-install-maintenance __CFW_TARGET_MANIFEST_SHA256__" />
+    <SetProperty Id="ActivateRuntimeUpdate" Before="ActivateRuntimeUpdate" Sequence="execute"
+                 Value="&quot;[#RuntimeFile]&quot; --activate-update $(var.MaintenanceTransaction) __CFW_TARGET_MANIFEST_SHA256__" />
+    <SetProperty Id="RetireRuntimeTarget" Before="RetireRuntimeTarget" Sequence="execute"
+                 Value="&quot;[#RuntimeFile]&quot; --retire-update-target $(var.MaintenanceTransaction) __CFW_TARGET_MANIFEST_SHA256__" />
+    <SetProperty Id="ActivateFreshRuntime" Before="ActivateFreshRuntime" Sequence="execute"
+                 Value="&quot;[#RuntimeFile]&quot; --activate-fresh-install __CFW_TARGET_MANIFEST_SHA256__" />
+    <SetProperty Id="RetireFreshRuntime" Before="RetireFreshRuntime" Sequence="execute"
+                 Value="&quot;[#RuntimeFile]&quot; --retire-fresh-install __CFW_TARGET_MANIFEST_SHA256__" />
     <CustomAction Id="RollbackRuntimeMaintenance" BinaryKey="WixCA" DllEntry="WixQuietExec64"
                   Execute="rollback" Impersonate="no" Return="check" />
     <CustomAction Id="PrepareRuntimeMaintenance" BinaryKey="WixCA" DllEntry="WixQuietExec64"
@@ -79,6 +87,14 @@
                   Execute="commit" Impersonate="no" Return="check" />
     <CustomAction Id="FreshInstallMaintenance" BinaryKey="WixCA" DllEntry="WixQuietExec64"
                   Execute="deferred" Impersonate="no" Return="check" />
+    <CustomAction Id="ActivateRuntimeUpdate" BinaryKey="WixCA" DllEntry="WixQuietExec64"
+                  Execute="commit" Impersonate="no" Return="check" />
+    <CustomAction Id="RetireRuntimeTarget" BinaryKey="WixCA" DllEntry="WixQuietExec64"
+                  Execute="rollback" Impersonate="no" Return="check" />
+    <CustomAction Id="ActivateFreshRuntime" BinaryKey="WixCA" DllEntry="WixQuietExec64"
+                  Execute="commit" Impersonate="no" Return="check" />
+    <CustomAction Id="RetireFreshRuntime" BinaryKey="WixCA" DllEntry="WixQuietExec64"
+                  Execute="rollback" Impersonate="no" Return="check" />
     <CustomAction Id="ValidateInstalledRuntime" FileKey="RuntimeFile" ExeCommand="--check-installation"
                   Execute="deferred" Impersonate="no" Return="check" />
     <!-- A real rejected runtime command supplies a nonzero deferred-action
@@ -94,8 +110,14 @@
       <Custom Action="FreshInstallMaintenance" Before="InstallServices">NOT Installed AND NOT WIX_UPGRADE_DETECTED AND NOT REMOVE~="ALL"</Custom>
       <Custom Action="ValidateInstalledRuntime" After="InstallServices">NOT REMOVE~="ALL"</Custom>
       <Custom Action="CommitRuntimeMaintenance" After="ValidateInstalledRuntime">WIX_UPGRADE_DETECTED AND NOT UPGRADINGPRODUCTCODE AND CFW_FIXTURE_MAINTENANCE = 1</Custom>
-      <Custom Action="FailAfterCommit" After="CommitRuntimeMaintenance">WIX_UPGRADE_DETECTED AND NOT UPGRADINGPRODUCTCODE AND CFW_FIXTURE_FAIL_COMMIT = 1</Custom>
-      <Custom Action="FailAfterReplacement" After="RemoveExistingProducts">NOT REMOVE~="ALL" AND CFW_FIXTURE_FAIL = 1</Custom>
+      <Custom Action="ActivateRuntimeUpdate" After="CommitRuntimeMaintenance">WIX_UPGRADE_DETECTED AND NOT UPGRADINGPRODUCTCODE AND CFW_FIXTURE_MAINTENANCE = 1</Custom>
+      <Custom Action="ActivateFreshRuntime" After="ActivateRuntimeUpdate">NOT Installed AND NOT WIX_UPGRADE_DETECTED AND NOT REMOVE~="ALL"</Custom>
+      <Custom Action="FailAfterCommit" After="ActivateFreshRuntime">NOT REMOVE~="ALL" AND NOT UPGRADINGPRODUCTCODE AND CFW_FIXTURE_FAIL_COMMIT = 1</Custom>
+      <!-- Queue retirement after validated target files and old-product removal,
+           so rollback runs it before restoring any original executable. -->
+      <Custom Action="RetireRuntimeTarget" After="RemoveExistingProducts">WIX_UPGRADE_DETECTED AND NOT UPGRADINGPRODUCTCODE AND CFW_FIXTURE_MAINTENANCE = 1</Custom>
+      <Custom Action="RetireFreshRuntime" After="RetireRuntimeTarget">NOT Installed AND NOT WIX_UPGRADE_DETECTED AND NOT REMOVE~="ALL"</Custom>
+      <Custom Action="FailAfterReplacement" After="RetireFreshRuntime">NOT REMOVE~="ALL" AND CFW_FIXTURE_FAIL = 1</Custom>
     </InstallExecuteSequence>
   </Product>
 </Wix>

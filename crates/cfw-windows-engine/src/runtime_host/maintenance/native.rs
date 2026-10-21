@@ -12,6 +12,8 @@ const SCOPE: &str = "CFWAuthorityMaintenance";
 const LOCK_WAIT: Duration = Duration::from_secs(3);
 const DRAIN: Duration = Duration::from_secs(40);
 
+mod activation;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ServiceMaintenanceFault {
     IntentPublished,
@@ -87,12 +89,13 @@ fn prepare(
                 installation.manifest_sha256.clone(),
                 target_manifest.map(str::to_owned),
                 control.start_type()?,
+                control.is_running()?,
             )?;
             let next_bytes = next.encode()?;
             guard.compare_exchange(Some(&bytes), &next_bytes)?;
             (next, next_bytes)
         } else {
-            if matches!(record.phase, Phase::Committing { .. }) {
+            if !matches!(record.phase, Phase::Preparing | Phase::Prepared { .. }) {
                 return Err(HostError::State(
                     "update completion must finish or roll back before preparation",
                 ));
@@ -111,6 +114,7 @@ fn prepare(
             installation.manifest_sha256.clone(),
             target_manifest.map(str::to_owned),
             control.start_type()?,
+            control.is_running()?,
         )?;
         let bytes = record.encode()?;
         guard.compare_exchange(None, &bytes)?;
@@ -123,7 +127,7 @@ fn prepare(
         mode if mode == record.original_start => control.drain(mode, Instant::now() + DRAIN)?,
         SERVICE_DISABLED => {
             control.require_stopped(SERVICE_DISABLED)?;
-            false
+            None
         }
         _ => {
             return Err(HostError::State(
@@ -153,7 +157,8 @@ fn prepare(
     guard.compare_exchange(Some(&original_bytes), &record.encode()?)?;
     Ok(
         serde_json::json!({"transaction":transaction,"target_manifest_sha256":record.target_manifest_sha256,"caller_session_id":caller.identity().session_id(),"authority":off,"service_stopped":true,
-        "service_start_disabled":true,"original_start_type":record.original_start,"retained_process_exit_observed":process_exit_observed,
+        "service_start_disabled":true,"original_start_type":record.original_start,"original_running":record.original_running,
+        "retained_process_exit_observed":process_exit_observed.is_some(),"retired_service":process_exit_observed,
         "replacement_authorized":false}),
     )
 }
@@ -270,7 +275,7 @@ impl InstalledRuntime {
                 Phase::Prepared { off } => (off.clone(), false, false),
                 Phase::Committing { off } => (off.clone(), false, true),
                 Phase::Committed { off } => (off.clone(), true, false),
-                Phase::Preparing => {
+                Phase::Preparing | Phase::RetiringTarget { .. } | Phase::RestoringOriginal => {
                     return Err(HostError::State("update maintenance was not prepared"));
                 }
             };
@@ -340,6 +345,11 @@ impl InstalledRuntime {
             };
             let pending = Record::decode(&bytes)?;
             pending.bind_original(transaction, &self.manifest_sha256)?;
+            if pending.target_manifest_sha256.is_some() {
+                return Err(HostError::State(
+                    "update rollback requires the update recovery entrypoint",
+                ));
+            }
             let control = ServiceControl::open(self.runtime()?)?;
             match control.start_type()? {
                 mode if mode == pending.original_start => {}

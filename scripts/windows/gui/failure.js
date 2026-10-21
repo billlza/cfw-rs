@@ -9,6 +9,9 @@
   await Promise.all([
     ['engine', 'engine_snapshot'],
     ['settings', 'read_settings_snapshot'],
+    ['controller', 'controller_snapshot'],
+    ['controller_version', 'controller_version'],
+    ['rules', 'rules_snapshot'],
   ].map(async ([name, command]) => {
     try {
       result[name] = await page.evaluate(async (readCommand) => {

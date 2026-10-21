@@ -274,7 +274,8 @@ jobs:
             -DesktopDirectory $evidence -EngineDirectory (Join-Path $evidence 'engine') `
             -Source (git rev-parse HEAD) -Output (Join-Path $evidence 'msi')
       - name: Install and exercise the actual ordinary-user desktop
-        timeout-minutes: 12
+        # Two separately retained 180-second GUI sessions plus bounded MSI work.
+        timeout-minutes: 18
         env:
           CFW_NATIVE_SERVICE_MUTATION_TESTS: '1'
         run: |

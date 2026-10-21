@@ -4,8 +4,9 @@ use super::*;
 use std::os::windows::io::AsHandle;
 
 mod input_desktop;
+mod network;
 
-pub(super) fn run() -> Result<()> {
+fn validation_context() -> Result<(String, PathBuf)> {
     if std::env::var("GITHUB_ACTIONS").as_deref() != Ok("true")
         || std::env::var("CFW_NATIVE_SERVICE_MUTATION_TESTS").as_deref() != Ok("1")
     {
@@ -21,6 +22,15 @@ pub(super) fn run() -> Result<()> {
     if !receipts.is_absolute() || !receipts.is_dir() {
         return Err("invalid GUI receipt directory".into());
     }
+    Ok((source, receipts))
+}
+
+pub(super) fn network_probe(operation: &str, port: &str) -> Result<()> {
+    network::probe(operation, port)
+}
+
+pub(super) fn run() -> Result<()> {
+    let (source, receipts) = validation_context()?;
     let installed =
         cfw_windows_engine::runtime_host::InstalledRuntime::open().map_err(|e| e.to_string())?;
     let _image = installed.desktop().map_err(|e| e.to_string())?;
@@ -28,6 +38,9 @@ pub(super) fn run() -> Result<()> {
         .map_err(|e| e.to_string())?;
     let token = restricted::token()?;
     let mut desktop = input_desktop::InputDesktop::open()?;
+    let observer = NativePeerProcess::open(std::process::id()).map_err(|e| e.to_string())?;
+    let original_proxy = network::proxy_snapshot()?;
+    let original_proxy_sha256 = network::proxy_digest(&original_proxy)?;
     let output = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -85,6 +98,7 @@ pub(super) fn run() -> Result<()> {
         if peer.identity().integrity_rid() != 0x2000
             || peer.identity().is_local_system()
             || peer.identity().is_app_container()
+            || peer.identity().user_session() != observer.identity().user_session()
             || observed.canonicalize().map_err(|e| e.to_string())?
                 != path.canonicalize().map_err(|e| e.to_string())?
         {
@@ -102,6 +116,8 @@ pub(super) fn run() -> Result<()> {
                 "image_sha256": cfw_singbox_config::sha256_hex(&std::fs::read(&path).map_err(|e| e.to_string())?),
                 "installed_release": installed.release(), "desktop_is_fixture": false,
                 "private_desktop": false, "desktop_observation": desktop.observation(),
+                "user_proxy_before_sha256": original_proxy_sha256,
+                "proxy_observer_same_user_session": true,
                 "physical_display_exercised": false,
                 "release_accepted": false
             }),
@@ -116,13 +132,19 @@ pub(super) fn run() -> Result<()> {
         if unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut exit) } == 0 {
             return Err(error("read installed GUI exit"));
         }
+        let after_proxy = network::proxy_snapshot()?;
+        if after_proxy != original_proxy {
+            return Err("installed GUI changed the original user proxy options".into());
+        }
         write(
             &receipts,
             "exit.json",
             &serde_json::json!({
                 "source": source, "process_id": info.dwProcessId,
                 "process_creation_time": peer.identity().process_creation_time(),
-                "exit_code": exit, "retained_process_exit_observed": true
+                "exit_code": exit, "retained_process_exit_observed": true,
+                "user_proxy_after_sha256": network::proxy_digest(&after_proxy)?,
+                "user_proxy_unchanged": true
             }),
         )?;
         if exit != 0 {

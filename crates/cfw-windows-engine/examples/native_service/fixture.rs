@@ -117,6 +117,9 @@ pub(super) fn main() -> Result<()> {
     if args.len() == 2 && args[1] == "--installed-gui-validation" {
         return installed_gui::run();
     }
+    if args.len() == 4 && args[1] == "--installed-gui-network-probe" {
+        return installed_gui::network_probe(&args[2], &args[3]);
+    }
     if args.len() == 2 && args[1] == "--installed-maintenance-validation" {
         return maintenance::run();
     }

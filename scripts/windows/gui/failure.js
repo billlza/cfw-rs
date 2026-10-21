@@ -6,20 +6,25 @@
     result.window = await page.locator('body').ariaSnapshot();
     await page.screenshot({ path: 'failure.png' });
   } catch (error) { result.window_error = String(error); }
-  try {
-    result.engine = await page.evaluate(async () => {
-      let timer;
-      try {
-        return await Promise.race([
-          window.__TAURI_INTERNALS__.invoke('engine_snapshot').then(
-            value => ({ status: 'observed', value }),
-            error => ({ status: 'rejected', error: String(error) }),
-          ),
-          new Promise(resolve => { timer = setTimeout(() => resolve({ status: 'deadline_exceeded' }), 3000); }),
-        ]);
-      } finally { clearTimeout(timer); }
-    });
-  } catch (error) { result.engine_error = String(error); }
+  await Promise.all([
+    ['engine', 'engine_snapshot'],
+    ['settings', 'read_settings_snapshot'],
+  ].map(async ([name, command]) => {
+    try {
+      result[name] = await page.evaluate(async (readCommand) => {
+        let timer;
+        try {
+          return await Promise.race([
+            window.__TAURI_INTERNALS__.invoke(readCommand).then(
+              value => ({ status: 'observed', value }),
+              error => ({ status: 'rejected', error: String(error) }),
+            ),
+            new Promise(resolve => { timer = setTimeout(() => resolve({ status: 'deadline_exceeded' }), 3000); }),
+          ]);
+        } finally { clearTimeout(timer); }
+      }, command);
+    } catch (error) { result[`${name}_error`] = String(error); }
+  }));
   try {
     await page.locator('#nav button[data-page="logs"]').click({ timeout: 2000 });
     result.logs = await page.locator('#page').innerText();

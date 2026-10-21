@@ -30,6 +30,7 @@ $receipt = [ordered]@{
     debugger_detach_preserved_gui=$false; debugger_detached_before_exit_wait=$false
     imported_profile_id=$null; active_runtime=$null; proxy_port=$null
     http_forwarding_verified=$false; listener_released=$false; engine_stopped=$false; user_proxy_unchanged=$false
+    startup_registration_exercised=$false; actual_sign_in_exercised=$false
     physical_display_exercised=$false; network_mode_exercised=$false; release_accepted=$false
 }
 $SessionResult.Value = $receipt
@@ -128,6 +129,12 @@ try {
         $pages | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'pages.json') -Encoding utf8NoBOM
         $receipt.page_count = $pages.pages.Count
         $receipt.native_gui_exercised = $true
+        $startup = (Invoke-Playwright 'startup-registration' @('--raw', 'run-code', "--filename=$(Join-Path $PSScriptRoot 'gui/startup-registration.js')")) | ConvertFrom-Json
+        $startup | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'startup-registration.json') -Encoding utf8NoBOM
+        if (-not $startup.startup_registration_exercised -or $startup.actual_sign_in_exercised -or $startup.release_accepted) {
+            throw 'The installed GUI did not verify its startup registration transaction'
+        }
+        $receipt.startup_registration_exercised = $true
     } else {
         $started = (Invoke-Playwright 'network-start' @('--raw', 'run-code', "--filename=$(Join-Path $PSScriptRoot 'gui/network-start.js')")) | ConvertFrom-Json
         $started | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'network-start.json') -Encoding utf8NoBOM

@@ -1,7 +1,9 @@
 // Consumed by `playwright-cli run-code --filename`. All IPC below is the
 // installed application's real read-only IPC; no renderer state is injected.
 (async (page) => {
-  await page.locator('#product-name').filter({ hasText: 'Clash for Windows' }).waitFor();
+  // Product identity is delivered by boot_payload below. The shared page has
+  // no #product-name element; wait for its actual navigation to be rendered.
+  await page.locator('#nav button[data-page="general"][aria-current="page"]').waitFor();
   const backend = await page.evaluate(async () => {
     if (typeof window.__TAURI_INTERNALS__?.invoke !== 'function') {
       throw new Error('The page is not the native Tauri webview');

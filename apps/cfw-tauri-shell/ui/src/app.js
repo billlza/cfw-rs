@@ -1913,7 +1913,7 @@ function renderGlassOverlays() {
       const version = product.version ?? "—";
       const update = dialog.payload?.update;
       const phase = dialog.payload?.phase ?? (dialog.payload?.checking ? "checking" : "idle");
-      const installView = updateInstallView(update, state.updateInstall);
+      const installView = updateInstallView(update, state.updateInstall, product.operating_system);
       const status = phase === "checking" ? productAboutStatusText(dialog.payload)
         : installView.status ?? productAboutStatusText(dialog.payload);
       const busy = phase === "checking" || installView.busy;
@@ -2427,7 +2427,7 @@ function renderProfiles() {
             <i></i>
             <div class="profile-card-main">
               <h3>${escapeHtml(profile.name)}</h3>
-              <p title="${escapeHtml(t("Time since this profile was saved in Clash for Mac"))}">${escapeHtml(profileSourceLabel(profile))} (${escapeHtml(profile.updated)})</p>
+              <p title="${escapeHtml(t("Time since this profile was saved in {product}", { product: state.payload.product.name }))}">${escapeHtml(profileSourceLabel(profile))} (${escapeHtml(profile.updated)})</p>
             </div>
             <div class="profile-card-primary">
               <button data-profile-action="edit" data-profile-id="${escapeHtml(profile.id)}" title="${escapeHtml(t("Open this profile"))}">‹›</button>
@@ -2670,7 +2670,7 @@ function renderPageContent() {
   }
   document.title = "";
   const productName = document.getElementById("product-name");
-  if (productName) productName.textContent = state.payload.product?.name ?? "Clash for Mac";
+  if (productName) productName.textContent = state.payload.product.name;
   const statusTitle = document.getElementById("status-title");
   if (statusTitle) statusTitle.textContent = state.mode ? t("{title} - {mode} Mode", { title: t(page.title), mode: t(state.mode) }) : t(page.title);
   document.getElementById("page-title").textContent = t(page.title);
@@ -4881,7 +4881,7 @@ export function renderFatalBootstrap() {
     window.__CFM_STARTUP__.fail();
     return;
   }
-  document.body.innerHTML = `<pre class="fatal">${escapeHtml(t("Clash for Mac could not start safely (startup_state_unverifiable). Review the application log before retrying."))}</pre>`;
+  document.body.innerHTML = `<pre class="fatal">${escapeHtml(t("The application could not start safely (startup_state_unverifiable). Review the application log before retrying."))}</pre>`;
 }
 
 bootstrap().catch(() => {

@@ -5,12 +5,22 @@ const MACOS = Object.freeze({
   startAtLogin: "Start with macOS",
   copyProxyCommands: "Copy proxy export commands for Terminal",
   copiedProxyCommands: "Copied proxy export commands for Terminal",
+  updateEnvironmentFailure: "This copy cannot update itself. Download the disk image and replace the app in Applications.",
+  updateStorageFailure: "The update could not be stored on this Mac. Free some disk space and try again.",
+  updatePackageFailure: "This release cannot be installed on this Mac.",
+  updateInstalling: "Installing update… Clash for Mac will reopen automatically.",
+  updateReady: "v{version} is ready to install. Clash for Mac will stop the core, quit, and reopen.",
 });
 const WINDOWS = Object.freeze({
   name: "Windows",
   startAtLogin: "Start with Windows",
   copyProxyCommands: "Copy proxy commands for PowerShell",
   copiedProxyCommands: "Copied proxy commands for PowerShell",
+  updateEnvironmentFailure: "This copy cannot update itself. Download the Windows installer from the release page and run it.",
+  updateStorageFailure: "The update could not be stored on this Windows PC. Free some disk space and try again.",
+  updatePackageFailure: "This release cannot be installed on this Windows PC.",
+  updateInstalling: "Installing update… Clash for Windows will reopen automatically.",
+  updateReady: "v{version} is ready to install. Clash for Windows will stop the core, quit, and reopen.",
 });
 
 export function platformPresentation(operatingSystem) {

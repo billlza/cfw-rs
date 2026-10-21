@@ -850,5 +850,14 @@
   "Windows retains control of startup approval.": "起動の許可は Windows が管理します。",
   "Tunnel availability is reported by the running backend.": "トンネルの利用可否は動作中のバックエンドが報告します。",
   "Home Directory opened in File Explorer": "エクスプローラーでホームフォルダーを開きました",
-  "Logs folder opened in File Explorer": "エクスプローラーでログフォルダーを開きました"
+  "Logs folder opened in File Explorer": "エクスプローラーでログフォルダーを開きました",
+  "This copy cannot update itself. Download the Windows installer from the release page and run it.": "このコピーは自動更新できません。リリースページから Windows インストーラーをダウンロードして実行してください。",
+  "The update could not be stored on this Windows PC. Free some disk space and try again.": "この Windows PC に更新を保存できませんでした。ディスクの空き容量を増やしてから再試行してください。",
+  "This release cannot be installed on this Windows PC.": "このリリースはこの Windows PC にインストールできません。",
+  "Installing update… Clash for Windows will reopen automatically.": "更新をインストール中…Clash for Windows は自動的に再起動します。",
+  "v{version} is ready to install. Clash for Windows will stop the core, quit, and reopen.": "v{version} をインストールできます。Clash for Windows はコアを停止し、終了してから再起動します。",
+  "Starting dashboard": "ダッシュボードを起動中",
+  "Logs could not be opened. Try Open diagnostic logs from the application menu.": "ログを開けませんでした。アプリケーションメニューから「診断ログを開く」を試してください。",
+  "Time since this profile was saved in {product}": "このプロファイルが {product} に保存されてからの経過時間",
+  "The application could not start safely (startup_state_unverifiable). Review the application log before retrying.": "アプリケーションを安全に起動できませんでした（startup_state_unverifiable）。再試行する前にアプリケーションログを確認してください。"
 }

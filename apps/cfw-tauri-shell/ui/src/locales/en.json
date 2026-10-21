@@ -850,5 +850,14 @@
   "Windows retains control of startup approval.": "Windows retains control of startup approval.",
   "Tunnel availability is reported by the running backend.": "Tunnel availability is reported by the running backend.",
   "Home Directory opened in File Explorer": "Home Directory opened in File Explorer",
-  "Logs folder opened in File Explorer": "Logs folder opened in File Explorer"
+  "Logs folder opened in File Explorer": "Logs folder opened in File Explorer",
+  "This copy cannot update itself. Download the Windows installer from the release page and run it.": "This copy cannot update itself. Download the Windows installer from the release page and run it.",
+  "The update could not be stored on this Windows PC. Free some disk space and try again.": "The update could not be stored on this Windows PC. Free some disk space and try again.",
+  "This release cannot be installed on this Windows PC.": "This release cannot be installed on this Windows PC.",
+  "Installing update… Clash for Windows will reopen automatically.": "Installing update… Clash for Windows will reopen automatically.",
+  "v{version} is ready to install. Clash for Windows will stop the core, quit, and reopen.": "v{version} is ready to install. Clash for Windows will stop the core, quit, and reopen.",
+  "Starting dashboard": "Starting dashboard",
+  "Logs could not be opened. Try Open diagnostic logs from the application menu.": "Logs could not be opened. Try Open diagnostic logs from the application menu.",
+  "Time since this profile was saved in {product}": "Time since this profile was saved in {product}",
+  "The application could not start safely (startup_state_unverifiable). Review the application log before retrying.": "The application could not start safely (startup_state_unverifiable). Review the application log before retrying."
 }

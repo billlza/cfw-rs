@@ -36,7 +36,7 @@ test("both platforms' dynamic presentation labels exist in every bundled languag
   for (const platform of ["macos", "windows"]) {
     const presentation = platformPresentation(platform);
     for (const locale of SUPPORTED_LOCALES) {
-      for (const key of [presentation.startAtLogin, presentation.copyProxyCommands, presentation.copiedProxyCommands]) {
+      for (const key of Object.entries(presentation).filter(([name]) => name !== "name").map(([, value]) => value)) {
         assert.ok(Object.hasOwn(catalogs[locale], key), `${locale}: ${key}`);
         assert.ok(catalogs[locale][key].trim(), `${locale}: ${key}`);
       }

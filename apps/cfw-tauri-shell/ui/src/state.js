@@ -66,7 +66,7 @@ export const defaultEngineStatus = {
 };
 
 export const state = {
-  payload: { product: { name: "Clash for Mac", version: null } },
+  payload: { product: { name: "Clash", version: null } },
   settingsSnapshot: defaultSettingsSnapshot,
   settingsUnavailableReason: null,
   launchAtLogin: {

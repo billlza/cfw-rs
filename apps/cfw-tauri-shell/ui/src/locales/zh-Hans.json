@@ -850,5 +850,14 @@
   "Windows retains control of startup approval.": "启动许可仍由 Windows 控制。",
   "Tunnel availability is reported by the running backend.": "隧道可用性由运行中的后端报告。",
   "Home Directory opened in File Explorer": "已在文件资源管理器中打开应用主目录",
-  "Logs folder opened in File Explorer": "已在文件资源管理器中打开日志目录"
+  "Logs folder opened in File Explorer": "已在文件资源管理器中打开日志目录",
+  "This copy cannot update itself. Download the Windows installer from the release page and run it.": "此副本无法自行更新。请从发行页面下载 Windows 安装程序并运行。",
+  "The update could not be stored on this Windows PC. Free some disk space and try again.": "无法在此 Windows 电脑上保存更新。请释放一些磁盘空间后重试。",
+  "This release cannot be installed on this Windows PC.": "无法在此 Windows 电脑上安装此版本。",
+  "Installing update… Clash for Windows will reopen automatically.": "正在安装更新…Clash for Windows 将自动重新打开。",
+  "v{version} is ready to install. Clash for Windows will stop the core, quit, and reopen.": "v{version} 已准备好安装。Clash for Windows 将停止核心、退出并重新打开。",
+  "Starting dashboard": "正在启动界面",
+  "Logs could not be opened. Try Open diagnostic logs from the application menu.": "无法打开日志。请尝试从应用菜单选择“打开诊断日志”。",
+  "Time since this profile was saved in {product}": "此配置保存到 {product} 后经过的时间",
+  "The application could not start safely (startup_state_unverifiable). Review the application log before retrying.": "应用无法安全启动（startup_state_unverifiable）。请先查看应用日志，再重试。"
 }

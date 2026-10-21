@@ -317,12 +317,21 @@ fn cancellation_records_job_membership_and_native_process_signals() {
         });
         println!("{receipt}");
         for (_, _, handle, _) in &witnesses {
-            if wait_until(handle, Instant::now()).unwrap() != WaitOutcome::Signaled {
-                assert_ne!(unsafe { TerminateProcess(handle.as_raw_handle(), 3) }, 0);
+            // wait_until checks its deadline before observing the handle, so
+            // Instant::now() cannot be used as a zero-duration native poll.
+            let wait = unsafe { WaitForSingleObject(handle.as_raw_handle(), 0) };
+            assert!(matches!(wait, WAIT_OBJECT_0 | WAIT_TIMEOUT));
+            if wait == WAIT_TIMEOUT {
+                let terminated = unsafe { TerminateProcess(handle.as_raw_handle(), 3) };
+                let termination_error = (terminated == 0).then(std::io::Error::last_os_error);
                 assert_eq!(
                     wait_until(handle, Instant::now() + CLEANUP).unwrap(),
-                    WaitOutcome::Signaled
+                    WaitOutcome::Signaled,
+                    "fixture cleanup did not observe exit: {termination_error:?}"
                 );
+                if let Some(error) = termination_error {
+                    eprintln!("fixture exited during cleanup after TerminateProcess: {error}");
+                }
             }
         }
         assert!(matches!(operation, Err(Error::Cancelled)));

@@ -1,9 +1,9 @@
 // Exercise the real ordinary-user startup preference transaction. Registration
 // is observed independently of the checkbox; this does not simulate sign-in.
-(async (page) => {
+(async (page, observeNative) => {
   await page.locator('#nav button[data-page="settings"]').click();
   const observe = async (enabled) => {
-    const handle = await page.waitForFunction(async (expected) => {
+    return observeNative(page, async (expected) => {
       const snapshot = await window.__TAURI_INTERNALS__.invoke('read_settings_snapshot');
       const status = snapshot.launch_at_login;
       if (!['registered', 'not_registered'].includes(status.live_status)) {
@@ -17,8 +17,7 @@
       const hint = input.closest('label').querySelector('small').textContent;
       if (!hint.includes(expected ? 'registration does not confirm launch' : 'No startup registration for this user')) return false;
       return { snapshot, hint };
-    }, enabled, { timeout: 15000, polling: 300 });
-    try { return await handle.jsonValue(); } finally { await handle.dispose(); }
+    }, enabled, { name: `startup registration ${enabled ? 'On' : 'Off'}`, timeoutMs: 15000, pollingMs: 300 });
   };
   const initial = await observe(false);
   const control = page.locator('label.toggle-row').filter({ has: page.locator('[data-toggle="startAtLogin"]') });

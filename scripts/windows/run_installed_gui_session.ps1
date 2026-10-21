@@ -50,6 +50,14 @@ function Invoke-Playwright([string]$Name, [string[]]$Arguments) {
         return ($result -join "`n")
     } finally { Pop-Location }
 }
+function Invoke-GuiScenario([ValidateSet('startup-registration', 'network-start', 'network-stop')][string]$Name) {
+    $observer = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'gui/observe.js'))
+    $scenario = [IO.File]::ReadAllText((Join-Path $PSScriptRoot "gui/$Name.js"))
+    $path = Join-Path $playwrightOutput "$Name.scenario.js"
+    $code = "(async (page) => {`nconst observeNative = (`n" + $observer + "`n);`nreturn await (`n" + $scenario + "`n)(page, observeNative);`n})"
+    [IO.File]::WriteAllText($path, $code)
+    return Invoke-Playwright $Name @('--raw', 'run-code', "--filename=$path")
+}
 function Invoke-NativeNetworkProbe([ValidateSet('http', 'closed')][string]$Operation, [int]$Port, $LaunchReceipt) {
     $start = [Diagnostics.ProcessStartInfo]::new($Launcher)
     $start.UseShellExecute = $false
@@ -130,14 +138,14 @@ try {
         $pages | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'pages.json') -Encoding utf8NoBOM
         $receipt.page_count = $pages.pages.Count
         $receipt.native_gui_exercised = $true
-        $startup = (Invoke-Playwright 'startup-registration' @('--raw', 'run-code', "--filename=$(Join-Path $PSScriptRoot 'gui/startup-registration.js')")) | ConvertFrom-Json
+        $startup = (Invoke-GuiScenario 'startup-registration') | ConvertFrom-Json
         $startup | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'startup-registration.json') -Encoding utf8NoBOM
         if (-not $startup.startup_registration_exercised -or $startup.actual_sign_in_exercised -or $startup.release_accepted) {
             throw 'The installed GUI did not verify its startup registration transaction'
         }
         $receipt.startup_registration_exercised = $true
     } else {
-        $started = (Invoke-Playwright 'network-start' @('--raw', 'run-code', "--filename=$(Join-Path $PSScriptRoot 'gui/network-start.js')")) | ConvertFrom-Json
+        $started = (Invoke-GuiScenario 'network-start') | ConvertFrom-Json
         $started | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'network-start.json') -Encoding utf8NoBOM
         $proxyPort = [int]$started.settings.effective.mixed_port
         if ($proxyPort -lt 1 -or $proxyPort -gt 65535) { throw 'GUI proxy port is invalid' }
@@ -147,7 +155,7 @@ try {
         $receipt.active_runtime = $started.active.snapshot.state.runtime
         $http = Invoke-NativeNetworkProbe 'http' $proxyPort $launch
         $receipt.http_forwarding_verified = $true
-        $stopped = (Invoke-Playwright 'network-stop' @('--raw', 'run-code', "--filename=$(Join-Path $PSScriptRoot 'gui/network-stop.js')")) | ConvertFrom-Json
+        $stopped = (Invoke-GuiScenario 'network-stop') | ConvertFrom-Json
         $stopped | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'network-stop.json') -Encoding utf8NoBOM
         $startedIdentity = $started.active.snapshot.state.runtime | ConvertTo-Json -Depth 20 -Compress
         $stoppedIdentity = $stopped.before.snapshot.state.runtime | ConvertTo-Json -Depth 20 -Compress

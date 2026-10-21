@@ -74,9 +74,12 @@ pub(crate) async fn apply(
         EngineMode::TunnelSystemProxy => ProjectionMode::TunnelSystemProxy,
         EngineMode::Off => unreachable!("offline changes commit without a runtime"),
     };
-    let projected = candidate
-        .profile
-        .project(&candidate.profile_id, projected_mode, &settings)?;
+    let projected = candidate.profile.project_with_tunnel_stack(
+        &candidate.profile_id,
+        projected_mode,
+        &settings,
+        state.runtime_platform.tunnel_stack(),
+    )?;
     let next_generation = state
         .snapshot
         .generation

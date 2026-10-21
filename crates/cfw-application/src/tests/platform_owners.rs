@@ -14,6 +14,43 @@ use crate::{EngineCoordinatorError, EngineModeCoordinator};
 const PROFILE: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
 #[tokio::test]
+async fn windows_profile_check_and_start_use_the_same_packet_configuration() {
+    for mode in [EngineMode::Tunnel, EngineMode::TunnelSystemProxy] {
+        let backend = Arc::new(FakeBackend::windows());
+        let coordinator = coordinator(backend.clone());
+        let settings = EngineSettings::default();
+        coordinator
+            .set_mode(
+                mode,
+                PROFILE.into(),
+                ValidatedSingBoxProfile::direct(),
+                settings.clone(),
+            )
+            .await
+            .unwrap();
+        coordinator
+            .change_profile(settings, async {
+                Ok(crate::ProfileChange {
+                    profile_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".into(),
+                    profile: ValidatedSingBoxProfile::direct(),
+                    activate: true,
+                    previous_profile: Some((PROFILE.into(), ValidatedSingBoxProfile::direct())),
+                    commit: Box::new(|| Ok(())),
+                })
+            })
+            .await
+            .unwrap();
+        let checks = backend.configuration_check_requests.lock().unwrap();
+        let starts = backend.tunnel_requests();
+        assert_eq!(checks.len(), 1);
+        assert_eq!(starts.len(), 2);
+        assert_eq!(checks[0], starts[1]);
+        assert!(checks[0].config_json.contains(r#""stack":"gvisor""#));
+        assert_ne!(starts[0].config_digest, starts[1].config_digest);
+    }
+}
+
+#[tokio::test]
 async fn windows_startup_cleanup_still_requires_independent_global_off() {
     for tunnel in [false, true] {
         for owner_survives in [false, true] {
@@ -75,7 +112,7 @@ async fn windows_startup_cleanup_still_requires_independent_global_off() {
 #[tokio::test]
 async fn windows_modes_bind_platform_owners_and_preserve_exact_restart_identity() {
     let backend = Arc::new(FakeBackend::windows());
-    let coordinator = coordinator(backend);
+    let coordinator = coordinator(backend.clone());
     assert_eq!(
         coordinator.runtime_platform(),
         EngineRuntimePlatform::Windows
@@ -103,6 +140,15 @@ async fn windows_modes_bind_platform_owners_and_preserve_exact_restart_identity(
             EngineState::TunnelActive { runtime }
             | EngineState::TunnelSystemProxyActive { runtime } => {
                 assert_eq!(runtime.owner, EngineOwner::WindowsTunnelService);
+                let requests = backend.tunnel_requests();
+                let request = requests.last().unwrap();
+                assert!(request.config_json.contains(r#""stack":"gvisor""#));
+                assert!(request.config_json.contains(r#""auto_route":false"#));
+                assert_eq!(request.config_digest, runtime.config_digest);
+                assert_eq!(
+                    request.config_content_digest,
+                    cfw_singbox_config::sha256_hex(request.config_json.as_bytes())
+                );
                 runtime
             }
             state => panic!("expected active state, got {state:?}"),

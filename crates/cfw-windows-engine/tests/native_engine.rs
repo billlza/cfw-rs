@@ -128,17 +128,29 @@ fn all_projected_modes_are_checked_without_starting_their_occupied_listeners() {
     let profile =
         ValidatedSingBoxProfile::parse(r#"{"outbounds":[{"type":"direct","tag":"direct"}]}"#)
             .unwrap();
-    for (index, mode) in [
+    for (index, (mode, platform)) in [
         ProjectionMode::LocalProxy,
         ProjectionMode::SystemProxy,
         ProjectionMode::Tunnel,
         ProjectionMode::TunnelSystemProxy,
     ]
     .into_iter()
+    .flat_map(|mode| {
+        [
+            cfw_engine_api::EngineRuntimePlatform::MacOs,
+            cfw_engine_api::EngineRuntimePlatform::Windows,
+        ]
+        .map(|platform| (mode, platform))
+    })
     .enumerate()
     {
         let projection = profile
-            .project("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", mode, &settings)
+            .project_with_tunnel_stack(
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                mode,
+                &settings,
+                platform.tunnel_stack(),
+            )
             .unwrap();
         let resolved = ResolvedProjection::new(&projection, []).unwrap();
         let directory = temporary.path().join(format!("check-{index}"));

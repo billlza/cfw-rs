@@ -22,6 +22,7 @@ pub(super) struct FakeBackend {
     pub(super) wrong_proxy_platform: Mutex<bool>,
     pub(super) configuration_check_error: Mutex<Option<BackendErrorKind>>,
     pub(super) configuration_check_gate: Mutex<Option<Arc<Notify>>>,
+    pub(super) configuration_check_requests: Mutex<Vec<EngineStartRequest>>,
     pub(super) fail_proxy_start_once: Mutex<bool>,
     operations: Mutex<Vec<&'static str>>,
     proxy_requests: Mutex<Vec<EngineStartRequest>>,
@@ -207,8 +208,12 @@ impl EngineBackend for FakeBackend {
         }
     }
 
-    fn check_configuration(&self, _request: EngineStartRequest) -> BackendFuture<'_, ()> {
+    fn check_configuration(&self, request: EngineStartRequest) -> BackendFuture<'_, ()> {
         Box::pin(async move {
+            self.configuration_check_requests
+                .lock()
+                .expect("check requests lock")
+                .push(request);
             self.operations
                 .lock()
                 .expect("operations lock")

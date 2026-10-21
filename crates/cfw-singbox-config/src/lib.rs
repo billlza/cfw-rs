@@ -51,7 +51,7 @@ pub use profile::{MAX_OUTBOUNDS, UtlsFingerprint};
 pub use projection::{
     AuthenticatedDnsServer, CONFIGURATION_IDENTITY_SCHEMA_VERSION, DEFAULT_MIXED_PORT,
     EngineSettings, ProjectedConfig, ProjectionMode, ProxyProbe, TUNNEL_ADDRESS_PLAN,
-    TunnelAddressPlan, configuration_identity_digest,
+    TunnelAddressPlan, TunnelStack, configuration_identity_digest,
 };
 pub use release_dns::ReleaseDnsEvidenceCase;
 pub use release_packet::{

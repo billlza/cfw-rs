@@ -84,6 +84,24 @@ impl ProjectionMode {
     }
 }
 
+/// Packet-processing implementation selected by the trusted native backend.
+/// This is not an imported profile field or a user preference. It is selected
+/// before canonicalization so both configuration digests bind the actual stack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TunnelStack {
+    System,
+    Gvisor,
+}
+
+impl TunnelStack {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Gvisor => "gvisor",
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct ProjectedConfig {
     mode: ProjectionMode,
@@ -252,6 +270,18 @@ impl ValidatedSingBoxProfile {
         profile_id: &str,
         mode: ProjectionMode,
         settings: &EngineSettings,
+    ) -> Result<ProjectedConfig, ConfigError> {
+        self.project_with_tunnel_stack(profile_id, mode, settings, TunnelStack::System)
+    }
+
+    /// Use the native backend's packet stack. The existing `project` entry point
+    /// retains the CFM NetworkExtension contract and its exact template bytes.
+    pub fn project_with_tunnel_stack(
+        &self,
+        profile_id: &str,
+        mode: ProjectionMode,
+        settings: &EngineSettings,
+        tunnel_stack: TunnelStack,
     ) -> Result<ProjectedConfig, ConfigError> {
         settings.validate_listener_settings()?;
         let credential_audience = CredentialAudience::new(profile_id, self.digest())?;
@@ -463,11 +493,10 @@ impl ValidatedSingBoxProfile {
                     "type": "tun",
                     "tag": "cfw-tunnel",
                     "address": addresses,
-                    // NetworkExtension owns route installation. The embedded
-                    // engine only processes packets supplied by the public
-                    // packet-flow adapter and never mutates host routes.
+                    // The native platform owner installs routes. This engine
+                    // processes only the packets supplied by that owner.
                     "auto_route": false,
-                    "stack": "system",
+                    "stack": tunnel_stack.as_str(),
                     "mtu": settings.tunnel_mtu
                 })
             }

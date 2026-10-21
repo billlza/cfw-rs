@@ -77,6 +77,15 @@ pub enum EngineRuntimePlatform {
 }
 
 impl EngineRuntimePlatform {
+    /// This affects the canonical configuration before any digest or lease is
+    /// prepared. It does not advertise or authorize platform TUN availability.
+    pub const fn tunnel_stack(self) -> cfw_singbox_config::TunnelStack {
+        match self {
+            Self::MacOs => cfw_singbox_config::TunnelStack::System,
+            Self::Windows => cfw_singbox_config::TunnelStack::Gvisor,
+        }
+    }
+
     pub const fn proxy_owner(self) -> EngineOwner {
         match self {
             Self::MacOs => EngineOwner::ProxyAgent,

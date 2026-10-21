@@ -52,19 +52,19 @@ pub(crate) async fn transition(
     if let Some(quarantine) = &state.quarantine {
         return Err(quarantine.clone());
     }
-    let projected = match target {
-        EngineMode::LocalProxy => {
-            profile.project(profile_id, ProjectionMode::LocalProxy, settings)?
-        }
-        EngineMode::SystemProxy => {
-            profile.project(profile_id, ProjectionMode::SystemProxy, settings)?
-        }
-        EngineMode::Tunnel => profile.project(profile_id, ProjectionMode::Tunnel, settings)?,
-        EngineMode::TunnelSystemProxy => {
-            profile.project(profile_id, ProjectionMode::TunnelSystemProxy, settings)?
-        }
+    let projected_mode = match target {
+        EngineMode::LocalProxy => ProjectionMode::LocalProxy,
+        EngineMode::SystemProxy => ProjectionMode::SystemProxy,
+        EngineMode::Tunnel => ProjectionMode::Tunnel,
+        EngineMode::TunnelSystemProxy => ProjectionMode::TunnelSystemProxy,
         EngineMode::Off => unreachable!("off returned before projection"),
     };
+    let projected = profile.project_with_tunnel_stack(
+        profile_id,
+        projected_mode,
+        settings,
+        state.runtime_platform.tunnel_stack(),
+    )?;
 
     let is_same_active_runtime = match &state.snapshot.state {
         EngineState::LocalProxyActive { runtime } | EngineState::ProxyActive { runtime }

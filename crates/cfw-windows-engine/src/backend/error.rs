@@ -93,6 +93,7 @@ fn engine_kind(error: &crate::Error) -> Kind {
         crate::Error::ExecutableIdentity => Kind::IdentityRejected,
         crate::Error::Cleanup
         | crate::Error::CleanupFailed { .. }
+        | crate::Error::JobRetirementIncomplete { .. }
         | crate::Error::ProxyRestoration(_) => Kind::CleanupUnproven,
         crate::Error::Io(_) | crate::Error::Operation { .. } | crate::Error::Storage(_) => {
             Kind::Unavailable

@@ -20,11 +20,19 @@ struct ProcessIds {
 }
 
 pub(super) struct RetirementWitnesses {
-    descendants: Vec<OwnedHandle>,
+    descendants: std::collections::BTreeMap<u32, OwnedHandle>,
 }
 
 impl RetirementWitnesses {
     pub(super) fn capture(assets: &SpawnAssets) -> Result<Self, Error> {
+        let mut witnesses = Self {
+            descendants: std::collections::BTreeMap::new(),
+        };
+        witnesses.observe(assets)?;
+        Ok(witnesses)
+    }
+
+    pub(super) fn observe(&mut self, assets: &SpawnAssets) -> Result<(), Error> {
         let mut list = ProcessIds {
             assigned: 0,
             returned: 0,
@@ -50,7 +58,6 @@ impl RetirementWitnesses {
             ));
         }
         let mut seen = std::collections::BTreeSet::new();
-        let mut descendants = Vec::new();
         for id in &list.ids[..list.returned as usize] {
             let id = u32::try_from(*id)
                 .map_err(|_| Error::Protocol("inspection Job process id is invalid"))?;
@@ -61,6 +68,14 @@ impl RetirementWitnesses {
                 // NativeChild already retains this exact process until after
                 // wait_process observes its exit. Do not reopen it by PID.
                 continue;
+            }
+            if self.descendants.contains_key(&id) {
+                continue;
+            }
+            if self.descendants.len() >= MAX_MEMBERS - 1 {
+                return Err(Error::Protocol(
+                    "inspection Job lifetime process bound exceeded",
+                ));
             }
             // Query/synchronize rights only. Cancellation remains scoped to
             // the owned Job; these handles never terminate arbitrary PIDs.
@@ -90,13 +105,13 @@ impl RetirementWitnesses {
             if member == 0 {
                 return Err(Error::Protocol("inspection process left its owned Job"));
             }
-            descendants.push(process);
+            self.descendants.insert(id, process);
         }
-        Ok(Self { descendants })
+        Ok(())
     }
 
-    pub(super) fn wait(self, job: &OwnedHandle, deadline: Instant) -> Result<(), Error> {
-        for process in &self.descendants {
+    pub(super) fn wait(&self, job: &OwnedHandle, deadline: Instant) -> Result<(), Error> {
+        for process in self.descendants.values() {
             match wait_until(process, deadline)? {
                 WaitOutcome::Signaled => {}
                 WaitOutcome::TimedOut => return Err(Error::Timeout),
@@ -113,9 +128,11 @@ impl RetirementWitnesses {
         if accounting.ActiveProcesses != 0
             || accounting.TotalProcesses as usize != 1 + self.descendants.len()
         {
-            return Err(Error::Protocol(
-                "inspection Job retirement population is incomplete",
-            ));
+            return Err(Error::JobRetirementIncomplete {
+                observed: 1 + self.descendants.len() as u32,
+                total: accounting.TotalProcesses,
+                active: accounting.ActiveProcesses,
+            });
         }
         Ok(())
     }

@@ -44,6 +44,7 @@ pub(crate) fn run(
         io: None,
         assigned: false,
         closed: false,
+        witnesses: None,
     };
     let result = process.exchange(request, deadline, &cancelled);
     let cleaned = process.retire(result.is_err());
@@ -62,6 +63,7 @@ struct OneShot {
     io: Option<JoinHandle<Result<Vec<u8>, Error>>>,
     assigned: bool,
     closed: bool,
+    witnesses: Option<RetirementWitnesses>,
 }
 
 impl OneShot {
@@ -88,6 +90,9 @@ impl OneShot {
         }
         self.assigned = true;
         self.assets.child.verify(&self.assets.executable)?;
+        // Capture creation-time members while the root is still suspended.
+        // Retain them across normal exit as well as cancellation.
+        self.witnesses = Some(RetirementWitnesses::capture(&self.assets)?);
         remaining(deadline)?;
         if cancelled() {
             return Err(Error::Cancelled);
@@ -119,6 +124,7 @@ impl OneShot {
         );
         self.assets.child.resume()?;
         loop {
+            self.observe_members()?;
             if cancelled() {
                 return Err(Error::Cancelled);
             }
@@ -138,6 +144,7 @@ impl OneShot {
             return Err(Error::Protocol("inspection reply size is invalid"));
         }
         let exit_code = loop {
+            self.observe_members()?;
             if cancelled() {
                 return Err(Error::Cancelled);
             }
@@ -168,7 +175,7 @@ impl OneShot {
         // Capture exact members before termination can remove them from Job
         // accounting. Capture failure must not prevent the owned Job/pipe
         // cleanup below, but it must prevent a successful cleanup result.
-        let witnesses = RetirementWitnesses::capture(&self.assets);
+        let captured = self.observe_members();
         if abort {
             if self.assigned {
                 // SAFETY: only this worker and its descendants belong to this
@@ -205,9 +212,23 @@ impl OneShot {
                 Err(error) => return Err(error),
             }
         }
-        witnesses?.wait(&self.assets.job, end)?;
+        captured?;
+        self.witnesses
+            .as_ref()
+            .ok_or(Error::Cleanup)?
+            .wait(&self.assets.job, end)?;
         self.closed = true;
         Ok(())
+    }
+
+    fn observe_members(&mut self) -> Result<(), Error> {
+        match &mut self.witnesses {
+            Some(witnesses) => witnesses.observe(&self.assets),
+            None => {
+                self.witnesses = Some(RetirementWitnesses::capture(&self.assets)?);
+                Ok(())
+            }
+        }
     }
 }
 

@@ -211,6 +211,7 @@ fn cancellation_records_job_membership_and_native_process_signals() {
             io: None,
             assigned: false,
             closed: false,
+            witnesses: None,
         };
         let children = RefCell::new((None, None));
         let operation = owner.exchange(
@@ -361,6 +362,7 @@ fn retirement_rejects_a_census_that_missed_later_descendants() {
         io: None,
         assigned: false,
         closed: false,
+        witnesses: None,
     };
     let children = RefCell::new((None, None));
     let operation = owner.exchange(
@@ -381,9 +383,7 @@ fn retirement_rejects_a_census_that_missed_later_descendants() {
     assert!(matches!(operation, Err(Error::Cancelled)));
     assert!(matches!(
         early_witnesses.wait(&owner.assets.job, Instant::now() + CLEANUP),
-        Err(Error::Protocol(
-            "inspection Job retirement population is incomplete"
-        ))
+        Err(Error::JobRetirementIncomplete { observed, total, active: 0 }) if observed < total
     ));
     let (worker, descendant) = children.into_inner();
     assert_retired(&worker.unwrap(), "census regression worker");

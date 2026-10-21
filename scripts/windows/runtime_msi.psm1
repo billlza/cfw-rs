@@ -5,6 +5,7 @@ $ErrorActionPreference = 'Stop'
 function New-WindowsRuntimeMsi {
     param([string]$Runtime, [string]$Desktop, [string]$Engine, [string]$Manifest,
           [string]$ProductCode, [string]$Source, [string]$Evidence,
+          [string]$EngineNotices, [string]$EngineNoticesSha256,
           [switch]$QualificationFixture)
     if (-not $IsWindows) { throw 'Windows MSI authoring requires Windows' }
     if ($Source -cnotmatch '^[0-9a-f]{40}$' -or (git rev-parse HEAD) -cne $Source -or $LASTEXITCODE -ne 0) {
@@ -21,9 +22,22 @@ function New-WindowsRuntimeMsi {
     $msiVersion = $inputManifest.product_version
     $basename = 'CFW-development-windows-x64'
     if ($QualificationFixture) {
+        if ($EngineNotices -or $EngineNoticesSha256) { throw 'The executable fixture does not claim engine notice delivery' }
         if ($build -notin @(1, 2)) { throw 'Unexpected native MSI qualification build' }
         $msiVersion = "0.5.$build"
         $basename = 'runtime-fixture'
+    }
+    $noticeBytes = $null
+    $noticeDigest = $null
+    if (-not $QualificationFixture) {
+        if (-not (Test-Path -LiteralPath $EngineNotices -PathType Leaf) -or $EngineNoticesSha256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'The desktop MSI requires verified engine notices'
+        }
+        $noticeBytes = (Get-Item -LiteralPath $EngineNotices).Length
+        $noticeDigest = (Get-FileHash -LiteralPath $EngineNotices -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($noticeBytes -lt 1 -or $noticeBytes -gt 64MB -or $noticeDigest -cne $EngineNoticesSha256) {
+            throw 'MSI engine notice input differs from its expected bytes'
+        }
     }
     foreach ($entry in @(@($Runtime, $inputManifest.runtime_sha256), @($Desktop, $inputManifest.desktop_sha256), @($Engine, $inputManifest.engine_sha256))) {
         if ((Get-FileHash -LiteralPath $entry[0] -Algorithm SHA256).Hash.ToLowerInvariant() -cne $entry[1]) {
@@ -51,19 +65,26 @@ function New-WindowsRuntimeMsi {
         "-dRuntime=$Runtime", "-dDesktop=$Desktop", "-dEngine=$Engine", "-dManifest=$Manifest",
         "-dQualificationFixture=$([int]$QualificationFixture.IsPresent)", "-dBuildNumber=$build",
         "-dProductCode=$ProductCode", "-dMsiVersion=$msiVersion", "-dMaintenanceTransaction=$transaction", $definition)
+    if (-not $QualificationFixture) { $arguments = @("-dEngineNotices=$EngineNotices") + $arguments }
     & $candle @arguments 2>&1 | Tee-Object -FilePath (Join-Path $Evidence 'compile.log') | Out-Host
     if ($LASTEXITCODE -ne 0) { throw 'Windows MSI compilation failed' }
     & $light -nologo -wx -ext $binder -ext $wixUtil -out $package $object 2>&1 | Tee-Object -FilePath (Join-Path $Evidence 'link.log') | Out-Host
     if ($LASTEXITCODE -ne 0) { throw 'Windows MSI link or validation failed' }
     $boundManifest = Get-Content -LiteralPath $Manifest -Raw | ConvertFrom-Json
     if ($boundManifest.msi_product_code -cne $ProductCode -or $boundManifest.msi_package_code -ceq '{00000000-0000-0000-0000-000000000000}') { throw 'Runtime manifest was not bound to its generated MSI identity' }
-    $result = [pscustomobject]@{
+    $result = [ordered]@{
         source=$Source; path=$package; product_code=$ProductCode; package_code=$boundManifest.msi_package_code; msi_version=$msiVersion
         package_sha256=(Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash.ToLowerInvariant()
         maintenance_transaction=$transaction; manifest_sha256=(Get-FileHash -LiteralPath $Manifest -Algorithm SHA256).Hash.ToLowerInvariant()
         build_number=$boundManifest.build_number
         desktop_is_fixture=$QualificationFixture.IsPresent; signed=$false; release_accepted=$false
     }
+    if (-not $QualificationFixture) {
+        $result['engine_notices_packaged'] = $true
+        $result['engine_notices_sha256'] = $noticeDigest
+        $result['engine_notices_bytes'] = $noticeBytes
+    }
+    $result = [pscustomobject]$result
     $result | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Evidence 'package.json') -Encoding utf8NoBOM
     return $result
 }

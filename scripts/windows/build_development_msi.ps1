@@ -19,6 +19,15 @@ if ($desktopReceipt.source -cne $Source -or $engineReceipt.product_source -cne $
 }
 $desktop = Join-Path $DesktopDirectory $desktopReceipt.filename
 $engine = Join-Path $EngineDirectory $engineReceipt.host_artifact.filename
+$notices = $engineReceipt.source_notices.archive
+if ($notices.filename -cne 'engine-third-party-notices.zip' -or $engineReceipt.source_notices.embedded_binaries -ne 1) {
+    throw 'The Windows engine build omitted its embedded-binary notices'
+}
+$noticeArchive = Join-Path $EngineDirectory $notices.filename
+if ((Get-Item -LiteralPath $noticeArchive).Length -ne $notices.bytes -or
+    (Get-FileHash -LiteralPath $noticeArchive -Algorithm SHA256).Hash.ToLowerInvariant() -cne $notices.sha256) {
+    throw 'Engine notices differ from their build receipt'
+}
 if ((Get-FileHash -LiteralPath $desktop -Algorithm SHA256).Hash.ToLowerInvariant() -cne $desktopReceipt.sha256 -or
     (Get-FileHash -LiteralPath $engine -Algorithm SHA256).Hash.ToLowerInvariant() -cne $engineReceipt.host_artifact.sha256) {
     throw 'Development package executable differs from its build receipt'
@@ -41,10 +50,12 @@ $manifestPath = Join-Path $Output 'manifest.json'
 $manifest | ConvertTo-Json | Set-Content -LiteralPath $manifestPath -Encoding utf8NoBOM
 Import-Module (Join-Path $PSScriptRoot 'runtime_msi.psm1') -Force
 $package = New-WindowsRuntimeMsi -Runtime $Runtime -Desktop $desktop -Engine $engine -Manifest $manifestPath `
-    -ProductCode $manifest.msi_product_code -Source $Source -Evidence $Output
+    -ProductCode $manifest.msi_product_code -Source $Source -Evidence $Output `
+    -EngineNotices $noticeArchive -EngineNoticesSha256 $notices.sha256
 [ordered]@{
     source=$Source; profile='debug'; desktop_sha256=$manifest.desktop_sha256
     runtime_sha256=$manifest.runtime_sha256; engine_sha256=$manifest.engine_sha256
+    engine_notices_sha256=$package.engine_notices_sha256
     package_sha256=$package.package_sha256; manifest_sha256=$package.manifest_sha256
     development_build_number=1; production_build_allocated=$false
     installed=$false; gui_exercised=$false; signed=$false; release_accepted=$false

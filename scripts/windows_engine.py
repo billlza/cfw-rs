@@ -25,6 +25,7 @@ from publication.license_resolution import candidate_license_files
 PATCHES = ("SECURITY", "RAW_PACKET", "DNS_FAILOVER", "ENDPOINT_CONFLICT", "PROFILE_PROBE", "SOCKS_LIFECYCLE")
 WINDOWS_TEST_OVERLAY = "native/windows/engine-tests/dns-response-lifecycle.patch"
 WINDOWS_TEST_FILE = "dns/runtime_policy_test.go"
+WINTUN_PACKAGE = "github.com/sagernet/sing-tun/internal/wintun"
 DIFF_OPTIONS = [
     "-c", "diff.interHunkContext=0", "-c", "diff.suppressBlankEmpty=false",
     "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--binary",
@@ -67,12 +68,13 @@ def read_pins(repository: Path) -> dict[str, str]:
             key, value = match.groups()
             require(key not in pins, f"duplicate dependency pin: {key}")
             pins[key] = value
-    for key in ("GO_VERSION", "PYTHON_VERSION", "RUST_VERSION"):
+    for key in ("GO_VERSION", "PYTHON_VERSION", "RUST_VERSION", "WINTUN_VERSION"):
         require(bool(re.fullmatch(r"\d+\.\d+\.\d+", pins[key])), f"invalid {key}")
     require(bool(re.fullmatch(r"[a-f0-9]{40}", pins["SING_BOX_COMMIT"])), "invalid engine commit")
     require(bool(re.fullmatch(r"v\d+\.\d+\.\d+", pins["SING_BOX_VERSION"])), "invalid engine version")
     require(bool(re.fullmatch(r"[a-z0-9_,]+", pins["LIBBOX_BUILD_TAGS"])), "invalid engine build tags")
     for key in ["GO_WINDOWS_AMD64_SHA256", "LIBBOX_MODULE_CACHE_CONTRACT_SHA256",
+                "WINTUN_ARCHIVE_SHA256", "WINTUN_WINDOWS_AMD64_SHA256", "WINTUN_BINARY_LICENSE_SHA256",
                 "SING_BOX_COMBINED_DIFF_SHA256", "SING_BOX_PATCHED_DIFF_SHA256",
                 "SING_BOX_UPSTREAM_GO_MOD_SHA256", "SING_BOX_UPSTREAM_GO_SUM_SHA256",
                 "SING_BOX_PATCHED_GO_MOD_SHA256", "SING_BOX_PATCHED_GO_SUM_SHA256",
@@ -134,10 +136,46 @@ def module_graph(data: bytes) -> list[dict[str, object]]:
     return result
 
 
-def bundle_notices(go: Path, source: Path, output: Path, environment: dict[str, str], pins: dict[str, str]) -> dict[str, object]:
+def bundle_wintun_notice(repository: Path, package: dict[str, object], root: Path,
+                         output: Path, pins: dict[str, str]) -> dict[str, object]:
+    """Bind the embedded DLL to the official archive without executing it.
+
+    The linked module's source license does not describe its embedded prebuilt
+    DLL. Preserve that binary's original license separately. This byte proof
+    is not an Authenticode or driver-installation receipt.
+    """
+    require(package.get("ImportPath") == WINTUN_PACKAGE, "unexpected embedded binary package")
+    require(package.get("EmbedFiles") == ["amd64/wintun.dll"], "unexpected linked Wintun embed files")
+    directory = package.get("Dir")
+    require(isinstance(directory, str), "Wintun package has no source directory")
+    directory = Path(directory).resolve(strict=True)
+    require(directory == root / "internal/wintun", "Wintun package escaped its linked module")
+    dll = directory / "amd64/wintun.dll"
+    regular_file(dll)
+    require(dll.stat().st_size <= 2 * 1024 * 1024, "embedded Wintun DLL exceeds its bound")
+    binary_digest = sha256(dll)
+    require(binary_digest == pins["WINTUN_WINDOWS_AMD64_SHA256"], "embedded Wintun differs from the official binary")
+    license_source = pinned_path(repository, pins["WINTUN_BINARY_LICENSE_PATH"])
+    require(sha256(license_source) == pins["WINTUN_BINARY_LICENSE_SHA256"], "Wintun binary license digest mismatch")
+    destination = output / "licenses" / f"wintun-{pins['WINTUN_VERSION']}" / "LICENSE.txt"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(license_source, destination)
+    require(sha256(destination) == pins["WINTUN_BINARY_LICENSE_SHA256"], "copied Wintun binary license changed")
+    return {"component": "Wintun prebuilt DLL", "version": pins["WINTUN_VERSION"],
+            "files": [{"path": destination.relative_to(output).as_posix(), "sha256": sha256(destination)}],
+            "distribution": {"url": f"https://www.wintun.net/builds/wintun-{pins['WINTUN_VERSION']}.zip",
+                             "sha256": pins["WINTUN_ARCHIVE_SHA256"]},
+            "embedded_binary": {"package": WINTUN_PACKAGE, "path": "amd64/wintun.dll", "architecture": "amd64",
+                                "bytes": dll.stat().st_size, "sha256": binary_digest},
+            "authenticode_verified": False, "driver_runtime_verified": False}
+
+
+def bundle_notices(repository: Path, go: Path, source: Path, output: Path,
+                   environment: dict[str, str], pins: dict[str, str]) -> dict[str, object]:
     packages = json_objects(command([str(go), "list", "-deps", "-json", "-tags", pins["LIBBOX_BUILD_TAGS"],
                                      "./cmd/sing-box", "./cmd/cfw-engine-host"], cwd=source, env=environment))
     roots: dict[tuple[str, str], Path] = {("Go", pins["GO_VERSION"]): go.parent.parent.resolve()}
+    embedded = []
     for package in packages:
         module = package.get("Module")
         if module is None:
@@ -154,6 +192,9 @@ def bundle_notices(go: Path, source: Path, output: Path, environment: dict[str, 
         key = (name, version)
         require(key not in roots or roots[key] == root, "linked module has conflicting source roots")
         roots[key] = root
+        if package.get("ImportPath") == WINTUN_PACKAGE:
+            require(not embedded, "duplicate linked Wintun package")
+            embedded.append(bundle_wintun_notice(repository, package, root, output, pins))
     records = []
     for (name, version), root in sorted(roots.items()):
         # Keep actual upstream license/notice files, including nested vendored
@@ -170,12 +211,39 @@ def bundle_notices(go: Path, source: Path, output: Path, environment: dict[str, 
             shutil.copyfile(path, destination)
             entries.append({"path": destination.relative_to(output).as_posix(), "sha256": sha256(destination)})
         records.append({"component": name, "version": version, "files": entries})
-    index = {"schema_version": 1, "scope": "linked Go modules and Go toolchain source notices",
+    records.extend(embedded)
+    index = {"schema_version": 1, "scope": "linked Go modules, embedded Windows binaries and Go toolchain notices",
              "release_license_review_complete": False, "components": records}
     index_path = output / "third-party-notices.json"
     index_path.write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
+    # One installer payload keeps every original notice byte and its index,
+    # without rewriting licenses into a generated summary or dropping nested files.
+    members = {"third-party-notices.json": sha256(index_path)}
+    for record in records:
+        for entry in record["files"]:
+            require(entry["path"] not in members, "duplicate notice archive member")
+            members[entry["path"]] = entry["sha256"]
+    require(len(members) <= 4096, "notice archive has too many members")
+    archive_path = output / "engine-third-party-notices.zip"
+    total = 0
+    with zipfile.ZipFile(archive_path, "x", compression=zipfile.ZIP_DEFLATED, compresslevel=9, allowZip64=False) as archive:
+        for name, digest in sorted(members.items()):
+            path = output / name
+            regular_file(path)
+            require(path.stat().st_size <= 2 * 1024 * 1024, "notice file exceeds its bound")
+            data = path.read_bytes()
+            total += len(data)
+            require(total <= 64 * 1024 * 1024, "notice archive exceeds its total bound")
+            require(hashlib.sha256(data).hexdigest() == digest, "notice changed before packaging")
+            member = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            member.create_system = 3
+            member.external_attr = 0o100644 << 16
+            archive.writestr(member, data, compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
     return {"components": len(records), "files": sum(len(record["files"]) for record in records),
-            "index_sha256": sha256(index_path)}
+            "embedded_binaries": len(embedded),
+            "index_sha256": sha256(index_path),
+            "archive": {"filename": archive_path.name, "bytes": archive_path.stat().st_size,
+                        "sha256": sha256(archive_path)}}
 
 
 def git(source: Path, *arguments: str, index: Path | None = None) -> bytes:
@@ -445,7 +513,8 @@ def build(repository: Path, work: Path, pins: dict[str, str]) -> None:
     shutil.copyfile(source / "LICENSE", output / "LICENSE")
     command([str(go), "mod", "verify"], cwd=source, env=environment)
     print("Collecting source license and notice texts for the linked Windows engine", flush=True)
-    notices = bundle_notices(go, source, output, environment, pins)
+    notices = bundle_notices(repository, go, source, output, environment, pins)
+    require(notices["embedded_binaries"] == 1, "fixed Windows engine omitted its embedded Wintun notice")
     receipt = {"schema_version": 1, "product_source": git(repository, "rev-parse", "HEAD").decode().strip(),
                "component": "windows-engine", "platform": "windows-amd64", "release_accepted": False,
                "engine_version": pins["SING_BOX_VERSION"], "engine_commit": pins["SING_BOX_COMMIT"],

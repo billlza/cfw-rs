@@ -69,12 +69,22 @@
               <PermissionEx Id="ManifestAcl" Sddl="O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)" />
             </File>
           </Component>
+          <?if $(var.QualificationFixture) = 0 ?>
+          <Component Id="EngineNotices" Guid="{F06D6DD3-5216-5FB2-8956-F4D0FB35B5A1}" Win64="yes">
+            <File Id="EngineNoticesFile" Name="EngineThirdPartyNotices.zip" Source="$(var.EngineNotices)" KeyPath="yes">
+              <PermissionEx Id="EngineNoticesAcl" Sddl="O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)" />
+            </File>
+          </Component>
+          <?endif ?>
         </Directory>
       </Directory>
     </Directory>
     <Feature Id="RuntimePayload" Level="1">
       <ComponentRef Id="Runtime" /><ComponentRef Id="Desktop" />
       <ComponentRef Id="Engine" /><ComponentRef Id="Manifest" />
+      <?if $(var.QualificationFixture) = 0 ?>
+      <ComponentRef Id="EngineNotices" />
+      <?endif ?>
     </Feature>
     <!-- These installed-image entrypoints retain their ordinary exact-path
          admission. The rollback is scheduled before preparation, so it runs

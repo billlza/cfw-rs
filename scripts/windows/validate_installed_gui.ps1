@@ -29,6 +29,7 @@ New-Item -ItemType Directory -Path $Output -ErrorAction Stop | Out-Null
 $outputRoot = (Resolve-Path -LiteralPath $Output).Path
 $receipt = [ordered]@{
     source=$Source; package_sha256=$package.package_sha256; installed=$null; uninstalled=$null
+    engine_notices_installed=$false
     fresh_off_session=$null; local_proxy_session=$null
     native_gui_exercised=$false; ordinary_user=$false; page_count=0; graceful_exit_observed=$false
     startup_registration_exercised=$false; actual_sign_in_exercised=$false
@@ -57,6 +58,15 @@ function Invoke-Installer([string]$Mode, [string]$Name) {
 }
 try {
     $receipt.installed = Invoke-Installer '/i' 'install'
+    $notices = Join-Path $installedDirectory 'EngineThirdPartyNotices.zip'
+    if (-not $package.engine_notices_packaged -or
+        (Get-Item -LiteralPath $notices).Length -ne $package.engine_notices_bytes -or
+        (Get-FileHash -LiteralPath $notices -Algorithm SHA256).Hash.ToLowerInvariant() -cne $package.engine_notices_sha256) {
+        throw 'Installed engine notices differ from the authored MSI payload'
+    }
+    $receipt.engine_notices_installed = $true
+    [ordered]@{ source=$Source; sha256=$package.engine_notices_sha256; bytes=$package.engine_notices_bytes; installed=$true } |
+        ConvertTo-Json | Set-Content -LiteralPath (Join-Path $outputRoot 'installed-notices.json') -Encoding utf8NoBOM
     $runtime = Join-Path $installedDirectory 'cfw-windows-runtime.exe'
     $check = & $runtime --check-installation $package.manifest_sha256
     $check | Set-Content -LiteralPath (Join-Path $outputRoot 'installed-runtime.json') -Encoding utf8NoBOM

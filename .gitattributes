@@ -1,3 +1,5 @@
 # Source contracts, snapshots and build-input hashes use the same bytes on every
 # checkout. Binary files retain Git's binary detection and are never normalized.
 * text=auto eol=lf
+# Preserve the exact upstream binary-distribution license used by its hash pin.
+native/windows/third-party/wintun/LICENSE.txt -text

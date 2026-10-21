@@ -63,7 +63,8 @@ function New-RuntimeMsiFixture {
     $light = Join-Path $tools 'light.exe'
     $csc = Join-Path ([Environment]::GetFolderPath('Windows')) 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
     $wixAssembly = Join-Path $tools 'wix.dll'
-    foreach ($path in @($candle, $light, $csc, $wixAssembly, $Runtime, $Desktop, $Engine, $Manifest)) {
+    $wixUtil = Join-Path $tools 'WixUtilExtension.dll'
+    foreach ($path in @($candle, $light, $csc, $wixAssembly, $wixUtil, $Runtime, $Desktop, $Engine, $Manifest)) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Required MSI qualification input missing: $path" }
     }
     $definition = Join-Path $PSScriptRoot 'windows_runtime_installation.wxs'
@@ -79,7 +80,7 @@ function New-RuntimeMsiFixture {
         "-dProductCode=$ProductCode", "-dMsiVersion=$msiVersion", "-dMaintenanceTransaction=$transaction", $definition)
     & $candle @arguments 2>&1 | Tee-Object -FilePath (Join-Path $Evidence 'compile.log') | Out-Host
     if ($LASTEXITCODE -ne 0) { throw 'Runtime MSI fixture compilation failed' }
-    & $light -nologo -wx -ext $binder -out $package $object 2>&1 | Tee-Object -FilePath (Join-Path $Evidence 'link.log') | Out-Host
+    & $light -nologo -wx -ext $binder -ext $wixUtil -out $package $object 2>&1 | Tee-Object -FilePath (Join-Path $Evidence 'link.log') | Out-Host
     if ($LASTEXITCODE -ne 0) { throw 'Runtime MSI fixture link or validation failed' }
     $boundManifest = Get-Content -LiteralPath $Manifest -Raw | ConvertFrom-Json
     if ($boundManifest.msi_product_code -cne $ProductCode -or $boundManifest.msi_package_code -ceq '{00000000-0000-0000-0000-000000000000}') { throw 'Runtime manifest was not bound to its generated MSI identity' }

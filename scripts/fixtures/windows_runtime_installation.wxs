@@ -59,11 +59,16 @@
     <!-- These installed-image entrypoints retain their ordinary exact-path
          admission. The rollback is scheduled before preparation, so it runs
          after Windows Installer has restored files and service registration. -->
-    <CustomAction Id="RollbackRuntimeMaintenance" FileKey="RuntimeFile"
-                  ExeCommand="--rollback-maintenance $(var.MaintenanceTransaction)"
+    <!-- Use the installer DLL host's logged execution path for SYSTEM work.
+         Direct EXE actions discard the runtime's diagnostic output. All
+         arguments are fixed here; no shell or caller-provided path is used. -->
+    <SetProperty Id="RollbackRuntimeMaintenance" Before="RollbackRuntimeMaintenance" Sequence="execute"
+                 Value="&quot;[#RuntimeFile]&quot; --rollback-maintenance $(var.MaintenanceTransaction)" />
+    <SetProperty Id="PrepareRuntimeMaintenance" Before="PrepareRuntimeMaintenance" Sequence="execute"
+                 Value="&quot;[#RuntimeFile]&quot; --prepare-maintenance $(var.MaintenanceTransaction)" />
+    <CustomAction Id="RollbackRuntimeMaintenance" BinaryKey="WixCA" DllEntry="WixQuietExec64"
                   Execute="rollback" Impersonate="no" Return="check" />
-    <CustomAction Id="PrepareRuntimeMaintenance" FileKey="RuntimeFile"
-                  ExeCommand="--prepare-maintenance $(var.MaintenanceTransaction)"
+    <CustomAction Id="PrepareRuntimeMaintenance" BinaryKey="WixCA" DllEntry="WixQuietExec64"
                   Execute="deferred" Impersonate="no" Return="check" />
     <CustomAction Id="ValidateInstalledRuntime" FileKey="RuntimeFile" ExeCommand="--check-installation"
                   Execute="deferred" Impersonate="no" Return="check" />

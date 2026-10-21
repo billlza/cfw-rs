@@ -43,7 +43,9 @@
         throw new Error('Windows TUN help does not describe the host platform');
       }
       await tunHelp.click();
-      const dialog = page.getByRole('dialog', { name: 'TUN Mode', exact: true });
+      const dialog = page.getByRole('dialog', { name: 'Info', exact: true }).filter({
+        has: page.getByRole('heading', { name: 'TUN Mode', exact: true }),
+      });
       await dialog.waitFor();
       const help = await dialog.innerText();
       if (!help.includes('Windows virtual network adapter') || /macOS|NetworkExtension|System Settings/u.test(help)) {

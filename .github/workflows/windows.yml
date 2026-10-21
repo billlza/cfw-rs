@@ -14,6 +14,83 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  wintun-lifecycle:
+    name: Windows Wintun adapter lifecycle
+    runs-on: windows-2025
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Verify driver qualification source and toolchain pins
+        id: pins
+        env:
+          EXPECTED_SOURCE: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          $source = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $source -cne $env:EXPECTED_SOURCE) { throw 'Driver qualification source mismatch' }
+          $pins = Get-Content scripts/dependency_pins.env -Raw
+          foreach ($name in @('RUST_VERSION', 'PYTHON_VERSION')) {
+            $values = [regex]::Matches($pins, "(?m)^${name}=([0-9]+\.[0-9]+\.[0-9]+)\r?`$")
+            if ($values.Count -ne 1) { throw "Missing or ambiguous pin: $name" }
+            "$name=$($values[0].Groups[1].Value)" >> $env:GITHUB_OUTPUT
+          }
+          $evidence = Join-Path $env:RUNNER_TEMP 'cfw-wintun-validation'
+          New-Item -ItemType Directory -Path $evidence -ErrorAction Stop | Out-Null
+          [ordered]@{ source=$source; phase='initialized'; release_accepted=$false } | ConvertTo-Json |
+            Set-Content -LiteralPath (Join-Path $evidence 'source.json') -Encoding utf8NoBOM
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: ${{ steps.pins.outputs.RUST_VERSION }}
+          components: clippy,rustfmt
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ steps.pins.outputs.PYTHON_VERSION }}
+      - name: Verify and stage the official driver distribution
+        run: |
+          $evidence = Join-Path $env:RUNNER_TEMP 'cfw-wintun-validation'
+          python -m unittest discover -s scripts/tests -p test_wintun_validation_staging.py -v 2>&1 |
+            Tee-Object -FilePath (Join-Path $evidence 'staging-tests.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Wintun staging boundary tests failed' }
+          python scripts/stage_wintun_validation.py --repository "$pwd" --output (Join-Path $evidence 'distribution') 2>&1 |
+            Tee-Object -FilePath (Join-Path $evidence 'staging.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Wintun distribution verification failed' }
+      - name: Build the isolated native lifecycle probe
+        run: |
+          $evidence = Join-Path $env:RUNNER_TEMP 'cfw-wintun-validation'
+          cargo clippy --locked -p cfw-windows-engine --features native-service-validation --example native-wintun-probe -- -D warnings 2>&1 |
+            Tee-Object -FilePath (Join-Path $evidence 'clippy.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Wintun lifecycle probe Clippy failed' }
+          cargo build --locked -p cfw-windows-engine --features native-service-validation --example native-wintun-probe 2>&1 |
+            Tee-Object -FilePath (Join-Path $evidence 'build.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Wintun lifecycle probe build failed' }
+          $probe = Join-Path $PWD 'target/debug/examples/native-wintun-probe.exe'
+          $copied = Join-Path $evidence 'native-wintun-probe.exe'
+          Copy-Item -LiteralPath $probe -Destination $copied -ErrorAction Stop
+          $digest = (Get-FileHash $probe -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ((Get-FileHash $copied -Algorithm SHA256).Hash.ToLowerInvariant() -cne $digest) { throw 'Copied Wintun probe changed' }
+          [ordered]@{ source=(git rev-parse HEAD); filename='native-wintun-probe.exe'; bytes=(Get-Item $copied).Length; sha256=$digest } |
+            ConvertTo-Json | Set-Content -LiteralPath (Join-Path $evidence 'probe.json') -Encoding utf8NoBOM
+      - name: Observe actual adapter retirement after normal and abrupt owner exit
+        env:
+          CFW_NATIVE_TUN_MUTATION_TESTS: '1'
+        run: |
+          $evidence = Join-Path $env:RUNNER_TEMP 'cfw-wintun-validation'
+          ./scripts/windows/validate_wintun_lifecycle.ps1 -Probe (Join-Path $evidence 'native-wintun-probe.exe') `
+            -Payload (Join-Path $evidence 'distribution/payload') -Output (Join-Path $evidence 'lifecycle') -Source (git rev-parse HEAD)
+      - name: Preserve driver lifecycle observations
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: cfw-wintun-validation-windows-x64
+          path: ${{ runner.temp }}/cfw-wintun-validation/
+          if-no-files-found: error
+          retention-days: 14
+
   engine:
     name: Windows x64 engine build and loopback traffic
     runs-on: windows-2025

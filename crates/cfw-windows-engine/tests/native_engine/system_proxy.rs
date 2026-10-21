@@ -358,10 +358,16 @@ async fn actual_system_proxy_carries_wininet_http_and_restores_before_engine_sto
     let upstream = private_interface_listener();
     upstream.set_nonblocking(true).unwrap();
     let upstream_address = upstream.local_addr().unwrap();
+    // Setting the current-user proxy can also route unrelated Windows traffic
+    // through this engine. Only the reserved probe destination belongs to the
+    // finite HTTP fixture; other destinations use a DIRECT route.
     let source = serde_json::json!({"outbounds":[{
         "type":"http", "tag":"fixture", "server":upstream_address.ip().to_string(),
         "server_port":upstream_address.port(),
-    }]})
+    }, {"type":"direct", "tag":"direct"}],
+    "route":{"final":"direct", "rules":[{
+        "type":"ip_cidr", "value":"192.0.2.123/32", "outbound":"fixture", "no_resolve":true
+    }]}})
     .to_string();
     // Validate the actual production input before starting a fixture thread.
     let mixed = reserve();
@@ -392,7 +398,19 @@ async fn actual_system_proxy_carries_wininet_http_and_restores_before_engine_sto
         stream.set_nonblocking(false).unwrap();
         stream.set_read_timeout(Some(TIMEOUT)).unwrap();
         stream.set_write_timeout(Some(TIMEOUT)).unwrap();
-        assert!(header(&mut stream).starts_with("CONNECT 192.0.2.123:80 "));
+        let connect = header(&mut stream);
+        let first_line = connect.lines().next().expect("upstream request line");
+        let method = match first_line.split_whitespace().next() {
+            Some("CONNECT") => "CONNECT",
+            Some("GET") => "GET",
+            Some("HEAD") => "HEAD",
+            _ => "other",
+        };
+        assert!(
+            connect.starts_with("CONNECT 192.0.2.123:80 "),
+            "unexpected upstream request: method={method}, first_line_sha256={}",
+            cfw_singbox_config::sha256_hex(first_line.as_bytes())
+        );
         stream
             .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             .unwrap();

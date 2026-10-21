@@ -66,6 +66,8 @@ pub use service_transport::{
 };
 #[cfg(windows)]
 mod listeners;
+#[cfg(all(windows, feature = "native-service-validation"))]
+pub mod native_wintun_validation;
 #[cfg(windows)]
 pub use lineage::{LineageError, WindowsEngineGenerationStore};
 #[cfg(all(windows, feature = "native-service-validation"))]

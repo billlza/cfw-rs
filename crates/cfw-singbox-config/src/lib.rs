@@ -15,7 +15,7 @@ mod dns_policy;
 mod domain_pattern;
 mod engine_settings;
 mod lan;
-pub use lan::access_rule as lan_access_rule;
+pub use lan::{LAN_INBOUND_TAG, access_rule as lan_access_rule};
 mod mainland;
 pub use engine_settings::{EngineLogLevel, LanProxySettings, RuntimePreferences};
 mod error;
@@ -50,8 +50,9 @@ pub use error::{ConfigError, ProfileParseError};
 pub use profile::{MAX_OUTBOUNDS, UtlsFingerprint};
 pub use projection::{
     AuthenticatedDnsServer, CONFIGURATION_IDENTITY_SCHEMA_VERSION, DEFAULT_MIXED_PORT,
-    EngineSettings, ProjectedConfig, ProjectionMode, ProxyProbe, TUNNEL_ADDRESS_PLAN,
-    TunnelAddressPlan, TunnelStack, configuration_identity_digest,
+    EngineSettings, ProjectedConfig, ProjectionMode, ProxyProbe, ROUTING_CACHE_PATH,
+    SYSTEM_PROXY_INBOUND_TAG, TUNNEL_ADDRESS_PLAN, TUNNEL_INBOUND_TAG, TunnelAddressPlan,
+    TunnelStack, configuration_identity_digest,
 };
 pub use release_dns::ReleaseDnsEvidenceCase;
 pub use release_packet::{

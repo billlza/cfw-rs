@@ -237,3 +237,97 @@ fn shared_credential_slots_require_exact_placeholders_audience_and_material() {
         CredentialAudience::new("cccccccc-cccc-4ccc-8ccc-cccccccccccc", "a".repeat(64)).unwrap();
     assert!(CheckedStartConfiguration::new(audience).is_err());
 }
+
+fn projected_request(
+    source: &str,
+    mode: ProjectionMode,
+    settings: &EngineSettings,
+    stack: cfw_singbox_config::TunnelStack,
+) -> EngineStartRequest {
+    let projection = ValidatedSingBoxProfile::parse(source)
+        .unwrap()
+        .project_with_tunnel_stack(PROFILE, mode, settings, stack)
+        .unwrap();
+    EngineStartRequest {
+        context: EngineCommandContext {
+            installation_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".into(),
+            config_epoch: 3,
+            generation: 7,
+        },
+        mode,
+        credential_audience: projection.credential_audience().clone(),
+        config_json: projection.as_json().into(),
+        config_content_digest: projection.configuration_digest().into(),
+        config_digest: projection.digest().into(),
+        credential_slots: projection.credential_slots().to_vec(),
+        tunnel_options: mode.has_tunnel().then_some(TunnelNetworkOptions {
+            ipv6_enabled: settings.enable_ipv6,
+            bypass_private_networks: settings.bypass_private_networks,
+            direct_ipv4_hosts: projection.direct_ipv4_hosts(),
+            mtu: settings.tunnel_mtu,
+            system_proxy_port: (mode == ProjectionMode::TunnelSystemProxy)
+                .then_some(settings.mixed_port),
+        }),
+    }
+}
+
+const MAINLAND_SOURCE: &str = r#"{"outbounds":[{"type":"socks5","tag":"proxy","server":"node.example.com","server_port":1080}]}"#;
+
+#[test]
+fn proxy_admission_keeps_the_projected_routing_cache() {
+    // Mainland China direct projects rule sets and their private routing
+    // cache. The Windows boundary previously rejected this GA projection.
+    let settings = EngineSettings {
+        mainland_china_direct: true,
+        ..EngineSettings::default()
+    };
+    for mode in [ProjectionMode::LocalProxy, ProjectionMode::SystemProxy] {
+        let request = projected_request(
+            MAINLAND_SOURCE,
+            mode,
+            &settings,
+            cfw_singbox_config::TunnelStack::Gvisor,
+        );
+        let document: Value = serde_json::from_str(&request.config_json).unwrap();
+        assert_eq!(
+            document["experimental"]["cache_file"],
+            serde_json::json!({"cache_id":PROFILE,"enabled":true,"path":"routing-cache.db"}),
+            "{mode:?} fixture no longer exercises the projected cache"
+        );
+        let checked = CheckedStartConfiguration::new(request).unwrap();
+        let prepared = checked.prepare_proxy([]).unwrap();
+        assert_eq!(prepared.mode(), mode);
+    }
+}
+
+#[test]
+fn proxy_routing_cache_cannot_leave_the_projected_shape() {
+    let settings = EngineSettings {
+        mainland_china_direct: true,
+        ..EngineSettings::default()
+    };
+    for change in 0..6 {
+        let mut value = projected_request(
+            MAINLAND_SOURCE,
+            ProjectionMode::SystemProxy,
+            &settings,
+            cfw_singbox_config::TunnelStack::Gvisor,
+        );
+        edit(&mut value, |root| {
+            let cache = &mut root["experimental"]["cache_file"];
+            match change {
+                0 => cache["path"] = r"C:\ProgramData\foreign.db".into(),
+                1 => cache["path"] = "../routing-cache.db".into(),
+                2 => cache["cache_id"] = "cccccccc-cccc-4ccc-8ccc-cccccccccccc".into(),
+                3 => cache["store_fakeip"] = true.into(),
+                4 => cache["enabled"] = false.into(),
+                5 => cache["store_rdrc"] = true.into(),
+                _ => unreachable!(),
+            }
+        });
+        assert!(
+            CheckedStartConfiguration::new(value).is_err(),
+            "routing cache change {change}"
+        );
+    }
+}

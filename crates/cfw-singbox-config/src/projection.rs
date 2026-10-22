@@ -60,6 +60,13 @@ pub struct TunnelAddressPlan {
     pub ipv6_dns_peer: &'static str,
 }
 
+/// Application-owned identities in every projection. Native admission
+/// boundaries compare these exact values; they are not profile choices.
+pub const SYSTEM_PROXY_INBOUND_TAG: &str = "cfw-system-proxy";
+pub const TUNNEL_INBOUND_TAG: &str = "cfw-tunnel";
+/// Relative to the engine's private working directory.
+pub const ROUTING_CACHE_PATH: &str = "routing-cache.db";
+
 pub const TUNNEL_ADDRESS_PLAN: TunnelAddressPlan = TunnelAddressPlan {
     ipv4_address: "198.18.64.1",
     ipv4_prefix_length: 30,
@@ -473,7 +480,7 @@ impl ValidatedSingBoxProfile {
                 }
                 json!({
                     "type": "mixed",
-                    "tag": "cfw-system-proxy",
+                    "tag": SYSTEM_PROXY_INBOUND_TAG,
                     "listen": "127.0.0.1",
                     "listen_port": settings.mixed_port
                 })
@@ -491,7 +498,7 @@ impl ValidatedSingBoxProfile {
                 }
                 json!({
                     "type": "tun",
-                    "tag": "cfw-tunnel",
+                    "tag": TUNNEL_INBOUND_TAG,
                     "address": addresses,
                     // The native platform owner installs routes. This engine
                     // processes only the packets supplied by that owner.
@@ -508,7 +515,7 @@ impl ValidatedSingBoxProfile {
             }
             inbounds.push(json!({
                 "type": "mixed",
-                "tag": "cfw-system-proxy",
+                "tag": SYSTEM_PROXY_INBOUND_TAG,
                 "listen": "127.0.0.1",
                 "listen_port": settings.mixed_port,
             }));
@@ -607,7 +614,7 @@ impl ValidatedSingBoxProfile {
         }
         if needs_routing_cache || fake_ip {
             let mut cache =
-                json!({"enabled": true, "path": "routing-cache.db", "cache_id": profile_id});
+                json!({"enabled": true, "path": ROUTING_CACHE_PATH, "cache_id": profile_id});
             if fake_ip {
                 cache["store_fakeip"] = json!(true);
             }

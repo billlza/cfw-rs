@@ -2,7 +2,8 @@
 use crate::LanProxySettings;
 use serde_json::{Value, json};
 
-pub(crate) const LAN_INBOUND_TAG: &str = "cfw-lan-proxy";
+/// Exact tag of the optional LAN ingress; native admission matches this value.
+pub const LAN_INBOUND_TAG: &str = "cfw-lan-proxy";
 
 pub(crate) fn inbound(settings: &LanProxySettings) -> Value {
     json!({"type":"mixed","tag":LAN_INBOUND_TAG,"listen":settings.listen,"listen_port":settings.port})

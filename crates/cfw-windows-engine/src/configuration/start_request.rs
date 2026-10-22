@@ -3,9 +3,10 @@
 use super::{Error, PreparedConfig, ResolvedProjection, SecretDocument, serialize_bounded};
 use cfw_engine_api::{EngineCommandContext, EngineStartRequest};
 use cfw_singbox_config::{
-    CredentialAudience, CredentialRef, CredentialSlot, LanProxySettings, MAX_ENGINE_CONFIG_BYTES,
-    ProjectionMode, canonicalize_configuration_value, configuration_identity_digest,
-    lan_access_rule, sha256_hex, validate_credential_slots,
+    CredentialAudience, CredentialRef, CredentialSlot, LAN_INBOUND_TAG, LanProxySettings,
+    MAX_ENGINE_CONFIG_BYTES, ProjectionMode, ROUTING_CACHE_PATH, SYSTEM_PROXY_INBOUND_TAG,
+    canonicalize_configuration_value, configuration_identity_digest, lan_access_rule, sha256_hex,
+    validate_credential_slots,
 };
 use serde_json::Value;
 use std::{
@@ -128,7 +129,7 @@ impl CheckedStartConfiguration {
         validate_credential_slots(&document.0, &request.credential_slots)
             .map_err(|_| Error::Configuration("invalid native credential slot binding"))?;
         if !request.mode.has_tunnel() {
-            proxy_controller(&document.0)?;
+            proxy_controller(&document.0, &request.credential_audience)?;
         }
         Ok(())
     }
@@ -152,7 +153,7 @@ impl CheckedStartConfiguration {
         if self.mode().has_tunnel() {
             return Err(Error::Configuration("platform mode is not yet admitted"));
         }
-        let controller = proxy_controller(&self.document()?.0)?;
+        let controller = proxy_controller(&self.document()?.0, &self.request.credential_audience)?;
         let resolved = self.resolve(material)?;
         PreparedConfig::from_parts(
             resolved,
@@ -165,7 +166,7 @@ impl CheckedStartConfiguration {
 }
 
 fn invalid() -> Error {
-    Error::Configuration("native proxy template violates application-owned endpoints")
+    Error::Configuration("native data-plane template violates application-owned endpoints")
 }
 fn port(value: &Value) -> Result<u16, Error> {
     value
@@ -182,10 +183,16 @@ fn exact_keys(value: &Value, keys: &[&str]) -> Result<(), Error> {
     Ok(())
 }
 
-fn proxy_controller(root: &Value) -> Result<SocketAddr, Error> {
-    // The SystemProxy/LocalProxy cleanup contract owns a process tree and user
-    // proxy settings, never an additional managed interface or service. These
-    // are exactly the top-level sections emitted by the shared projection.
+/// Sections every application-owned data plane shares. The routing cache is
+/// the projection's private file in the engine working directory; fake-IP
+/// storage exists only in Tunnel projections. Returns the private controller.
+fn owned_controller(
+    root: &Value,
+    audience: &CredentialAudience,
+    tunnel: bool,
+) -> Result<SocketAddr, Error> {
+    // These are exactly the top-level sections emitted by the shared
+    // projection; no other managed interface or service can be requested.
     let object = root.as_object().ok_or_else(invalid)?;
     if object.keys().any(|key| {
         !matches!(
@@ -195,7 +202,17 @@ fn proxy_controller(root: &Value) -> Result<SocketAddr, Error> {
     }) {
         return Err(invalid());
     }
-    exact_keys(&root["experimental"], &["clash_api"])?;
+    let experimental = root["experimental"].as_object().ok_or_else(invalid)?;
+    if !experimental.contains_key("clash_api")
+        || experimental
+            .keys()
+            .any(|key| !matches!(key.as_str(), "clash_api" | "cache_file"))
+    {
+        return Err(invalid());
+    }
+    if let Some(cache) = experimental.get("cache_file") {
+        routing_cache(cache, audience, tunnel)?;
+    }
     if let Some(endpoints) = object.get("endpoints") {
         for endpoint in endpoints.as_array().ok_or_else(invalid)? {
             // Shared WireGuard projection always requests the userspace stack.
@@ -230,6 +247,32 @@ fn proxy_controller(root: &Value) -> Result<SocketAddr, Error> {
     {
         return Err(invalid());
     }
+    Ok(controller)
+}
+
+fn routing_cache(cache: &Value, audience: &CredentialAudience, tunnel: bool) -> Result<(), Error> {
+    let fake_ip = cache.get("store_fakeip").is_some();
+    if fake_ip {
+        exact_keys(cache, &["enabled", "path", "cache_id", "store_fakeip"])?;
+        if !tunnel || cache["store_fakeip"] != true {
+            return Err(invalid());
+        }
+    } else {
+        exact_keys(cache, &["enabled", "path", "cache_id"])?;
+    }
+    if cache["enabled"] != true
+        || cache["path"] != ROUTING_CACHE_PATH
+        || cache["cache_id"] != audience.profile_id()
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+fn proxy_controller(root: &Value, audience: &CredentialAudience) -> Result<SocketAddr, Error> {
+    // The SystemProxy/LocalProxy cleanup contract owns a process tree and user
+    // proxy settings, never an additional managed interface or service.
+    let controller = owned_controller(root, audience, false)?;
     let inbounds = root["inbounds"].as_array().ok_or_else(invalid)?;
     if !(1..=2).contains(&inbounds.len()) {
         return Err(invalid());
@@ -238,36 +281,13 @@ fn proxy_controller(root: &Value) -> Result<SocketAddr, Error> {
     let mut lan = false;
     let mut ports = BTreeSet::from([controller.port()]);
     for inbound in inbounds {
-        exact_keys(inbound, &["type", "tag", "listen", "listen_port"])?;
-        if inbound["type"] != "mixed" {
-            return Err(invalid());
-        }
-        let listen_text = inbound["listen"].as_str().ok_or_else(invalid)?;
-        let address: Ipv4Addr = listen_text.parse().map_err(|_| invalid())?;
-        let port = port(&inbound["listen_port"])?;
-        if address.to_string() != listen_text || !ports.insert(port) {
-            return Err(invalid());
-        }
+        let (address, port) = mixed_listener(inbound, &mut ports)?;
         match inbound["tag"].as_str() {
-            Some("cfw-system-proxy") if !main && address == Ipv4Addr::LOCALHOST => main = true,
-            Some("cfw-lan-proxy") if !lan => {
-                let rule = &root["route"]["rules"][0];
-                let sources = rule["rules"][1]["source_ip_cidr"]
-                    .as_array()
-                    .ok_or_else(invalid)?;
-                let settings = LanProxySettings {
-                    listen: address,
-                    port,
-                    allowed_source_cidrs: sources
-                        .iter()
-                        .map(|v| v.as_str().map(str::to_owned).ok_or_else(invalid))
-                        .collect::<Result<_, _>>()?,
-                };
-                settings.validate().map_err(|_| invalid())?;
-                let expected = lan_access_rule(&settings);
-                if rule != &expected {
-                    return Err(invalid());
-                }
+            Some(SYSTEM_PROXY_INBOUND_TAG) if !main && address == Ipv4Addr::LOCALHOST => {
+                main = true
+            }
+            Some(LAN_INBOUND_TAG) if !lan => {
+                lan_listener(root, address, port)?;
                 lan = true;
             }
             _ => return Err(invalid()),
@@ -277,6 +297,41 @@ fn proxy_controller(root: &Value) -> Result<SocketAddr, Error> {
         return Err(invalid());
     }
     Ok(controller)
+}
+
+fn mixed_listener(inbound: &Value, ports: &mut BTreeSet<u16>) -> Result<(Ipv4Addr, u16), Error> {
+    exact_keys(inbound, &["type", "tag", "listen", "listen_port"])?;
+    if inbound["type"] != "mixed" {
+        return Err(invalid());
+    }
+    let listen_text = inbound["listen"].as_str().ok_or_else(invalid)?;
+    let address: Ipv4Addr = listen_text.parse().map_err(|_| invalid())?;
+    let port = port(&inbound["listen_port"])?;
+    if address.to_string() != listen_text || !ports.insert(port) {
+        return Err(invalid());
+    }
+    Ok((address, port))
+}
+
+/// The LAN listener is admitted only with its exact first source policy rule.
+fn lan_listener(root: &Value, address: Ipv4Addr, port: u16) -> Result<(), Error> {
+    let rule = &root["route"]["rules"][0];
+    let sources = rule["rules"][1]["source_ip_cidr"]
+        .as_array()
+        .ok_or_else(invalid)?;
+    let settings = LanProxySettings {
+        listen: address,
+        port,
+        allowed_source_cidrs: sources
+            .iter()
+            .map(|v| v.as_str().map(str::to_owned).ok_or_else(invalid))
+            .collect::<Result<_, _>>()?,
+    };
+    settings.validate().map_err(|_| invalid())?;
+    if rule != &lan_access_rule(&settings) {
+        return Err(invalid());
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -8,15 +8,33 @@
 //! pinned sing-tun echoes Windows' own multicast, broadcast and link-local
 //! packets back unchanged, and those are refused here instead of re-entering
 //! the stack. Link-local sources are refused because no proxied reply can
-//! carry one, while router advertisements and redirects require one.
-use super::{Result, packet::Header};
+//! carry one, while ICMPv6 router advertisements and redirects require one.
+//! ICMP is limited to echo replies and to destination unreachable, time
+//! exceeded and parameter problem reports (ICMPv6 also packet too big) that
+//! arrive unfragmented and quote a packet Windows sent from the adapter's own
+//! address. Redirects, router and neighbour discovery, multicast listener
+//! messages and every other type are refused, so the engine cannot change the
+//! host's routes, neighbours or group membership, nor report errors for flows
+//! that never used the tunnel.
+use super::{
+    Result,
+    packet::{Header, Message},
+};
 use std::{
     fmt,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
 
-const IPV4_TRANSPORTS: [u8; 3] = [1, 6, 17];
-const IPV6_TRANSPORTS: [u8; 3] = [6, 17, 58];
+const ICMPV4: u8 = 1;
+const ICMPV6: u8 = 58;
+const IPV4_TRANSPORTS: [u8; 3] = [ICMPV4, 6, 17];
+const IPV6_TRANSPORTS: [u8; 3] = [6, 17, ICMPV6];
+const ICMPV4_ECHO_REPLY: u8 = 0;
+/// Destination unreachable, time exceeded, parameter problem.
+const ICMPV4_ERRORS: [u8; 3] = [3, 11, 12];
+const ICMPV6_ECHO_REPLY: u8 = 129;
+/// Destination unreachable, packet too big, time exceeded, parameter problem.
+const ICMPV6_ERRORS: [u8; 4] = [1, 2, 3, 4];
 
 /// The adapter's own unicast addresses: IPv4 always, IPv6 only when the
 /// tunnel enables it. Build it from the addresses actually assigned.
@@ -33,7 +51,10 @@ pub enum RefusalReason {
     /// A source no remote peer can hold, or the adapter's own address.
     Source,
     /// IPv4 options, IPv6 extension headers other than one fragment
-    /// header, or a protocol outside TCP, UDP and ICMP or ICMPv6.
+    /// header, a protocol outside TCP, UDP and ICMP or ICMPv6, or an ICMP
+    /// message other than an echo reply or an unfragmented destination
+    /// unreachable, packet too big, time exceeded or parameter problem
+    /// report that quotes the adapter's own address.
     Protocol,
 }
 impl fmt::Display for RefusalReason {
@@ -81,6 +102,8 @@ impl DeliveryPolicy {
                 source,
                 destination,
                 transport,
+                message,
+                quoted,
             } => (
                 IpAddr::V4(source),
                 IpAddr::V4(destination),
@@ -88,7 +111,15 @@ impl DeliveryPolicy {
                     Some(RefusalReason::Destination)
                 } else if !remote_ipv4(source) || source == self.ipv4 {
                     Some(RefusalReason::Source)
-                } else if !transport.is_some_and(|protocol| IPV4_TRANSPORTS.contains(&protocol)) {
+                } else if !transport.is_some_and(|protocol| IPV4_TRANSPORTS.contains(&protocol))
+                    || (transport == Some(ICMPV4)
+                        && !icmp_admitted(
+                            message,
+                            ICMPV4_ECHO_REPLY,
+                            &ICMPV4_ERRORS,
+                            quoted == Some(self.ipv4),
+                        ))
+                {
                     Some(RefusalReason::Protocol)
                 } else {
                     None
@@ -98,6 +129,8 @@ impl DeliveryPolicy {
                 source,
                 destination,
                 transport,
+                message,
+                quoted,
             } => (
                 IpAddr::V6(source),
                 IpAddr::V6(destination),
@@ -105,7 +138,15 @@ impl DeliveryPolicy {
                     Some(RefusalReason::Destination)
                 } else if !remote_ipv6(source) || self.ipv6 == Some(source) {
                     Some(RefusalReason::Source)
-                } else if !transport.is_some_and(|protocol| IPV6_TRANSPORTS.contains(&protocol)) {
+                } else if !transport.is_some_and(|protocol| IPV6_TRANSPORTS.contains(&protocol))
+                    || (transport == Some(ICMPV6)
+                        && !icmp_admitted(
+                            message,
+                            ICMPV6_ECHO_REPLY,
+                            &ICMPV6_ERRORS,
+                            quoted.is_some() && quoted == self.ipv6,
+                        ))
+                {
                     Some(RefusalReason::Protocol)
                 } else {
                     None
@@ -120,6 +161,20 @@ impl DeliveryPolicy {
                 destination,
             }),
         }
+    }
+}
+
+/// An echo reply may be fragmented. An error report is at most 576 (IPv4) or
+/// 1280 (IPv6) bytes, so it must be whole and quote a packet Windows sent from
+/// the adapter's own address. A later fragment has no type to check and cannot
+/// be reassembled without its first fragment, which is checked; it cannot
+/// overwrite the type either, since it starts at least eight bytes in.
+fn icmp_admitted(message: Message, echo_reply: u8, errors: &[u8], quotes_own: bool) -> bool {
+    match message {
+        Message::Whole(Some(kind)) => kind == echo_reply || (errors.contains(&kind) && quotes_own),
+        Message::First(Some(kind)) => kind == echo_reply,
+        Message::Continuation => true,
+        Message::Whole(None) | Message::First(None) => false,
     }
 }
 
@@ -153,11 +208,14 @@ mod tests {
         DeliveryPolicy::new(OWN4, Some(OWN6)).unwrap()
     }
 
+    /// For ICMP the message is a whole echo reply; other transports ignore it.
     fn v4(source: Ipv4Addr, destination: Ipv4Addr, transport: Option<u8>) -> Header {
         Header::V4 {
             source,
             destination,
             transport,
+            message: Message::Whole(Some(0)),
+            quoted: None,
         }
     }
 
@@ -166,6 +224,8 @@ mod tests {
             source,
             destination,
             transport,
+            message: Message::Whole(Some(129)),
+            quoted: None,
         }
     }
 
@@ -368,6 +428,142 @@ mod tests {
         assert_eq!(RefusalReason::Destination.to_string(), "destination");
         assert_eq!(RefusalReason::Source.to_string(), "source");
         assert_eq!(RefusalReason::Protocol.to_string(), "protocol");
+    }
+
+    #[test]
+    fn packet_policy_admits_only_echo_replies_and_errors_about_tunnel_packets() {
+        let policy = policy();
+        let icmp4 = |message, quoted| Header::V4 {
+            source: PEER4,
+            destination: OWN4,
+            transport: Some(1),
+            message,
+            quoted,
+        };
+        let icmp6 = |message, quoted| Header::V6 {
+            source: PEER6,
+            destination: OWN6,
+            transport: Some(58),
+            message,
+            quoted,
+        };
+        // Echo replies, also fragmented, and errors quoting the adapter.
+        for message in [Message::Whole(Some(0)), Message::First(Some(0))] {
+            policy.admit(&icmp4(message, None)).unwrap();
+        }
+        for kind in [3, 11, 12] {
+            policy
+                .admit(&icmp4(Message::Whole(Some(kind)), Some(OWN4)))
+                .unwrap();
+            // An error about another sender, about no packet, or fragmented.
+            for (message, quoted) in [
+                (Message::Whole(Some(kind)), Some(PEER4)),
+                (Message::Whole(Some(kind)), Some(Ipv4Addr::new(10, 0, 0, 2))),
+                (Message::Whole(Some(kind)), None),
+                (Message::First(Some(kind)), Some(OWN4)),
+            ] {
+                assert_eq!(
+                    refused(&policy, icmp4(message, quoted)),
+                    RefusalReason::Protocol,
+                    "{kind} {quoted:?}"
+                );
+            }
+        }
+        // Echo request, source quench, redirect, router advertisement and
+        // solicitation, timestamp, information and address mask messages.
+        for kind in [8, 4, 5, 9, 10, 13, 14, 15, 16, 17, 18, 30, 255] {
+            for message in [Message::Whole(Some(kind)), Message::First(Some(kind))] {
+                assert_eq!(
+                    refused(&policy, icmp4(message, Some(OWN4))),
+                    RefusalReason::Protocol,
+                    "{kind}"
+                );
+            }
+        }
+        for message in [Message::Whole(Some(129)), Message::First(Some(129))] {
+            policy.admit(&icmp6(message, None)).unwrap();
+        }
+        for kind in [1, 2, 3, 4] {
+            policy
+                .admit(&icmp6(Message::Whole(Some(kind)), Some(OWN6)))
+                .unwrap();
+            for (message, quoted) in [
+                (Message::Whole(Some(kind)), Some(PEER6)),
+                (Message::Whole(Some(kind)), None),
+                (Message::First(Some(kind)), Some(OWN6)),
+            ] {
+                assert_eq!(
+                    refused(&policy, icmp6(message, quoted)),
+                    RefusalReason::Protocol,
+                    "{kind} {quoted:?}"
+                );
+            }
+        }
+        // Echo request, multicast listener, router and neighbour discovery,
+        // redirect, renumbering, inverse discovery, MLDv2, mobility and
+        // multicast router discovery messages.
+        for kind in [
+            128, 130, 131, 132, 133, 134, 135, 136, 137, 138, 141, 142, 143, 144, 145, 146, 147,
+            151, 152, 153, 200, 255,
+        ] {
+            for message in [Message::Whole(Some(kind)), Message::First(Some(kind))] {
+                assert_eq!(
+                    refused(&policy, icmp6(message, Some(OWN6))),
+                    RefusalReason::Protocol,
+                    "{kind}"
+                );
+            }
+        }
+        // Without an IPv6 address, an ICMPv6 error cannot quote one; the
+        // destination check refuses it first.
+        let ipv4_only = DeliveryPolicy::new(OWN4, None).unwrap();
+        assert_eq!(
+            refused(&ipv4_only, icmp6(Message::Whole(Some(2)), Some(OWN6))),
+            RefusalReason::Destination
+        );
+        // A message too short for its type is refused; a later fragment
+        // carries no type and is admitted.
+        for message in [Message::Whole(None), Message::First(None)] {
+            assert_eq!(
+                refused(&policy, icmp4(message, Some(OWN4))),
+                RefusalReason::Protocol
+            );
+            assert_eq!(
+                refused(&policy, icmp6(message, Some(OWN6))),
+                RefusalReason::Protocol
+            );
+        }
+        policy.admit(&icmp4(Message::Continuation, None)).unwrap();
+        policy.admit(&icmp6(Message::Continuation, None)).unwrap();
+        // TCP and UDP do not depend on the message position, its first byte
+        // or a quoted address.
+        for message in [
+            Message::Whole(None),
+            Message::Whole(Some(5)),
+            Message::First(Some(134)),
+            Message::Continuation,
+        ] {
+            for transport in [6, 17] {
+                policy
+                    .admit(&Header::V4 {
+                        source: PEER4,
+                        destination: OWN4,
+                        transport: Some(transport),
+                        message,
+                        quoted: Some(PEER4),
+                    })
+                    .unwrap();
+                policy
+                    .admit(&Header::V6 {
+                        source: PEER6,
+                        destination: OWN6,
+                        transport: Some(transport),
+                        message,
+                        quoted: None,
+                    })
+                    .unwrap();
+            }
+        }
     }
 
     #[test]

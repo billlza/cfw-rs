@@ -440,11 +440,26 @@ fn packet_pump_refuses_engine_packets_outside_the_policy_and_keeps_running() {
         Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0x16),
         0,
     );
-    let icmp = ipv4_between(84, 8, PEER4, OWN4, 1);
-    let icmpv6 = ipv6_between(104, 10, PEER6, OWN6, 58);
+    // An echo reply and a packet-too-big report are what the engine sends.
+    let mut icmp = ipv4_between(84, 8, PEER4, OWN4, 1);
+    icmp[20] = 0;
+    let mut icmpv6 = ipv6_between(104, 10, PEER6, OWN6, 58);
+    icmpv6[40] = 2;
+    // The report quotes the IPv6 header Windows sent from the adapter.
+    icmpv6[48] = 0x60;
+    icmpv6[56..72].copy_from_slice(&OWN6.octets());
     // gVisor fragments an oversized UDP reply behind one fragment header.
     let mut fragment = ipv6_between(1000, 11, PEER6, OWN6, 44);
     fragment[40] = UDP;
+    fragment[41] = 0;
+    fragment[42..44].copy_from_slice(&1u16.to_be_bytes());
+    // A redirect and a router advertisement from a routable source would
+    // change the host's routes.
+    let mut redirect = ipv4_between(64, 12, PEER4, OWN4, 1);
+    redirect[6] = 0x40;
+    redirect[20] = 5;
+    let mut router = ipv6_between(88, 13, PEER6, OWN6, 58);
+    router[40] = 134;
     let written = [
         &admitted_v4,
         &echo,
@@ -454,7 +469,9 @@ fn packet_pump_refuses_engine_packets_outside_the_policy_and_keeps_running() {
         &advertisement,
         &multicast,
         &icmp,
+        &redirect,
         &icmpv6,
+        &router,
         &fragment,
     ];
     let retirement = thread::scope(|scope| {
@@ -469,7 +486,7 @@ fn packet_pump_refuses_engine_packets_outside_the_policy_and_keeps_running() {
                 && report.refused.destination.packets
                     + report.refused.source.packets
                     + report.refused.protocol.packets
-                    == 5
+                    == 7
         }));
         assert!(!pump.control().terminated());
         pump.control().expect_peer_close();
@@ -519,8 +536,8 @@ fn packet_pump_refuses_engine_packets_outside_the_policy_and_keeps_running() {
                 ),
             },
             protocol: RefusedClass {
-                packets: 1,
-                bytes: 120,
+                packets: 3,
+                bytes: 120 + 64 + 88,
                 first: refusal(RefusalReason::Protocol, PEER4.into(), OWN4.into()),
             },
         }

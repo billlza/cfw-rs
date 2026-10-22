@@ -1,8 +1,9 @@
 //! One owned Wintun session exchanging complete IP packets with one packet
 //! endpoint, on two scoped workers. This data-plane primitive grants no
 //! Authority lease and changes no adapter, address, route, DNS, firewall or
-//! proxy state. Engine-to-system packets are validated only as IP packets; a
-//! destination policy is still required before a SYSTEM service hosts it.
+//! proxy state. Engine-to-system packets reach the session only when the
+//! owner's `DeliveryPolicy` admits them; refused packets are counted by
+//! reason and never end the run.
 //!
 //! Retirement order: the owner calls `expect_peer_close`, stops the engine
 //! (which closes its endpoint first, so it can report a clean Stopped), then
@@ -13,6 +14,7 @@ use super::{
     Error, PACKET_TRANSFER_BOUND, PumpDirection, Result, Session,
     channel::{PacketReceiver, PacketSender, PacketServer},
     merge_failures, peer_close_code,
+    policy::{DeliveryPolicy, Refusal, RefusalReason},
     session::{SessionReceiver, SessionSender},
 };
 use crate::ServiceTransportError;
@@ -20,7 +22,7 @@ use std::{
     any::Any,
     os::windows::io::OwnedHandle,
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU64, AtomicUsize, Ordering},
     },
     thread::{self, Scope, ScopedJoinHandle},
@@ -44,12 +46,32 @@ pub struct DirectionCounters {
     pub largest_packet: usize,
 }
 
+/// Engine packets the delivery policy refused for one reason. They never
+/// reached the session, so `to_system` keeps matching what the adapter
+/// received. `first` is the earliest refusal for this reason. A report taken
+/// while the pump runs may trail by one packet; a retirement report is exact.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RefusedClass {
+    pub packets: u64,
+    pub bytes: u64,
+    pub first: Option<Refusal>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RefusedPackets {
+    pub destination: RefusedClass,
+    pub source: RefusedClass,
+    pub protocol: RefusedClass,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PumpReport {
     pub to_engine: DirectionCounters,
     pub to_system: DirectionCounters,
     /// Bounded retries while the system send ring was full.
     pub ring_full_waits: u64,
+    /// Engine packets the delivery policy kept from the system.
+    pub refused: RefusedPackets,
 }
 
 /// Constructed only by `finish`: both workers joined without a failure, the
@@ -92,6 +114,30 @@ impl Tally {
     }
 }
 
+/// Written only by the engine-to-system worker; the first refusal is set
+/// before the counts, so a snapshot with packets has its sample.
+#[derive(Default)]
+struct RefusalTally {
+    packets: AtomicU64,
+    bytes: AtomicU64,
+    first: OnceLock<Refusal>,
+}
+impl RefusalTally {
+    fn add(&self, refusal: Refusal, length: usize) {
+        self.first.get_or_init(|| refusal);
+        self.packets.fetch_add(1, Ordering::Release);
+        self.bytes.fetch_add(length as u64, Ordering::Relaxed);
+    }
+    fn snapshot(&self) -> RefusedClass {
+        let packets = self.packets.load(Ordering::Acquire);
+        RefusedClass {
+            packets,
+            bytes: self.bytes.load(Ordering::Relaxed),
+            first: self.first.get().copied(),
+        }
+    }
+}
+
 struct Shared {
     /// The endpoint's irreversible cancellation: earlier PacketCancellation
     /// handles and this pump stop the same two workers.
@@ -103,6 +149,9 @@ struct Shared {
     to_engine: Tally,
     to_system: Tally,
     ring_full_waits: AtomicU64,
+    refused_destination: RefusalTally,
+    refused_source: RefusalTally,
+    refused_protocol: RefusalTally,
 }
 impl Shared {
     fn new(abort: Arc<AtomicBool>) -> Self {
@@ -115,7 +164,18 @@ impl Shared {
             to_engine: Tally::default(),
             to_system: Tally::default(),
             ring_full_waits: AtomicU64::new(0),
+            refused_destination: RefusalTally::default(),
+            refused_source: RefusalTally::default(),
+            refused_protocol: RefusalTally::default(),
         }
+    }
+    fn refuse(&self, refusal: Refusal, length: usize) {
+        match refusal.reason {
+            RefusalReason::Destination => &self.refused_destination,
+            RefusalReason::Source => &self.refused_source,
+            RefusalReason::Protocol => &self.refused_protocol,
+        }
+        .add(refusal, length);
     }
     fn aborted(&self) -> bool {
         self.abort.load(Ordering::Acquire)
@@ -146,6 +206,11 @@ impl Shared {
             to_engine: self.to_engine.snapshot(),
             to_system: self.to_system.snapshot(),
             ring_full_waits: self.ring_full_waits.load(Ordering::Relaxed),
+            refused: RefusedPackets {
+                destination: self.refused_destination.snapshot(),
+                source: self.refused_source.snapshot(),
+                protocol: self.refused_protocol.snapshot(),
+            },
         }
     }
 }
@@ -223,14 +288,16 @@ pub struct PacketPump<'scope> {
 
 impl<'scope> PacketPump<'scope> {
     /// Consume the endpoint and borrow the session exclusively for both
-    /// workers. A failed start stops and joins whatever already started.
+    /// workers. `policy` names the adapter addresses the owner assigned. A
+    /// failed start stops and joins whatever already started.
     pub fn start(
         scope: &'scope Scope<'scope, '_>,
         session: &'scope mut Session<'_>,
         server: PacketServer,
+        policy: DeliveryPolicy,
     ) -> Result<Self> {
         let (incoming, outgoing) = session.split();
-        Self::start_halves(scope, incoming, outgoing, server)
+        Self::start_halves(scope, incoming, outgoing, server, policy)
     }
 
     pub(crate) fn start_halves(
@@ -238,6 +305,7 @@ impl<'scope> PacketPump<'scope> {
         incoming: SessionReceiver<'scope>,
         outgoing: SessionSender<'scope>,
         server: PacketServer,
+        policy: DeliveryPolicy,
     ) -> Result<Self> {
         let parts = server.into_pump_parts()?;
         if parts.mtu != incoming.mtu() {
@@ -270,7 +338,7 @@ impl<'scope> PacketPump<'scope> {
                 .name("cfw-tunnel-to-system".into())
                 .spawn_scoped(scope, move || {
                     supervise(&worker, PumpDirection::ToSystem, || {
-                        to_system(&outgoing, endpoint_reader, &worker)
+                        to_system(&outgoing, endpoint_reader, &worker, &policy)
                     })
                 })
                 .map_err(|source| Error::Native {
@@ -444,6 +512,7 @@ fn to_system(
     session: &SessionSender<'_>,
     mut endpoint: PacketReceiver,
     shared: &Shared,
+    policy: &DeliveryPolicy,
 ) -> Result<()> {
     let outcome = (|| {
         loop {
@@ -451,7 +520,13 @@ fn to_system(
                 return Ok(());
             }
             match endpoint.receive(Instant::now() + WAIT_SLICE, &shared.abort) {
-                Ok(Some(packet)) => deliver(session, packet.as_bytes(), shared)?,
+                Ok(Some(packet)) => {
+                    let bytes = packet.payload.as_bytes();
+                    match policy.admit(&packet.header) {
+                        Ok(()) => deliver(session, bytes, shared)?,
+                        Err(refusal) => shared.refuse(refusal, bytes.len()),
+                    }
+                }
                 Ok(None) => {}
                 Err(error) => return endpoint_exit(PumpDirection::ToSystem, error, shared),
             }

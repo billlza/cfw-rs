@@ -11,7 +11,10 @@ use super::{
 };
 use crate::{
     CheckedStartConfiguration, EngineProcess, VerifiedExecutable,
-    tunnel::{PacketPump, PacketServer},
+    tunnel::{
+        DeliveryPolicy, InterfaceCounters, PacketPump, PacketServer, PumpReport, Refusal,
+        RefusedClass,
+    },
 };
 use cfw_engine_api::{EngineCommandContext, EngineStartRequest, TunnelNetworkOptions};
 use cfw_singbox_config::{EngineSettings, ProjectionMode, TunnelStack, ValidatedSingBoxProfile};
@@ -253,7 +256,9 @@ fn forward(run: &Run<'_>, mtu: u16) -> Result<Value> {
             name: &name,
             luid,
         };
-        let exercised = exercise(run, &mut session, &identity, mtu);
+        let exercised = owned
+            .delivery_policy()
+            .and_then(|policy| exercise(run, &mut session, &identity, mtu, policy));
         let restored = owned.restore();
         drop(session);
         let mut receipt = combine(exercised, restored)?;
@@ -286,6 +291,7 @@ fn exercise(
     session: &mut crate::tunnel::Session<'_>,
     adapter: &Owned<'_>,
     mtu: u16,
+    policy: DeliveryPolicy,
 ) -> Result<Value> {
     let nonce = uuid::Uuid::new_v4().simple().to_string();
     // Fixture threads start before the inheritable packet endpoint exists.
@@ -311,7 +317,7 @@ fn exercise(
     let before =
         library::counters(adapter.luid, adapter.name).map_err(|error| error.to_string())?;
     let (traffic, observed, stopped, retired) = thread::scope(|scope| {
-        let pump = match PacketPump::start(scope, &mut *session, server) {
+        let pump = match PacketPump::start(scope, &mut *session, server, policy) {
             Ok(pump) => pump,
             Err(error) => {
                 let stopped = process.stop(TIMEOUT).map_err(|error| error.to_string());
@@ -341,7 +347,6 @@ fn exercise(
         };
         (traffic, observed, stopped, Some(retired))
     });
-    let after = library::counters(adapter.luid, adapter.name).map_err(|error| error.to_string());
     let mut failures = Vec::new();
     let traffic = traffic
         .map_err(|error| failures.push(format!("traffic: {error}")))
@@ -366,11 +371,8 @@ fn exercise(
         }
         None => None,
     };
-    let after = after
-        .map_err(|error| failures.push(format!("adapter counters: {error}")))
-        .ok();
-    let (Some(traffic), Some(observed), Some(stopped), Some(retirement), Some(after)) =
-        (traffic, observed, stopped, retirement, after)
+    let (Some(traffic), Some(observed), Some(stopped), Some(retirement)) =
+        (traffic, observed, stopped, retirement)
     else {
         drop(process);
         let fixture = fixture
@@ -397,6 +399,16 @@ fn exercise(
             "pump did not carry full-MTU packets in both directions: {report:?}"
         ));
     }
+    // Genuine engine output is always addressed to the adapter from a
+    // remote peer; only sing-tun's echoes of Windows' own multicast,
+    // broadcast and link-local packets may be refused, by destination.
+    if report.refused.source.packets != 0 || report.refused.protocol.packets != 0 {
+        return Err(format!(
+            "the delivery policy refused engine packets other than echoes: {:?}",
+            report.refused
+        ));
+    }
+    let after = received_equals_delivered(adapter, &before, &report)?;
     let control = causal_control(&fixture)?;
     let accepted = fixture.accepted();
     let observations = fixture.finish()?;
@@ -411,11 +423,58 @@ fn exercise(
             "to_engine":{"packets":report.to_engine.packets,"bytes":report.to_engine.bytes,"largest_packet":report.to_engine.largest_packet},
             "to_system":{"packets":report.to_system.packets,"bytes":report.to_system.bytes,"largest_packet":report.to_system.largest_packet},
             "ring_full_waits":report.ring_full_waits,"peer_close_code":retirement.peer_close_code(),
-            "server_endpoint_closed":true},
-        "interface_counters":{"before":before,"after":after},
+            "server_endpoint_closed":true,"refused":{
+                "destination":refused(&report.refused.destination),
+                "source":refused(&report.refused.source),
+                "protocol":refused(&report.refused.protocol)}},
+        "delivery_policy":{"ipv4":policy.ipv4().to_string(),
+            "ipv6":policy.ipv6().map(|address| address.to_string())},
+        "interface_counters":{"before":before,"after":after,"received_equals_delivered":true},
         "causal_control":control,"fixture_accepted_connections":accepted,"fixture":observations,
         "windows_to_engine_forwarding_verified":true,"engine_to_windows_forwarding_verified":true
     }))
+}
+
+fn refused(class: &RefusedClass) -> Value {
+    let sample = |refusal: &Refusal| {
+        json!({"reason":refusal.reason.to_string(),
+        "source":refusal.source.to_string(),"destination":refusal.destination.to_string()})
+    };
+    json!({"packets":class.packets,"bytes":class.bytes,"first":class.first.as_ref().map(sample)})
+}
+
+/// The adapter's receive counters grew by exactly the packets and bytes the
+/// pump delivered, with no non-unicast, discarded or erroneous receive. That
+/// refused packets were withheld from the session is the pump tests' proof.
+/// Wintun indicates packets asynchronously, so the counters may trail the
+/// pump's retirement briefly.
+fn received_equals_delivered(
+    adapter: &Owned<'_>,
+    before: &InterfaceCounters,
+    report: &PumpReport,
+) -> Result<InterfaceCounters> {
+    let delivered = report.to_system;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let after =
+            library::counters(adapter.luid, adapter.name).map_err(|error| error.to_string())?;
+        let grew = |now: u64, then: u64| now.checked_sub(then);
+        let matches = grew(after.in_unicast_packets, before.in_unicast_packets)
+            == Some(delivered.packets)
+            && grew(after.in_octets, before.in_octets) == Some(delivered.bytes)
+            && after.in_non_unicast_packets == before.in_non_unicast_packets
+            && after.in_discards == before.in_discards
+            && after.in_errors == before.in_errors;
+        if matches {
+            return Ok(after);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "adapter receive counters differ from the pump's deliveries: before {before:?}, after {after:?}, pump {report:?}"
+            ));
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// Both families: TCP bulk both ways and one full-MTU UDP datagram each.

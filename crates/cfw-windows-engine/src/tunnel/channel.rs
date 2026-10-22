@@ -58,6 +58,12 @@ pub(crate) struct PacketReceiver {
     mtu: u16,
 }
 
+/// One engine packet whose framing was validated, with its fixed header.
+pub(crate) struct Received {
+    pub(crate) payload: ServicePayload,
+    pub(crate) header: packet::Header,
+}
+
 /// Writing direction of one endpoint. One writer keeps packet order.
 pub(crate) struct PacketSender {
     pipe: Arc<OwnedHandle>,
@@ -115,6 +121,7 @@ impl PacketServer {
             None => Err(ServiceTransportError::Closed.into()),
         };
         self.finish(operation)
+            .map(|received| received.map(|packet| packet.payload))
     }
 
     fn finish<T>(&mut self, operation: Result<T>) -> Result<T> {
@@ -188,7 +195,7 @@ impl PacketReceiver {
         &mut self,
         deadline: Instant,
         cancel: &AtomicBool,
-    ) -> Result<Option<ServicePayload>> {
+    ) -> Result<Option<Received>> {
         if self.read.is_none() {
             self.read = Some(PendingMessageRead::new(
                 Arc::clone(&self.pipe),
@@ -196,12 +203,12 @@ impl PacketReceiver {
             )?);
         }
         let read = self.read.as_mut().ok_or(ServiceTransportError::Closed)?;
-        let received = read.poll(deadline, cancel)?;
-        if let Some(bytes) = &received {
-            self.read = None;
-            packet::validate(bytes.as_bytes(), self.mtu)?;
-        }
-        Ok(received)
+        let Some(payload) = read.poll(deadline, cancel)? else {
+            return Ok(None);
+        };
+        self.read = None;
+        let header = packet::validate(payload.as_bytes(), self.mtu)?;
+        Ok(Some(Received { payload, header }))
     }
 
     /// Cancel and drain an outstanding read before its buffer is released.

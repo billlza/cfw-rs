@@ -5,6 +5,7 @@ mod channel;
 #[cfg(windows)]
 mod driver;
 mod packet;
+mod policy;
 #[cfg(windows)]
 mod pump;
 #[cfg(windows)]
@@ -14,9 +15,13 @@ pub use channel::{PacketCancellation, PacketClient, PacketServer};
 #[cfg(windows)]
 pub use driver::{Adapter, Library, Session, interface_identity, observe};
 #[cfg(all(windows, feature = "native-service-validation"))]
-pub(crate) use driver::{absence_within_deadline, counters, wait_absent};
+pub(crate) use driver::{InterfaceCounters, absence_within_deadline, counters, wait_absent};
+pub use policy::{DeliveryPolicy, Refusal, RefusalReason};
 #[cfg(windows)]
-pub use pump::{DirectionCounters, PacketPump, PumpControl, PumpReport, PumpRetirement};
+pub use pump::{
+    DirectionCounters, PacketPump, PumpControl, PumpReport, PumpRetirement, RefusedClass,
+    RefusedPackets,
+};
 
 use std::{fmt, time::Duration};
 

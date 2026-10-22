@@ -5,7 +5,7 @@
 //! An IPv6 fixture also turns off duplicate-address detection and router
 //! discovery on its own adapter: a point-to-point tunnel has no neighbours.
 use super::{Result, library};
-use crate::tunnel::Adapter;
+use crate::tunnel::{Adapter, DeliveryPolicy};
 use std::{
     ffi::c_void,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
@@ -390,6 +390,22 @@ impl<'a> OwnedNetwork<'a> {
     }
     pub(super) fn original_mtu(&self) -> u32 {
         self.original_mtu
+    }
+    /// The pump's delivery policy for exactly the addresses this fixture
+    /// assigned and still owns.
+    pub(super) fn delivery_policy(&self) -> Result<DeliveryPolicy> {
+        let (mut ipv4, mut ipv6) = (None, None);
+        for (address, _) in &self.addresses {
+            let duplicate = match address {
+                IpAddr::V4(address) => ipv4.replace(*address).is_some(),
+                IpAddr::V6(address) => ipv6.replace(*address).is_some(),
+            };
+            if duplicate {
+                return Err("fixture owns two addresses of one family".into());
+            }
+        }
+        DeliveryPolicy::new(ipv4.ok_or("fixture owns no IPv4 address")?, ipv6)
+            .map_err(|error| error.to_string())
     }
     /// The adapter's IPv6 interface before this probe, when IPv6 was bound to it.
     pub(super) fn original_ipv6(&self) -> Option<Ipv6Interface> {

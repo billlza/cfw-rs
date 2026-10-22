@@ -249,6 +249,21 @@ jobs:
                 $case.traffic.ipv4.udp.answer_bytes -ne ($case.mtu - 28) -or $case.traffic.ipv6.udp.answer_bytes -ne ($case.mtu - 48)) {
               throw "Wintun forwarding case $($case.mtu) is incomplete"
             }
+            # The adapter received exactly what the pump delivered under the
+            # policy for its own addresses; refused packets never reached it.
+            $counters = $case.interface_counters
+            $refused = $case.pump.refused
+            if ($case.delivery_policy.ipv4 -cne '192.0.2.10' -or $case.delivery_policy.ipv6 -cne '2001:db8:1::10' -or
+                $counters.received_equals_delivered -ne $true -or
+                ($counters.after.in_unicast_packets - $counters.before.in_unicast_packets) -ne $case.pump.to_system.packets -or
+                ($counters.after.in_octets - $counters.before.in_octets) -ne $case.pump.to_system.bytes -or
+                $counters.after.in_non_unicast_packets -ne $counters.before.in_non_unicast_packets -or
+                $counters.after.in_discards -ne $counters.before.in_discards -or $counters.after.in_errors -ne $counters.before.in_errors -or
+                (@($refused.PSObject.Properties.Name | Sort-Object) -join ',') -cne 'destination,protocol,source' -or
+                $refused.source.packets -ne 0 -or $refused.protocol.packets -ne 0 -or $null -eq $refused.destination.packets -or
+                @(@($refused.destination, $refused.source, $refused.protocol) | Where-Object { ($_.packets -eq 0) -ne ($null -eq $_.first) }).Count -ne 0) {
+              throw "Wintun forwarding case $($case.mtu) did not bind deliveries to its policy"
+            }
           }
           "Verified Windows IPv4/IPv6 TCP and UDP through Wintun, the packet pump and the native engine at MTU $(@($result.cases).mtu -join '/')" | Out-Host
       - name: Upload the verified unsigned engine component
@@ -292,7 +307,7 @@ jobs:
         run: |
           "Built the GA-pinned Windows engine twice from independent caches and ran its native package tests and loopback HTTP/SOCKS TCP/UDP checks." >> $env:GITHUB_STEP_SUMMARY
           "The Rust owner additionally checks private-pipe identity, real WinINet HTTP through current-user proxy settings, exact restoration before engine stop, owner-process exit, conflicting settings, startup failure and emergency cleanup." >> $env:GITHUB_STEP_SUMMARY
-          "A validation probe forwards real Windows IPv4/IPv6 TCP and UDP through its own Wintun adapter, the packet pump and the engine's packet endpoint at three MTUs; it runs as the CI account without an Authority lease, user handoff, default route, DNS or firewall ownership." >> $env:GITHUB_STEP_SUMMARY
+          "A validation probe forwards real Windows IPv4/IPv6 TCP and UDP through its own Wintun adapter, the packet pump and the engine's packet endpoint at three MTUs; engine packets reach Windows only under the delivery policy for the adapter's own addresses, and the adapter's receive counters equal the pump's deliveries. It runs as the CI account without an Authority lease, user handoff, default route, DNS or firewall ownership." >> $env:GITHUB_STEP_SUMMARY
           "This unsigned engine component does not establish Windows desktop hosting, global service/TUN/system-proxy recovery, installation, signing or release acceptance." >> $env:GITHUB_STEP_SUMMARY
 
   service-peer:

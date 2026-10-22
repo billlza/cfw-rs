@@ -253,7 +253,8 @@ jobs:
             # policy for its own addresses; refused packets never reached it.
             $counters = $case.interface_counters
             $refused = $case.pump.refused
-            if ($case.delivery_policy.ipv4 -cne '192.0.2.10' -or $case.delivery_policy.ipv6 -cne '2001:db8:1::10' -or
+            if ($case.adapter_dhcpv4_enabled_at_creation -isnot [bool] -or $case.adapter_dhcpv4_enabled_with_fixture_addresses -isnot [bool] -or
+                $case.delivery_policy.ipv4 -cne '192.0.2.10' -or $case.delivery_policy.ipv6 -cne '2001:db8:1::10' -or
                 $counters.received_equals_delivered -ne $true -or
                 ($counters.after.in_unicast_packets - $counters.before.in_unicast_packets) -ne $case.pump.to_system.packets -or
                 ($counters.after.in_octets - $counters.before.in_octets) -ne $case.pump.to_system.bytes -or

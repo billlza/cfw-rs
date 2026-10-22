@@ -28,8 +28,11 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use windows_sys::Win32::Networking::WinSock::{
-    IP_DONTFRAGMENT, IPPROTO_IP, IPPROTO_IPV6, IPV6_DONTFRAG, SOCKET, setsockopt,
+use windows_sys::Win32::{
+    NetworkManagement::IpHelper::IP_ADAPTER_DHCP_ENABLED,
+    Networking::WinSock::{
+        IP_DONTFRAGMENT, IPPROTO_IP, IPPROTO_IPV6, IPV6_DONTFRAG, SOCKET, setsockopt,
+    },
 };
 
 mod socks;
@@ -243,14 +246,19 @@ fn forward(run: &Run<'_>, mtu: u16) -> Result<Value> {
     let adapter = run.library.create(id).map_err(|error| error.to_string())?;
     let luid = adapter.luid();
     let name = adapter.name().to_owned();
+    // Observed only: whether a new Wintun adapter starts with DHCPv4 enabled.
+    let flags_at_creation = network::adapter_flags(luid);
     record(
         output,
         &format!("mtu-{mtu}-created.json"),
-        &json!({"source":source,"mtu":mtu,"interface_guid":id,"luid":luid,"name":name,"adapter_created":true}),
+        &json!({"source":source,"mtu":mtu,"interface_guid":id,"luid":luid,"name":name,"adapter_created":true,
+        "adapter_flags_at_creation":flags_at_creation.as_ref().ok()}),
     )?;
     let operation = (|| {
+        let flags_at_creation = flags_at_creation?;
         let mut session = adapter.session(mtu).map_err(|error| error.to_string())?;
         let mut owned = network::OwnedNetwork::configure(&adapter, id, mtu, true)?;
+        let flags_with_fixture = network::adapter_flags(luid);
         let identity = Owned {
             id,
             name: &name,
@@ -262,6 +270,13 @@ fn forward(run: &Run<'_>, mtu: u16) -> Result<Value> {
         let restored = owned.restore();
         drop(session);
         let mut receipt = combine(exercised, restored)?;
+        let flags_with_fixture = flags_with_fixture?;
+        receipt["adapter_flags_at_creation"] = json!(flags_at_creation);
+        receipt["adapter_flags_with_fixture_addresses"] = json!(flags_with_fixture);
+        receipt["adapter_dhcpv4_enabled_at_creation"] =
+            json!(flags_at_creation & IP_ADAPTER_DHCP_ENABLED != 0);
+        receipt["adapter_dhcpv4_enabled_with_fixture_addresses"] =
+            json!(flags_with_fixture & IP_ADAPTER_DHCP_ENABLED != 0);
         receipt["original_mtu"] = json!(owned.original_mtu());
         receipt["original_ipv6_interface"] = json!(owned.original_ipv6().map(|original| {
             json!({"mtu":original.mtu,"dad_transmits":original.dad_transmits,

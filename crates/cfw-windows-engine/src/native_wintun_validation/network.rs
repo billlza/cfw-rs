@@ -9,12 +9,12 @@ use crate::tunnel::{Adapter, DeliveryPolicy};
 use std::{
     ffi::c_void,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
-    ptr::null_mut,
+    ptr::{null, null_mut},
     thread,
     time::{Duration, Instant},
 };
 use windows_sys::Win32::{
-    Foundation::{ERROR_FILE_NOT_FOUND, ERROR_NOT_FOUND},
+    Foundation::{ERROR_BUFFER_OVERFLOW, ERROR_FILE_NOT_FOUND, ERROR_NOT_FOUND},
     NetworkManagement::{IpHelper::*, Ndis::NET_LUID_LH},
     Networking::WinSock::*,
 };
@@ -153,6 +153,40 @@ pub(super) fn require_unused_addresses_and_route() -> Result<()> {
         return Err("fixture host route already exists".into());
     }
     Ok(())
+}
+
+/// The adapter record's flags (IP_ADAPTER_DHCP_ENABLED is DHCPv4,
+/// IP_ADAPTER_IPV4_ENABLED and IP_ADAPTER_IPV6_ENABLED the bound protocols).
+/// The probe only observes them; it never changes DHCP.
+pub(super) fn adapter_flags(luid: u64) -> Result<u32> {
+    let flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+    let mut size: u32 = 32 * 1024;
+    for _ in 0..4 {
+        // u64 storage keeps the records 8-byte aligned.
+        let mut storage = vec![0u64; (size as usize).div_ceil(8)];
+        let first = storage.as_mut_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>();
+        let code =
+            unsafe { GetAdaptersAddresses(u32::from(AF_UNSPEC), flags, null(), first, &mut size) };
+        if code == ERROR_BUFFER_OVERFLOW {
+            continue;
+        }
+        status(code, "enumerate adapter records")?;
+        let mut current = first.cast_const();
+        for _ in 0..4096 {
+            if current.is_null() {
+                return Err("owned adapter has no adapter record".into());
+            }
+            // SAFETY: GetAdaptersAddresses filled `storage` with a list of
+            // records it links through `Next`; `storage` outlives this walk.
+            let record = unsafe { &*current };
+            if unsafe { record.Luid.Value } == luid {
+                return Ok(unsafe { record.Anonymous2.Flags });
+            }
+            current = record.Next.cast_const();
+        }
+        return Err("adapter record list exceeds its bound".into());
+    }
+    Err("adapter record table kept growing".into())
 }
 
 /// The IPv6 interface settings a probe changed, kept to restore them exactly.

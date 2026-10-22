@@ -134,9 +134,12 @@ build-script-boundary 完整检查通过，变异检查确认新断言有效。�
 不计为通过或失败。此后多数提交的 macOS CI（如运行 39734543615）在排队中被下一次推送
 取消；`3dbe2d59` 的运行 39754658440 实际执行，三项作业分别停在 release-tool 测试、
 Rust 目标图公告与 libbox Go 公告（见交接前加固一节）。`39b1440a` 的运行 39770829274
-中质量作业 30 个步骤全部通过：包括 Tauri 外壳在内的整个工作区 macOS Clippy、1,327 项
-Rust 测试、329 项 UI 测试、3,672 项 release-tool 测试以及 shell 语法检查与 ShellCheck；
-供应链与 libbox 作业仍分别停在 RUSTSEC-2026-0382 与 GO-2026-6809。自 `21505a88`
+与 `775ad5fe` 的运行 39778207372 中质量作业全部步骤通过：包括 Tauri 外壳在内的整个工作区
+macOS Clippy、1,327 项 Rust 测试、329 项 UI 测试、release-tool 测试（3,672 项中 3,671 项
+通过，`test_real_pinned_signer_reads_temporary_key_from_dev_fd` 因该作业未安装固定 Tauri
+签名器而跳过，不计为通过）以及 shell 语法检查与 ShellCheck；两次的 libbox 作业仍停在
+GO-2026-6809，`39b1440a` 的供应链作业仍停在 RUSTSEC-2026-0382（`775ad5fe` 的供应链作业
+记录时仍在排队）。自 `21505a88`
 以来 libbox 与供应链作业每次都停在公告扫描，Swift 格式与包测试、Xcode 目标测试与
 分析、更新签名边界、0.5.0 验证骨架构建和依赖／来源／许可证策略均无结果，完整 Mac
 门禁尚无结果。
@@ -2747,16 +2750,18 @@ NetBIOS over TCP/IP、IPv4、IPv6 启用），分配固定地址后不变；产�
 build-script-boundary、ci-no-masking、证据清单、版本契约、rustfmt、依赖图、UI
 （329 项）、整个工作区的 macOS Clippy 与 1,323 项 Rust 测试全部通过，`WINTUN_*`
 修正生效；release-tool 测试 3,672 项中只有
-`test_real_swift_identity_is_clean_repeatable_and_structured` 失败：托管镜像已换成
-Xcode 27.2 beta 3，其 Swift 报告 `6.4.2`，而测试硬编码 `6.4`。供应链作业因
+`test_real_swift_identity_is_clean_repeatable_and_structured` 失败（另 1 项因未安装固定
+Tauri 签名器跳过）：该作业的镜像选中 Xcode 27.2 beta 3，其 Swift 报告 `6.4.2`，而测试
+硬编码 `6.4`。供应链作业因
 RUSTSEC-2026-0382（rustls-webpki 0.103.15，修复于 0.103.16）失败，libbox 作业因
 GO-2026-6809（go1.27.2 的 crypto/x509，修复于 go1.27.3）失败。各作业在失败步骤后
 停止：shell 脚本检查、依赖／来源／许可证策略，以及 libbox 之后的 Swift、Xcode、更新
 签名边界与 0.5.0 验证骨架步骤均未执行，不计为通过。两项公告都在 GA 之后发布，修复要
 升级 Go 工具链与 rustls-webpki，会改变发布身份，需另行决定。`39b1440a` 的运行
-39770829274 中同一 release-tool 测试通过：该次质量作业分到 `xcode-27-arm64` 镜像
-20261012.0260.1（选中 Xcode 27.2 beta 2，27B5028f），`3dbe2d59` 分到 20261019.0289.1
-（Xcode 27.2 beta 3，27B5038j）。同一标签同时分配两个镜像版本，“选择最新可用 Xcode”
+39770829274 与 `775ad5fe` 的运行 39778207372 中同一 release-tool 测试通过：两次质量作业都
+分到 `xcode-27-arm64` 镜像 20261012.0260.1（选中 Xcode 27.2 beta 2，27B5028f），而
+`3dbe2d59` 的质量作业及这两次运行的 libbox 作业分到 20261019.0289.1（Xcode 27.2 beta 3，
+27B5038j）。同一标签同时分配两个镜像版本，“选择最新可用 Xcode”
 随之改变 Swift 版本，该测试结果因此取决于分到的镜像；固定 Xcode 选择或让测试接受
 同一 6.4 系列的补丁版本，需另行决定。
 

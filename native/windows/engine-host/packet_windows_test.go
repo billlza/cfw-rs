@@ -115,6 +115,51 @@ func packetTestIP(version, length int) []byte {
 	return packet
 }
 
+// The access a SYSTEM Authority leaves on a packet endpoint it hands to the
+// user process hosting the engine (FILE_READ_DATA | FILE_WRITE_DATA |
+// FILE_READ_ATTRIBUTES | SYNCHRONIZE): the Rust ENDPOINT_ACCESS.
+const handoffEndpointAccess = 0x00100083
+
+func TestPacketDeviceRunsOnTheHandoffAccessOnly(t *testing.T) {
+	peer, client := packetTestPair(t, windows.FILE_FLAG_OVERLAPPED)
+	var reduced windows.Handle
+	process := windows.CurrentProcess()
+	duplicated := windows.DuplicateHandle(process, client, process, &reduced, handoffEndpointAccess, false, 0)
+	if err := errors.Join(duplicated, windows.CloseHandle(client)); err != nil {
+		t.Fatal(err)
+	}
+	device, err := newPacketDevice(reduced, packetTestName, 1500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { requirePacketClose(t, device.Close()) })
+	if err := device.Start(); err != nil {
+		t.Fatal(err)
+	}
+	request := packetTestIP(4, 1500)
+	if n, err := peer.Write(request); err != nil || n != len(request) {
+		t.Fatalf("peer write: %d, %v", n, err)
+	}
+	buffer := make([]byte, 1510)
+	if n, err := device.Read(buffer); err != nil || n != len(request) || !bytes.Equal(buffer[:n], request) {
+		t.Fatalf("device packet: %d, %v", n, err)
+	}
+	response := bytes.Clone(request)
+	response[len(response)-1] ^= 0xff
+	if n, err := device.Write(response); err != nil || n != len(response) {
+		t.Fatalf("device write: %d, %v", n, err)
+	}
+	if n, err := peer.Read(buffer); err != nil || n != len(response) || !bytes.Equal(buffer[:n], response) {
+		t.Fatalf("peer packet: %d, %v", n, err)
+	}
+	if err := device.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := device.Failure(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // The engine stop races packets gVisor still writes. A Close that lands after
 // a write was admitted must not be recorded as a data-plane failure, or the
 // stop would report close_failed for its own intentional shutdown.

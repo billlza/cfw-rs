@@ -78,7 +78,7 @@ fn roundtrip(library: &Library, mtu: u16, output: &Path, source: &str) -> Result
     )?;
     let operation = (|| {
         let session = adapter.session(mtu).map_err(|error| error.to_string())?;
-        let mut network = network::OwnedNetwork::configure(&adapter, id, mtu)?;
+        let mut network = network::OwnedNetwork::configure(&adapter, id, mtu, false)?;
         let original_mtu = network.original_mtu();
         let traffic = exchange(&session, output, source, mtu, id, luid, &name);
         let restored = network.restore();

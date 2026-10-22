@@ -2,13 +2,17 @@
 //! only this host's own address as client (the engine's outbound source) and
 //! serves only the fixed forwarding targets; every other request is refused
 //! and recorded. It is never an open proxy and never dials anything itself.
-use super::super::Result;
+use super::super::{
+    Result,
+    network::{REMOTE, REMOTE6},
+};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     io::{ErrorKind, Read, Write},
     net::{
-        IpAddr, Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4, TcpListener, TcpStream, UdpSocket,
+        IpAddr, Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4, SocketAddrV6, TcpListener, TcpStream,
+        UdpSocket,
     },
     sync::{
         Arc, Mutex, PoisonError,
@@ -18,8 +22,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub(super) const HTTP_TARGET: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 123), 80);
-pub(super) const UDP_TARGET: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 123), 54321);
+/// The node serves exactly these targets, one TCP and one UDP per family.
+pub(super) const HTTP_TARGETS: [SocketAddr; 2] = [
+    SocketAddr::V4(SocketAddrV4::new(REMOTE, 80)),
+    SocketAddr::V6(SocketAddrV6::new(REMOTE6, 80, 0, 0)),
+];
+pub(super) const UDP_TARGETS: [SocketAddr; 2] = [
+    SocketAddr::V4(SocketAddrV4::new(REMOTE, 54321)),
+    SocketAddr::V6(SocketAddrV6::new(REMOTE6, 54321, 0, 0)),
+];
 pub(super) const BULK_BYTES: usize = 512 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(15);
 const MAXIMUM_CONNECTIONS: usize = 64;
@@ -39,6 +50,13 @@ pub(super) fn bulk(nonce: &str, purpose: &str, length: usize) -> Vec<u8> {
     }
     bytes.truncate(length);
     bytes
+}
+
+pub(super) fn family(target: SocketAddr) -> &'static str {
+    match target {
+        SocketAddr::V4(_) => "ipv4",
+        SocketAddr::V6(_) => "ipv6",
+    }
 }
 
 /// The relay's answer differs from the request in every byte.
@@ -335,14 +353,13 @@ fn serve(
         return Err("invalid SOCKS5 request header".into());
     }
     let target = read_target(&mut stream)?;
-    match request[1] {
-        1 if matches!(target, Target::Address(address) if address == SocketAddr::V4(HTTP_TARGET)) =>
-        {
+    match (request[1], &target) {
+        (1, Target::Address(address)) if HTTP_TARGETS.contains(address) => {
             reply(&mut stream, 0, SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))
                 .map_err(Failure::broken)?;
-            http(&mut stream, nonce).map_err(Failure::Broken)
+            http(&mut stream, nonce, *address).map_err(Failure::Broken)
         }
-        3 => {
+        (3, _) => {
             let relay = UdpSocket::bind(SocketAddrV4::new(host, 0)).map_err(text)?;
             let SocketAddr::V4(bound) = relay.local_addr().map_err(text)? else {
                 return Err("UDP relay is not IPv4".into());
@@ -350,7 +367,7 @@ fn serve(
             reply(&mut stream, 0, bound)?;
             associate(stream, relay, host, stop).map_err(Failure::Broken)
         }
-        command => {
+        (command, _) => {
             // Refused: connection not allowed by ruleset. Background flows
             // are recorded, never served or dialled.
             reply(&mut stream, 2, SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))?;
@@ -359,7 +376,8 @@ fn serve(
     }
 }
 
-fn http(stream: &mut TcpStream, nonce: &str) -> Result<Value> {
+fn http(stream: &mut TcpStream, nonce: &str, target: SocketAddr) -> Result<Value> {
+    let family = family(target);
     let mut header = Vec::new();
     while !header.ends_with(b"\r\n\r\n") {
         let mut byte = [0u8; 1];
@@ -371,7 +389,7 @@ fn http(stream: &mut TcpStream, nonce: &str) -> Result<Value> {
     }
     let header = String::from_utf8(header).map_err(|_| "HTTP header is not UTF-8")?;
     let mut lines = header.split("\r\n");
-    let expected = format!("POST /cfw-tunnel-forwarding/{nonce} HTTP/1.1");
+    let expected = format!("POST /cfw-tunnel-forwarding/{nonce}/{family} HTTP/1.1");
     if lines.next() != Some(expected.as_str()) {
         return Err("HTTP request line does not carry this run's nonce".into());
     }
@@ -384,11 +402,11 @@ fn http(stream: &mut TcpStream, nonce: &str) -> Result<Value> {
     }
     let mut upload = vec![0u8; BULK_BYTES];
     stream.read_exact(&mut upload).map_err(text)?;
-    if upload != bulk(nonce, "upload", BULK_BYTES) {
+    if upload != bulk(nonce, &format!("upload-{family}"), BULK_BYTES) {
         return Err("uploaded bytes differ from this run's bulk content".into());
     }
     let upload_sha256 = hex(&Sha256::digest(&upload));
-    let download = bulk(nonce, "download", BULK_BYTES);
+    let download = bulk(nonce, &format!("download-{family}"), BULK_BYTES);
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Length: {BULK_BYTES}\r\nX-Upload-Sha256: {upload_sha256}\r\nConnection: close\r\n\r\n"
     );
@@ -396,9 +414,11 @@ fn http(stream: &mut TcpStream, nonce: &str) -> Result<Value> {
     stream.write_all(&download).map_err(text)?;
     stream.flush().map_err(text)?;
     stream.shutdown(Shutdown::Write).map_err(text)?;
-    Ok(json!({"command":"connect","target":HTTP_TARGET.to_string(),
+    Ok(
+        json!({"command":"connect","target":target.to_string(),"family":family,
         "upload_bytes":BULK_BYTES,"upload_sha256":upload_sha256,
-        "download_bytes":BULK_BYTES,"download_sha256":hex(&Sha256::digest(&download))}))
+        "download_bytes":BULK_BYTES,"download_sha256":hex(&Sha256::digest(&download))}),
+    )
 }
 
 fn associate(
@@ -449,12 +469,13 @@ fn associate(
         if datagram.len() < 10 || datagram[..3] != [0, 0, 0] {
             return Err("invalid or fragmented SOCKS5 UDP header".into());
         }
-        let (target, data) = match datagram[3] {
+        let (target, header, data) = match datagram[3] {
             1 => (
                 SocketAddr::new(
                     IpAddr::from(<[u8; 4]>::try_from(&datagram[4..8]).map_err(|_| "address")?),
                     u16::from_be_bytes([datagram[8], datagram[9]]),
                 ),
+                &datagram[..10],
                 &datagram[10..],
             ),
             4 if datagram.len() >= 22 => (
@@ -462,21 +483,22 @@ fn associate(
                     IpAddr::from(<[u8; 16]>::try_from(&datagram[4..20]).map_err(|_| "address")?),
                     u16::from_be_bytes([datagram[20], datagram[21]]),
                 ),
+                &datagram[..22],
                 &datagram[22..],
             ),
             kind => return Err(format!("SOCKS5 UDP address type {kind} is not served")),
         };
-        if target != SocketAddr::V4(UDP_TARGET) {
+        if !UDP_TARGETS.contains(&target) {
             other.push(json!({"target":target.to_string(),"bytes":data.len()}));
             continue;
         }
-        let mut answer = datagram[..10].to_vec();
+        let mut answer = header.to_vec();
         answer.extend(transform(data));
         if relay.send_to(&answer, from).map_err(text)? != answer.len() {
             return Err("UDP relay answer was truncated".into());
         }
-        served.push(json!({"target":target.to_string(),"bytes":data.len(),
-            "request_sha256":hex(&Sha256::digest(data))}));
+        served.push(json!({"target":target.to_string(),"family":family(target),
+            "bytes":data.len(),"request_sha256":hex(&Sha256::digest(data))}));
     }
     Ok(json!({"command":"udp_associate","served":served,"other_targets":other}))
 }

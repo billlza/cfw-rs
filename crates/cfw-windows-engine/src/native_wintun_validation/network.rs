@@ -2,11 +2,13 @@
 //! route, DNS option or firewall rule is changed. Every mutation names the
 //! retained adapter's native LUID, alias and creation GUID. Both IP families
 //! get the probe MTU, so the stack cannot hand the session a larger packet.
+//! An IPv6 fixture also turns off duplicate-address detection and router
+//! discovery on its own adapter: a point-to-point tunnel has no neighbours.
 use super::{Result, library};
 use crate::tunnel::Adapter;
 use std::{
     ffi::c_void,
-    net::Ipv4Addr,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
     ptr::null_mut,
     thread,
     time::{Duration, Instant},
@@ -19,6 +21,16 @@ use windows_sys::Win32::{
 
 pub(super) const LOCAL: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 10);
 pub(super) const REMOTE: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 123);
+/// RFC 3849 documentation addresses, outside the tunnel address plan.
+pub(super) const LOCAL6: Ipv6Addr = Ipv6Addr::new(0x2001, 0xdb8, 1, 0, 0, 0, 0, 0x10);
+pub(super) const REMOTE6: Ipv6Addr = Ipv6Addr::new(0x2001, 0xdb8, 1, 0, 0, 0, 0, 0x123);
+const FIXTURE_ADDRESSES: [IpAddr; 4] = [
+    IpAddr::V4(LOCAL),
+    IpAddr::V4(REMOTE),
+    IpAddr::V6(LOCAL6),
+    IpAddr::V6(REMOTE6),
+];
+const FIXTURE_ROUTES: [IpAddr; 2] = [IpAddr::V4(REMOTE), IpAddr::V6(REMOTE6)];
 
 fn status(code: u32, operation: &str) -> Result<()> {
     if code == 0 {
@@ -30,22 +42,53 @@ fn status(code: u32, operation: &str) -> Result<()> {
         ))
     }
 }
-fn address(ip: Ipv4Addr) -> SOCKADDR_INET {
-    SOCKADDR_INET {
-        Ipv4: SOCKADDR_IN {
-            sin_family: AF_INET,
-            sin_addr: IN_ADDR {
-                S_un: IN_ADDR_0 {
-                    S_addr: u32::from_ne_bytes(ip.octets()),
+fn address(ip: IpAddr) -> SOCKADDR_INET {
+    match ip {
+        IpAddr::V4(ip) => SOCKADDR_INET {
+            Ipv4: SOCKADDR_IN {
+                sin_family: AF_INET,
+                sin_addr: IN_ADDR {
+                    S_un: IN_ADDR_0 {
+                        S_addr: u32::from_ne_bytes(ip.octets()),
+                    },
                 },
+                ..Default::default()
             },
-            ..Default::default()
+        },
+        IpAddr::V6(ip) => SOCKADDR_INET {
+            Ipv6: SOCKADDR_IN6 {
+                sin6_family: AF_INET6,
+                sin6_addr: IN6_ADDR {
+                    u: IN6_ADDR_0 { Byte: ip.octets() },
+                },
+                ..Default::default()
+            },
         },
     }
 }
-fn same_address(native: &SOCKADDR_INET, ip: Ipv4Addr) -> bool {
+fn same_address(native: &SOCKADDR_INET, ip: IpAddr) -> bool {
     unsafe {
-        native.si_family == AF_INET && native.Ipv4.sin_addr.S_un.S_addr.to_ne_bytes() == ip.octets()
+        match ip {
+            IpAddr::V4(ip) => {
+                native.si_family == AF_INET
+                    && native.Ipv4.sin_addr.S_un.S_addr.to_ne_bytes() == ip.octets()
+            }
+            IpAddr::V6(ip) => {
+                native.si_family == AF_INET6 && native.Ipv6.sin6_addr.u.Byte == ip.octets()
+            }
+        }
+    }
+}
+fn host_prefix(ip: IpAddr) -> u8 {
+    match ip {
+        IpAddr::V4(_) => 32,
+        IpAddr::V6(_) => 128,
+    }
+}
+fn unspecified(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(_) => Ipv4Addr::UNSPECIFIED.into(),
+        IpAddr::V6(_) => Ipv6Addr::UNSPECIFIED.into(),
     }
 }
 struct Table(*mut c_void);
@@ -58,7 +101,7 @@ impl Drop for Table {
 pub(super) fn require_unused_addresses_and_route() -> Result<()> {
     let mut pointer = null_mut();
     status(
-        unsafe { GetUnicastIpAddressTable(AF_INET, &mut pointer) },
+        unsafe { GetUnicastIpAddressTable(AF_UNSPEC, &mut pointer) },
         "enumerate fixture address conflicts",
     )?;
     if pointer.is_null() {
@@ -75,15 +118,16 @@ pub(super) fn require_unused_addresses_and_route() -> Result<()> {
             count,
         )
     };
-    if entries
-        .iter()
-        .any(|row| same_address(&row.Address, LOCAL) || same_address(&row.Address, REMOTE))
-    {
+    if entries.iter().any(|row| {
+        FIXTURE_ADDRESSES
+            .iter()
+            .any(|ip| same_address(&row.Address, *ip))
+    }) {
         return Err("fixture address is already assigned to an interface".into());
     }
     let mut pointer = null_mut();
     status(
-        unsafe { GetIpForwardTable2(AF_INET, &mut pointer) },
+        unsafe { GetIpForwardTable2(AF_UNSPEC, &mut pointer) },
         "enumerate fixture route conflicts",
     )?;
     if pointer.is_null() {
@@ -101,38 +145,57 @@ pub(super) fn require_unused_addresses_and_route() -> Result<()> {
         )
     };
     if entries.iter().any(|row| {
-        row.DestinationPrefix.PrefixLength == 32
-            && same_address(&row.DestinationPrefix.Prefix, REMOTE)
+        FIXTURE_ROUTES.iter().any(|ip| {
+            row.DestinationPrefix.PrefixLength == host_prefix(*ip)
+                && same_address(&row.DestinationPrefix.Prefix, *ip)
+        })
     }) {
         return Err("fixture host route already exists".into());
     }
     Ok(())
 }
 
+/// The IPv6 interface settings a probe changed, kept to restore them exactly.
+#[derive(Clone, Copy)]
+struct Ipv6Interface {
+    mtu: u32,
+    dad_transmits: u32,
+    router_discovery: NL_ROUTER_DISCOVERY_BEHAVIOR,
+}
+
 pub(super) struct OwnedNetwork<'a> {
     adapter: &'a Adapter<'a>,
     id: uuid::Uuid,
-    original_mtu: u32,
-    original_ipv6_mtu: Option<u32>,
     mtu: u16,
+    ipv6_fixture: bool,
+    original_mtu: u32,
     mtu_changed: bool,
-    ipv6_mtu_changed: bool,
-    address: Option<MIB_UNICASTIPADDRESS_ROW>,
-    route: Option<MIB_IPFORWARD_ROW2>,
+    original_ipv6: Option<Ipv6Interface>,
+    ipv6_changed: bool,
+    addresses: Vec<(IpAddr, MIB_UNICASTIPADDRESS_ROW)>,
+    routes: Vec<(IpAddr, MIB_IPFORWARD_ROW2)>,
 }
 impl<'a> OwnedNetwork<'a> {
-    pub(super) fn configure(adapter: &'a Adapter<'a>, id: uuid::Uuid, mtu: u16) -> Result<Self> {
+    /// 192.0.2.10 with a host route to 192.0.2.123 and, for an IPv6 fixture,
+    /// 2001:db8:1::10 with a host route to 2001:db8:1::123, all on this adapter.
+    pub(super) fn configure(
+        adapter: &'a Adapter<'a>,
+        id: uuid::Uuid,
+        mtu: u16,
+        ipv6: bool,
+    ) -> Result<Self> {
         require_unused_addresses_and_route()?;
         let mut value = Self {
             adapter,
             id,
-            original_mtu: 0,
-            original_ipv6_mtu: None,
             mtu,
+            ipv6_fixture: ipv6,
+            original_mtu: 0,
             mtu_changed: false,
-            ipv6_mtu_changed: false,
-            address: None,
-            route: None,
+            original_ipv6: None,
+            ipv6_changed: false,
+            addresses: Vec::new(),
+            routes: Vec::new(),
         };
         value.require_owner()?;
         let mut interface = value.interface()?;
@@ -150,70 +213,34 @@ impl<'a> OwnedNetwork<'a> {
             if value.interface()?.NlMtu != u32::from(mtu) {
                 return Err("adapter MTU readback differs".into());
             }
-            if let Some(mut ipv6) = value.interface_for(AF_INET6)? {
-                value.original_ipv6_mtu = Some(ipv6.NlMtu);
-                ipv6.NlMtu = u32::from(mtu);
-                status(
-                    unsafe { SetIpInterfaceEntry(&mut ipv6) },
-                    "set owned adapter IPv6 MTU",
-                )?;
-                value.ipv6_mtu_changed = true;
-                if value.interface_for(AF_INET6)?.map(|row| row.NlMtu) != Some(u32::from(mtu)) {
-                    return Err("adapter IPv6 MTU readback differs".into());
+            match value.interface_for(AF_INET6)? {
+                Some(mut ipv6_interface) => {
+                    let original = Ipv6Interface {
+                        mtu: ipv6_interface.NlMtu,
+                        dad_transmits: ipv6_interface.DadTransmits,
+                        router_discovery: ipv6_interface.RouterDiscoveryBehavior,
+                    };
+                    value.original_ipv6 = Some(original);
+                    let wanted = value.wanted_ipv6(original);
+                    ipv6_interface.NlMtu = wanted.mtu;
+                    ipv6_interface.DadTransmits = wanted.dad_transmits;
+                    ipv6_interface.RouterDiscoveryBehavior = wanted.router_discovery;
+                    status(
+                        unsafe { SetIpInterfaceEntry(&mut ipv6_interface) },
+                        "set owned adapter IPv6 interface",
+                    )?;
+                    value.ipv6_changed = true;
+                    value.require_ipv6(wanted, "adapter IPv6 interface readback differs")?;
                 }
+                None if ipv6 => return Err("owned adapter has no IPv6 interface".into()),
+                None => {}
             }
-            let mut row = MIB_UNICASTIPADDRESS_ROW::default();
-            unsafe { InitializeUnicastIpAddressEntry(&mut row) };
-            row.InterfaceLuid = NET_LUID_LH {
-                Value: adapter.luid(),
-            };
-            row.Address = address(LOCAL);
-            row.OnLinkPrefixLength = 32;
-            row.PrefixOrigin = IpPrefixOriginManual;
-            row.SuffixOrigin = IpSuffixOriginManual;
-            value.require_owner()?;
-            status(
-                unsafe { CreateUnicastIpAddressEntry(&row) },
-                "create owned fixture address",
-            )?;
-            value.address = Some(row);
-            let deadline = Instant::now() + Duration::from_secs(8);
-            loop {
-                let mut observed = row;
-                status(
-                    unsafe { GetUnicastIpAddressEntry(&mut observed) },
-                    "observe fixture address readiness",
-                )?;
-                if observed.DadState == IpDadStatePreferred {
-                    break;
-                }
-                if observed.DadState != IpDadStateTentative || Instant::now() >= deadline {
-                    return Err(format!(
-                        "fixture address did not become usable: DAD {}",
-                        observed.DadState
-                    ));
-                }
-                thread::sleep(Duration::from_millis(100));
+            value.add_address(LOCAL.into())?;
+            value.add_route(REMOTE.into())?;
+            if ipv6 {
+                value.add_address(LOCAL6.into())?;
+                value.add_route(REMOTE6.into())?;
             }
-            let mut row = MIB_IPFORWARD_ROW2::default();
-            unsafe { InitializeIpForwardEntry(&mut row) };
-            row.InterfaceLuid = NET_LUID_LH {
-                Value: adapter.luid(),
-            };
-            row.DestinationPrefix = IP_ADDRESS_PREFIX {
-                Prefix: address(REMOTE),
-                PrefixLength: 32,
-            };
-            row.NextHop = address(Ipv4Addr::UNSPECIFIED);
-            row.Metric = 0;
-            row.Protocol = MIB_IPPROTO_NETMGMT;
-            value.require_owner()?;
-            status(
-                unsafe { CreateIpForwardEntry2(&row) },
-                "create owned fixture host route",
-            )?;
-            value.route = Some(row);
-            value.verify_route(&row)?;
             Ok(())
         })();
         if let Err(error) = result {
@@ -223,6 +250,92 @@ impl<'a> OwnedNetwork<'a> {
             };
         }
         Ok(value)
+    }
+
+    fn wanted_ipv6(&self, original: Ipv6Interface) -> Ipv6Interface {
+        if self.ipv6_fixture {
+            Ipv6Interface {
+                mtu: u32::from(self.mtu),
+                dad_transmits: 0,
+                router_discovery: RouterDiscoveryDisabled,
+            }
+        } else {
+            Ipv6Interface {
+                mtu: u32::from(self.mtu),
+                ..original
+            }
+        }
+    }
+
+    fn require_ipv6(&self, expected: Ipv6Interface, message: &str) -> Result<()> {
+        let observed = self
+            .interface_for(AF_INET6)?
+            .ok_or("owned adapter lost its IPv6 interface")?;
+        if observed.NlMtu != expected.mtu
+            || observed.DadTransmits != expected.dad_transmits
+            || observed.RouterDiscoveryBehavior != expected.router_discovery
+        {
+            return Err(message.into());
+        }
+        Ok(())
+    }
+
+    fn add_address(&mut self, local: IpAddr) -> Result<()> {
+        let mut row = MIB_UNICASTIPADDRESS_ROW::default();
+        unsafe { InitializeUnicastIpAddressEntry(&mut row) };
+        row.InterfaceLuid = NET_LUID_LH {
+            Value: self.adapter.luid(),
+        };
+        row.Address = address(local);
+        row.OnLinkPrefixLength = host_prefix(local);
+        row.PrefixOrigin = IpPrefixOriginManual;
+        row.SuffixOrigin = IpSuffixOriginManual;
+        self.require_owner()?;
+        status(
+            unsafe { CreateUnicastIpAddressEntry(&row) },
+            "create owned fixture address",
+        )?;
+        self.addresses.push((local, row));
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            let mut observed = row;
+            status(
+                unsafe { GetUnicastIpAddressEntry(&mut observed) },
+                "observe fixture address readiness",
+            )?;
+            if observed.DadState == IpDadStatePreferred {
+                return Ok(());
+            }
+            if observed.DadState != IpDadStateTentative || Instant::now() >= deadline {
+                return Err(format!(
+                    "fixture address {local} did not become usable: DAD {}",
+                    observed.DadState
+                ));
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    fn add_route(&mut self, remote: IpAddr) -> Result<()> {
+        let mut row = MIB_IPFORWARD_ROW2::default();
+        unsafe { InitializeIpForwardEntry(&mut row) };
+        row.InterfaceLuid = NET_LUID_LH {
+            Value: self.adapter.luid(),
+        };
+        row.DestinationPrefix = IP_ADDRESS_PREFIX {
+            Prefix: address(remote),
+            PrefixLength: host_prefix(remote),
+        };
+        row.NextHop = address(unspecified(remote));
+        row.Metric = 0;
+        row.Protocol = MIB_IPPROTO_NETMGMT;
+        self.require_owner()?;
+        status(
+            unsafe { CreateIpForwardEntry2(&row) },
+            "create owned fixture host route",
+        )?;
+        self.routes.push((remote, row));
+        self.verify_route(remote, &row)
     }
 
     fn require_owner(&self) -> Result<()> {
@@ -257,7 +370,7 @@ impl<'a> OwnedNetwork<'a> {
         }
         Ok(Some(row))
     }
-    fn verify_route(&self, expected: &MIB_IPFORWARD_ROW2) -> Result<()> {
+    fn verify_route(&self, remote: IpAddr, expected: &MIB_IPFORWARD_ROW2) -> Result<()> {
         self.require_owner()?;
         let mut observed = *expected;
         status(
@@ -265,9 +378,9 @@ impl<'a> OwnedNetwork<'a> {
             "read owned fixture route",
         )?;
         if unsafe { observed.InterfaceLuid.Value } != self.adapter.luid()
-            || observed.DestinationPrefix.PrefixLength != 32
-            || !same_address(&observed.DestinationPrefix.Prefix, REMOTE)
-            || !same_address(&observed.NextHop, Ipv4Addr::UNSPECIFIED)
+            || observed.DestinationPrefix.PrefixLength != host_prefix(remote)
+            || !same_address(&observed.DestinationPrefix.Prefix, remote)
+            || !same_address(&observed.NextHop, unspecified(remote))
             || observed.Metric != 0
             || observed.Protocol != MIB_IPPROTO_NETMGMT
         {
@@ -280,17 +393,17 @@ impl<'a> OwnedNetwork<'a> {
     }
     /// The adapter's IPv6 MTU before this probe, when IPv6 was bound to it.
     pub(super) fn original_ipv6_mtu(&self) -> Option<u32> {
-        self.original_ipv6_mtu
+        self.original_ipv6.map(|original| original.mtu)
     }
     pub(super) fn restore(&mut self) -> Result<()> {
         self.require_owner()?;
-        if let Some(row) = self.route {
-            self.verify_route(&row)?;
+        while let Some(&(remote, row)) = self.routes.last() {
+            self.verify_route(remote, &row)?;
             status(
                 unsafe { DeleteIpForwardEntry2(&row) },
                 "remove owned fixture route",
             )?;
-            self.route = None;
+            self.routes.pop();
             let mut query = row;
             let code = unsafe { GetIpForwardEntry2(&mut query) };
             if code != ERROR_NOT_FOUND && code != ERROR_FILE_NOT_FOUND {
@@ -299,7 +412,7 @@ impl<'a> OwnedNetwork<'a> {
                 ));
             }
         }
-        if let Some(row) = self.address {
+        while let Some(&(local, row)) = self.addresses.last() {
             self.require_owner()?;
             let mut observed = row;
             status(
@@ -307,8 +420,8 @@ impl<'a> OwnedNetwork<'a> {
                 "read owned fixture address",
             )?;
             if unsafe { observed.InterfaceLuid.Value } != self.adapter.luid()
-                || !same_address(&observed.Address, LOCAL)
-                || observed.OnLinkPrefixLength != 32
+                || !same_address(&observed.Address, local)
+                || observed.OnLinkPrefixLength != host_prefix(local)
                 || observed.PrefixOrigin != IpPrefixOriginManual
                 || observed.SuffixOrigin != IpSuffixOriginManual
             {
@@ -318,7 +431,7 @@ impl<'a> OwnedNetwork<'a> {
                 unsafe { DeleteUnicastIpAddressEntry(&row) },
                 "remove owned fixture address",
             )?;
-            self.address = None;
+            self.addresses.pop();
             let mut query = row;
             let code = unsafe { GetUnicastIpAddressEntry(&mut query) };
             if code != ERROR_NOT_FOUND && code != ERROR_FILE_NOT_FOUND {
@@ -343,35 +456,36 @@ impl<'a> OwnedNetwork<'a> {
             }
             self.mtu_changed = false;
         }
-        if self.ipv6_mtu_changed {
+        if self.ipv6_changed {
             let original = self
-                .original_ipv6_mtu
-                .ok_or("IPv6 MTU change has no original value")?;
+                .original_ipv6
+                .ok_or("IPv6 interface change has no original value")?;
+            self.require_ipv6(
+                self.wanted_ipv6(original),
+                "fixture IPv6 interface changed before restoration",
+            )?;
             let mut interface = self
                 .interface_for(AF_INET6)?
                 .ok_or("owned adapter lost its IPv6 interface before restoration")?;
-            if interface.NlMtu != u32::from(self.mtu) {
-                return Err("fixture IPv6 MTU changed before restoration".into());
-            }
-            interface.NlMtu = original;
+            interface.NlMtu = original.mtu;
+            interface.DadTransmits = original.dad_transmits;
+            interface.RouterDiscoveryBehavior = original.router_discovery;
             status(
                 unsafe { SetIpInterfaceEntry(&mut interface) },
-                "restore owned adapter IPv6 MTU",
+                "restore owned adapter IPv6 interface",
             )?;
-            if self.interface_for(AF_INET6)?.map(|row| row.NlMtu) != Some(original) {
-                return Err("original IPv6 MTU was not restored".into());
-            }
-            self.ipv6_mtu_changed = false;
+            self.require_ipv6(original, "original IPv6 interface was not restored")?;
+            self.ipv6_changed = false;
         }
         Ok(())
     }
 }
 impl Drop for OwnedNetwork<'_> {
     fn drop(&mut self) {
-        if (self.route.is_some()
-            || self.address.is_some()
+        if (!self.routes.is_empty()
+            || !self.addresses.is_empty()
             || self.mtu_changed
-            || self.ipv6_mtu_changed)
+            || self.ipv6_changed)
             && let Err(error) = self.restore()
         {
             eprintln!("Wintun packet fixture cleanup failed: {error}");

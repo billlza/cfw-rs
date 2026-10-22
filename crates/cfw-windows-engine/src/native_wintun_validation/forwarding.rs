@@ -1,6 +1,6 @@
-//! Actual Windows TCP and UDP -> Wintun -> packet pump -> the real engine's
-//! gVisor packet endpoint -> its SOCKS5 outbound -> a local fixture node, and
-//! every reply back the same way. Validation only: the CI runner account owns
+//! Actual Windows TCP and UDP over IPv4 and IPv6 -> Wintun -> packet pump ->
+//! the real engine's gVisor packet endpoint -> its SOCKS5 outbound -> a local
+//! fixture node, and every reply back the same way. Validation only: the CI runner account owns
 //! the adapter, the fixture address/host route, the pump and the engine. No
 //! Authority lease, TunnelWorker handoff, default route, DNS, firewall or
 //! product backend is involved, so product TUN stays unavailable.
@@ -19,16 +19,18 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     io::{ErrorKind, Read, Write},
-    net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream, UdpSocket},
+    net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket},
     os::windows::io::AsRawSocket,
     path::Path,
     thread,
     time::{Duration, Instant},
 };
-use windows_sys::Win32::Networking::WinSock::{IP_DONTFRAGMENT, IPPROTO_IP, SOCKET, setsockopt};
+use windows_sys::Win32::Networking::WinSock::{
+    IP_DONTFRAGMENT, IPPROTO_IP, IPPROTO_IPV6, IPV6_DONTFRAG, SOCKET, setsockopt,
+};
 
 mod socks;
-use socks::{BULK_BYTES, Fixture, HTTP_TARGET, UDP_TARGET, bulk, hex, transform};
+use socks::{BULK_BYTES, Fixture, HTTP_TARGETS, UDP_TARGETS, bulk, family, hex, transform};
 
 const PROFILE: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const TIMEOUT: Duration = Duration::from_secs(15);
@@ -128,8 +130,10 @@ pub(super) fn run(
         output,
         "result.json",
         &json!({"source":source,"success":result.is_ok(),"failure":result.as_ref().err(),
-        "cases":cases,"ip_families":["ipv4"],"owned_address":"192.0.2.10/32",
-        "owned_host_route":"192.0.2.123/32","wintun_engine_forwarding_verified":result.is_ok(),
+        "cases":cases,"ip_families":["ipv4","ipv6"],
+        "owned_addresses":["192.0.2.10/32","2001:db8:1::10/128"],
+        "owned_host_routes":["192.0.2.123/32","2001:db8:1::123/128"],
+        "wintun_engine_forwarding_verified":result.is_ok(),
         "authority_lease_exercised":false,"system_to_user_handoff_exercised":false,
         "default_routes_modified":false,"dns_modified":false,"firewall_modified":false,
         "product_tunnel_backend_exercised":false,"release_accepted":false}),
@@ -240,7 +244,7 @@ fn forward(run: &Run<'_>, mtu: u16) -> Result<Value> {
     )?;
     let operation = (|| {
         let mut session = adapter.session(mtu).map_err(|error| error.to_string())?;
-        let mut owned = network::OwnedNetwork::configure(&adapter, id, mtu)?;
+        let mut owned = network::OwnedNetwork::configure(&adapter, id, mtu, true)?;
         let identity = Owned {
             id,
             name: &name,
@@ -408,36 +412,51 @@ fn exercise(
     }))
 }
 
+/// Both families: TCP bulk both ways and one full-MTU UDP datagram each.
 fn exchange(fixture: &Fixture, mtu: u16) -> Result<Value> {
+    let mut families = serde_json::Map::new();
+    for (local, http, udp) in [
+        (IpAddr::V4(network::LOCAL), HTTP_TARGETS[0], UDP_TARGETS[0]),
+        (IpAddr::V6(network::LOCAL6), HTTP_TARGETS[1], UDP_TARGETS[1]),
+    ] {
+        let tcp = tcp_exchange(fixture, local, http)?;
+        let udp = udp_exchange(fixture, local, udp, mtu)?;
+        families.insert(family(http).to_owned(), json!({"tcp":tcp,"udp":udp}));
+    }
+    Ok(Value::Object(families))
+}
+
+fn tcp_exchange(fixture: &Fixture, local: IpAddr, target: SocketAddr) -> Result<Value> {
     let nonce = fixture.nonce();
-    let mut stream = TcpStream::connect_timeout(&SocketAddr::V4(HTTP_TARGET), TIMEOUT)
-        .map_err(|error| format!("TCP through the adapter: {error}"))?;
+    let family = family(target);
+    let mut stream = TcpStream::connect_timeout(&target, TIMEOUT)
+        .map_err(|error| format!("{family} TCP through the adapter: {error}"))?;
     stream
         .set_read_timeout(Some(TIMEOUT))
         .and_then(|()| stream.set_write_timeout(Some(TIMEOUT)))
         .map_err(|error| error.to_string())?;
-    let local = stream.local_addr().map_err(|error| error.to_string())?;
+    let observed_local = stream.local_addr().map_err(|error| error.to_string())?;
     let remote = stream.peer_addr().map_err(|error| error.to_string())?;
-    if local.ip() != IpAddr::V4(network::LOCAL) || remote != SocketAddr::V4(HTTP_TARGET) {
+    if observed_local.ip() != local || remote != target {
         return Err(format!(
-            "TCP did not use the owned adapter path: {local} -> {remote}"
+            "{family} TCP did not use the owned adapter path: {observed_local} -> {remote}"
         ));
     }
-    let upload = bulk(nonce, "upload", BULK_BYTES);
+    let upload = bulk(nonce, &format!("upload-{family}"), BULK_BYTES);
     let request = format!(
-        "POST /cfw-tunnel-forwarding/{nonce} HTTP/1.1\r\nHost: {}\r\nContent-Length: {BULK_BYTES}\r\nConnection: close\r\n\r\n",
-        HTTP_TARGET.ip()
+        "POST /cfw-tunnel-forwarding/{nonce}/{family} HTTP/1.1\r\nHost: {}\r\nContent-Length: {BULK_BYTES}\r\nConnection: close\r\n\r\n",
+        target.ip()
     );
     stream
         .write_all(request.as_bytes())
         .and_then(|()| stream.write_all(&upload))
-        .map_err(|error| format!("TCP upload: {error}"))?;
+        .map_err(|error| format!("{family} TCP upload: {error}"))?;
     let mut header = Vec::new();
     while !header.ends_with(b"\r\n\r\n") {
         let mut byte = [0u8; 1];
         stream
             .read_exact(&mut byte)
-            .map_err(|error| format!("TCP response header: {error}"))?;
+            .map_err(|error| format!("{family} TCP response header: {error}"))?;
         header.push(byte[0]);
         if header.len() > 8192 {
             return Err("HTTP response header exceeds its bound".into());
@@ -449,71 +468,90 @@ fn exchange(fixture: &Fixture, mtu: u16) -> Result<Value> {
         || !header.contains(&format!("\r\nContent-Length: {BULK_BYTES}\r\n"))
         || !header.contains(&format!("\r\nX-Upload-Sha256: {upload_sha256}\r\n"))
     {
-        return Err("HTTP response does not confirm the exact upload".into());
+        return Err(format!(
+            "{family} HTTP response does not confirm the exact upload"
+        ));
     }
     let mut download = vec![0u8; BULK_BYTES];
     stream
         .read_exact(&mut download)
-        .map_err(|error| format!("TCP download: {error}"))?;
+        .map_err(|error| format!("{family} TCP download: {error}"))?;
     let mut trailing = [0u8; 1];
     match stream.read(&mut trailing) {
         Ok(0) => {}
         Ok(_) => return Err("HTTP response carried bytes beyond its length".into()),
-        Err(error) => return Err(format!("TCP close: {error}")),
+        Err(error) => return Err(format!("{family} TCP close: {error}")),
     }
-    if download != bulk(nonce, "download", BULK_BYTES) {
-        return Err("downloaded bytes differ from the node's content".into());
+    if download != bulk(nonce, &format!("download-{family}"), BULK_BYTES) {
+        return Err(format!(
+            "{family} downloaded bytes differ from the node's content"
+        ));
     }
-    drop(stream);
+    Ok(
+        json!({"local":observed_local.to_string(),"remote":remote.to_string(),
+        "upload_bytes":BULK_BYTES,"upload_sha256":upload_sha256,"download_bytes":BULK_BYTES,
+        "download_sha256":hex(&Sha256::digest(&download))}),
+    )
+}
 
-    let socket =
-        UdpSocket::bind(SocketAddrV4::new(network::LOCAL, 0)).map_err(|error| error.to_string())?;
+fn udp_exchange(fixture: &Fixture, local: IpAddr, target: SocketAddr, mtu: u16) -> Result<Value> {
+    let family = family(target);
+    let socket = UdpSocket::bind(SocketAddr::new(local, 0)).map_err(|error| error.to_string())?;
+    let (level, option, headers) = match local {
+        IpAddr::V4(_) => (IPPROTO_IP, IP_DONTFRAGMENT, 28),
+        IpAddr::V6(_) => (IPPROTO_IPV6, IPV6_DONTFRAG, 48),
+    };
     let enabled: u32 = 1;
     if unsafe {
         setsockopt(
             socket.as_raw_socket() as SOCKET,
-            IPPROTO_IP,
-            IP_DONTFRAGMENT,
+            level,
+            option,
             (&enabled as *const u32).cast(),
             std::mem::size_of::<u32>() as i32,
         )
     } != 0
     {
         return Err(format!(
-            "set UDP don't-fragment: {}",
+            "set {family} UDP don't-fragment: {}",
             std::io::Error::last_os_error()
         ));
     }
     socket
-        .connect(SocketAddr::V4(UDP_TARGET))
+        .connect(target)
         .and_then(|()| socket.set_read_timeout(Some(TIMEOUT)))
         .map_err(|error| error.to_string())?;
-    let udp_local = socket.local_addr().map_err(|error| error.to_string())?;
-    if udp_local.ip() != IpAddr::V4(network::LOCAL) {
+    let observed_local = socket.local_addr().map_err(|error| error.to_string())?;
+    if observed_local.ip() != local {
         return Err(format!(
-            "UDP did not use the owned adapter address: {udp_local}"
+            "{family} UDP did not use the owned adapter address: {observed_local}"
         ));
     }
-    // A full-MTU IPv4 datagram: 20-byte IP and 8-byte UDP headers.
-    let payload = bulk(nonce, "udp", usize::from(mtu) - 28);
+    // A full-MTU datagram after the IP and 8-byte UDP headers.
+    let payload = bulk(
+        fixture.nonce(),
+        &format!("udp-{family}"),
+        usize::from(mtu) - headers,
+    );
     if socket.send(&payload).map_err(|error| error.to_string())? != payload.len() {
-        return Err("Windows UDP send did not accept the complete datagram".into());
+        return Err(format!(
+            "Windows {family} UDP send did not accept the complete datagram"
+        ));
     }
     let mut buffer = vec![0u8; usize::from(mtu)];
     let received = socket
         .recv(&mut buffer)
-        .map_err(|error| format!("UDP answer through the adapter: {error}"))?;
+        .map_err(|error| format!("{family} UDP answer through the adapter: {error}"))?;
     if buffer[..received] != transform(&payload) {
-        return Err("Windows UDP did not receive the node's exact answer".into());
+        return Err(format!(
+            "Windows {family} UDP did not receive the node's exact answer"
+        ));
     }
-    Ok(json!({
-        "tcp":{"local":local.to_string(),"remote":remote.to_string(),"upload_bytes":BULK_BYTES,
-            "upload_sha256":upload_sha256,"download_bytes":BULK_BYTES,
-            "download_sha256":hex(&Sha256::digest(&download))},
-        "udp":{"local":udp_local.to_string(),"remote":UDP_TARGET.to_string(),
-            "request_bytes":payload.len(),"answer_bytes":received,"dont_fragment":true,
-            "request_sha256":hex(&Sha256::digest(&payload))}
-    }))
+    Ok(
+        json!({"local":observed_local.to_string(),"remote":target.to_string(),
+        "request_bytes":payload.len(),"answer_bytes":received,"dont_fragment":true,
+        "request_sha256":hex(&Sha256::digest(&payload))}),
+    )
 }
 
 /// With the engine stopped and the pump retired, the same route, address and
@@ -521,7 +559,7 @@ fn exchange(fixture: &Fixture, mtu: u16) -> Result<Value> {
 fn causal_control(fixture: &Fixture) -> Result<Value> {
     let before = fixture.accepted();
     let started = Instant::now();
-    match TcpStream::connect_timeout(&SocketAddr::V4(HTTP_TARGET), Duration::from_secs(3)) {
+    match TcpStream::connect_timeout(&HTTP_TARGETS[0], Duration::from_secs(3)) {
         Err(error) if error.kind() == ErrorKind::TimedOut => {}
         Ok(_) => return Err("TCP connected through the adapter without a running pump".into()),
         Err(error) => return Err(format!("unexpected control connect result: {error}")),
@@ -533,26 +571,36 @@ fn causal_control(fixture: &Fixture) -> Result<Value> {
         "control_wait_ms":started.elapsed().as_millis(),"node_connections_unchanged":true}))
 }
 
-/// Exactly one CONNECT and one UDP datagram for this run's fixed targets.
-/// Other background flows are recorded by the fixture and never served.
+/// Exactly one CONNECT and one UDP datagram per family for this run's fixed
+/// targets. Other background flows are recorded by the fixture, never served.
 fn require_fixture_flows(observations: &Value, mtu: u16) -> Result<()> {
     let flows = observations["observations"]
         .as_array()
         .ok_or("fixture observations are missing")?;
-    let connects = flows
-        .iter()
-        .filter(|flow| flow["command"] == "connect" && flow["target"] == HTTP_TARGET.to_string())
-        .count();
-    let served: Vec<_> = flows
-        .iter()
-        .filter(|flow| flow["command"] == "udp_associate")
-        .filter_map(|flow| flow["served"].as_array())
-        .flatten()
-        .collect();
-    if connects != 1 || served.len() != 1 || served[0]["bytes"] != json!(usize::from(mtu) - 28) {
-        return Err(format!(
-            "fixture did not observe exactly the run's TCP and UDP flows: {observations}"
-        ));
+    for (http, udp, headers) in [
+        (HTTP_TARGETS[0], UDP_TARGETS[0], 28),
+        (HTTP_TARGETS[1], UDP_TARGETS[1], 48),
+    ] {
+        let connects = flows
+            .iter()
+            .filter(|flow| flow["command"] == "connect" && flow["target"] == http.to_string())
+            .count();
+        let served: Vec<_> = flows
+            .iter()
+            .filter(|flow| flow["command"] == "udp_associate")
+            .filter_map(|flow| flow["served"].as_array())
+            .flatten()
+            .filter(|datagram| datagram["target"] == udp.to_string())
+            .collect();
+        if connects != 1
+            || served.len() != 1
+            || served[0]["bytes"] != json!(usize::from(mtu) - headers)
+        {
+            return Err(format!(
+                "fixture did not observe exactly the run's {} flows: {observations}",
+                family(http)
+            ));
+        }
     }
     Ok(())
 }

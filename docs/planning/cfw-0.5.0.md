@@ -212,9 +212,9 @@ ICMPv6（IPv6 最多一个分片头）的包才写入会话。被拒包按目的
 SYSTEM 所有的适配器。验证探针按自身实际分配的地址构造策略，并要求适配器接收计数
 等于泵的投递计数、源地址类与协议类拒绝为零。它不涉及 SYSTEM 所有权、TunnelWorker
 授权交接、默认路由、DNS、防火墙或持久恢复，产品 TUN 仍不可用。SYSTEM 承载时还须
-关闭适配器的 DHCP、路由器发现、DAD 与转发，保持公用网络防火墙配置，并处理
-Authority wire 中 `PacketPumpLimits` 只接受 1280–1500 的冲突（数据面与共享设置为
-1280–9000）。
+关闭适配器的路由器发现、DAD、转发、DDNS 注册与 NetBIOS（DHCPv4 默认已关闭），保持
+公用网络防火墙配置；`PacketPumpLimits` 按用户决定保持 1280–1500，交接只提供该范围
+的端点（数据面与共享设置为 1280–9000）。
 
 `2c708d2f` 的[共享／原生作业](https://github.com/billlza/cfw-rs/actions/runs/39738500584)与
 [桌面作业](https://github.com/billlza/cfw-rs/actions/runs/39738498834)七项全部通过，五个
@@ -907,7 +907,7 @@ Windows 成品使用 Windows runner；本机可仅作为编辑与控制端。现
 | 基线 | 固定 GA；九页、命令、平台功能与已知限制清点 | 源码和发布身份已核实；已安装界面全量视觉采集待完成 |
 | 路线评估 | 两条路线范围/维护/CI 对照、明确建议 | 已记录共享前端建议 |
 | 共享边界 | UI 产品/平台表现、用例与持久化边界；Mac 行为保持回归 | `ab812fc` 的 Windows 快照通过 481 项 Rust/311 项前端；共享授权改动的 Mac 全工作区 1,160 项 Rust 回归通过；当前完整 Mac CI 与桌面产品接线未完成 |
-| Windows 纵向链路 | 真正导入、启动代理、联网、停止恢复；General 与复杂弹窗真实验证 | 引擎、Rust 进程所有权及 WinINet 流量/恢复已通过九项真实集成测试并核验下载产物；`ab812fc` 的 SCM 九项原生场景及普通客户端权限边界也已通过并核验回执；`ca1d120e` 起实际安装 GUI 完成两种代理流量与退出恢复；`1f7bccc1`／`f00051fb` 起 Wintun→泵→真实引擎的 IPv4／IPv6 TCP 与 UDP 转发已在托管 Windows 验证；TUN 运行租约、SYSTEM 承载与持久恢复、完整服务生命周期待完成 |
+| Windows 纵向链路 | 真正导入、启动代理、联网、停止恢复；General 与复杂弹窗真实验证 | 引擎、Rust 进程所有权及 WinINet 流量/恢复已通过九项真实集成测试并核验下载产物；`ab812fc` 的 SCM 九项原生场景及普通客户端权限边界也已通过并核验回执；`ca1d120e` 起实际安装 GUI 完成两种代理流量与退出恢复；`1f7bccc1`／`f00051fb` 起 Wintun→泵→真实引擎的 IPv4／IPv6 TCP 与 UDP 转发已在托管 Windows 验证；`9287fb79` 起 SYSTEM 到 UserAgent 的端点交接在 SCM 夹具中原生验证；TUN 运行租约、SYSTEM 承载与持久恢复、完整服务生命周期待完成 |
 | 全功能/视觉 | 本文全部页面和功能逐项有可执行用例与证据 | 待完成 |
 | 稳定性/交付 | 完整 CI、真实 Windows 验收、签名安装更新、性能与恢复 | 待完成；用户暂未确定 Windows 测试机，先推进代码和托管 CI；真机项目保持未验证 |
 | 正式发布 | 无阻塞缺陷、源/包身份一致、授权发布和下载验证 | 未开始 |
@@ -2699,17 +2699,97 @@ MTU UDP（载荷 MTU−48，设置 IPV6_DONTFRAG），固定节点按地址族�
 须与流量一致），并修正 macOS 门禁发现的 `WINTUN_*` 策略声明缺失。随后加入引擎到
 系统方向的 `DeliveryPolicy`，`2c708d2f` 原生验证通过（见当前验收状态）。
 
-下一步（未实现）：由 SYSTEM 创建数据包端点，经可验证的接收路径（管道契约、服务端
-进程身份、SYSTEM 侧对象比对、本地原件与副本比对）把客户端交给普通用户进程，先作为
-只验证的 SCM 场景，再接入 wire 版本、租约与 SYSTEM 承载的泵。开工前需要用户决定：
-（1）Tunnel 引擎由 UserAgent 承载（复用每用户 DPAPI 凭据），还是保持状态机现有的
-独立 TunnelWorker 角色，或由 SYSTEM 以用户令牌启动；（2）Authority wire
-`PacketPumpLimits` 的 1280–1500 上限：与 macOS GA 一致（GA 的 Swift
-`TunnelNetworkOptions` 同样只接受 1280–1500，Windows TUN 对更大 MTU 显式拒绝），
-还是把共享协议扩展到 9000（需同步 macOS 模型与固定样例）；（3）接收进程的完整性
-要求（与 keeper 一致恰为中等，或允许中到高）以及转交句柄的访问掩码。另需在 SYSTEM
-承载前确认：Wintun 适配器默认是否启用 DHCP，以及 IPv4 ICMP 重定向在点对点 /30 上的
-影响（策略目前允许 ICMP 类型 5）。
+2026-10-22 用户已决定：Tunnel 引擎由 UserAgent 承载（复用每用户 DPAPI 凭据）；
+`PacketPumpLimits` 保持 1280–1500，与 macOS GA 模型一致，不修改共享协议；接收端点的
+进程须为中或高完整性（低、AppContainer、不受信任一律拒绝），转交的句柄只带泵所需的
+访问权限。随后 `3dbe2d59` 先完成交接前的加固，`9287fb79` 实现 SYSTEM 到 UserAgent 的
+端点交接（见下节）。
+
+### 2026-10-22：交接前加固与 SYSTEM 端点交接（均已原生验证）
+
+`7ffd916c` 收窄可绕过投递策略的直接路径：`Session` 的直接收发只在
+native-service-validation 下存在，`PacketServer::receive` 只在 native-engine-validation
+下存在，会话拆分、泵端点拆分与 `start_halves` 只在 `tunnel` 模块内可见；产品构建中
+引擎数据包只能经 `PacketPump` 和投递策略进入 Windows。`c05346c7` 收紧 ICMP：只放行
+回显应答（可分片），以及完整未分片、且引用 Windows 从适配器自身地址发出之包的目的
+不可达／超时／参数问题报告（ICMPv6 另含 packet too big）；重定向（ICMPv4 类型 5）、
+路由器通告与请求、邻居发现、MLD 及其余类型一律拒绝。首分片必须带类型；后续分片在
+缺少首分片时无法重组，因此放行。头部解析新增分片位置（DF 与保留位不算分片，IPv6
+分片头即使偏移为 0 也算分片）和被引用报头的源地址，可移植变异检查全部杀死。
+`509092d2` 在转发探针中记录适配器创建时与分配固定地址后的 `GetAdaptersAddresses`
+标志。`3dbe2d59` 的[共享／原生作业](https://github.com/billlza/cfw-rs/actions/runs/39754658396)
+与[桌面作业](https://github.com/billlza/cfw-rs/actions/runs/39754654559)七项全部通过，
+五个产物按 API 摘要核验：引擎
+`864c5557ab72b9b05f6c8765ffdfe79aa714c8ead16d05ab097c3af5c7ecbb5b`、Wintun
+`58a74ba6d80f4e1ff2b5256727d780a093c4074592c9e180e1e6dd3d8237e749`、SCM
+`80b594d1c386b3ea5ed0e948b8e6c1b3212ea6c82189ce22783f5bc7a47d1d8e`、桌面
+`96d67056380210d91cf3e2a25c59322c8a1a4f8103f0559b2f6808b0ed276f9a`、更新包检查
+`5eedfa57e180cd08c3d59a5e84f5c2d5d9ca431ab2963d486f4d72638ae1d0d0`。505 个 Go 测试、
+41 项 Wintun 数据包测试、共享 760 项 Rust／329 项 UI、372 项桌面测试与三次 GUI 会话
+通过，EXE 为 43,320,320 字节（`a952c9dcc65c9c877dc6403e79cdee99cc0050761a233da49b1ca8a408a8ff1a`）。
+原生观察：新建 Wintun 适配器的 DHCPv4 默认关闭，适配器标志为 0x1C1（DDNS 注册、
+NetBIOS over TCP/IP、IPv4、IPv6 启用），分配固定地址后不变；产品承载时应另行关闭
+该适配器的 DDNS 注册与 NetBIOS。转发三档的目的地址类拒绝为 34／39／41 个，源地址类
+与协议类（含新 ICMP 规则）为 0，接收计数等式成立。
+
+同一提交的 macOS CI（运行 39754658440）三项作业都实际执行。质量作业中
+build-script-boundary、ci-no-masking、证据清单、版本契约、rustfmt、依赖图、UI
+（329 项）、整个工作区的 macOS Clippy 与 1,323 项 Rust 测试全部通过，`WINTUN_*`
+修正生效；release-tool 测试 3,672 项中只有
+`test_real_swift_identity_is_clean_repeatable_and_structured` 失败：托管镜像已换成
+Xcode 27.2 beta 3，其 Swift 报告 `6.4.2`，而测试硬编码 `6.4`。供应链作业因
+RUSTSEC-2026-0382（rustls-webpki 0.103.15，修复于 0.103.16）失败，libbox 作业因
+GO-2026-6809（go1.27.2 的 crypto/x509，修复于 go1.27.3）失败。两项公告都在 GA 之后
+发布，修复要升级 Go 工具链与 rustls-webpki，会改变发布身份，需另行决定。
+
+macOS 运行长期排队的原因（只读诊断）：个人账户的托管 macOS 作业实际并发上限为 5，
+几乎全部被 billlza/q-periapt 的 `ci`、`independent-continuity`、`reference-account`
+工作流占用（无 concurrency 分组，每次推送约 9 个 macOS 作业，大量作业排队满 24 小时
+后被取消）；PR #8 的 CI 又在每次推送时取消排队中的旧运行，使其反复回到队尾。
+`xcode-27` 是标准托管镜像标签，不是自托管或大型 runner；账单接口因令牌权限不可读。
+建议由用户操作：取消 q-periapt 不需要的排队运行，为其三个工作流及本仓库
+`mobile-egress-observer.yml` 加 concurrency 分组或限制触发；不建议改用
+`macos-15`／`macos-latest`，它们共享同一并发上限。
+
+`b0be2250` 实现 SYSTEM 到 UserAgent 的端点交接。`EndpointHandoff::create` 只允许
+SYSTEM 服务为已授权的 UserAgent 请求创建端点，接收方须为中或高完整性的交互会话进程，
+且不是 AppContainer、受限令牌或 LocalSystem；客户端以 `ENDPOINT_ACCESS`
+（`FILE_READ_DATA | FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE`）不可继承地
+复制到接收方，SYSTEM 从不关闭对方句柄表中的值。接收方 `PacketClient::adopt` 先核对
+句柄标志为零、单实例消息管道客户端、消息读模式与缓冲区，并核对服务端进程是固定的
+服务进程（创建时间与会话 0 不变），再请 SYSTEM 以零权限副本和 `CompareObjectHandles`
+比对；确认会消耗交接对象，任何拒绝（包括替换对象）都退役该端点。采纳后的客户端经
+`into_child` 再次核对服务端后才可被引擎继承。`2a65c64b` 让 Go 引擎宿主在恰为该访问
+掩码的句柄上完成收发与关闭。`9287fb79` 在 SCM 夹具中验证：SYSTEM 服务把端点交给
+中等完整性的 UserAgent 客户端；客户端证明无关事件与自己服务的管道在询问 SYSTEM 前
+即被拒绝且仍保持打开，SYSTEM 的对象比对拒绝无关副本并退役该端点；客户端随后采纳
+新端点，证明它无法提升到 DELETE、READ_CONTROL、WRITE_DAC、WRITE_OWNER 等权限，
+往返一个 1500 字节的包后关闭，SYSTEM 观察到对端关闭。
+`9287fb79` 的[共享／原生作业](https://github.com/billlza/cfw-rs/actions/runs/39763928886)五项
+通过：SCM 回执列出 36 项用例（新增 `system_packet_endpoint_handoff`），夹具父进程逐字
+核对 SYSTEM 端报告与客户端报告（采纳、替换被拒、访问受限、往返回显均为真），精确名称
+的准入测试 1 项通过；Wintun 作业的数据包测试增至 49 项（新增 4 项交接与 4 项条款测试，
+包括在 Windows 上自建的字节管道、非消息读模式、非阻塞模式、两实例和超限缓冲反例）；
+Go 测试增至 506 项，其中引擎宿主在恰为交接访问掩码的句柄上完成收发与关闭；共享 768 项
+Rust／329 项 UI。产物摘要：引擎
+`2dc022619a350c94b9d59ce51c7d24f0cf9a947a6c8f82f73fcee86cf061475d`、Wintun
+`2109a4949fb6a6fef86d06edc9a2ce3821c9fc7ee7fc577c96fcdb69584e9115`、SCM
+`65fdabe8c249cb525b5837a7e59540ffd1c3e3eee24f38997f27ffc8f554defb`、更新包检查
+`7343e2b15850618147035904abec6bf45a31538fbdf47c567a829fc2ae995c53`；引擎宿主字节不变。
+同一提交的[桌面作业](https://github.com/billlza/cfw-rs/actions/runs/39763925394)第一次
+尝试失败（产物 `e4ef34db94e79e28d50ed4f0daa7b16434019c50e9632759f2248b1398a46fd4`）：
+LocalProxy 网络启动时 Agent 报告 “installed Agent readiness was not delivered”，其
+Authority 通道在 Ready 前被 SYSTEM 端关闭（109），桌面显示
+“authority ended before Ready”；现有产物不收集 SYSTEM 运行时日志，原因未能定位。
+同一作业重跑一次后通过（产物
+`2043d567ea59c5fed3ef5c2886ac2e2a483cf6c3b265554fb8d1a991c39c4ed3`：372 项桌面、5 项
+更新日志测试与三次 GUI 会话，EXE 43,322,880 字节，SHA-256
+`8570575a3a98521f390852bf186617e527cc64949d574abcaee2af3eb40dbaac`）。改动不触及
+LocalProxy 路径，且 engine 作业的 19 项安装运行检查同时通过，因此记为间歇失败而非
+回归；GUI 失败时应补充采集 SYSTEM 运行时诊断。仍未接通：
+Authority wire 中携带端点的消息与 TunnelWorker 授权、SYSTEM 承载的 Wintun 适配器与泵、
+路由／DNS 所有权与持久恢复。同一用户的其他中等完整性进程仍可从 UserAgent 复制出
+端点，这是由 UserAgent 承载引擎带来的固有边界。
 
 ## 官方资料
 

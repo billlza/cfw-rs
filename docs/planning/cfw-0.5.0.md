@@ -132,12 +132,14 @@ build-script-boundary 完整检查通过，变异检查确认新断言有效。�
 （`-D warnings`）。完整 release-tool 测试在本机 3,655 项中有 31 项因缺少封闭发布环境
 （发布账户 home、`CFW_RELEASE_RUST_TOOLCHAIN`、Homebrew Python 为符号链接）失败，
 不计为通过或失败。此后多数提交的 macOS CI（如运行 39734543615）在排队中被下一次推送
-取消；`3dbe2d59` 的运行 39754658440 实际执行，包括 Tauri 外壳在内的整个工作区 macOS
-Clippy 与 Rust 测试通过，三项作业分别停在 release-tool 测试、Rust 目标图公告与 libbox
-Go 公告（见交接前加固一节）。自 `21505a88` 以来 PR 分支只完成 `1f7bccc1` 与
-`3dbe2d59` 两次 macOS 运行，两次的 libbox 与供应链作业都停在公告扫描，质量作业也未
-到达 shell 检查：Swift 格式与包测试、Xcode 目标测试与分析、更新签名边界、0.5.0 验证
-骨架构建、依赖／来源／许可证策略和 shell 脚本检查均无结果，完整 Mac 门禁尚无结果。
+取消；`3dbe2d59` 的运行 39754658440 实际执行，三项作业分别停在 release-tool 测试、
+Rust 目标图公告与 libbox Go 公告（见交接前加固一节）。`39b1440a` 的运行 39770829274
+中质量作业 30 个步骤全部通过：包括 Tauri 外壳在内的整个工作区 macOS Clippy、1,327 项
+Rust 测试、329 项 UI 测试、3,672 项 release-tool 测试以及 shell 语法检查与 ShellCheck；
+供应链与 libbox 作业仍分别停在 RUSTSEC-2026-0382 与 GO-2026-6809。自 `21505a88`
+以来 libbox 与供应链作业每次都停在公告扫描，Swift 格式与包测试、Xcode 目标测试与
+分析、更新签名边界、0.5.0 验证骨架构建和依赖／来源／许可证策略均无结果，完整 Mac
+门禁尚无结果。
 SYSTEM 到 UserAgent 的数据包端点交接已在 SCM 夹具中原生验证（`9287fb79`），但
 Authority wire 中的端点消息与授权代次、SYSTEM 承载的适配器与泵、路由／DNS 所有权及
 持久恢复尚未接通；产品 TUN 仍不可用，不能将引擎适配代码、验证夹具或尚未执行的测试
@@ -2751,7 +2753,12 @@ RUSTSEC-2026-0382（rustls-webpki 0.103.15，修复于 0.103.16）失败，libbo
 GO-2026-6809（go1.27.2 的 crypto/x509，修复于 go1.27.3）失败。各作业在失败步骤后
 停止：shell 脚本检查、依赖／来源／许可证策略，以及 libbox 之后的 Swift、Xcode、更新
 签名边界与 0.5.0 验证骨架步骤均未执行，不计为通过。两项公告都在 GA 之后发布，修复要
-升级 Go 工具链与 rustls-webpki，会改变发布身份，需另行决定。
+升级 Go 工具链与 rustls-webpki，会改变发布身份，需另行决定。`39b1440a` 的运行
+39770829274 中同一 release-tool 测试通过：该次质量作业分到 `xcode-27-arm64` 镜像
+20261012.0260.1（选中 Xcode 27.2 beta 2，27B5028f），`3dbe2d59` 分到 20261019.0289.1
+（Xcode 27.2 beta 3，27B5038j）。同一标签同时分配两个镜像版本，“选择最新可用 Xcode”
+随之改变 Swift 版本，该测试结果因此取决于分到的镜像；固定 Xcode 选择或让测试接受
+同一 6.4 系列的补丁版本，需另行决定。
 
 macOS 运行长期排队的原因（只读诊断）：个人账户的托管 macOS 作业实际并发上限为 5，
 几乎全部被 billlza/q-periapt 的 `ci`、`independent-continuity`、`reference-account`

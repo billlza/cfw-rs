@@ -1,6 +1,6 @@
 //! Complete IP messages over a private native pipe. This data-plane primitive
 //! grants no Authority lease and never changes adapters, DNS, routes or proxy.
-use super::{Error, Result, packet};
+use super::{Result, packet};
 use crate::{
     NativePeerProcess, ServicePayload, ServiceTransportError,
     protocol::PacketAttachment,
@@ -115,6 +115,9 @@ impl PacketServer {
 
     /// None is only a polling timeout. The same buffer/OVERLAPPED remains
     /// owned, including a packet that completes just after this poll returns.
+    /// Validation only: product engine packets reach Windows solely through
+    /// a `PacketPump` and its delivery policy.
+    #[cfg(feature = "native-engine-validation")]
     pub fn receive(&mut self, deadline: Instant) -> Result<Option<ServicePayload>> {
         let operation = match self.receiver.as_mut() {
             Some(receiver) => receiver.receive(deadline, &self.cancel),
@@ -124,12 +127,13 @@ impl PacketServer {
             .map(|received| received.map(|packet| packet.payload))
     }
 
+    #[cfg(feature = "native-engine-validation")]
     fn finish<T>(&mut self, operation: Result<T>) -> Result<T> {
         match operation {
             Ok(value) => Ok(value),
             Err(operation) => match self.close() {
                 Ok(()) => Err(operation),
-                Err(cleanup) => Err(Error::Cleanup {
+                Err(cleanup) => Err(super::Error::Cleanup {
                     operation: Box::new(operation),
                     cleanup: Box::new(cleanup),
                 }),
@@ -149,7 +153,7 @@ impl PacketServer {
 
     /// Hand both directions to one pump. A closed or cancelled endpoint cannot
     /// start one; cancellation handles issued earlier keep applying to it.
-    pub(crate) fn into_pump_parts(mut self) -> Result<PumpParts> {
+    pub(super) fn into_pump_parts(mut self) -> Result<PumpParts> {
         if self.cancel.load(Ordering::Acquire) {
             return Err(ServiceTransportError::Cancelled.into());
         }

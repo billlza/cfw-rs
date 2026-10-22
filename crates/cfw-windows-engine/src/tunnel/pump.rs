@@ -300,7 +300,7 @@ impl<'scope> PacketPump<'scope> {
         Self::start_halves(scope, incoming, outgoing, server, policy)
     }
 
-    pub(crate) fn start_halves(
+    pub(super) fn start_halves(
         scope: &'scope Scope<'scope, '_>,
         incoming: SessionReceiver<'scope>,
         outgoing: SessionSender<'scope>,

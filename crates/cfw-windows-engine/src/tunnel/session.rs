@@ -121,11 +121,16 @@ impl Session<'_> {
         self.mtu
     }
 
-    pub fn wait_readable(&self, timeout: Duration) -> Result<bool> {
+    // Direct session I/O exists only for the validation probes. Product
+    // packets move through `PacketPump`, whose delivery policy guards every
+    // packet written to Windows.
+    #[cfg(feature = "native-service-validation")]
+    pub(crate) fn wait_readable(&self, timeout: Duration) -> Result<bool> {
         wait(self.read_event, timeout)
     }
 
-    pub fn receive(&self, output: &mut [u8]) -> Result<Option<usize>> {
+    #[cfg(feature = "native-service-validation")]
+    pub(crate) fn receive(&self, output: &mut [u8]) -> Result<Option<usize>> {
         let library = self.adapter.library;
         receive(
             self.handle,
@@ -136,14 +141,15 @@ impl Session<'_> {
         )
     }
 
-    pub fn send(&self, bytes: &[u8]) -> Result<()> {
+    #[cfg(feature = "native-service-validation")]
+    pub(crate) fn send(&self, bytes: &[u8]) -> Result<()> {
         let library = self.adapter.library;
         send(self.handle, library.allocate, library.send, self.mtu, bytes)
     }
 
     /// One receiving and one sending half for two concurrent workers. The
     /// exclusive borrow keeps the owner from using the session meanwhile.
-    pub(crate) fn split(&mut self) -> (SessionReceiver<'_>, SessionSender<'_>) {
+    pub(super) fn split(&mut self) -> (SessionReceiver<'_>, SessionSender<'_>) {
         let library = self.adapter.library;
         (
             SessionReceiver {

@@ -83,7 +83,7 @@ impl ClientCase {
                 serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"installed_package_inspector":true,"installed_desktop_identity":true,"protected_manifest_write_denied":true,"signed_msi_verified":true,"different_publisher_rejected":true,"precreation_cancellation_observed":true,"private_staged_copy_inspected":true,"staging_cleanup_observed":true,"desktop_staging_owner_retained":true})
             }
             Self::UserAgent => {
-                serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"query_only_service_process":true,"desktop_role_rejected":true,"pipe_instance_creation_rejected":true,"live_console_authorized":true,"missing_lease_rejected":true,"foreign_lease_rejected":true,"unleased_observation_admitted":true,"machine_record_access_denied":true,"zero_access_job_keeper_isolated":true,"job_keeper_prevents_name_loss":true,"job_keeper_release_observed":true,"keeper_object_identity_checked":true,"unrelated_keeper_handle_preserved":true})
+                serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"query_only_service_process":true,"desktop_role_rejected":true,"pipe_instance_creation_rejected":true,"live_console_authorized":true,"missing_lease_rejected":true,"foreign_lease_rejected":true,"unleased_observation_admitted":true,"machine_record_access_denied":true,"zero_access_job_keeper_isolated":true,"job_keeper_prevents_name_loss":true,"job_keeper_release_observed":true,"keeper_object_identity_checked":true,"unrelated_keeper_handle_preserved":true,"packet_endpoint_adopted":true,"packet_substitutes_refused":true,"packet_endpoint_access_reduced":true,"packet_endpoint_echoed":true})
             }
             Self::CopiedImage => {
                 serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"client_image_rejected":true})
@@ -940,6 +940,7 @@ fn client_body(name: &str, hex: &str, case: ClientCase) -> Result<()> {
     .map_err(|e| e.to_string())?;
     verify_query_only_service_access(channel.process_id().map_err(|e| e.to_string())?)?;
     job_keeper::client(&mut channel)?;
+    packet_handoff::client(&mut channel)?;
     if channel
         .request(b"ping", Instant::now() + LIMIT)
         .map_err(|e| e.to_string())?

@@ -538,6 +538,7 @@ fn serve_connection(
 ) -> Result<()> {
     let mut wire_connection = false;
     let mut job_keeper: Option<cfw_windows_engine::authority::JobKeeperProbe> = None;
+    let mut packet_handoff: Option<cfw_windows_engine::tunnel::PacketHandoffProbe> = None;
     loop {
         if STOP.load(Ordering::SeqCst) {
             return Ok(());
@@ -730,7 +731,7 @@ fn serve_connection(
                         .map_err(|e| e.to_string())?;
                     Some(b"released".to_vec())
                 }
-                _ => None,
+                body => packet_handoff::handle(&mut packet_handoff, &admitted, body)?,
             };
             if let Some(reply) = reply {
                 connection
@@ -741,6 +742,9 @@ fn serve_connection(
         }
         if request.body() == b"done" && job_keeper.as_ref().is_some_and(|p| !p.released()) {
             return Err("keeper fixture ended before handle retirement".into());
+        }
+        if request.body() == b"done" {
+            packet_handoff::require_complete(&packet_handoff)?;
         }
         if request.body() == b"identity-probe" {
             connection

@@ -345,7 +345,9 @@ jobs:
           $artifactRoot = Join-Path $env:RUNNER_TEMP 'cfw-service-peer'
           New-Item -ItemType Directory -Path $artifactRoot -ErrorAction Stop | Out-Null
           cargo test --locked -p cfw-windows-engine --features native-service-validation --lib authority::runtime_job::validation::keeper::tests::ordinary_user_cannot_create_job_keeper_probes -- --exact 2>&1 | Tee-Object -FilePath (Join-Path $artifactRoot 'job-keeper-admission-tests.txt')
-          if ($LASTEXITCODE -ne 0) { throw "Job keeper fixture admission failed" }
+          if ($LASTEXITCODE -ne 0 -or -not (Select-String -Path (Join-Path $artifactRoot 'job-keeper-admission-tests.txt') -SimpleMatch 'test result: ok. 1 passed' -Quiet)) { throw "Job keeper fixture admission failed" }
+          cargo test --locked -p cfw-windows-engine --features native-service-validation --lib tunnel::channel::handoff::tests::ordinary_user_cannot_create_packet_handoff_probes -- --exact 2>&1 | Tee-Object -FilePath (Join-Path $artifactRoot 'packet-handoff-admission-tests.txt')
+          if ($LASTEXITCODE -ne 0 -or -not (Select-String -Path (Join-Path $artifactRoot 'packet-handoff-admission-tests.txt') -SimpleMatch 'test result: ok. 1 passed' -Quiet)) { throw "Packet handoff fixture admission failed" }
           cargo test --locked -p cfw-windows-engine --features native-service-validation --example native-service-fixture 2>&1 | Tee-Object -FilePath (Join-Path $artifactRoot 'runtime-diagnostics-tests.txt')
           if ($LASTEXITCODE -ne 0) { throw "Runtime fixture diagnostic preservation failed" }
           # Only this disposable VM installs uniquely named fixtures. The

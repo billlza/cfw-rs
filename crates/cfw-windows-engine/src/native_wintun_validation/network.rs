@@ -157,10 +157,10 @@ pub(super) fn require_unused_addresses_and_route() -> Result<()> {
 
 /// The IPv6 interface settings a probe changed, kept to restore them exactly.
 #[derive(Clone, Copy)]
-struct Ipv6Interface {
-    mtu: u32,
-    dad_transmits: u32,
-    router_discovery: NL_ROUTER_DISCOVERY_BEHAVIOR,
+pub(super) struct Ipv6Interface {
+    pub(super) mtu: u32,
+    pub(super) dad_transmits: u32,
+    pub(super) router_discovery: NL_ROUTER_DISCOVERY_BEHAVIOR,
 }
 
 pub(super) struct OwnedNetwork<'a> {
@@ -391,9 +391,9 @@ impl<'a> OwnedNetwork<'a> {
     pub(super) fn original_mtu(&self) -> u32 {
         self.original_mtu
     }
-    /// The adapter's IPv6 MTU before this probe, when IPv6 was bound to it.
-    pub(super) fn original_ipv6_mtu(&self) -> Option<u32> {
-        self.original_ipv6.map(|original| original.mtu)
+    /// The adapter's IPv6 interface before this probe, when IPv6 was bound to it.
+    pub(super) fn original_ipv6(&self) -> Option<Ipv6Interface> {
+        self.original_ipv6
     }
     pub(super) fn restore(&mut self) -> Result<()> {
         self.require_owner()?;

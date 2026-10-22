@@ -30,7 +30,10 @@ use windows_sys::Win32::Networking::WinSock::{
 };
 
 mod socks;
-use socks::{BULK_BYTES, Fixture, HTTP_TARGETS, UDP_TARGETS, bulk, family, hex, transform};
+use socks::{
+    BULK_BYTES, Fixture, HTTP_TARGETS, UDP_TARGETS, bulk, family, hex, http_host, transform,
+    udp_overhead,
+};
 
 const PROFILE: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const TIMEOUT: Duration = Duration::from_secs(15);
@@ -255,7 +258,10 @@ fn forward(run: &Run<'_>, mtu: u16) -> Result<Value> {
         drop(session);
         let mut receipt = combine(exercised, restored)?;
         receipt["original_mtu"] = json!(owned.original_mtu());
-        receipt["original_ipv6_mtu"] = json!(owned.original_ipv6_mtu());
+        receipt["original_ipv6_interface"] = json!(owned.original_ipv6().map(|original| {
+            json!({"mtu":original.mtu,"dad_transmits":original.dad_transmits,
+            "router_discovery":original.router_discovery})
+        }));
         receipt["owned_route_address_mtu_restored"] = json!(true);
         Ok(receipt)
     })();
@@ -437,7 +443,8 @@ fn tcp_exchange(fixture: &Fixture, local: IpAddr, target: SocketAddr) -> Result<
         .map_err(|error| error.to_string())?;
     let observed_local = stream.local_addr().map_err(|error| error.to_string())?;
     let remote = stream.peer_addr().map_err(|error| error.to_string())?;
-    if observed_local.ip() != local || remote != target {
+    if observed_local.ip() != local || remote.ip() != target.ip() || remote.port() != target.port()
+    {
         return Err(format!(
             "{family} TCP did not use the owned adapter path: {observed_local} -> {remote}"
         ));
@@ -445,7 +452,7 @@ fn tcp_exchange(fixture: &Fixture, local: IpAddr, target: SocketAddr) -> Result<
     let upload = bulk(nonce, &format!("upload-{family}"), BULK_BYTES);
     let request = format!(
         "POST /cfw-tunnel-forwarding/{nonce}/{family} HTTP/1.1\r\nHost: {}\r\nContent-Length: {BULK_BYTES}\r\nConnection: close\r\n\r\n",
-        target.ip()
+        http_host(target)
     );
     stream
         .write_all(request.as_bytes())
@@ -497,9 +504,9 @@ fn tcp_exchange(fixture: &Fixture, local: IpAddr, target: SocketAddr) -> Result<
 fn udp_exchange(fixture: &Fixture, local: IpAddr, target: SocketAddr, mtu: u16) -> Result<Value> {
     let family = family(target);
     let socket = UdpSocket::bind(SocketAddr::new(local, 0)).map_err(|error| error.to_string())?;
-    let (level, option, headers) = match local {
-        IpAddr::V4(_) => (IPPROTO_IP, IP_DONTFRAGMENT, 28),
-        IpAddr::V6(_) => (IPPROTO_IPV6, IPV6_DONTFRAG, 48),
+    let (level, option) = match local {
+        IpAddr::V4(_) => (IPPROTO_IP, IP_DONTFRAGMENT),
+        IpAddr::V6(_) => (IPPROTO_IPV6, IPV6_DONTFRAG),
     };
     let enabled: u32 = 1;
     if unsafe {
@@ -527,11 +534,10 @@ fn udp_exchange(fixture: &Fixture, local: IpAddr, target: SocketAddr, mtu: u16) 
             "{family} UDP did not use the owned adapter address: {observed_local}"
         ));
     }
-    // A full-MTU datagram after the IP and 8-byte UDP headers.
     let payload = bulk(
         fixture.nonce(),
         &format!("udp-{family}"),
-        usize::from(mtu) - headers,
+        usize::from(mtu) - udp_overhead(target),
     );
     if socket.send(&payload).map_err(|error| error.to_string())? != payload.len() {
         return Err(format!(
@@ -554,21 +560,40 @@ fn udp_exchange(fixture: &Fixture, local: IpAddr, target: SocketAddr, mtu: u16) 
     )
 }
 
-/// With the engine stopped and the pump retired, the same route, address and
-/// session remain: a new connection must find no forwarder at all.
+/// With the engine stopped and the pump retired, the same routes, addresses
+/// and session remain: a new connection in either family must find no
+/// forwarder at all.
 fn causal_control(fixture: &Fixture) -> Result<Value> {
     let before = fixture.accepted();
-    let started = Instant::now();
-    match TcpStream::connect_timeout(&HTTP_TARGETS[0], Duration::from_secs(3)) {
-        Err(error) if error.kind() == ErrorKind::TimedOut => {}
-        Ok(_) => return Err("TCP connected through the adapter without a running pump".into()),
-        Err(error) => return Err(format!("unexpected control connect result: {error}")),
+    let mut families = serde_json::Map::new();
+    for target in HTTP_TARGETS {
+        let family = family(target);
+        let started = Instant::now();
+        match TcpStream::connect_timeout(&target, Duration::from_secs(3)) {
+            Err(error) if error.kind() == ErrorKind::TimedOut => {}
+            Ok(_) => {
+                return Err(format!(
+                    "{family} TCP connected through the adapter without a running pump"
+                ));
+            }
+            Err(error) => {
+                return Err(format!(
+                    "unexpected {family} control connect result: {error}"
+                ));
+            }
+        }
+        families.insert(
+            family.to_owned(),
+            json!({"control_wait_ms":started.elapsed().as_millis()}),
+        );
     }
     if fixture.accepted() != before {
         return Err("the node accepted a connection without a running pump".into());
     }
-    Ok(json!({"connect_without_pump_timed_out":true,
-        "control_wait_ms":started.elapsed().as_millis(),"node_connections_unchanged":true}))
+    Ok(
+        json!({"connect_without_pump_timed_out":true,"families":families,
+        "node_connections_unchanged":true}),
+    )
 }
 
 /// Exactly one CONNECT and one UDP datagram per family for this run's fixed
@@ -577,10 +602,7 @@ fn require_fixture_flows(observations: &Value, mtu: u16) -> Result<()> {
     let flows = observations["observations"]
         .as_array()
         .ok_or("fixture observations are missing")?;
-    for (http, udp, headers) in [
-        (HTTP_TARGETS[0], UDP_TARGETS[0], 28),
-        (HTTP_TARGETS[1], UDP_TARGETS[1], 48),
-    ] {
+    for (http, udp) in HTTP_TARGETS.into_iter().zip(UDP_TARGETS) {
         let connects = flows
             .iter()
             .filter(|flow| flow["command"] == "connect" && flow["target"] == http.to_string())
@@ -594,7 +616,7 @@ fn require_fixture_flows(observations: &Value, mtu: u16) -> Result<()> {
             .collect();
         if connects != 1
             || served.len() != 1
-            || served[0]["bytes"] != json!(usize::from(mtu) - headers)
+            || served[0]["bytes"] != json!(usize::from(mtu) - udp_overhead(udp))
         {
             return Err(format!(
                 "fixture did not observe exactly the run's {} flows: {observations}",

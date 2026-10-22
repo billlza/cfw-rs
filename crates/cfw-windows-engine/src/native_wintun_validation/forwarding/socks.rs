@@ -59,6 +59,23 @@ pub(super) fn family(target: SocketAddr) -> &'static str {
     }
 }
 
+/// The IP header without options plus the 8-byte UDP header: a full-MTU
+/// datagram carries the MTU minus this as payload.
+pub(super) fn udp_overhead(target: SocketAddr) -> usize {
+    match target {
+        SocketAddr::V4(_) => 20 + 8,
+        SocketAddr::V6(_) => 40 + 8,
+    }
+}
+
+/// The HTTP Host value for a literal target on port 80, bracketed for IPv6.
+pub(super) fn http_host(target: SocketAddr) -> String {
+    match target {
+        SocketAddr::V4(target) => target.ip().to_string(),
+        SocketAddr::V6(target) => format!("[{}]", target.ip()),
+    }
+}
+
 /// The relay's answer differs from the request in every byte.
 pub(super) fn transform(data: &[u8]) -> Vec<u8> {
     data.iter().map(|byte| byte ^ 0x5a).collect()
@@ -393,7 +410,16 @@ fn http(stream: &mut TcpStream, nonce: &str, target: SocketAddr) -> Result<Value
     if lines.next() != Some(expected.as_str()) {
         return Err("HTTP request line does not carry this run's nonce".into());
     }
-    let length = lines
+    let fields: Vec<_> = lines.collect();
+    let hosts: Vec<_> = fields
+        .iter()
+        .filter_map(|line| line.strip_prefix("Host: "))
+        .collect();
+    if hosts != [http_host(target)] {
+        return Err("HTTP Host does not name the SOCKS target".into());
+    }
+    let length = fields
+        .iter()
         .filter_map(|line| line.strip_prefix("Content-Length: "))
         .map(|value| value.parse::<usize>().map_err(|_| "invalid Content-Length"))
         .collect::<std::result::Result<Vec<_>, _>>()?;

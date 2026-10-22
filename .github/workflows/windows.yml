@@ -177,7 +177,8 @@ jobs:
           ./scripts/fixtures/windows_installed_runtime.ps1 -Runtime (Join-Path $PWD 'target/debug/cfw-windows-runtime.exe') -DesktopFixture (Join-Path $PWD 'target/debug/examples/native-service-fixture.exe') -Engine $env:CFW_ENGINE_HOST_PATH -EngineVersion $env:CFW_ENGINE_HOST_VERSION -Source $receipt.product_source -Receipts $artifactRoot
       - name: Forward real Windows traffic through Wintun, the packet pump and the native engine
         # Runs last: it installs the Wintun driver and briefly owns one test
-        # address and host route on its own adapter in this disposable VM.
+        # address and host route per IP family on its own adapter in this
+        # disposable VM.
         timeout-minutes: 8
         env:
           CFW_NATIVE_TUN_MUTATION_TESTS: '1'
@@ -224,12 +225,13 @@ jobs:
           } finally { $process.Dispose() }
           $initial = Get-Content (Join-Path $output 'initial.json') -Raw | ConvertFrom-Json
           $result = Get-Content (Join-Path $output 'result.json') -Raw | ConvertFrom-Json
+          $families = @($result.ip_families) -join ','
           if ($initial.source -cne $source -or $initial.engine_sha256 -cne $receipt.host_artifact.sha256 -or
               $initial.process_id -ne $probeId -or $initial.process_creation_time -ne $probeStarted -or
               ((@($result.cases) | ForEach-Object { $_.mtu }) -join ',') -cne '1280,1500,9000' -or
               $result.source -cne $source -or -not $result.success -or $null -ne $result.failure -or
               -not $result.wintun_engine_forwarding_verified -or @($result.cases).Count -ne 3 -or
-              (@($result.ip_families) -join ',') -cne 'ipv4,ipv6' -or
+              $families -cne 'ipv4,ipv6' -or
               $result.authority_lease_exercised -or $result.system_to_user_handoff_exercised -or
               $result.default_routes_modified -or $result.dns_modified -or $result.firewall_modified -or
               $result.product_tunnel_backend_exercised -or $result.release_accepted) {
@@ -240,6 +242,10 @@ jobs:
                 -not $case.engine_to_windows_forwarding_verified -or -not $case.adapter_absence_observed -or
                 -not $case.causal_control.connect_without_pump_timed_out -or $case.pump.to_engine.largest_packet -ne $case.mtu -or
                 $case.pump.to_system.largest_packet -ne $case.mtu -or $case.pump.peer_close_code -notin @(109, 232) -or
+                (@($case.traffic.PSObject.Properties.Name) -join ',') -cne $families -or
+                (@($case.causal_control.families.PSObject.Properties.Name) -join ',') -cne $families -or
+                $case.traffic.ipv4.tcp.local -notmatch '^192\.0\.2\.10:\d+$' -or
+                $case.traffic.ipv6.tcp.local -notmatch '^\[2001:db8:1::10\]:\d+$' -or
                 $case.traffic.ipv4.udp.answer_bytes -ne ($case.mtu - 28) -or $case.traffic.ipv6.udp.answer_bytes -ne ($case.mtu - 48)) {
               throw "Wintun forwarding case $($case.mtu) is incomplete"
             }

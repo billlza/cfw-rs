@@ -331,3 +331,147 @@ fn proxy_routing_cache_cannot_leave_the_projected_shape() {
         );
     }
 }
+
+fn tunnel_request(settings: &EngineSettings) -> EngineStartRequest {
+    projected_request(
+        MAINLAND_SOURCE,
+        ProjectionMode::Tunnel,
+        settings,
+        cfw_singbox_config::TunnelStack::Gvisor,
+    )
+}
+
+#[test]
+fn tunnel_data_plane_admits_only_the_exact_packet_fed_projection() {
+    let fake_ip = serde_json::json!({"outbounds":[{"type":"socks5","tag":"proxy","server":"node.example.com","server_port":1080}],
+        "dns":{"servers":[{"type":"udp","server":"1.1.1.1","server_port":53}],"fake_ip":{"exclude":["+.lan"]}}})
+    .to_string();
+    for (case, mtu, ipv6, lan, mainland, source) in [
+        (0, 1280, false, false, false, MAINLAND_SOURCE),
+        (1, 1500, true, true, false, MAINLAND_SOURCE),
+        (2, 9000, true, false, true, MAINLAND_SOURCE),
+        (3, 1500, true, true, true, fake_ip.as_str()),
+    ] {
+        let settings = EngineSettings {
+            tunnel_mtu: mtu,
+            enable_ipv6: ipv6,
+            mainland_china_direct: mainland,
+            lan_proxy: lan.then(|| LanProxySettings {
+                listen: Ipv4Addr::UNSPECIFIED,
+                port: 8081,
+                allowed_source_cidrs: vec!["192.168.42.0/24".into()],
+            }),
+            ..EngineSettings::default()
+        };
+        let request = projected_request(
+            source,
+            ProjectionMode::Tunnel,
+            &settings,
+            cfw_singbox_config::TunnelStack::Gvisor,
+        );
+        let identity = request.config_digest.clone();
+        let document: Value = serde_json::from_str(&request.config_json).unwrap();
+        if case == 3 {
+            assert_eq!(document["experimental"]["cache_file"]["store_fakeip"], true);
+        }
+        let prepared = CheckedStartConfiguration::new(request)
+            .unwrap()
+            .prepare_tunnel_data_plane([])
+            .unwrap();
+        assert_eq!(prepared.mode(), ProjectionMode::Tunnel, "case {case}");
+        assert_eq!(prepared.tunnel_mtu(), Some(mtu), "case {case}");
+        assert_eq!(prepared.digest(), identity, "case {case}");
+        assert_eq!(prepared.system_proxy_endpoint(), None, "case {case}");
+        let mut expected = vec![SocketAddr::from((
+            Ipv4Addr::LOCALHOST,
+            settings.controller_port,
+        ))];
+        if lan {
+            expected.push(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 8081)));
+        }
+        assert_eq!(prepared.listeners, expected, "case {case}");
+    }
+}
+
+#[test]
+fn tunnel_data_plane_rejects_other_modes_and_the_system_stack() {
+    let settings = EngineSettings::default();
+    for (mode, stack) in [
+        (
+            ProjectionMode::LocalProxy,
+            cfw_singbox_config::TunnelStack::Gvisor,
+        ),
+        (
+            ProjectionMode::SystemProxy,
+            cfw_singbox_config::TunnelStack::Gvisor,
+        ),
+        (
+            ProjectionMode::TunnelSystemProxy,
+            cfw_singbox_config::TunnelStack::Gvisor,
+        ),
+        (
+            ProjectionMode::Tunnel,
+            cfw_singbox_config::TunnelStack::System,
+        ),
+    ] {
+        let checked = CheckedStartConfiguration::new(projected_request(
+            MAINLAND_SOURCE,
+            mode,
+            &settings,
+            stack,
+        ))
+        .unwrap();
+        assert!(
+            checked.prepare_tunnel_data_plane([]).is_err(),
+            "{mode:?} {stack:?} became a packet-fed Tunnel data plane"
+        );
+    }
+}
+
+#[test]
+fn tunnel_data_plane_cannot_request_unowned_interfaces_or_drift_from_its_options() {
+    let settings = EngineSettings {
+        lan_proxy: Some(LanProxySettings {
+            listen: Ipv4Addr::UNSPECIFIED,
+            port: 8081,
+            allowed_source_cidrs: vec!["192.168.42.0/24".into()],
+        }),
+        ..EngineSettings::default()
+    };
+    for change in 0..12 {
+        let mut value = tunnel_request(&settings);
+        if change == 11 {
+            // A self-consistent identity cannot move the options away from the
+            // interface the template actually configures.
+            value.tunnel_options.as_mut().unwrap().mtu = 9000;
+            rehash(&mut value);
+        } else {
+            edit(&mut value, |root| {
+                let tun = &mut root["inbounds"][0];
+                assert_eq!(tun["tag"], "cfw-tunnel");
+                match change {
+                    0 => tun["auto_route"] = true.into(),
+                    1 => tun["stack"] = "system".into(),
+                    2 => tun["mtu"] = 9000.into(),
+                    3 => tun["strict_route"] = true.into(),
+                    4 => tun["auto_redirect"] = true.into(),
+                    5 => tun["address"] = serde_json::json!(["10.0.0.1/30"]),
+                    6 => tun["listen"] = "127.0.0.1".into(),
+                    7 => tun["tag"] = "foreign-tunnel".into(),
+                    8 => {
+                        let second = tun.clone();
+                        root["inbounds"].as_array_mut().unwrap().push(second);
+                    }
+                    9 => root["inbounds"].as_array_mut().unwrap().push(serde_json::json!(
+                        {"type":"mixed","tag":"cfw-system-proxy","listen":"127.0.0.1","listen_port":7890}
+                    )),
+                    10 => root["route"]["rules"][0]["rules"][1]["invert"] = false.into(),
+                    _ => unreachable!(),
+                }
+            });
+        }
+        let accepted = CheckedStartConfiguration::new(value)
+            .and_then(|checked| checked.prepare_tunnel_data_plane([]));
+        assert!(accepted.is_err(), "Tunnel change {change}");
+    }
+}

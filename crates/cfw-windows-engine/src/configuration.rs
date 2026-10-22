@@ -1,7 +1,8 @@
 use std::{collections::BTreeMap, fmt, io::Write};
 
 use cfw_singbox_config::{
-    CredentialRef, CredentialSecret, MAX_ENGINE_CONFIG_BYTES, ProjectedConfig, ProjectionMode,
+    CredentialRef, CredentialSecret, LAN_INBOUND_TAG, MAX_ENGINE_CONFIG_BYTES, ProjectedConfig,
+    ProjectionMode, SYSTEM_PROXY_INBOUND_TAG, TUNNEL_INBOUND_TAG,
 };
 use serde_json::Value;
 use zeroize::{Zeroize, Zeroizing};
@@ -105,8 +106,9 @@ impl ResolvedProjection {
     }
 }
 
-/// Admits a local or SystemProxy data plane. Starting this child alone does not
-/// claim OS proxy ownership. Tunnel projections remain inadmissible here.
+/// Admits a local, SystemProxy or packet-fed Tunnel data plane. Starting this
+/// child alone claims no OS proxy, adapter, route or DNS ownership. Tunnel is
+/// admitted only through the checked shared request, never from a projection.
 #[derive(Debug)]
 pub struct PreparedConfig {
     pub(crate) resolved: ResolvedProjection,
@@ -114,6 +116,7 @@ pub struct PreparedConfig {
     configuration_digest: String,
     mode: ProjectionMode,
     system_proxy_endpoint: Option<std::net::SocketAddr>,
+    tunnel_mtu: Option<u16>,
 }
 
 impl PreparedConfig {
@@ -151,6 +154,7 @@ impl PreparedConfig {
                 projection.clash_api().address().into(),
                 projection.clash_api().port(),
             ),
+            None,
         )
     }
 
@@ -160,7 +164,11 @@ impl PreparedConfig {
         template_digest: &str,
         expected: ProjectionMode,
         controller: std::net::SocketAddr,
+        tunnel_mtu: Option<u16>,
     ) -> Result<Self, Error> {
+        if (expected == ProjectionMode::Tunnel) != tunnel_mtu.is_some() {
+            return Err(Error::Configuration("platform mode is not yet admitted"));
+        }
         // Listener metadata comes from the immutable projection. Its generated
         // controller credential is also erased when this temporary DOM drops.
         let document = SecretDocument(
@@ -174,7 +182,24 @@ impl PreparedConfig {
             .and_then(Value::as_array)
             .ok_or(Error::Configuration("missing projected listeners"))?;
         let mut system_proxy_endpoint = None;
+        let mut packet_interface = false;
         for inbound in inbounds {
+            let tag = inbound.get("tag").and_then(Value::as_str);
+            if inbound.get("type").and_then(Value::as_str) == Some("tun") {
+                // The checked admission validated this one packet-fed
+                // interface. It has no listener and is never a proxy endpoint.
+                if expected != ProjectionMode::Tunnel
+                    || packet_interface
+                    || tag != Some(TUNNEL_INBOUND_TAG)
+                {
+                    return Err(Error::Configuration("unowned packet interface"));
+                }
+                packet_interface = true;
+                continue;
+            }
+            if expected == ProjectionMode::Tunnel && tag != Some(LAN_INBOUND_TAG) {
+                return Err(Error::Configuration("unknown projected tunnel role"));
+            }
             let address: std::net::IpAddr = inbound
                 .get("listen")
                 .and_then(Value::as_str)
@@ -191,9 +216,9 @@ impl PreparedConfig {
                 // The shared projection separately validates LAN ingress and
                 // its source allowlist. Retain its native listener observation,
                 // but never adopt that endpoint as this user's OS proxy.
-                match inbound.get("tag").and_then(Value::as_str) {
-                    Some("cfw-lan-proxy") => continue,
-                    Some("cfw-system-proxy") => {}
+                match tag {
+                    Some(LAN_INBOUND_TAG) => continue,
+                    Some(SYSTEM_PROXY_INBOUND_TAG) => {}
                     _ => return Err(Error::Configuration("unknown projected proxy role")),
                 }
                 if inbound.get("type").and_then(Value::as_str) != Some("mixed")
@@ -223,12 +248,18 @@ impl PreparedConfig {
         if expected == ProjectionMode::SystemProxy && system_proxy_endpoint.is_none() {
             return Err(Error::Configuration("SystemProxy listener is missing"));
         }
+        if expected == ProjectionMode::Tunnel && !packet_interface {
+            return Err(Error::Configuration(
+                "Tunnel data plane requires exactly one packet interface",
+            ));
+        }
         Ok(Self {
             resolved,
             listeners,
             configuration_digest: template_digest.to_owned(),
             mode: expected,
             system_proxy_endpoint,
+            tunnel_mtu,
         })
     }
 
@@ -247,6 +278,11 @@ impl PreparedConfig {
 
     pub fn system_proxy_endpoint(&self) -> Option<std::net::SocketAddr> {
         self.system_proxy_endpoint
+    }
+
+    /// The MTU of the packet endpoint this Tunnel data plane must be fed by.
+    pub fn tunnel_mtu(&self) -> Option<u16> {
+        self.tunnel_mtu
     }
 }
 
@@ -392,6 +428,112 @@ mod tests {
             } else {
                 assert!(PreparedConfig::system_proxy_data_plane(&projected, []).is_err());
             }
+        }
+    }
+
+    #[test]
+    fn packet_interface_is_owned_only_by_the_admitted_tunnel_data_plane() {
+        let profile =
+            ValidatedSingBoxProfile::parse(r#"{"outbounds":[{"type":"direct","tag":"direct"}]}"#)
+                .unwrap();
+        let settings = EngineSettings {
+            lan_proxy: Some(cfw_singbox_config::LanProxySettings {
+                listen: "0.0.0.0".parse().unwrap(),
+                port: 8081,
+                allowed_source_cidrs: vec!["192.168.42.0/24".into()],
+            }),
+            ..EngineSettings::default()
+        };
+        let project = |mode| {
+            profile
+                .project_with_tunnel_stack(
+                    PROFILE,
+                    mode,
+                    &settings,
+                    cfw_singbox_config::TunnelStack::Gvisor,
+                )
+                .unwrap()
+        };
+        let tunnel = project(ProjectionMode::Tunnel);
+        let local = project(ProjectionMode::LocalProxy);
+        let combined = project(ProjectionMode::TunnelSystemProxy);
+        let controller = std::net::SocketAddr::new(
+            tunnel.clash_api().address().into(),
+            tunnel.clash_api().port(),
+        );
+        let prepare = |projection: &ProjectedConfig, template: &str, mode, mtu| {
+            PreparedConfig::from_parts(
+                ResolvedProjection::new(projection, []).unwrap(),
+                template,
+                projection.configuration_digest(),
+                mode,
+                controller,
+                mtu,
+            )
+        };
+        let admitted = prepare(
+            &tunnel,
+            tunnel.as_json(),
+            ProjectionMode::Tunnel,
+            Some(1500),
+        )
+        .expect("the exact packet-fed Tunnel template");
+        assert_eq!(
+            admitted.listeners,
+            [controller, "0.0.0.0:8081".parse().unwrap()]
+        );
+        assert_eq!(admitted.tunnel_mtu(), Some(1500));
+        assert_eq!(admitted.system_proxy_endpoint(), None);
+        let mut detached: Value = serde_json::from_str(tunnel.as_json()).unwrap();
+        detached["inbounds"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|inbound| inbound["type"] != "tun");
+        let detached = detached.to_string();
+        let mut doubled: Value = serde_json::from_str(tunnel.as_json()).unwrap();
+        let interface = doubled["inbounds"][0].clone();
+        assert_eq!(interface["type"], "tun");
+        doubled["inbounds"].as_array_mut().unwrap().push(interface);
+        let doubled = doubled.to_string();
+        for (projection, template, mode, mtu) in [
+            (&tunnel, tunnel.as_json(), ProjectionMode::LocalProxy, None),
+            (&tunnel, tunnel.as_json(), ProjectionMode::Tunnel, None),
+            (
+                &tunnel,
+                detached.as_str(),
+                ProjectionMode::Tunnel,
+                Some(1500),
+            ),
+            (
+                &tunnel,
+                doubled.as_str(),
+                ProjectionMode::Tunnel,
+                Some(1500),
+            ),
+            (&local, local.as_json(), ProjectionMode::Tunnel, Some(1500)),
+            (
+                &local,
+                local.as_json(),
+                ProjectionMode::LocalProxy,
+                Some(1500),
+            ),
+            (
+                &combined,
+                combined.as_json(),
+                ProjectionMode::Tunnel,
+                Some(1500),
+            ),
+            (
+                &combined,
+                combined.as_json(),
+                ProjectionMode::TunnelSystemProxy,
+                Some(1500),
+            ),
+        ] {
+            assert!(
+                prepare(projection, template, mode, mtu).is_err(),
+                "{mode:?} with MTU {mtu:?} admitted a template it does not own"
+            );
         }
     }
 

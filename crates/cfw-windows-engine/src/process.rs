@@ -23,6 +23,7 @@ use crate::{
     Error, PreparedConfig, ResolvedProbe, ResolvedProjection,
     protocol::{self, Exchange},
 };
+use cfw_singbox_config::ProjectionMode;
 use cfw_windows_storage::{PrivateDirectory, WaitOutcome, wait_until};
 use sha2::{Digest, Sha256};
 use windows_sys::Win32::{
@@ -226,6 +227,8 @@ pub struct EngineProcess {
     proxy_cleanup: Option<crate::system_proxy::ProxyCleanup>,
     restored_proxy: Option<crate::system_proxy::ProxyCleanup>,
     cancellation: Option<Arc<AtomicBool>>,
+    /// MTU of the inherited packet endpoint; None for a listener-only child.
+    packet_mtu: Option<u16>,
 }
 
 /// Internal launch result preserves a partially created owner so the agent can
@@ -380,6 +383,7 @@ impl EngineProcess {
             return Err(ChildLaunchFailure::uncreated(Error::Cancelled));
         }
         let session = uuid::Uuid::new_v4().simple().to_string();
+        let packet_mtu = packet.as_ref().map(crate::tunnel::PacketClient::mtu);
         let assets = spawn_assets(executable, runtime_directory, keeper, packet)
             .map_err(ChildLaunchFailure::uncreated)?;
         let mut owner = Self {
@@ -399,6 +403,7 @@ impl EngineProcess {
             proxy_cleanup: None,
             restored_proxy: None,
             cancellation,
+            packet_mtu,
         };
         match owner.initialize(deadline) {
             Ok(()) => Ok(owner),
@@ -501,6 +506,9 @@ impl EngineProcess {
             if self.closed || self.digest.is_some() {
                 return Err(Error::Protocol("child is not idle"));
             }
+            if self.packet_mtu.is_some() {
+                return Err(Error::Protocol("packet-fed worker cannot run a check"));
+            }
             self.rpc("check", Some(config), "checked", config.digest(), deadline)?;
             self.finish_normal_exit(deadline)
         })();
@@ -534,6 +542,9 @@ impl EngineProcess {
             remaining(deadline)?;
             if self.closed || self.digest.is_some() || self.child.try_wait()?.is_some() {
                 return Err(Error::Protocol("probe worker is not idle"));
+            }
+            if self.packet_mtu.is_some() {
+                return Err(Error::Protocol("packet-fed worker cannot run a probe"));
             }
             if self.is_cancelled() {
                 return Err(Error::Cancelled);
@@ -571,8 +582,24 @@ impl EngineProcess {
         if self.closed || self.digest.is_some() {
             return Err(Error::Protocol("child is not idle"));
         }
+        self.admit_packet_mode(config)?;
         let result = self.start_retained(config, timeout);
         self.finish_operation(result)
+    }
+
+    /// A Tunnel data plane needs the exact inherited packet endpoint, and a
+    /// listener-only data plane must not hold one. Checked before any effect.
+    fn admit_packet_mode(&self, config: &PreparedConfig) -> Result<(), Error> {
+        match (config.mode(), config.tunnel_mtu(), self.packet_mtu) {
+            (ProjectionMode::Tunnel, Some(required), Some(owned)) if required == owned => Ok(()),
+            (ProjectionMode::Tunnel, ..) => Err(Error::Protocol(
+                "Tunnel data plane requires its exact inherited packet endpoint",
+            )),
+            (_, None, None) => Ok(()),
+            _ => Err(Error::Protocol(
+                "packet endpoint cannot feed a listener-only data plane",
+            )),
+        }
     }
 
     pub(crate) fn start_retained(
@@ -584,6 +611,7 @@ impl EngineProcess {
         if self.closed || self.digest.is_some() {
             return Err(Error::Protocol("child is not idle"));
         }
+        self.admit_packet_mode(config)?;
         self.rpc(
             "start",
             Some(&config.resolved),

@@ -42,10 +42,10 @@ type StartSession = unsafe extern "system" fn(*mut c_void, u32) -> *mut c_void;
 type EndSession = unsafe extern "system" fn(*mut c_void);
 type ReadWaitEvent = unsafe extern "system" fn(*mut c_void) -> *mut c_void;
 type DriverVersion = unsafe extern "system" fn() -> u32;
-type ReceivePacket = unsafe extern "system" fn(*mut c_void, *mut u32) -> *mut u8;
-type ReleasePacket = unsafe extern "system" fn(*mut c_void, *const u8);
-type AllocatePacket = unsafe extern "system" fn(*mut c_void, u32) -> *mut u8;
-type SendPacket = unsafe extern "system" fn(*mut c_void, *const u8);
+pub(super) type ReceivePacket = unsafe extern "system" fn(*mut c_void, *mut u32) -> *mut u8;
+pub(super) type ReleasePacket = unsafe extern "system" fn(*mut c_void, *const u8);
+pub(super) type AllocatePacket = unsafe extern "system" fn(*mut c_void, u32) -> *mut u8;
+pub(super) type SendPacket = unsafe extern "system" fn(*mut c_void, *const u8);
 
 struct Module(Option<NonNull<c_void>>);
 impl Module {
@@ -75,7 +75,7 @@ pub struct Library {
     luid: GetAdapterLuid,
     start: StartSession,
     end: EndSession,
-    pub(super) event: ReadWaitEvent,
+    event: ReadWaitEvent,
     version: DriverVersion,
     pub(super) receive: ReceivePacket,
     pub(super) release: ReleasePacket,
@@ -220,16 +220,21 @@ impl Adapter<'_> {
             (self.library.start)(self.handle.as_ptr(), super::RING_CAPACITY_BYTES)
         })
         .ok_or_else(|| native_error("start Wintun packet session"))?;
+        let event = unsafe { (self.library.event)(handle.as_ptr()) };
+        let Some(read_event) = NonNull::new(event) else {
+            let error = native_error("observe Wintun receive event");
+            // No Session owns this handle yet: end exactly the one started above.
+            unsafe { (self.library.end)(handle.as_ptr()) };
+            return Err(error);
+        };
         let session = Session {
             adapter: self,
             handle,
+            read_event,
             mtu,
         };
-        let event = unsafe { (self.library.event)(handle.as_ptr()) };
-        if event.is_null() {
-            return Err(native_error("observe Wintun receive event"));
-        }
-        // Borrowed from the session: never CloseHandle this event.
+        // Borrowed from the session: never CloseHandle this event. It is
+        // captured once here; GetReadWaitEvent is not documented thread-safe.
         let state = unsafe { WaitForSingleObject(event, 0) };
         if state == WAIT_FAILED {
             return Err(native_error("inspect Wintun receive event"));
@@ -258,6 +263,7 @@ impl Drop for Adapter<'_> {
 pub struct Session<'a> {
     pub(super) adapter: &'a Adapter<'a>,
     pub(super) handle: NonNull<c_void>,
+    pub(super) read_event: NonNull<c_void>,
     pub(super) mtu: u16,
 }
 impl Drop for Session<'_> {

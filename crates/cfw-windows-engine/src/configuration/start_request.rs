@@ -1,12 +1,12 @@
 //! Validate the existing shared application request at the Windows native
 //! boundary. This does not grant a runtime lease or credential authorization.
 use super::{Error, PreparedConfig, ResolvedProjection, SecretDocument, serialize_bounded};
-use cfw_engine_api::{EngineCommandContext, EngineStartRequest};
+use cfw_engine_api::{EngineCommandContext, EngineStartRequest, TunnelNetworkOptions};
 use cfw_singbox_config::{
     CredentialAudience, CredentialRef, CredentialSlot, LAN_INBOUND_TAG, LanProxySettings,
     MAX_ENGINE_CONFIG_BYTES, ProjectionMode, ROUTING_CACHE_PATH, SYSTEM_PROXY_INBOUND_TAG,
-    canonicalize_configuration_value, configuration_identity_digest, lan_access_rule, sha256_hex,
-    validate_credential_slots,
+    TUNNEL_ADDRESS_PLAN, TUNNEL_INBOUND_TAG, canonicalize_configuration_value,
+    configuration_identity_digest, lan_access_rule, sha256_hex, validate_credential_slots,
 };
 use serde_json::Value;
 use std::{
@@ -161,6 +161,37 @@ impl CheckedStartConfiguration {
             &self.request.config_content_digest,
             self.request.mode,
             controller,
+            None,
+        )
+    }
+
+    /// Admit exactly the Tunnel data plane of an engine that owns an inherited
+    /// packet endpoint. Its configuration requests no adapter, route, DNS,
+    /// firewall or proxy change: the privileged packet owner keeps those, and
+    /// this admission grants no Authority lease. TunnelSystemProxy stays closed.
+    pub fn prepare_tunnel_data_plane<'a>(
+        self,
+        material: impl IntoIterator<Item = (&'a CredentialRef, &'a str)>,
+    ) -> Result<PreparedConfig, Error> {
+        if self.mode() != ProjectionMode::Tunnel {
+            return Err(Error::Configuration("platform mode is not yet admitted"));
+        }
+        let options = self.request.tunnel_options.ok_or(Error::Configuration(
+            "native mode and network options differ",
+        ))?;
+        let controller = tunnel_controller(
+            &self.document()?.0,
+            &self.request.credential_audience,
+            &options,
+        )?;
+        let resolved = self.resolve(material)?;
+        PreparedConfig::from_parts(
+            resolved,
+            &self.request.config_json,
+            &self.request.config_content_digest,
+            ProjectionMode::Tunnel,
+            controller,
+            Some(options.mtu),
         )
     }
 }
@@ -297,6 +328,68 @@ fn proxy_controller(root: &Value, audience: &CredentialAudience) -> Result<Socke
         return Err(invalid());
     }
     Ok(controller)
+}
+
+/// The Tunnel data plane owns one packet-fed gVisor interface, never a system
+/// stack, route, auto-redirect or DNS mode. Its MTU and address plan are the
+/// typed network options already bound into the identity digest.
+fn tunnel_controller(
+    root: &Value,
+    audience: &CredentialAudience,
+    options: &TunnelNetworkOptions,
+) -> Result<SocketAddr, Error> {
+    let controller = owned_controller(root, audience, true)?;
+    let inbounds = root["inbounds"].as_array().ok_or_else(invalid)?;
+    if !(1..=2).contains(&inbounds.len()) {
+        return Err(invalid());
+    }
+    let mut tunnel = false;
+    let mut lan = false;
+    let mut ports = BTreeSet::from([controller.port()]);
+    for inbound in inbounds {
+        match inbound["tag"].as_str() {
+            Some(TUNNEL_INBOUND_TAG) if !tunnel => {
+                packet_interface(inbound, options)?;
+                tunnel = true;
+            }
+            Some(LAN_INBOUND_TAG) if !lan => {
+                let (address, port) = mixed_listener(inbound, &mut ports)?;
+                lan_listener(root, address, port)?;
+                lan = true;
+            }
+            _ => return Err(invalid()),
+        }
+    }
+    if !tunnel {
+        return Err(invalid());
+    }
+    Ok(controller)
+}
+
+fn packet_interface(inbound: &Value, options: &TunnelNetworkOptions) -> Result<(), Error> {
+    exact_keys(
+        inbound,
+        &["type", "tag", "address", "auto_route", "stack", "mtu"],
+    )?;
+    let mut addresses = vec![format!(
+        "{}/{}",
+        TUNNEL_ADDRESS_PLAN.ipv4_address, TUNNEL_ADDRESS_PLAN.ipv4_prefix_length
+    )];
+    if options.ipv6_enabled {
+        addresses.push(format!(
+            "{}/{}",
+            TUNNEL_ADDRESS_PLAN.ipv6_address, TUNNEL_ADDRESS_PLAN.ipv6_prefix_length
+        ));
+    }
+    if inbound["type"] != "tun"
+        || inbound["auto_route"] != false
+        || inbound["stack"] != "gvisor"
+        || inbound["mtu"] != options.mtu
+        || inbound["address"] != serde_json::json!(addresses)
+    {
+        return Err(invalid());
+    }
+    Ok(())
 }
 
 fn mixed_listener(inbound: &Value, ports: &mut BTreeSet<u16>) -> Result<(Ipv4Addr, u16), Error> {

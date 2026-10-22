@@ -115,6 +115,24 @@ func packetTestIP(version, length int) []byte {
 	return packet
 }
 
+// The engine stop races packets gVisor still writes. A Close that lands after
+// a write was admitted must not be recorded as a data-plane failure, or the
+// stop would report close_failed for its own intentional shutdown.
+func TestPacketDeviceCloseDuringWriteAdmissionIsNotAFailure(t *testing.T) {
+	_, device := packetTestDevice(t, 1500)
+	device.writeAdmitted = func() {
+		if err := device.shutdown(); err != nil {
+			t.Error(err)
+		}
+	}
+	if n, err := device.Write(packetTestIP(4, 1500)); err == nil || n != 0 {
+		t.Fatalf("write after an intentional close: %d, %v", n, err)
+	}
+	if err := device.Failure(); err != nil {
+		t.Fatalf("intentional close recorded a data-plane failure: %v", err)
+	}
+}
+
 func TestPacketDeviceNativeFullMTUBidirectionalMessages(t *testing.T) {
 	for _, mtu := range []int{1280, 1500, 9000} {
 		for _, version := range []int{4, 6} {

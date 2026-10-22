@@ -41,6 +41,9 @@ type packetDevice struct {
 	failure   error
 	linkMu    sync.Mutex
 	link      packetLink
+
+	// Test-only scheduling point after write admission, before the deadline.
+	writeAdmitted func()
 }
 
 type packetLink interface {
@@ -195,8 +198,13 @@ func (p *packetDevice) Write(packet []byte) (int, error) {
 	if !validIPPacket(packet, p.mtu) {
 		return 0, p.fail(errPacketContract)
 	}
+	if p.writeAdmitted != nil {
+		p.writeAdmitted()
+	}
+	// An intentional Close can land after admission. The closing file is then
+	// the expected result of that Close, not a newly observed I/O failure.
 	if err := p.file.SetWriteDeadline(time.Now().Add(packetWriteTimeout)); err != nil {
-		return 0, p.fail(err)
+		return 0, p.ioFailure(err)
 	}
 	length, err := p.file.Write(packet)
 	if err != nil {

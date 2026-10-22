@@ -4,7 +4,7 @@
 use super::{
     Result,
     library::{self, Library},
-    record,
+    network, record,
 };
 use crate::tunnel::Session;
 use serde_json::{Value, json};
@@ -14,7 +14,6 @@ use std::{
     time::{Duration, Instant},
 };
 mod codec;
-mod network;
 
 pub(super) fn run(dll: &Path, output: &Path, source: &str) -> Result<()> {
     if !dll.is_absolute() || !output.is_absolute() || output.exists() {

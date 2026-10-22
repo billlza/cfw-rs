@@ -1,7 +1,8 @@
-//! Disposable address/route ownership for the packet probe only. No default
+//! Disposable address/route ownership for the packet probes only. No default
 //! route, DNS option or firewall rule is changed. Every mutation names the
-//! retained adapter's native LUID, alias and creation GUID.
-use super::super::{Result, library};
+//! retained adapter's native LUID, alias and creation GUID. Both IP families
+//! get the probe MTU, so the stack cannot hand the session a larger packet.
+use super::{Result, library};
 use crate::tunnel::Adapter;
 use std::{
     ffi::c_void,
@@ -112,8 +113,10 @@ pub(super) struct OwnedNetwork<'a> {
     adapter: &'a Adapter<'a>,
     id: uuid::Uuid,
     original_mtu: u32,
+    original_ipv6_mtu: Option<u32>,
     mtu: u16,
     mtu_changed: bool,
+    ipv6_mtu_changed: bool,
     address: Option<MIB_UNICASTIPADDRESS_ROW>,
     route: Option<MIB_IPFORWARD_ROW2>,
 }
@@ -124,8 +127,10 @@ impl<'a> OwnedNetwork<'a> {
             adapter,
             id,
             original_mtu: 0,
+            original_ipv6_mtu: None,
             mtu,
             mtu_changed: false,
+            ipv6_mtu_changed: false,
             address: None,
             route: None,
         };
@@ -144,6 +149,18 @@ impl<'a> OwnedNetwork<'a> {
             value.mtu_changed = true;
             if value.interface()?.NlMtu != u32::from(mtu) {
                 return Err("adapter MTU readback differs".into());
+            }
+            if let Some(mut ipv6) = value.interface_for(AF_INET6)? {
+                value.original_ipv6_mtu = Some(ipv6.NlMtu);
+                ipv6.NlMtu = u32::from(mtu);
+                status(
+                    unsafe { SetIpInterfaceEntry(&mut ipv6) },
+                    "set owned adapter IPv6 MTU",
+                )?;
+                value.ipv6_mtu_changed = true;
+                if value.interface_for(AF_INET6)?.map(|row| row.NlMtu) != Some(u32::from(mtu)) {
+                    return Err("adapter IPv6 MTU readback differs".into());
+                }
             }
             let mut row = MIB_UNICASTIPADDRESS_ROW::default();
             unsafe { InitializeUnicastIpAddressEntry(&mut row) };
@@ -217,22 +234,28 @@ impl<'a> OwnedNetwork<'a> {
         Ok(())
     }
     fn interface(&self) -> Result<MIB_IPINTERFACE_ROW> {
+        self.interface_for(AF_INET)?
+            .ok_or_else(|| "owned adapter has no IPv4 interface".into())
+    }
+    /// None only when the family is not bound to the adapter at all.
+    fn interface_for(&self, family: ADDRESS_FAMILY) -> Result<Option<MIB_IPINTERFACE_ROW>> {
         self.require_owner()?;
         let mut row = MIB_IPINTERFACE_ROW {
-            Family: AF_INET,
+            Family: family,
             InterfaceLuid: NET_LUID_LH {
                 Value: self.adapter.luid(),
             },
             ..Default::default()
         };
-        status(
-            unsafe { GetIpInterfaceEntry(&mut row) },
-            "read owned IP interface",
-        )?;
+        let code = unsafe { GetIpInterfaceEntry(&mut row) };
+        if family == AF_INET6 && code == ERROR_NOT_FOUND {
+            return Ok(None);
+        }
+        status(code, "read owned IP interface")?;
         if unsafe { row.InterfaceLuid.Value } != self.adapter.luid() {
             return Err("IP interface changed its requested LUID".into());
         }
-        Ok(row)
+        Ok(Some(row))
     }
     fn verify_route(&self, expected: &MIB_IPFORWARD_ROW2) -> Result<()> {
         self.require_owner()?;
@@ -254,6 +277,10 @@ impl<'a> OwnedNetwork<'a> {
     }
     pub(super) fn original_mtu(&self) -> u32 {
         self.original_mtu
+    }
+    /// The adapter's IPv6 MTU before this probe, when IPv6 was bound to it.
+    pub(super) fn original_ipv6_mtu(&self) -> Option<u32> {
+        self.original_ipv6_mtu
     }
     pub(super) fn restore(&mut self) -> Result<()> {
         self.require_owner()?;
@@ -316,12 +343,35 @@ impl<'a> OwnedNetwork<'a> {
             }
             self.mtu_changed = false;
         }
+        if self.ipv6_mtu_changed {
+            let original = self
+                .original_ipv6_mtu
+                .ok_or("IPv6 MTU change has no original value")?;
+            let mut interface = self
+                .interface_for(AF_INET6)?
+                .ok_or("owned adapter lost its IPv6 interface before restoration")?;
+            if interface.NlMtu != u32::from(self.mtu) {
+                return Err("fixture IPv6 MTU changed before restoration".into());
+            }
+            interface.NlMtu = original;
+            status(
+                unsafe { SetIpInterfaceEntry(&mut interface) },
+                "restore owned adapter IPv6 MTU",
+            )?;
+            if self.interface_for(AF_INET6)?.map(|row| row.NlMtu) != Some(original) {
+                return Err("original IPv6 MTU was not restored".into());
+            }
+            self.ipv6_mtu_changed = false;
+        }
         Ok(())
     }
 }
 impl Drop for OwnedNetwork<'_> {
     fn drop(&mut self) {
-        if (self.route.is_some() || self.address.is_some() || self.mtu_changed)
+        if (self.route.is_some()
+            || self.address.is_some()
+            || self.mtu_changed
+            || self.ipv6_mtu_changed)
             && let Err(error) = self.restore()
         {
             eprintln!("Wintun packet fixture cleanup failed: {error}");

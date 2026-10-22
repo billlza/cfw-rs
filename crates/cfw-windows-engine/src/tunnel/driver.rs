@@ -323,6 +323,42 @@ fn alias(row: &MIB_IF_ROW2) -> Result<String> {
     String::from_utf16(&row.Alias[..end]).map_err(|error| Error::Contract(error.to_string()))
 }
 
+/// Native interface counters of one owned adapter, for validation receipts.
+#[cfg(feature = "native-service-validation")]
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub(crate) struct InterfaceCounters {
+    pub in_octets: u64,
+    pub in_unicast_packets: u64,
+    pub in_non_unicast_packets: u64,
+    pub in_discards: u64,
+    pub in_errors: u64,
+    pub out_octets: u64,
+    pub out_unicast_packets: u64,
+    pub out_non_unicast_packets: u64,
+    pub out_discards: u64,
+    pub out_errors: u64,
+}
+
+#[cfg(feature = "native-service-validation")]
+pub(crate) fn counters(luid: u64, name: &str) -> Result<InterfaceCounters> {
+    let row = row(luid)?.ok_or("owned adapter is absent")?;
+    if alias(&row)? != name {
+        return Err("adapter alias no longer matches its owner".into());
+    }
+    Ok(InterfaceCounters {
+        in_octets: row.InOctets,
+        in_unicast_packets: row.InUcastPkts,
+        in_non_unicast_packets: row.InNUcastPkts,
+        in_discards: row.InDiscards,
+        in_errors: row.InErrors,
+        out_octets: row.OutOctets,
+        out_unicast_packets: row.OutUcastPkts,
+        out_non_unicast_packets: row.OutNUcastPkts,
+        out_discards: row.OutDiscards,
+        out_errors: row.OutErrors,
+    })
+}
+
 #[cfg(feature = "native-service-validation")]
 pub fn wait_absent(luid: u64, name: &str) -> Result<()> {
     if absence_within_deadline(luid, name)? {

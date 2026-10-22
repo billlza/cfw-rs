@@ -175,6 +175,74 @@ jobs:
           cargo build --locked -p cfw-windows-engine --bin cfw-windows-runtime
           if ($LASTEXITCODE -ne 0) { throw "Product Windows runtime build failed" }
           ./scripts/fixtures/windows_installed_runtime.ps1 -Runtime (Join-Path $PWD 'target/debug/cfw-windows-runtime.exe') -DesktopFixture (Join-Path $PWD 'target/debug/examples/native-service-fixture.exe') -Engine $env:CFW_ENGINE_HOST_PATH -EngineVersion $env:CFW_ENGINE_HOST_VERSION -Source $receipt.product_source -Receipts $artifactRoot
+      - name: Forward real Windows traffic through Wintun, the packet pump and the native engine
+        # Runs last: it installs the Wintun driver and briefly owns one test
+        # address and host route on its own adapter in this disposable VM.
+        timeout-minutes: 8
+        env:
+          CFW_NATIVE_TUN_MUTATION_TESTS: '1'
+        run: |
+          $artifactRoot = Join-Path $env:RUNNER_TEMP 'cfw-windows-engine/artifacts'
+          $receipt = Get-Content (Join-Path $artifactRoot 'build-receipt.json') -Raw | ConvertFrom-Json
+          $source = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $source -cne $receipt.product_source) { throw 'Forwarding validation source mismatch' }
+          $dll = Join-Path $artifactRoot $receipt.wintun_artifact.filename
+          if ((Get-FileHash $dll -Algorithm SHA256).Hash.ToLowerInvariant() -cne $receipt.wintun_artifact.sha256) { throw 'Engine-pinned Wintun DLL changed' }
+          $signature = Get-AuthenticodeSignature -FilePath $dll
+          if ($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate) { throw "Official Wintun signature is not valid: $($signature.Status)" }
+          $engine = Join-Path $artifactRoot $receipt.host_artifact.filename
+          if ((Get-FileHash $engine -Algorithm SHA256).Hash.ToLowerInvariant() -cne $receipt.host_artifact.sha256) { throw 'Engine host changed after its build receipt' }
+          cargo build --locked -p cfw-windows-engine --features native-service-validation --example native-wintun-probe 2>&1 |
+            Tee-Object -FilePath (Join-Path $artifactRoot 'tunnel-forwarding-build.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Wintun forwarding probe build failed' }
+          $output = Join-Path $artifactRoot 'tunnel-forwarding'
+          $start = [Diagnostics.ProcessStartInfo]::new((Join-Path $PWD 'target/debug/examples/native-wintun-probe.exe'))
+          $start.UseShellExecute = $false
+          $start.RedirectStandardOutput = $true
+          $start.RedirectStandardError = $true
+          foreach ($argument in @('--engine-forwarding', $dll, $engine, $receipt.host_artifact.sha256, $receipt.engine_version.TrimStart('v'), $output)) {
+            $start.ArgumentList.Add($argument)
+          }
+          $start.Environment['CFW_NATIVE_TUN_SOURCE'] = $source
+          $process = [Diagnostics.Process]::Start($start)
+          $probeId = $process.Id
+          $probeStarted = $process.StartTime.ToFileTimeUtc()
+          try {
+            $stdout = $process.StandardOutput.ReadToEndAsync()
+            $stderr = $process.StandardError.ReadToEndAsync()
+            $exited = $process.WaitForExit(360000)
+            if (-not $exited) {
+              # This retained probe process tree is the disposable fixture.
+              $process.Kill($true)
+              if (-not $process.WaitForExit(10000)) { throw 'Timed-out forwarding probe did not retire' }
+            }
+            if (-not $stdout.Wait(10000) -or -not $stderr.Wait(10000)) { throw 'Forwarding probe output did not drain' }
+            [IO.File]::WriteAllText((Join-Path $artifactRoot 'tunnel-forwarding-stdout.log'), $stdout.GetAwaiter().GetResult())
+            [IO.File]::WriteAllText((Join-Path $artifactRoot 'tunnel-forwarding-stderr.log'), $stderr.GetAwaiter().GetResult())
+            if (-not $exited) { throw 'Wintun forwarding probe exceeded its deadline' }
+            if ($process.ExitCode -ne 0) { throw "Wintun forwarding probe failed ($($process.ExitCode)); inspect retained observations" }
+          } finally { $process.Dispose() }
+          $initial = Get-Content (Join-Path $output 'initial.json') -Raw | ConvertFrom-Json
+          $result = Get-Content (Join-Path $output 'result.json') -Raw | ConvertFrom-Json
+          if ($initial.source -cne $source -or $initial.engine_sha256 -cne $receipt.host_artifact.sha256 -or
+              $initial.process_id -ne $probeId -or $initial.process_creation_time -ne $probeStarted -or
+              ((@($result.cases) | ForEach-Object { $_.mtu }) -join ',') -cne '1280,1500,9000' -or
+              $result.source -cne $source -or -not $result.success -or $null -ne $result.failure -or
+              -not $result.wintun_engine_forwarding_verified -or @($result.cases).Count -ne 3 -or
+              $result.authority_lease_exercised -or $result.system_to_user_handoff_exercised -or
+              $result.default_routes_modified -or $result.dns_modified -or $result.firewall_modified -or
+              $result.product_tunnel_backend_exercised -or $result.release_accepted) {
+            throw 'Wintun forwarding receipt is invalid or overstates its scope'
+          }
+          foreach ($case in @($result.cases)) {
+            if ($case.source -cne $source -or -not $case.windows_to_engine_forwarding_verified -or
+                -not $case.engine_to_windows_forwarding_verified -or -not $case.adapter_absence_observed -or
+                -not $case.causal_control.connect_without_pump_timed_out -or $case.pump.to_engine.largest_packet -ne $case.mtu -or
+                $case.pump.to_system.largest_packet -ne $case.mtu -or $case.pump.peer_close_code -notin @(109, 232)) {
+              throw "Wintun forwarding case $($case.mtu) is incomplete"
+            }
+          }
+          "Verified Windows TCP/UDP through Wintun, the packet pump and the native engine at MTU $(@($result.cases).mtu -join '/')" | Out-Host
       - name: Upload the verified unsigned engine component
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
@@ -203,6 +271,7 @@ jobs:
             ${{ runner.temp }}/cfw-windows-engine/artifacts/installed-host-*.json
             ${{ runner.temp }}/cfw-windows-engine/artifacts/installed-service-maintenance.json
             ${{ runner.temp }}/cfw-windows-engine/artifacts/msi/**
+            ${{ runner.temp }}/cfw-windows-engine/artifacts/tunnel-forwarding/**
             ${{ runner.temp }}/cfw-windows-engine/artifacts/*.wire-validation.json
             ${{ runner.temp }}/cfw-windows-engine/artifacts/*.off-admission.json
             ${{ runner.temp }}/cfw-windows-engine/artifacts/*.rejection.json
@@ -215,6 +284,7 @@ jobs:
         run: |
           "Built the GA-pinned Windows engine twice from independent caches and ran its native package tests and loopback HTTP/SOCKS TCP/UDP checks." >> $env:GITHUB_STEP_SUMMARY
           "The Rust owner additionally checks private-pipe identity, real WinINet HTTP through current-user proxy settings, exact restoration before engine stop, owner-process exit, conflicting settings, startup failure and emergency cleanup." >> $env:GITHUB_STEP_SUMMARY
+          "A validation probe forwards real Windows TCP/UDP through its own Wintun adapter, the packet pump and the engine's packet endpoint at three MTUs; it runs as the CI account without an Authority lease, user handoff, default route, DNS or firewall ownership." >> $env:GITHUB_STEP_SUMMARY
           "This unsigned engine component does not establish Windows desktop hosting, global service/TUN/system-proxy recovery, installation, signing or release acceptance." >> $env:GITHUB_STEP_SUMMARY
 
   service-peer:

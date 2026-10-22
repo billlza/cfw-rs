@@ -14,6 +14,8 @@ use std::{
 };
 
 use crate::tunnel as library;
+mod forwarding;
+mod network;
 mod packets;
 mod recovery;
 use library::{Library, observe, wait_absent};
@@ -23,7 +25,10 @@ fn native_error(operation: &str) -> String {
 }
 
 fn source() -> Result<String> {
+    // GitHub-hosted runners are disposable; GITHUB_ACTIONS alone is also set
+    // by local Actions emulators running on a person's own Windows machine.
     if std::env::var("GITHUB_ACTIONS").as_deref() != Ok("true")
+        || std::env::var("RUNNER_ENVIRONMENT").as_deref() != Ok("github-hosted")
         || std::env::var("CFW_NATIVE_TUN_MUTATION_TESTS").as_deref() != Ok("1")
     {
         return Err("Wintun validation requires disposable Windows CI opt-in".into());
@@ -51,11 +56,22 @@ fn record(output: &Path, name: &str, value: &Value) -> Result<()> {
         .map_err(|error| error.to_string())
 }
 
-/// CLI used exclusively by native-wintun-probe. The packet command temporarily
-/// configures one fixed test address and host route on its own adapter. Neither
-/// command installs a product service or changes DNS, firewall or default routes.
+/// CLI used exclusively by native-wintun-probe. The packet and forwarding
+/// commands temporarily configure one fixed test address and host route on
+/// their own adapter. No command installs a product service or changes DNS,
+/// firewall or default routes.
 pub fn run(arguments: &[String]) -> Result<()> {
     let source = source()?;
+    if arguments.len() == 6 && arguments[0] == "--engine-forwarding" {
+        return forwarding::run(
+            &PathBuf::from(&arguments[1]),
+            &PathBuf::from(&arguments[2]),
+            &arguments[3],
+            &arguments[4],
+            &PathBuf::from(&arguments[5]),
+            &source,
+        );
+    }
     if arguments.len() == 3 && arguments[0] == "--packet-roundtrip" {
         return packets::run(
             &PathBuf::from(&arguments[1]),

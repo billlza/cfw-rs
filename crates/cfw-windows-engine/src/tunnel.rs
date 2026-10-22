@@ -14,7 +14,7 @@ pub use channel::{PacketCancellation, PacketClient, PacketServer};
 #[cfg(windows)]
 pub use driver::{Adapter, Library, Session, interface_identity, observe};
 #[cfg(all(windows, feature = "native-service-validation"))]
-pub(crate) use driver::{absence_within_deadline, wait_absent};
+pub(crate) use driver::{absence_within_deadline, counters, wait_absent};
 #[cfg(windows)]
 pub use pump::{DirectionCounters, PacketPump, PumpControl, PumpReport, PumpRetirement};
 

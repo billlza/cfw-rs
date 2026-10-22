@@ -3,7 +3,7 @@
 //! captured before another read. Runtime authorization is a separate layer.
 use crate::connection_binding::ConnectionBinding;
 use crate::service_peer::{
-    SERVICE_PIPE_CLIENT_ACCESS, require_system_service_identity, service_pipe_name,
+    PacketAuthority, SERVICE_PIPE_CLIENT_ACCESS, require_system_service_identity, service_pipe_name,
 };
 use crate::{
     LocalServicePipe, NativePeerIdentity, NativePeerProcess, PeerIdentityError, ServiceClientRole,
@@ -496,6 +496,16 @@ impl ServiceChannel {
             .ok_or(ServiceTransportError::Closed)?
             .peer
             .process_id())
+    }
+    /// The service process behind this admitted connection, rechecked now,
+    /// to recognise a packet endpoint that service transfers.
+    pub fn packet_authority(&self) -> Result<PacketAuthority, ServiceTransportError> {
+        let connection = self
+            .connection
+            .as_ref()
+            .ok_or(ServiceTransportError::Closed)?;
+        connection.peer.verify_pipe_server(&connection.pipe)?;
+        Ok(connection.peer.packet_authority()?)
     }
     pub fn request(
         &mut self,

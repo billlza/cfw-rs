@@ -4,18 +4,24 @@
 mod channel;
 #[cfg(windows)]
 mod driver;
+mod endpoint;
 mod packet;
 mod policy;
 #[cfg(windows)]
 mod pump;
 #[cfg(windows)]
 mod session;
+#[cfg(all(windows, feature = "native-service-validation"))]
+pub use channel::{AdoptedEndpointProbe, PacketHandoffProbe};
 #[cfg(windows)]
-pub use channel::{PacketCancellation, PacketClient, PacketServer};
+pub use channel::{
+    ENDPOINT_ACCESS, EndpointHandoff, HandoffError, PacketCancellation, PacketClient, PacketServer,
+};
 #[cfg(windows)]
 pub use driver::{Adapter, Library, Session, interface_identity, observe};
 #[cfg(all(windows, feature = "native-service-validation"))]
 pub(crate) use driver::{InterfaceCounters, absence_within_deadline, counters, wait_absent};
+pub use endpoint::{EndpointOffer, HANDOFF_MTU};
 pub use policy::{DeliveryPolicy, Refusal, RefusalReason};
 #[cfg(windows)]
 pub use pump::{

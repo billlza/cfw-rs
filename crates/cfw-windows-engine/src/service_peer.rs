@@ -336,6 +336,55 @@ impl WindowsServicePeer {
     }
 }
 
+impl WindowsServicePeer {
+    /// The service process behind this admitted peer, kept to recognise a
+    /// packet endpoint it transfers. Fails if the process was replaced.
+    pub(crate) fn packet_authority(&self) -> Result<PacketAuthority, ServicePeerError> {
+        if process_creation(&self.process, self.process_id)? != self.created_at {
+            return Err(ServicePeerError::WrongProcess);
+        }
+        let process = self
+            .process
+            .try_clone()
+            .map_err(|source| ServicePeerError::Native {
+                operation: "retain the packet authority process",
+                source,
+            })?;
+        Ok(PacketAuthority {
+            process: Arc::new(process),
+            process_id: self.process_id,
+            created_at: self.created_at,
+        })
+    }
+}
+
+/// The SYSTEM service process behind one admitted service connection. It
+/// grants nothing: it only answers whether a pipe is still served by that
+/// exact process, in session 0, with its original creation time.
+#[derive(Clone)]
+pub struct PacketAuthority {
+    process: Arc<OwnedHandle>,
+    process_id: u32,
+    created_at: u64,
+}
+impl PacketAuthority {
+    pub fn process_id(&self) -> u32 {
+        self.process_id
+    }
+
+    pub(crate) fn verify_pipe_server(
+        &self,
+        pipe: &impl AsRawHandle,
+    ) -> Result<(), ServicePeerError> {
+        if pipe_process(pipe)? != self.process_id
+            || process_creation(&self.process, self.process_id)? != self.created_at
+        {
+            return Err(ServicePeerError::WrongProcess);
+        }
+        Ok(())
+    }
+}
+
 fn service_name_wide(name: &str) -> Result<Vec<u16>, ServicePeerError> {
     if name.is_empty()
         || name.len() > 80

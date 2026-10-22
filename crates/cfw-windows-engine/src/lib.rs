@@ -56,7 +56,7 @@ pub use peer::{
 mod service_peer;
 #[cfg(windows)]
 pub use service_peer::{
-    LocalServicePipe, ServiceClientRole, ServicePeerError, WindowsServicePeer,
+    LocalServicePipe, PacketAuthority, ServiceClientRole, ServicePeerError, WindowsServicePeer,
     configure_service_process_observation,
 };
 #[cfg(windows)]

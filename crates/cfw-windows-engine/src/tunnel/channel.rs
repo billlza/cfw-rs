@@ -2,7 +2,7 @@
 //! grants no Authority lease and never changes adapters, DNS, routes or proxy.
 use super::{Result, packet};
 use crate::{
-    NativePeerProcess, ServicePayload, ServiceTransportError,
+    NativePeerProcess, PacketAuthority, ServicePayload, ServiceTransportError,
     protocol::PacketAttachment,
     service_transport::native_io::{self, PendingMessageRead},
 };
@@ -40,14 +40,27 @@ pub struct PacketServer {
     cancel: Arc<AtomicBool>,
 }
 
-/// Receiver-owned endpoint prepared by the current process. No raw-handle
-/// constructor/Clone exists. Remote Authority transfer needs its own verified
-/// adoption path; this local constructor must not be mistaken for that path.
+mod handoff;
+#[cfg(feature = "native-service-validation")]
+pub use handoff::{AdoptedEndpointProbe, PacketHandoffProbe};
+pub use handoff::{ENDPOINT_ACCESS, EndpointHandoff, HandoffError};
+
+/// Receiver-owned endpoint, either prepared by the current process or adopted
+/// through the verified Authority handoff. No raw-handle constructor or Clone
+/// exists.
 pub struct PacketClient {
     handle: OwnedHandle,
-    creator: NativePeerProcess,
+    creator: EndpointCreator,
     name: String,
     mtu: u16,
+}
+
+/// Who serves the endpoint's pipe, rechecked before a child inherits it.
+enum EndpointCreator {
+    /// This process created the pair and serves it.
+    Local(NativePeerProcess),
+    /// The pinned SYSTEM service created it and handed the client end over.
+    Authority(PacketAuthority),
 }
 
 /// Reading direction of one endpoint. Exactly one owner polls it; the caller
@@ -102,7 +115,7 @@ impl PacketServer {
             },
             PacketClient {
                 handle: client,
-                creator,
+                creator: EndpointCreator::Local(creator),
                 name: format!("CFW-TUN-{adapter}"),
                 mtu,
             },
@@ -254,11 +267,18 @@ impl PacketClient {
     ) -> std::result::Result<(OwnedHandle, PacketAttachment), crate::Error> {
         let inherit =
             || -> std::result::Result<OwnedHandle, Box<dyn std::error::Error + Send + Sync>> {
-                self.creator.revalidate()?;
-                if self.creator.process_id() != std::process::id() {
-                    return Err("packet endpoint belongs to another creator".into());
+                match &self.creator {
+                    EndpointCreator::Local(creator) => {
+                        creator.revalidate()?;
+                        if creator.process_id() != std::process::id() {
+                            return Err("packet endpoint belongs to another creator".into());
+                        }
+                        creator.verify_pipe_server(&self.handle)?;
+                    }
+                    EndpointCreator::Authority(authority) => {
+                        authority.verify_pipe_server(&self.handle)?;
+                    }
                 }
-                self.creator.verify_pipe_server(&self.handle)?;
                 let mut raw = null_mut();
                 if unsafe {
                     DuplicateHandle(

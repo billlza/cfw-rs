@@ -175,7 +175,7 @@ install_xcodegen() {
     exit 1
   fi
 
-  local staging archive extracted payload build_root build_log xcodegen_patch settings_builder
+  local staging archive extracted payload build_root build_log resolve_log xcodegen_patch settings_builder
   staging="$(mktemp -d "$toolchain_root/xcodegen-bootstrap.XXXXXX")"
   trap '/bin/rm -rf -- "$staging"' RETURN
   archive="$staging/xcodegen-source.tar.gz"
@@ -288,6 +288,7 @@ PY
   swift_config="$staging/swift-config"
   swift_security="$staging/swift-security"
   build_log="$staging/swift-build.log"
+  resolve_log="$staging/swift-resolve.log"
   mkdir -p \
     "$build_root" \
     "$isolated_home" \
@@ -321,11 +322,17 @@ PY
     --no-color-diagnostics \
     resolve
   )
-  "${swift_resolve_command[@]}"
-  # The upstream manifest is verified before its explicit compatibility patch.
-  # Keep both identities; never silently edit a shared SwiftPM checkout.
-  cfw_patch_xcodegen_aexml "$repo_root" "$build_root/checkouts"
-  "${swift_resolve_command[@]}"
+  # SwiftPM evaluates every dependency manifest while it resolves. Each one
+  # is used as published (AEXML 4.7.1 declares supported platforms), so no
+  # checkout is edited, and a warning from any manifest fails the bootstrap.
+  if "${swift_resolve_command[@]}" 2>&1 | tee "$resolve_log"; then
+    :
+  else
+    echo "error: isolated XcodeGen dependency resolution failed" >&2
+    exit 1
+  fi
+  cfw_reject_swiftpm_warnings "$resolve_log" "dependency resolution" || exit 1
+  cfw_verify_xcodegen_aexml "$build_root/checkouts" || exit 1
   local -a swift_build_command=(
     /usr/bin/env -i \
     HOME="$isolated_home" \
@@ -363,10 +370,7 @@ PY
     echo "error: isolated XcodeGen build failed" >&2
     exit 1
   fi
-  if grep -Eiq '(^|[[:space:]])warning([[:space:]]|:)' "$build_log"; then
-    echo "error: isolated XcodeGen build emitted a warning" >&2
-    exit 1
-  fi
+  cfw_reject_swiftpm_warnings "$build_log" build || exit 1
   printf '%s  %s\n' "$XCODEGEN_PACKAGE_RESOLVED_SHA256" "$payload/source/Package.resolved" |
     shasum -a 256 --check >/dev/null
   local xcodegen_bin_dir
@@ -445,7 +449,7 @@ PY
     "$payload" \
     --output "$staging/xcodegen-$XCODEGEN_VERSION.manifest.json" \
     --algorithm sha256-tree-v2 \
-    --metadata "artifactKind=pinned-xcodegen-toolchain-v3" \
+    --metadata "artifactKind=pinned-xcodegen-toolchain-v4" \
     --metadata "buildPolicy=isolated-resolved-swiftpm-v1" \
     --metadata "macosDeploymentTarget=$MACOS_DEPLOYMENT_TARGET" \
     --metadata "packageResolvedSha256=$XCODEGEN_PACKAGE_RESOLVED_SHA256" \
@@ -453,8 +457,6 @@ PY
     --metadata "dependencyPatchSha256=$XCODEGEN_DEPENDENCY_PATCH_SHA256" \
     --metadata "aexmlCommit=$XCODEGEN_AEXML_COMMIT" \
     --metadata "aexmlUpstreamManifestSha256=$XCODEGEN_AEXML_UPSTREAM_MANIFEST_SHA256" \
-    --metadata "aexmlPatchSha256=$XCODEGEN_AEXML_PATCH_SHA256" \
-    --metadata "aexmlPatchedManifestSha256=$XCODEGEN_AEXML_PATCHED_MANIFEST_SHA256" \
     --metadata "patchSha256=$XCODEGEN_PATCH_SHA256" \
     --metadata "patchedSettingsBuilderSha256=$XCODEGEN_PATCHED_SETTINGS_BUILDER_SHA256" \
     --metadata "platform=darwin-arm64" \

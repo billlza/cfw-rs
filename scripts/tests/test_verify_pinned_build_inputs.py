@@ -1022,7 +1022,7 @@ class PinnedBuildInputsTests(unittest.TestCase):
             "go-module-sum": ("GOVULNCHECK_MODULE_SUM", "not-an-h1-sum"),
             "go-module-version": ("SING_BOX_VERSION", "1.14.2"),
             "gomobile-target": ("LIBBOX_APPLE_PLATFORM", "macos"),
-            "repository-path": ("XCODEGEN_AEXML_PATCH_PATH", "scripts/a b.patch"),
+            "repository-path": ("XCODEGEN_DEPENDENCY_PATCH_PATH", "scripts/a b.patch"),
             "sha256": ("GO_DARWIN_ARM64_SHA256", "A" * 64),
             "version": ("GO_VERSION", "1.27"),
         }
@@ -1038,10 +1038,10 @@ class PinnedBuildInputsTests(unittest.TestCase):
         for value in ("../scripts/a.patch", "scripts/./a.patch", "/scripts/a.patch"):
             with self.subTest(value=value):
                 fixture = Fixture()
-                fixture.env["XCODEGEN_AEXML_PATCH_PATH"] = value
+                fixture.env["XCODEGEN_DEPENDENCY_PATCH_PATH"] = value
                 self._assert_fails(
                     fixture,
-                    "XCODEGEN_AEXML_PATCH_PATH (path has an unsafe component|path is "
+                    "XCODEGEN_DEPENDENCY_PATCH_PATH (path has an unsafe component|path is "
                     "not repository-relative|is not a repository-path value)",
                 )
 

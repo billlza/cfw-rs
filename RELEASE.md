@@ -355,9 +355,9 @@ suffix (for example `400491`); nothing depends on that suffix.
 This is another preparation attempt using the same active GA build, not
 candidate retirement or a new build allocation.
 These reversible checkout, input-copy and environment-preflight
-steps, followed by the candidate build, may run in parallel with hosted CI for
-the same source commit. Required local source/build admission checks still run
-before candidate freeze and signing. The successful exact-source hosted receipt
+steps may run while hosted CI runs for the same source commit; the candidate
+build starts only after that run has passed (step 1 below). Required local
+source/build admission checks still run before candidate freeze and signing. The successful exact-source hosted receipt
 is required where publication preparation and prepackage consume that evidence.
 
 ## 1. Prepare and seal networked release inputs
@@ -933,6 +933,61 @@ any other tracked file of the release source closure, apart from `docs/` and
 the top-level guides, that names a GA-role ledger build outside a digest or
 object-ID token, and any installed tree digest outside the registry.
 
+#### Running a release with the driver
+
+`scripts/cfm_release.sh` is the only operator entry point of a release. It
+reads the active identity, keeps everything of one GA build under
+`~/.cfm-release-tooling/releases/<version>/` (the operator checkout
+`operator-<build>` with its artifact worktree, numbered logs, driver records,
+the private review files and the retained history), and recognises each stage
+as complete from the artifacts the release tools publish:
+
+```bash
+scripts/cfm_release.sh status
+scripts/cfm_release.sh next
+scripts/cfm_release.sh run STAGE
+```
+
+`next` names the one stage the recorded state allows, who runs it and what it
+needs. `run` refuses a stage that is complete or out of order, then checks both
+checkouts, other running release commands, the pinned Xcode and free space, and
+runs the stage's fixed entry point in the closed release environment. Only one
+`run` of a release proceeds at a time. A partly complete stage, such as a
+frozen but unsigned candidate or an unfinished runtime collection, is explained
+by `next` instead of being offered again; only its documented recovery runs.
+Instructions therefore always come from the artifact state, never from an
+earlier message, log or runbook. A refusal is one `refusing:` line whose exit
+status names its cause (2 usage, 94 network, 95 another release command or
+machine state, 96 a missing prerequisite, 97 a checkout); a release tool's own
+failure keeps its exit status. Before pushing a release commit,
+`scripts/cfm_release.sh preflight` runs the CI workflow's inline content checks
+(shell syntax and the pinned ShellCheck), which no gate lane covers.
+
+| Stage | What it runs |
+| --- | --- |
+| `enroll` | the operator clone and artifact worktree at the release commit, and APFS clones of the managed inputs of a development worktree whose gates passed on that commit |
+| `prepare` | `verify_release_environment.sh`, the preparation lanes and the libbox vulnerability scan in the artifact checkout |
+| `ci` | `run_hosted_ci_preflight.sh` (step 1): the newest hosted run of the exact release commit must have passed every check of the receipt |
+| `build` | `build_signed_candidate.sh --ga` (step 2; the owner answers the Keychain prompts), and afterwards only the recoveries of step 4 |
+| `receipt` | `release_publication_gate.sh --capture-hosted-ci` with the run that `ci` selected (step 3) |
+| `review-template`, `review` | the component review template; the approved decisions of the last shipped release carry forward (`scripts/publication/review_carryover.py`) and the owner decides every new or changed manual item |
+| `publication-prepare`, `draft`, `legal-review`, `finalize`, `preserve` | the publication evidence of step 5; the owner approves the exact closure |
+| `seal-prepackage`, `dmg`, `updater` | the prepackage seal and both package sets of step 5 |
+| `install`, `export` | the transactions of step 6 in order, resumed after the last recorded one |
+| `acceptance`, `seal-ga-acceptance` | the runtime collector of step 7 and its seal; the driver first checks every precondition the collector would reject after launch, starts the evidence instances and always stops them again |
+| `seal-publication`, `publish`, `verify-remote` | steps 9 and 10 and the remote verification below; the owner uploads the allowlisted files |
+
+Hosted CI runs before freeze: `build` refuses until `ci` has recorded the
+passed run of the release commit, so a CI failure is fixed in a new release
+commit before any build number is consumed, and the receipt never needs a
+separate test-only commit. After `verify-remote` the driver registers the build
+in `~/.cfm-release-tooling/releases/shipped.json`, the ledger from which the
+next release carries the approved component decisions forward; a release that
+shipped before the driver is registered once with
+`scripts/cfm_release.sh shipped --add VERSION BUILD ARTIFACT REVIEW`. The
+sections below describe what each stage's entry point does and stay the
+reference for its recovery rules.
+
 Run the sequence below from one clean release commit. Its `CHANGELOG.md`
 heading for the product version reads `## <version> — <freeze date>`: the
 publication set ships the frozen file as `MODIFICATIONS.md`, so the date
@@ -976,11 +1031,15 @@ the 0.4.0 predecessor profiles; a journal or marker in that form is rejected,
 never adopted.
 
 1. run the required source gates and start the three jobs in the `CI` GitHub
-   Actions workflow for the exact clean release commit. Hosted CI and the
-   candidate build may proceed in parallel; publication preparation and
-   prepackage require the successful hosted receipt. Retain the numeric GitHub
-   run ID; no local result, older SHA, foreign repository/workflow, or superseded
-   run attempt can satisfy the hosted gate;
+   Actions workflow for the exact clean release commit, then wait until that
+   run has passed before step 2. The driver's `ci` stage
+   (`scripts/run_hosted_ci_preflight.sh`) selects the newest run of the commit
+   and verifies it as completely as the receipt will, and `build` refuses until
+   it has; a CI failure is therefore fixed in a new release commit before any
+   candidate is frozen. Publication preparation and prepackage require the
+   successful hosted receipt. Retain the numeric GitHub run ID; no local
+   result, older SHA, foreign repository/workflow, or superseded run attempt
+   can satisfy the hosted gate;
 2. run the fixed builder with the live Developer ID profiles, notary Keychain
    profile, and updater-key custody configured on the release Mac:
 
@@ -1032,7 +1091,9 @@ never adopted.
    One complete successful hosted run for the frozen product commit, or for an
    immutable commit differing only in the reviewed validation/provenance
    adapters and `scripts/tests/`, satisfies ordinary GA's deterministic CI
-   requirement. Receipt v5 binds both source identities and the actual hosted
+   requirement. The driver's `ci` stage selects a run of the frozen commit
+   itself, and its `receipt` stage refuses a receipt whose tested source is
+   another commit. Receipt v5 binds both source identities and the actual hosted
    Xcode version; runtime, dependency-lock and signing inputs must remain equal.
    The reviewed Rust build adapter accepts a hosted selection only for the
    unsigned validation builds 40000 and 50000 (the unsigned preview). GA

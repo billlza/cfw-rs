@@ -138,20 +138,20 @@ class VersionContractTests(unittest.TestCase):
             repository = Path(temporary)
             self.make_repository(repository)
             manifest = repository / "crates/cfw-controller/Cargo.toml"
-            manifest.write_text(manifest.read_text().replace("0.5.0", "0.4.0"))
+            manifest.write_text(manifest.read_text().replace(EXPECTED_VERSION, "0.4.0"))
             with self.assertRaisesRegex(ValueError, "cfw-controller"):
                 verify(repository)
 
     def test_lockfile_version_and_local_origin_are_checked(self) -> None:
         mutations = (
-            (lambda text: text.replace('version = "0.5.0"', 'version = "0.4.0"', 1),
+            (lambda text: text.replace(f'version = "{EXPECTED_VERSION}"', 'version = "0.4.0"', 1),
              "Cargo.lock version differs"),
             (lambda text: text.replace('name = "cfw-core"',
                                        'name = "cfw-core"\nsource = "registry+https://example.test"'),
              "must remain local"),
             (lambda text: text.replace('name = "cfw-core"', 'name = "missing-core"'),
              "package set differs"),
-            (lambda text: text + '\n[[package]]\nname = "cfw-core"\nversion = "0.5.0"\n',
+            (lambda text: text + f'\n[[package]]\nname = "cfw-core"\nversion = "{EXPECTED_VERSION}"\n',
              "duplicate product Cargo.lock"),
         )
         for mutate, error in mutations:
@@ -168,7 +168,7 @@ class VersionContractTests(unittest.TestCase):
             repository = Path(temporary)
             self.make_repository(repository)
             source = repository / "crates/cfw-core/src/lib.rs"
-            source.write_text(source.read_text().replace("0.5.0", "0.4.0"))
+            source.write_text(source.read_text().replace(EXPECTED_VERSION, "0.4.0"))
             with self.assertRaisesRegex(ValueError, "cfw-core PRODUCT_VERSION"):
                 verify(repository)
 
@@ -217,9 +217,9 @@ class VersionContractTests(unittest.TestCase):
 
     def test_every_version_surface_is_checked(self) -> None:
         for relative, old, new, error in (
-            ("apps/cfw-tauri-shell/tauri.conf.json", "0.5.0", "0.4.0", "Tauri version"),
-            ("native/macos/project.yml", "0.5.0", "0.4.0", "MARKETING_VERSION"),
-            ("CHANGELOG.md", "0.5.0", "0.4.0", "first changelog release"),
+            ("apps/cfw-tauri-shell/tauri.conf.json", EXPECTED_VERSION, "0.4.0", "Tauri version"),
+            ("native/macos/project.yml", EXPECTED_VERSION, "0.4.0", "MARKETING_VERSION"),
+            ("CHANGELOG.md", EXPECTED_VERSION, "0.4.0", "first changelog release"),
             ("native/macos/Config/ProxyAgent-Info.plist", "$(CURRENT_PROJECT_VERSION)",
              GA_BUILD, "must inherit the canonical"),
         ):

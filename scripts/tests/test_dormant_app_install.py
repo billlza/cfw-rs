@@ -71,7 +71,7 @@ from scripts.dormant_app_install import (
     resolve_predecessor,
     select_active_predecessor,
 )
-from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY, PRODUCT_VERSION
 from scripts.tests.release_identity_fixture import next_patch
 
 
@@ -260,7 +260,7 @@ class DormantInstallFixture:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.repository = self.root / "repository"
-        self.candidate = self.repository / "target/candidates/0.5.0/signed" / TARGET_NAME
+        self.candidate = self.repository / f"target/candidates/{install.VERSION}/signed" / TARGET_NAME
         self.parent = self.root / "Applications"
         self.target = self.parent / TARGET_NAME
         self.candidate.mkdir(parents=True)
@@ -1210,13 +1210,13 @@ class DormantInstallValidationTests(unittest.TestCase):
         )
         self.assertTrue(
             str(paths.candidate_app).endswith(
-                f"/target/candidates/0.5.0/ga/{GA_BUILD}/signed/Clash for Mac.app"
+                f"/target/candidates/{PRODUCT_VERSION}/ga/{GA_BUILD}/signed/Clash for Mac.app"
             )
         )
         self.assertEqual(
             paths.profile.native_products_relative,
             Path(
-                f"target/candidates/0.5.0/ga/{GA_BUILD}/signing-output/signed-native-products"
+                f"target/candidates/{PRODUCT_VERSION}/ga/{GA_BUILD}/signing-output/signed-native-products"
             ),
         )
         self.assertEqual(paths.journal_name, JOURNAL_NAME)
@@ -1294,7 +1294,7 @@ class DormantInstallValidationTests(unittest.TestCase):
             # to its own product version; the active GA profile does not read it.
             validate_journal(document, historical)
             self.assertEqual(GA_INSTALL_PROFILE.product_version, install.VERSION)
-            for profile in (GA_INSTALL_PROFILE, replace(historical, product_version="0.5.0")):
+            for profile in (GA_INSTALL_PROFILE, replace(historical, product_version=install.VERSION)):
                 with self.subTest(profile=(profile.product_version, profile.build_number)):
                     with self.assertRaises(InstallError) as captured:
                         validate_journal(document, profile)
@@ -1440,7 +1440,7 @@ class DormantInstallValidationTests(unittest.TestCase):
         paths = InstallPaths.production()
         self.assertTrue(
             paths.candidate_app.as_posix().endswith(
-                f"/target/candidates/0.5.0/ga/{GA_BUILD}/signed/Clash for Mac.app"
+                f"/target/candidates/{PRODUCT_VERSION}/ga/{GA_BUILD}/signed/Clash for Mac.app"
             )
         )
 

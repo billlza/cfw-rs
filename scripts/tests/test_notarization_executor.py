@@ -19,7 +19,7 @@ from scripts.release_executor_source import (
     capture_executor_source,
     require_executor_unchanged,
 )
-from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY, ga_root
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY, PRODUCT_VERSION, ga_root
 from scripts.repository_source_identity import SourceIdentityError
 
 
@@ -66,7 +66,7 @@ class NotarizationExecutorTests(unittest.TestCase):
         self.assertEqual(document["document"], DOCUMENT)
         self.assertEqual(document["artifact_source"], self.arguments["artifact_identity"])
         self.assertEqual(document["executor_source"], self.identity)
-        self.assertEqual(document["product"], {"version": "0.5.0", "build_number": GA_BUILD})
+        self.assertEqual(document["product"], {"version": PRODUCT_VERSION, "build_number": GA_BUILD})
         self.assertEqual(document["candidate_freeze_intent_sha256"], "e" * 64)
         self.assertEqual(document["signing_transformation_receipt_sha256"], "f" * 64)
         self.assertEqual(stat.S_IMODE(before.st_mode), 0o600)

@@ -9,9 +9,9 @@ from typing import Any
 
 from .common import MAX_JSON_BYTES, PublicationError, canonical_json
 from .bounded_process import BoundedProcessError, run_bounded_process
+from .release_contract import RELEASE_VERSION
 
 
-RELEASE_VERSION = "0.5.0"
 MAX_COMMAND_BYTES = 256 * 1024 * 1024
 COMMAND_TIMEOUT_SECONDS = 600
 

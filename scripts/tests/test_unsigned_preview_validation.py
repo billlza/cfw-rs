@@ -13,13 +13,14 @@ from scripts import native_ui_artifact as ui
 from scripts import release_build_identity as identity
 from scripts.hash_artifact import build_manifest
 from scripts.promote_signed_native_manifest import promote_manifest, SignedNativeManifestError
+from scripts.release_build_identity import PRODUCT_VERSION
 
 
 GA_BUILD = identity.ACTIVE_RELEASE_IDENTITY.ga_build
 
 
 class UnsignedPreviewValidationTests(unittest.TestCase):
-    def pair(self, repository: Path, *, build="50000", version="0.5.0"):
+    def pair(self, repository: Path, *, build="50000", version=PRODUCT_VERSION):
         native = identity.unsigned_preview_native_products_root(repository)
         native.mkdir(parents=True)
         app = identity.unsigned_preview_root(repository) / "cargo/release/bundle/macos/Clash for Mac.app"
@@ -38,7 +39,7 @@ class UnsignedPreviewValidationTests(unittest.TestCase):
             app, native = self.pair(repository)
             expected = identity.CandidateBundleContext.UNSIGNED_PREVIEW_HOST
             result = identity.candidate_bundle_verification_paths(repository, app, native, expected)
-            self.assertEqual(result.build_identity, identity.BundleBuildIdentity("0.5.0", "50000"))
+            self.assertEqual(result.build_identity, identity.BundleBuildIdentity(PRODUCT_VERSION, "50000"))
             for context in identity.CandidateBundleContext:
                 if context is expected:
                     continue
@@ -65,7 +66,7 @@ class UnsignedPreviewValidationTests(unittest.TestCase):
                 )
 
     def test_new_context_refuses_wrong_or_mixed_component_identity(self):
-        for build, version in (("40000", "0.5.0"), (GA_BUILD, "0.5.0"), ("50013", "0.5.0"), ("50014", "0.5.0"), ("50015", "0.5.0"), ("50025", "0.5.0"), ("50000", "0.4.0")):
+        for build, version in (("40000", PRODUCT_VERSION), (GA_BUILD, PRODUCT_VERSION), ("50013", PRODUCT_VERSION), ("50014", PRODUCT_VERSION), ("50015", PRODUCT_VERSION), ("50025", PRODUCT_VERSION), ("50000", "0.4.0")):
             with self.subTest(build=build, version=version), tempfile.TemporaryDirectory() as temporary:
                 repository = Path(temporary).resolve()
                 app, native = self.pair(repository, build=build, version=version)
@@ -75,7 +76,7 @@ class UnsignedPreviewValidationTests(unittest.TestCase):
             repository = Path(temporary).resolve()
             app, native = self.pair(repository)
             info = app / "Contents/Library/LoginItems/CFWProxyAgent.app/Contents/Info.plist"
-            info.write_bytes(plistlib.dumps({"CFBundleShortVersionString": "0.5.0", "CFBundleVersion": "50025"}))
+            info.write_bytes(plistlib.dumps({"CFBundleShortVersionString": PRODUCT_VERSION, "CFBundleVersion": "50025"}))
             with self.assertRaisesRegex(identity.BuildIdentityError, "build versions differ"):
                 identity.candidate_bundle_verification_paths(repository, app, native, identity.CandidateBundleContext.UNSIGNED_PREVIEW_HOST)
 
@@ -83,7 +84,7 @@ class UnsignedPreviewValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             repository = Path(temporary).resolve()
             roots = {
-                "40000": repository / "target/candidates/0.5.0/unsigned/native-products",
+                "40000": repository / f"target/candidates/{PRODUCT_VERSION}/unsigned/native-products",
                 GA_BUILD: identity.ga_pre_sign_native_products_root(repository),
                 "50000": identity.unsigned_preview_native_products_root(repository),
             }
@@ -152,7 +153,7 @@ class UnsignedPreviewValidationTests(unittest.TestCase):
     def test_unsigned_intermediate_directory_symlink_is_rejected_before_creation(self):
         with tempfile.TemporaryDirectory() as temporary:
             repository = Path(temporary).resolve()
-            parent = repository / "target/candidates/0.5.0"
+            parent = repository / f"target/candidates/{PRODUCT_VERSION}"
             parent.mkdir(parents=True)
             outside = repository / "outside"
             outside.mkdir()

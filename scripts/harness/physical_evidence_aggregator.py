@@ -76,7 +76,11 @@ if __package__:
         verify_ps256,
     )
     from ..evidence_manifest import LEVEL_ORDER
-    from ..release_build_identity import BuildIdentityError, canonical_build_version
+    from ..release_build_identity import (
+        PRODUCT_VERSION,
+        BuildIdentityError,
+        canonical_build_version,
+    )
 else:  # pragma: no cover - direct-script import path
     import sys
 
@@ -141,13 +145,16 @@ else:  # pragma: no cover - direct-script import path
         verify_ps256,
     )
     from evidence_manifest import LEVEL_ORDER  # type: ignore
-    from release_build_identity import BuildIdentityError, canonical_build_version  # type: ignore
+    from release_build_identity import (  # type: ignore
+        PRODUCT_VERSION,
+        BuildIdentityError,
+        canonical_build_version,
+    )
 
 
 SCHEMA_VERSION = EVIDENCE_PROFILE["aggregate_schema_version"]
 AGGREGATOR_VERSION = EVIDENCE_PROFILE["aggregator_version"]
 RECEIPT_SCHEMA_VERSION = 3
-PRODUCT_VERSION = "0.5.0"
 GRANTED_LEVEL = "Signed_Installed_Verified"
 if GRANTED_LEVEL not in LEVEL_ORDER:
     raise RuntimeError("physical evidence level is absent from Evidence_Manifest")

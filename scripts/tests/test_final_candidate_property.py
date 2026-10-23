@@ -73,6 +73,7 @@ from scripts.tests.release_property_snapshots import (
     PhysicalSnapshotInput,
     StrictReleasePropertySnapshots,
 )
+from scripts.release_build_identity import PRODUCT_VERSION
 
 REPOSITORY = Path(__file__).resolve().parent.parent.parent
 REPOSITORY_COMMIT = repository_commit(REPOSITORY)
@@ -149,7 +150,7 @@ def _request(rng: random.Random, drop_physical: str | None = None) -> dict:
     captured = _captured_at(rng)
     manifest = _artifact_manifest(rng)
     request = {
-        "product": {"version": "0.5.0", "build_number": BUILD_NUMBER},
+        "product": {"version": PRODUCT_VERSION, "build_number": BUILD_NUMBER},
         "commit": REPOSITORY_COMMIT,
         "final_artifacts": {
             "signed_app_tree_sha256": SIGNED_TREE,

@@ -1001,7 +1001,7 @@ class ReleaseConsumerContractTests(unittest.TestCase):
         self.assertIn(
             'if [[ $preview_validation -eq 1 ]]; then\n'
             '  build_version="50000"\n'
-            '  candidate_relative="target/candidates/0.5.0/unsigned/50000"\n'
+            '  candidate_relative="target/candidates/$product_version/unsigned/50000"\n'
             '  bundle_context="unsigned-preview-host"',
             unsigned,
         )
@@ -1739,7 +1739,7 @@ LIBBOX_VET_PACKAGES=(".")
         readme = (REPOSITORY / "native/macos/README.md").read_text(encoding="utf-8")
         self.assertIn("export CFW_BUILD_NUMBER=40000", readme)
         self.assertIn(
-            "target/candidates/0.5.0/native-validation/40000/native-products",
+            "target/candidates/$CFW_PRODUCT_VERSION/native-validation/40000/native-products",
             readme,
         )
         self.assertNotIn(

@@ -4,7 +4,7 @@ import copy
 import unittest
 
 from scripts.release_runtime_evidence import RuntimeEvidenceError, validate_runtime_evidence
-from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY, PRODUCT_VERSION
 
 
 GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
@@ -90,7 +90,7 @@ def fixture() -> dict:
         )
     return {
         "schema_version": 1,
-        "product": {"version": "0.5.0", "build_number": GA_BUILD},
+        "product": {"version": PRODUCT_VERSION, "build_number": GA_BUILD},
         "app_manifest_sha256": "b" * 64,
         "captured_at": "2026-07-22T00:00:00Z",
         "platform": {

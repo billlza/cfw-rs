@@ -19,7 +19,7 @@ from scripts.hash_artifact import build_manifest
 from scripts.publication import durable_file
 from scripts.publication.common import PublicationError
 from scripts import verify_signing_transformation as transformation
-from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY, PRODUCT_VERSION
 
 
 GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
@@ -39,7 +39,7 @@ class FixtureCodeObject:
     unsigned_before_signing: bool = False
 
 
-# The real 0.5.0 Host, independent of the module under test: every nested
+# The real Host, independent of the module under test: every nested
 # object of native/macos/Config/signing-order.json in its order, then the Host.
 # The build strips the compiler's signature from the SwiftUI library, so it is
 # the one code object the frozen pre-sign app carries unsigned.
@@ -181,7 +181,7 @@ class SigningTransformationFixture:
         self.temporary = tempfile.TemporaryDirectory()
         self.repository = Path(self.temporary.name).resolve()
         self.root = (
-            self.repository / f"target/candidates/0.5.0/ga/{GA_BUILD}"
+            self.repository / f"target/candidates/{PRODUCT_VERSION}/ga/{GA_BUILD}"
         )
         self.pre_sign_app = self.root / transformation.PRE_SIGN_APP_RELATIVE
         self.signing_output = (
@@ -241,7 +241,7 @@ class SigningTransformationFixture:
         metadata = {
             "artifactKind": "pre-sign-application-v1",
             "buildNumber": GA_BUILD,
-            "version": "0.5.0",
+            "version": PRODUCT_VERSION,
         }
         value = build_manifest(
             self.pre_sign_app,
@@ -293,7 +293,7 @@ class SigningTransformationFixture:
             "consumption_state": "candidate_frozen_consumed",
             "document": "cfm-candidate-freeze-intent-v3",
             "pre_sign_app_tree_sha256": "a" * 64,
-            "product_version": "0.5.0",
+            "product_version": PRODUCT_VERSION,
             "schema_version": 3,
         }
         self.intent_path.parent.mkdir(mode=0o700)
@@ -307,7 +307,7 @@ class SigningTransformationFixture:
             root=self.root,
             intent_path=self.intent_path,
             intent_sha256=hashlib.sha256(self.intent_path.read_bytes()).hexdigest(),
-            product_version="0.5.0",
+            product_version=PRODUCT_VERSION,
             build_number=GA_BUILD,
             recovered=False,
         )

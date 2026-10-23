@@ -112,7 +112,7 @@ GA_BUILD: Final = ACTIVE_RELEASE_IDENTITY.ga_build
 API_ORIGIN: Final = "https://api.github.com"
 API_ACCEPT: Final = "application/vnd.github+json"
 API_VERSION: Final = "2022-11-28"
-API_USER_AGENT: Final = "cfw-rs-release-evidence/0.5.0"
+API_USER_AGENT: Final = f"cfw-rs-release-evidence/{ACTIVE_RELEASE_IDENTITY.product_version}"
 API_TIMEOUT_SECONDS: Final = 30
 MAX_API_RESPONSE_BYTES: Final = 8 * 1024 * 1024
 MAX_RECEIPT_BYTES: Final = 4 * 1024 * 1024
@@ -159,7 +159,7 @@ REQUIRED_JOB_STEP_NAMES: Final = {
     "libbox, Network Extension, and app skeleton gates": frozenset(
         {
             "Build source-bound libbox",
-            "Build and verify unsigned 0.5.0 validation skeleton (50000)",
+            "Build and verify unsigned validation skeleton (50000)",
         }
     ),
 }

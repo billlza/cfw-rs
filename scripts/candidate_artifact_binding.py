@@ -31,6 +31,7 @@ if __package__:
     from .publication.graph_model import load_pins
     from .publication.release_environment import release_tool_environment
     from .publication.sealed_manifest import _ci_lane_document
+    from .release_build_identity import PRODUCT_VERSION
     from .release_python_runtime import require_closed_release_runtime
     from .repository_source_identity import SourceIdentityError, current_identity
 else:
@@ -45,6 +46,7 @@ else:
     from publication.graph_model import load_pins
     from publication.release_environment import release_tool_environment
     from publication.sealed_manifest import _ci_lane_document
+    from release_build_identity import PRODUCT_VERSION
     from release_python_runtime import require_closed_release_runtime
     from repository_source_identity import SourceIdentityError, current_identity
 
@@ -266,7 +268,7 @@ def validate_candidate_app_manifest(
         **expected_source,
         **toolchain_metadata,
         "teamID": team_id,
-        "version": "0.5.0",
+        "version": PRODUCT_VERSION,
     }
     if document.get("metadata") != dict(sorted(expected_metadata.items())):
         raise CandidateBindingError(

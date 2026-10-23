@@ -37,6 +37,7 @@ from scripts.release_driver_context import (
     write_record,
 )
 from scripts.release_driver_review import read_ledger
+from scripts.release_build_identity import PRODUCT_VERSION
 
 COMMIT = "a" * 40
 PINS = {"XCODE_VERSION": "27.1", "XCODE_BUILD_VERSION": "27A9275", "PYTHON_VERSION": "3.14.7"}
@@ -194,7 +195,7 @@ class StageOrderTests(DriverFixture):
     def test_a_shipped_build_offers_no_stage(self) -> None:
         ledger = self.home / ".cfm-release-tooling/releases/shipped.json"
         self.touch(ledger, json.dumps({"document": "cfm-shipped-releases-v1", "releases": [
-            {"version": "0.5.0", "build": "90002", "artifact": "/a", "review": "/r"}]}))
+            {"version": PRODUCT_VERSION, "build": "90002", "artifact": "/a", "review": "/r"}]}))
         with contextlib.redirect_stdout(io.StringIO()) as output:
             command_next(self.context())
         self.assertIn("is shipped and verified", output.getvalue())
@@ -293,7 +294,7 @@ class RunLockTests(DriverFixture):
             command_run(self.context(), "no-such-stage")
         self.touch(self.home / ".cfm-release-tooling/releases/shipped.json", json.dumps({
             "document": "cfm-shipped-releases-v1",
-            "releases": [{"version": "0.5.0", "build": "90002", "artifact": "/a", "review": "/r"}]}))
+            "releases": [{"version": PRODUCT_VERSION, "build": "90002", "artifact": "/a", "review": "/r"}]}))
         with self.assertRaisesRegex(DriverError, "is shipped"):
             command_run(self.context(), "prepare")
         self.assertFalse(path_present(self.release.home))
@@ -325,7 +326,7 @@ class MachineTests(unittest.TestCase):
 
 
 class LedgerTests(unittest.TestCase):
-    ENTRY = {"version": "0.5.0", "build": "90001", "artifact": "/a", "review": "/r"}
+    ENTRY = {"version": PRODUCT_VERSION, "build": "90001", "artifact": "/a", "review": "/r"}
 
     def read(self, content: str) -> list:
         with tempfile.TemporaryDirectory() as directory:
@@ -466,7 +467,7 @@ class PathContractTests(unittest.TestCase):
         from scripts.publication import ga_release_contract as contract
         from scripts.release_artifact_set import DISTRIBUTION_SEAL_NAME, DMG_SEAL_NAME, UPDATER_SEAL_NAME
 
-        release = Release("0.5.0", contract.GA_BUILD, Path("/h"), "v1.14.2")
+        release = Release(PRODUCT_VERSION, contract.GA_BUILD, Path("/h"), "v1.14.2")
         artifact = release.artifact
         self.assertEqual(release.ga, artifact / contract.GA_ROOT)
         self.assertEqual(release.stage_inputs / "hosted-ci.json", artifact / contract.HOSTED_CI_INPUT)
@@ -603,7 +604,7 @@ class PreflightTests(unittest.TestCase):
         "Assert Apple Silicon host",
         "Assert selected Apple validation toolchain",
         # Runs the unsigned candidate build that the gate lanes also cover.
-        "Build and verify unsigned 0.5.0 validation skeleton (50000)",
+        "Build and verify unsigned validation skeleton (50000)",
     }
 
     def test_every_inline_workflow_step_is_classified(self) -> None:

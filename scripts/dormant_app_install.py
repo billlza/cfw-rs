@@ -4054,7 +4054,8 @@ def main() -> None:
         raise SystemExit(f"error: {code}: {error}") from error
     print(
         f"dormant install transaction {result['phase']}: "
-        f"0.5.0 ({result['candidate']['build_number']}); application was not launched"
+        f"{ACTIVE_RELEASE_IDENTITY.product_version} ({result['candidate']['build_number']}); "
+        "application was not launched"
     )
 
 

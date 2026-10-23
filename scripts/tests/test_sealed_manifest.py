@@ -79,7 +79,7 @@ from scripts.tests.physical_evidence_fixture import (
 )
 from scripts.tests.gatekeeper_fixture import fixture as gatekeeper_fixture
 from scripts.tests.test_sealed_closure import _request as _closure_request
-from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY, PRODUCT_VERSION
 
 
 GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
@@ -233,7 +233,7 @@ def ci_lanes(
 
 def sealed_closure_document(*, commit: str = COMMIT, signed_app: str = SIGNED_TREE) -> dict:
     request = _closure_request(
-        product={"name": "Clash for Mac", "version": "0.5.0", "build_number": BUILD_NUMBER},
+        product={"name": "Clash for Mac", "version": PRODUCT_VERSION, "build_number": BUILD_NUMBER},
         commit=commit,
         signed_app={"sha256": signed_app},
         xcframework={"sha256": XCFRAMEWORK_SHA},
@@ -250,7 +250,7 @@ def final_candidate_document(
 ) -> dict:
     manifest = _artifact_hash_manifest()
     request = {
-        "product": {"version": "0.5.0", "build_number": BUILD_NUMBER},
+        "product": {"version": PRODUCT_VERSION, "build_number": BUILD_NUMBER},
         "commit": commit,
         "final_artifacts": {
             "signed_app_tree_sha256": SIGNED_TREE,
@@ -314,7 +314,7 @@ def request(
     """
     aggregate = physical_fixture() if depth >= 2 else None
     return {
-        "product": {"version": "0.5.0", "build_number": BUILD_NUMBER},
+        "product": {"version": PRODUCT_VERSION, "build_number": BUILD_NUMBER},
         "commit": commit,
         "evidence_manifest": inner_manifest(
             depth if claim_depth is None else claim_depth,
@@ -492,7 +492,7 @@ class SealedManifestRoundTripTests(_CleanWorkspace):
         bindings = manifest["bindings"]
         self.assertEqual(bindings["commit"], COMMIT)
         self.assertEqual(bindings["release_source_sha256"], RELEASE_SOURCE)
-        self.assertEqual(bindings["product"], {"version": "0.5.0", "build_number": BUILD_NUMBER})
+        self.assertEqual(bindings["product"], {"version": PRODUCT_VERSION, "build_number": BUILD_NUMBER})
         self.assertEqual(bindings["signed_app_tree_sha256"], SIGNED_TREE)
         self.assertEqual(bindings["app_manifest_sha256"], APP_MANIFEST)
         self.assertIn(SIGNED_TREE, bindings["final_artifact_hashes"])
@@ -1053,7 +1053,7 @@ class SealedManifestContractTests(unittest.TestCase):
     def test_default_state_is_confined_to_the_active_ga_stage_root(self) -> None:
         self.assertEqual(
             DEFAULT_EVIDENCE_DIRECTORY,
-            f"target/candidates/0.5.0/ga/{GA_BUILD}/stage-inputs/sealed-manifest",
+            f"target/candidates/{PRODUCT_VERSION}/ga/{GA_BUILD}/stage-inputs/sealed-manifest",
         )
         self.assertEqual(
             DEFAULT_MANIFEST_PATH,

@@ -21,7 +21,7 @@ from scripts import release_signing_plan
 from scripts import release_signing_preflight
 from scripts import verify_release_build_allocations as allocations
 from scripts.dormant_app_install import SUPPORTED_PREDECESSORS, PredecessorProfile
-from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY, PRODUCT_VERSION
 from scripts.tests.metadata_change_fixture import change_only_ctime
 from scripts.tests.release_identity_fixture import NEXT_GA_BUILD, retired_ga_builds
 
@@ -58,9 +58,9 @@ class CandidateFreezeTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.repository = Path(self.temporary.name).resolve()
         self.preflight = (
-            self.repository / f"target/candidates/0.5.0/ga-preflight/{GA_BUILD}"
+            self.repository / f"target/candidates/{PRODUCT_VERSION}/ga-preflight/{GA_BUILD}"
         )
-        self.final = self.repository / f"target/candidates/0.5.0/ga/{GA_BUILD}"
+        self.final = self.repository / f"target/candidates/{PRODUCT_VERSION}/ga/{GA_BUILD}"
         ledger = self.repository / allocations.CONTRACT_RELATIVE_PATH
         ledger.parent.mkdir(parents=True)
         # The artifact repository carries the tracked ledger and the retirement
@@ -256,7 +256,7 @@ class CandidateFreezeTests(unittest.TestCase):
             _canonical_json(
                 {
                     "document": "cfm-ga-product-input-v1",
-                    "product": {"build_number": GA_BUILD, "version": "0.5.0"},
+                    "product": {"build_number": GA_BUILD, "version": PRODUCT_VERSION},
                     "schema_version": 1,
                     "source": {
                         "release_source_sha256": "b" * 64,
@@ -305,7 +305,7 @@ class CandidateFreezeTests(unittest.TestCase):
         self.assertEqual(
             candidate_freeze._fixed_roots(self.repository), (self.preflight, self.final)
         )
-        candidates = self.repository / "target/candidates/0.5.0"
+        candidates = self.repository / f"target/candidates/{PRODUCT_VERSION}"
         for helper, root in (
             ("ga_preflight_root", candidates / GA_BUILD),
             ("ga_root", candidates / GA_BUILD),
@@ -496,7 +496,7 @@ class CandidateFreezeTests(unittest.TestCase):
             _canonical_json(
                 {
                     "document": "cfm-ga-product-input-v1",
-                    "product": {"build_number": GA_BUILD, "version": "0.5.0"},
+                    "product": {"build_number": GA_BUILD, "version": PRODUCT_VERSION},
                     "schema_version": 1,
                     "source": {
                         "release_source_sha256": "b" * 64,
@@ -635,7 +635,9 @@ class CandidateFreezeTests(unittest.TestCase):
             b'"order":["host"],"product":{"build_number":"'
             + GA_BUILD.encode("ascii")
             + b'",'
-            b'"version":"0.5.0"},"schema_version":1}\n'
+            b'"version":"'
+            + PRODUCT_VERSION.encode("ascii")
+            + b'"},"schema_version":1}\n'
         )
 
         with self.assertRaisesRegex(

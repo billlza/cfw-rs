@@ -193,7 +193,8 @@ installed or handed over as the corrected 0.5 preview.
 
 ## CI compilation of the 0.5 bundle
 
-The CI skeleton uses the separate unsigned validation identity **0.5.0/50000**:
+The CI skeleton uses the separate unsigned validation identity: build **50000** of
+the product version in `scripts/release_identity.env`:
 
 ```sh
 scripts/build_unsigned_candidate.sh --preview-validation \
@@ -203,7 +204,7 @@ scripts/build_unsigned_candidate.sh --preview-validation \
 The Python executable must already satisfy the closed validation runtime contract.
 This lane builds Release native UI components, embeds their library and localization
 resources, and verifies their source, compiler, architecture, exports and portable
-load paths. Its exact output is `target/candidates/0.5.0/unsigned/50000`; retained
+load paths. Its exact output is `target/candidates/<version>/unsigned/50000`; retained
 attempts are never overwritten. It has no distribution signature and is not an
 input to the GA signing, installation or publication lanes. The GA release build
 keeps its independently allocated build and pinned production compiler.

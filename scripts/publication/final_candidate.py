@@ -89,7 +89,7 @@ try:  # pragma: no cover - import shim exercised by both invocation styles
         load_release_trust_policy,
         parse_descriptor,
     )
-    from scripts.release_build_identity import canonical_build_version, ga_root
+    from scripts.release_build_identity import PRODUCT_VERSION, canonical_build_version, ga_root
     from scripts.release_secret_material_blocker import (
         SecretMaterialReleaseBlock,
         evaluate_workspace,
@@ -114,7 +114,7 @@ except ImportError:  # pragma: no cover - CLI invocation style
         load_release_trust_policy,
         parse_descriptor,
     )
-    from scripts.release_build_identity import canonical_build_version, ga_root
+    from scripts.release_build_identity import PRODUCT_VERSION, canonical_build_version, ga_root
     from scripts.release_secret_material_blocker import (
         SecretMaterialReleaseBlock,
         evaluate_workspace,
@@ -143,7 +143,6 @@ VERIFIED = "verified"
 BLOCKED = "blocked"
 STATUSES = {VERIFIED, BLOCKED}
 
-PRODUCT_VERSION = "0.5.0"
 TEAM_ID = "YKUPL7Z869"
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 CDHASH_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -763,7 +762,7 @@ def _secret_material_blocked(workspace_root: Path) -> bool:
 
 # This legacy binder remains a callable validator, so its default input root is
 # confined to the one active GA identity.  It must never recreate the retired
-# parallel ``target/candidates/0.5.0/release`` namespace.
+# parallel ``target/candidates/<version>/release`` namespace.
 DEFAULT_EVIDENCE_DIRECTORY = str(
     ga_root(Path()) / "stage-inputs/final-candidate"
 )

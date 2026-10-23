@@ -97,7 +97,7 @@ def product(value: object, fixture: bool) -> dict[str, str]:
     if not fixture and (
         identity["name"] != PRODUCT_NAME or identity["version"] != RELEASE_VERSION
     ):
-        raise PublicationError("publication evidence is not for the fixed 0.5.0 product")
+        raise PublicationError(f"publication evidence is not for the fixed {RELEASE_VERSION} product")
     return {
         "name": identity["name"],
         "version": identity["version"],

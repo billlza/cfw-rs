@@ -100,6 +100,9 @@ from scripts.tests.release_identity_fixture import NEXT_GA_BUILD
 from scripts.tests.physical_evidence_fixture import pcap_bytes
 
 
+# The installed predecessor's product version: a Packet Tunnel it registered
+# is listed as (FROM_VERSION/FROM_BUILD), which may precede PRODUCT_VERSION.
+FROM_VERSION = ACTIVE_PREDECESSOR.product_version
 DIGESTS = {
     "dmg_gatekeeper_sha256": "1" * 64,
     "dmg_set_seal_sha256": "2" * 64,
@@ -1174,7 +1177,7 @@ def system_extension_output() -> str:
         "--- com.apple.system_extension.network_extension\n"
         "enabled\tactive\tteamID\tbundleID (version)\tname\t[state]\n"
         "*\t*\tYKUPL7Z869\tcom.bill.clashformac.packet-tunnel "
-        f"(0.5.0/{TO_BUILD})\tCFWPacketTunnel\t[activated enabled]\n"
+        f"({PRODUCT_VERSION}/{TO_BUILD})\tCFWPacketTunnel\t[activated enabled]\n"
     )
 
 
@@ -1239,8 +1242,8 @@ def observed_replacement_rows() -> tuple[str, ...]:
     return (
         packet_tunnel_row("0.5.0/50008", SYSTEM_EXTENSION_RETAINED),
         packet_tunnel_row("0.4.0/40073", SYSTEM_EXTENSION_RETAINED),
-        packet_tunnel_row(f"0.5.0/{FROM_BUILD}", SYSTEM_EXTENSION_RETAINED),
-        packet_tunnel_row(f"0.5.0/{TO_BUILD}", SYSTEM_EXTENSION_ACTIVATED),
+        packet_tunnel_row(f"{FROM_VERSION}/{FROM_BUILD}", SYSTEM_EXTENSION_RETAINED),
+        packet_tunnel_row(f"{PRODUCT_VERSION}/{TO_BUILD}", SYSTEM_EXTENSION_ACTIVATED),
     )
 
 
@@ -1463,8 +1466,8 @@ class RuntimeFixture:
                         "context:primary-signature",
                         "-vv",
                         (
-                            f"target/candidates/0.5.0/ga/{TO_BUILD}/packages/dmg/v0.5.0/"
-                            "Clash.for.Mac_0.5.0_arm64.dmg"
+                            f"target/candidates/{PRODUCT_VERSION}/ga/{TO_BUILD}/packages/dmg/v{PRODUCT_VERSION}/"
+                            f"Clash.for.Mac_{PRODUCT_VERSION}_arm64.dmg"
                         ),
                     ],
                     stderr="accepted\nsource=Notarized Developer ID\n",
@@ -1812,7 +1815,7 @@ class GARuntimeDmgLauncherTests(unittest.TestCase):
                 "--directory",
                 str(self.artifact / ga_runtime.DMG_SET_RELATIVE),
                 "--version",
-                "0.5.0",
+                PRODUCT_VERSION,
                 "--repository",
                 str(self.artifact),
             ],
@@ -2009,28 +2012,28 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
         self.assertEqual(
             ACCEPTANCE_RELATIVE,
             Path(
-                f"target/candidates/0.5.0/ga/{TO_BUILD}/stage-inputs/ga-acceptance/"
+                f"target/candidates/{PRODUCT_VERSION}/ga/{TO_BUILD}/stage-inputs/ga-acceptance/"
                 "runtime-acceptance.json"
             ),
         )
         self.assertEqual(
             RAW_ROOT_RELATIVE,
             Path(
-                f"target/candidates/0.5.0/ga/{TO_BUILD}/stage-inputs/ga-acceptance/"
+                f"target/candidates/{PRODUCT_VERSION}/ga/{TO_BUILD}/stage-inputs/ga-acceptance/"
                 "runtime-evidence"
             ),
         )
         self.assertEqual(
             ENVIRONMENT_RELATIVE,
             Path(
-                f"target/candidates/0.5.0/ga/{TO_BUILD}/stage-inputs/ga-acceptance/"
+                f"target/candidates/{PRODUCT_VERSION}/ga/{TO_BUILD}/stage-inputs/ga-acceptance/"
                 "migration-journals/service-transaction/environment.json"
             ),
         )
         self.assertEqual(
             INSTALL_JOURNAL_RELATIVE,
             Path(
-                f"target/candidates/0.5.0/ga/{TO_BUILD}/stage-inputs/ga-acceptance/"
+                f"target/candidates/{PRODUCT_VERSION}/ga/{TO_BUILD}/stage-inputs/ga-acceptance/"
                 "migration-journals/dormant-install.json"
             ),
         )
@@ -4643,7 +4646,7 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
     def test_activated_predecessor_cannot_seal_as_the_candidate(self) -> None:
         self._set_system_extension_stdout(
             packet_tunnel_listing(
-                packet_tunnel_row(f"0.5.0/{FROM_BUILD}", SYSTEM_EXTENSION_ACTIVATED)
+                packet_tunnel_row(f"{FROM_VERSION}/{FROM_BUILD}", SYSTEM_EXTENSION_ACTIVATED)
             )
         )
         with self.assertRaisesRegex(
@@ -4748,7 +4751,7 @@ class GARuntimeSystemExtensionTests(unittest.TestCase):
                 self._validate(stdout)
 
     def test_near_match_bundle_identifiers_are_ignored(self) -> None:
-        candidate = packet_tunnel_row(f"0.5.0/{TO_BUILD}", SYSTEM_EXTENSION_ACTIVATED)
+        candidate = packet_tunnel_row(f"{PRODUCT_VERSION}/{TO_BUILD}", SYSTEM_EXTENSION_ACTIVATED)
         for bundle_id in (
             "com.bill.clashformac.packet-tunnelx",
             "com.bill.clashformac.packet-tunnel.helper",
@@ -4756,7 +4759,7 @@ class GARuntimeSystemExtensionTests(unittest.TestCase):
         ):
             for team_id in ("YKUPL7Z869", "ABCDE12345"):
                 near_match = packet_tunnel_row(
-                    f"0.5.0/{TO_BUILD}",
+                    f"{PRODUCT_VERSION}/{TO_BUILD}",
                     SYSTEM_EXTENSION_ACTIVATED,
                     team_id=team_id,
                     bundle_id=bundle_id,
@@ -4771,14 +4774,14 @@ class GARuntimeSystemExtensionTests(unittest.TestCase):
         self._assert_rejected(
             {
                 "predecessor alone after reboot": (
-                    packet_tunnel_listing(row(f"0.5.0/{FROM_BUILD}", activated)),
+                    packet_tunnel_listing(row(f"{FROM_VERSION}/{FROM_BUILD}", activated)),
                     self.MISSING,
                 ),
                 f"listing before the {TO_BUILD} replacement": (
                     packet_tunnel_listing(
                         row("0.5.0/50008", retained),
                         row("0.4.0/40073", retained),
-                        row(f"0.5.0/{FROM_BUILD}", activated),
+                        row(f"{FROM_VERSION}/{FROM_BUILD}", activated),
                     ),
                     self.MISSING,
                 ),
@@ -4796,13 +4799,13 @@ class GARuntimeSystemExtensionTests(unittest.TestCase):
             {
                 "predecessor still activated": (
                     packet_tunnel_listing(
-                        row(f"0.5.0/{FROM_BUILD}", activated), row(f"0.5.0/{TO_BUILD}", activated)
+                        row(f"{FROM_VERSION}/{FROM_BUILD}", activated), row(f"{PRODUCT_VERSION}/{TO_BUILD}", activated)
                     ),
                     self.NOT_RETAINED,
                 ),
                 "later build activated": (
                     packet_tunnel_listing(
-                        row(f"0.5.0/{TO_BUILD}", activated), row(f"0.5.0/{NEXT_GA_BUILD}", activated)
+                        row(f"{PRODUCT_VERSION}/{TO_BUILD}", activated), row(f"{PRODUCT_VERSION}/{NEXT_GA_BUILD}", activated)
                     ),
                     self.NOT_RETAINED,
                 ),
@@ -4812,18 +4815,18 @@ class GARuntimeSystemExtensionTests(unittest.TestCase):
     def test_candidate_must_be_activated_enabled_and_flagged(self) -> None:
         row = packet_tunnel_row
         activated = SYSTEM_EXTENSION_ACTIVATED
-        predecessor = row(f"0.5.0/{FROM_BUILD}", SYSTEM_EXTENSION_RETAINED)
+        predecessor = row(f"{FROM_VERSION}/{FROM_BUILD}", SYSTEM_EXTENSION_RETAINED)
         cases = {
             "waiting for user": (
                 packet_tunnel_listing(
                     predecessor,
-                    row(f"0.5.0/{TO_BUILD}", "[activated waiting for user]", flags="*\t*"),
+                    row(f"{PRODUCT_VERSION}/{TO_BUILD}", "[activated waiting for user]", flags="*\t*"),
                 ),
                 self.NOT_ENABLED,
             ),
             "retained itself": (
                 packet_tunnel_listing(
-                    predecessor, row(f"0.5.0/{TO_BUILD}", SYSTEM_EXTENSION_RETAINED)
+                    predecessor, row(f"{PRODUCT_VERSION}/{TO_BUILD}", SYSTEM_EXTENSION_RETAINED)
                 ),
                 self.NOT_ENABLED,
             ),
@@ -4831,18 +4834,18 @@ class GARuntimeSystemExtensionTests(unittest.TestCase):
         # The state column alone is not proof: both flag columns must agree.
         for flags in ("\t", "*\t", "\t*"):
             cases[f"flags {flags!r}"] = (
-                packet_tunnel_listing(row(f"0.5.0/{TO_BUILD}", activated, flags=flags)),
+                packet_tunnel_listing(row(f"{PRODUCT_VERSION}/{TO_BUILD}", activated, flags=flags)),
                 self.NOT_ENABLED,
             )
         self._assert_rejected(cases)
 
     def test_predecessor_in_an_unexpected_state_is_rejected(self) -> None:
-        candidate = packet_tunnel_row(f"0.5.0/{TO_BUILD}", SYSTEM_EXTENSION_ACTIVATED)
+        candidate = packet_tunnel_row(f"{PRODUCT_VERSION}/{TO_BUILD}", SYSTEM_EXTENSION_ACTIVATED)
         self._assert_rejected(
             {
                 state: (
                     packet_tunnel_listing(
-                        packet_tunnel_row(f"0.5.0/{FROM_BUILD}", state), candidate
+                        packet_tunnel_row(f"{FROM_VERSION}/{FROM_BUILD}", state), candidate
                     ),
                     self.NOT_RETAINED,
                 )
@@ -4878,14 +4881,14 @@ class GARuntimeSystemExtensionTests(unittest.TestCase):
         )
 
     def test_retained_registration_must_be_disabled_and_inactive(self) -> None:
-        candidate = packet_tunnel_row(f"0.5.0/{TO_BUILD}", SYSTEM_EXTENSION_ACTIVATED)
+        candidate = packet_tunnel_row(f"{PRODUCT_VERSION}/{TO_BUILD}", SYSTEM_EXTENSION_ACTIVATED)
         # A retained state beside either flag is a self-contradicting row.
         self._assert_rejected(
             {
                 f"retained flags {flags!r}": (
                     packet_tunnel_listing(
                         packet_tunnel_row(
-                            f"0.5.0/{FROM_BUILD}", SYSTEM_EXTENSION_RETAINED, flags=flags
+                            f"{FROM_VERSION}/{FROM_BUILD}", SYSTEM_EXTENSION_RETAINED, flags=flags
                         ),
                         candidate,
                     ),
@@ -4896,7 +4899,7 @@ class GARuntimeSystemExtensionTests(unittest.TestCase):
         )
 
     def test_retained_registration_must_be_an_earlier_build(self) -> None:
-        candidate = packet_tunnel_row(f"0.5.0/{TO_BUILD}", SYSTEM_EXTENSION_ACTIVATED)
+        candidate = packet_tunnel_row(f"{PRODUCT_VERSION}/{TO_BUILD}", SYSTEM_EXTENSION_ACTIVATED)
 
         def listing(version: str) -> str:
             return packet_tunnel_listing(
@@ -4907,7 +4910,7 @@ class GARuntimeSystemExtensionTests(unittest.TestCase):
             f"retained {version}": (listing(version), self.NOT_EARLIER)
             for version in (
                 f"0.5.1/{TO_BUILD}",
-                f"0.5.0/{NEXT_GA_BUILD}",
+                f"{PRODUCT_VERSION}/{NEXT_GA_BUILD}",
                 "0.6.0/60001",
                 "0.4.0/9223372036854775807",
             )
@@ -4942,15 +4945,15 @@ class GARuntimeSystemExtensionTests(unittest.TestCase):
             {
                 "foreign predecessor": (
                     packet_tunnel_listing(
-                        row(f"0.5.0/{FROM_BUILD}", retained, team_id="ABCDE12345"),
-                        row(f"0.5.0/{TO_BUILD}", activated),
+                        row(f"{FROM_VERSION}/{FROM_BUILD}", retained, team_id="ABCDE12345"),
+                        row(f"{PRODUCT_VERSION}/{TO_BUILD}", activated),
                     ),
                     self.FOREIGN_TEAM,
                 ),
                 "foreign candidate": (
                     packet_tunnel_listing(
-                        row(f"0.5.0/{FROM_BUILD}", retained),
-                        row(f"0.5.0/{TO_BUILD}", activated, team_id="ABCDE12345"),
+                        row(f"{FROM_VERSION}/{FROM_BUILD}", retained),
+                        row(f"{PRODUCT_VERSION}/{TO_BUILD}", activated, team_id="ABCDE12345"),
                     ),
                     self.FOREIGN_TEAM,
                 ),
@@ -4959,12 +4962,12 @@ class GARuntimeSystemExtensionTests(unittest.TestCase):
 
     def test_duplicate_or_miscounted_listing_is_malformed(self) -> None:
         row = packet_tunnel_row
-        candidate = row(f"0.5.0/{TO_BUILD}", SYSTEM_EXTENSION_ACTIVATED)
+        candidate = row(f"{PRODUCT_VERSION}/{TO_BUILD}", SYSTEM_EXTENSION_ACTIVATED)
         self._assert_rejected(
             {
                 "duplicate candidate registration": (
                     packet_tunnel_listing(
-                        row(f"0.5.0/{TO_BUILD}", SYSTEM_EXTENSION_RETAINED), candidate
+                        row(f"{PRODUCT_VERSION}/{TO_BUILD}", SYSTEM_EXTENSION_RETAINED), candidate
                     ),
                     self.MALFORMED,
                 ),
@@ -4973,7 +4976,7 @@ class GARuntimeSystemExtensionTests(unittest.TestCase):
                 "duplicate under a distinct-registration count": (
                     packet_tunnel_listing(candidate).replace(
                         candidate,
-                        f"{row(f'0.5.0/{TO_BUILD}', SYSTEM_EXTENSION_RETAINED)}\n{candidate}",
+                        f"{row(f'{PRODUCT_VERSION}/{TO_BUILD}', SYSTEM_EXTENSION_RETAINED)}\n{candidate}",
                         1,
                     ),
                     self.MALFORMED,
@@ -5280,7 +5283,7 @@ class GARuntimeCollectorTests(unittest.TestCase):
             tuple(PROCESS_OBSERVATION_COMMAND): processes,
             ("/usr/bin/systemextensionsctl", "list"): packet_tunnel_listing(
                 packet_tunnel_row(
-                    f"0.5.0/{TO_BUILD}", SYSTEM_EXTENSION_ACTIVATED, team_id=extension_team
+                    f"{PRODUCT_VERSION}/{TO_BUILD}", SYSTEM_EXTENSION_ACTIVATED, team_id=extension_team
                 )
             ),
             vpns: vpn_list(vpn),

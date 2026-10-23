@@ -1,5 +1,6 @@
 #!/bin/bash -p
-# Build, sign, notarize, staple, and verify the installable 0.5.0 candidate.
+# Build, sign, notarize, staple, and verify the installable candidate of the
+# active release identity.
 # This script never installs or launches the app and never changes network,
 # proxy, DNS, helper, launchd, or Network Extension runtime state.
 set -euo pipefail
@@ -44,7 +45,6 @@ source "$repo_root/scripts/tauri_host_skeleton.sh"
 cfw_select_release_apple_toolchain
 readonly expected_team_id="YKUPL7Z869"
 readonly expected_app_id="com.bill.clashformac"
-readonly candidate_base="$repo_root/target/candidates/0.5.0"
 readonly toolchain_root="${CFW_TOOLCHAIN_ROOT:-$repo_root/target/toolchains}"
 readonly tauri_bin="$toolchain_root/tauri-cli-$TAURI_CLI_VERSION/bin/cargo-tauri"
 
@@ -86,23 +86,26 @@ readonly signing_transaction_command
 readonly notarization_recovery_id
 [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]] ||
   die "signed candidates require Apple Silicon macOS"
-# The candidate build is the active GA build of scripts/release_identity.env,
-# read through its byte-strict loader. An operator does not export it; a
-# preset value is accepted only when it is exactly that build.
-active_ga_build="$(PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B -W error - \
+# The candidate is the active release identity of scripts/release_identity.env,
+# read through its byte-strict loader. An operator does not export its build;
+# a preset value is accepted only when it is exactly that build.
+release_identity="$(PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B -W error - \
   "$repo_root" <<'PY'
 import sys
 
 sys.path.insert(0, sys.argv[1] + "/scripts")
 from release_build_identity import ACTIVE_RELEASE_IDENTITY
 
-print(ACTIVE_RELEASE_IDENTITY.ga_build)
+print(ACTIVE_RELEASE_IDENTITY.product_version, ACTIVE_RELEASE_IDENTITY.ga_build)
 PY
-)" || die "cannot read the active GA build from scripts/release_identity.env"
+)" || die "cannot read the active release identity from scripts/release_identity.env"
+read -r product_version active_ga_build <<<"$release_identity"
+readonly product_version active_ga_build
 if [[ -n "${CFW_BUILD_NUMBER+set}" && "$CFW_BUILD_NUMBER" != "$active_ga_build" ]]; then
   die "preset CFW_BUILD_NUMBER differs from the active GA build $active_ga_build; unset it"
 fi
 export CFW_BUILD_NUMBER="$active_ga_build"
+readonly candidate_base="$repo_root/target/candidates/$product_version"
 preflight_root="$candidate_base/ga-preflight/$CFW_BUILD_NUMBER"
 frozen_root="$candidate_base/ga/$CFW_BUILD_NUMBER"
 native_products="$preflight_root/native-products"
@@ -302,6 +305,7 @@ product_input="$preflight_root/product-input.json"
 "$python_bin" -I -S -B -W error - \
   "$product_input" \
   "$CFW_BUILD_NUMBER" \
+  "$product_version" \
   "$repository_commit" \
   "$release_source_sha256" \
   "$toolchain_sha256" \
@@ -321,6 +325,7 @@ import sys
 (
     output,
     build_number,
+    product_version,
     repository_commit,
     release_source_sha256,
     toolchain_sha256,
@@ -335,7 +340,7 @@ import sys
 ) = sys.argv[1:]
 value = {
     "document": "cfm-ga-product-input-v1",
-    "product": {"build_number": build_number, "version": "0.5.0"},
+    "product": {"build_number": build_number, "version": product_version},
     "schema_version": 1,
     "source": {
         "release_source_sha256": release_source_sha256,
@@ -462,7 +467,7 @@ run_isolated_python_script "$repo_root/scripts/hash_artifact.py" \
   --metadata "toolchainSha256=$toolchain_sha256" \
   --metadata "uiDependenciesTreeSha256=$ui_dependencies_tree_sha256" \
   --metadata "xcodegenToolchainTreeSha256=$xcodegen_toolchain_tree_sha256" \
-  --metadata "version=0.5.0"
+  --metadata "version=$product_version"
 run_isolated_python_script "$repo_root/scripts/verify_artifact_manifest.py" \
   "$pre_sign_app" \
   "$pre_sign_manifest" \
@@ -498,7 +503,7 @@ else
   run_isolated_python_script "$repo_root/scripts/updater_key_possession_proof.py" verify-frozen
   frozen_product_input="$frozen_root/product-input.json"
   frozen_binding="$($python_bin -I -S -B -W error - \
-    "$frozen_product_input" "$CFW_BUILD_NUMBER" <<'PY'
+    "$frozen_product_input" "$CFW_BUILD_NUMBER" "$product_version" <<'PY'
 import json
 from pathlib import Path
 import sys
@@ -516,7 +521,7 @@ if set(value) != {"document", "product", "schema_version", "source", "toolchain"
     raise SystemExit("error: frozen product input field set is invalid")
 if value["document"] != "cfm-ga-product-input-v1" or value["schema_version"] != 1:
     raise SystemExit("error: frozen product input identity is invalid")
-if value["product"] != {"build_number": sys.argv[2], "version": "0.5.0"}:
+if value["product"] != {"build_number": sys.argv[2], "version": sys.argv[3]}:
     raise SystemExit("error: frozen product identity is invalid")
 source = value["source"]
 toolchain = value["toolchain"]
@@ -618,5 +623,5 @@ completed=1
 trap - EXIT
 
 final_app_relative="${final_app#"$repo_root/"}"
-echo "signed and notarized 0.5.0 GA build $CFW_BUILD_NUMBER: $final_app_relative"
+echo "signed and notarized $product_version GA build $CFW_BUILD_NUMBER: $final_app_relative"
 echo "the app has not been installed or launched"

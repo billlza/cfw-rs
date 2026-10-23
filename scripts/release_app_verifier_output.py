@@ -10,6 +10,11 @@ import re
 from types import MappingProxyType
 import unicodedata
 
+if __package__:
+    from .release_build_identity import PRODUCT_VERSION
+else:
+    from release_build_identity import PRODUCT_VERSION
+
 
 class ReleaseAppVerifierOutputError(ValueError):
     """The verifier output did not match the fixed success contract."""
@@ -165,7 +170,7 @@ def _app_from_stdout(
             for index, product in enumerate(_ARTIFACT_PRODUCTS)
         },
         4: f"candidate bundle verified: {app}",
-        5: f"identity: 0.5.0 ({expected_build_number}) / arm64 / macOS 15.0+",
+        5: f"identity: {PRODUCT_VERSION} ({expected_build_number}) / arm64 / macOS 15.0+",
         6: "Mach-O objects: 7",
         closing: f"release app verified: {app}",
         closing + 1: _IDENTITY_LINE,

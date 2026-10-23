@@ -14,7 +14,7 @@ from scripts.publication import ga_release_contract, preparer
 from scripts.publication import release_app_verifier
 from scripts.publication.release_app_verifier import verify_release_app
 from scripts.release_app_verifier_output import NotarizationCheck
-from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY, ga_root
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY, PRODUCT_VERSION, ga_root
 from scripts.tests.release_app_verifier_fixture import (
     complete_verifier_stderr,
     complete_verifier_stdout,
@@ -26,10 +26,10 @@ GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
 
 
 REPOSITORY = Path("/private/tmp/release")
-APP = REPOSITORY / f"target/candidates/0.5.0/ga/{GA_BUILD}/signed/Clash for Mac.app"
+APP = REPOSITORY / f"target/candidates/{PRODUCT_VERSION}/ga/{GA_BUILD}/signed/Clash for Mac.app"
 NATIVE_PRODUCTS = (
     REPOSITORY
-    / f"target/candidates/0.5.0/ga/{GA_BUILD}/signing-output/signed-native-products"
+    / f"target/candidates/{PRODUCT_VERSION}/ga/{GA_BUILD}/signing-output/signed-native-products"
 )
 
 

@@ -1,8 +1,9 @@
 # CFW 0.5.0：CFM GA 对齐与 Windows 发布计划
 
-评估日期：2026-10-18；最近实施检查：2026-10-22。状态：已在托管 Windows
+评估日期：2026-10-18；最近实施检查：2026-10-23。状态：已在托管 Windows
 普通输入桌面完成真实 MSI 安装、非管理员九页检查、两种代理的真实流量、
-停止／运行中退出恢复及卸载。完整 UI 对齐、产品 TUN、完整更新和发布验收仍开放。
+停止／运行中退出恢复及卸载。产品 TUN 的 SYSTEM 适配器／UserAgent 引擎通路已实现，
+托管原生验证进行中，UI 尚未开放；组合模式、完整 UI 对齐、完整更新和发布验收仍开放。
 
 ## 当前验收状态
 
@@ -837,7 +838,8 @@ GA 发布说明记录的安装所有权和非正常退出遗留隧道问题是�
 `TunnelWorker` 和 `PacketPumpLimits` 的状态机测试不构成生产隧道通路。现有
 `InstalledDesktop::check_configuration` 只构造／关闭引擎，不能证明创建适配器或转发数据包。
 后续实现必须接通适配器、受约束的数据包传输、运行租约和独立清理观察后，再开放 UI 能力。
-2026-10-22 起 `tunnel::PacketPump` 提供会话与数据包端点之间的有界双向传输，验证
+（以下为 2026-10-22 的状态；2026-10-23 的实现见“产品 TUN——SYSTEM 适配器与 UserAgent
+引擎”一节。）2026-10-22 起 `tunnel::PacketPump` 提供会话与数据包端点之间的有界双向传输，验证
 探针以真实引擎转发 Windows IPv4／IPv6 TCP 与 UDP（结果见当前验收状态）；引擎到系统
 方向只投递 `DeliveryPolicy` 允许的包。SYSTEM 到 UserAgent 的端点交接已在 SCM 夹具中
 原生验证（见交接前加固一节）。Authority 状态机仍按独立的 `TunnelWorker` 角色授权
@@ -921,7 +923,7 @@ Windows 成品使用 Windows runner；本机可仅作为编辑与控制端。现
 | 基线 | 固定 GA；九页、命令、平台功能与已知限制清点 | 源码和发布身份已核实；已安装界面全量视觉采集待完成 |
 | 路线评估 | 两条路线范围/维护/CI 对照、明确建议 | 已记录共享前端建议 |
 | 共享边界 | UI 产品/平台表现、用例与持久化边界；Mac 行为保持回归 | `ab812fc` 的 Windows 快照通过 481 项 Rust/311 项前端；共享授权改动的 Mac 全工作区 1,160 项 Rust 回归通过；当前完整 Mac CI 与桌面产品接线未完成 |
-| Windows 纵向链路 | 真正导入、启动代理、联网、停止恢复；General 与复杂弹窗真实验证 | 引擎、Rust 进程所有权及 WinINet 流量/恢复已通过九项真实集成测试并核验下载产物；`ab812fc` 的 SCM 九项原生场景及普通客户端权限边界也已通过并核验回执；`ca1d120e` 起实际安装 GUI 完成两种代理流量与退出恢复；`1f7bccc1`／`f00051fb` 起 Wintun→泵→真实引擎的 IPv4／IPv6 TCP 与 UDP 转发已在托管 Windows 验证；`9287fb79` 起 SYSTEM 到 UserAgent 的端点交接在 SCM 夹具中原生验证；TUN 运行租约、SYSTEM 承载与持久恢复、完整服务生命周期待完成 |
+| Windows 纵向链路 | 真正导入、启动代理、联网、停止恢复；General 与复杂弹窗真实验证 | 引擎、Rust 进程所有权及 WinINet 流量/恢复已通过九项真实集成测试并核验下载产物；`ab812fc` 的 SCM 九项原生场景及普通客户端权限边界也已通过并核验回执；`ca1d120e` 起实际安装 GUI 完成两种代理流量与退出恢复；`1f7bccc1`／`f00051fb` 起 Wintun→泵→真实引擎的 IPv4／IPv6 TCP 与 UDP 转发已在托管 Windows 验证；`9287fb79` 起 SYSTEM 到 UserAgent 的端点交接在 SCM 夹具中原生验证；2026-10-23 接通 TUN 运行租约、SYSTEM 承载的适配器／路由／解析器、退役与恢复，并在 UI 开放 TUN（组合模式除外），托管原生与 GUI 验证见当日记录；完整服务生命周期待完成 |
 | 全功能/视觉 | 本文全部页面和功能逐项有可执行用例与证据 | 待完成 |
 | 稳定性/交付 | 完整 CI、真实 Windows 验收、签名安装更新、性能与恢复 | 待完成；用户暂未确定 Windows 测试机，先推进代码和托管 CI；真机项目保持未验证 |
 | 正式发布 | 无阻塞缺陷、源/包身份一致、授权发布和下载验证 | 未开始 |
@@ -2814,6 +2816,176 @@ Authority wire 中携带端点的消息与授权代次（状态机的 Tunnel 模
 `TunnelWorker` 角色，须改为 UserAgent 承载）、SYSTEM 承载的 Wintun 适配器与泵、
 路由／DNS 所有权与持久恢复。同一用户的其他中等完整性进程仍可从 UserAgent 复制出
 端点，这是由 UserAgent 承载引擎带来的固有边界。
+
+### 2026-10-23：macOS 门禁根因与安全刷新
+
+`320141f5` 的 macOS `CI`（运行 39787856702）中质量作业通过，另两项失败，根因都在
+CFW 源码之外。libbox 作业在“Materialize pinned libbox source”从 GitHub 拉取固定
+sing-box 源码时网络中断（`curl 56 Recv failure: Operation timed out`，随后
+`fetch-pack: invalid index-pack output`，退出码 128），未到公告扫描；`39b1440a` 与
+`775ad5fe` 的运行已表明拉取成功后下一步会因 GO-2026-6809 失败。供应链作业在
+“Audit exact shipped Rust target graph”因 RUSTSEC-2026-0382（rustls-webpki 0.103.15）
+失败。两项公告均在 GA（`v0.5.0` → `502adf9`）之后发布，已发布的 GA 字节不变。
+
+`60ed5bb7` 把产品 Go 工具链移到 1.27.3（`GO_VERSION` 与各归档摘要、sing-box 安全
+依赖补丁、go-release-tools 与 certgen 的 `go` 指令），把 rustls-webpki 移到 0.103.16，
+并在 RELEASE.md、docs/supply-chain.md、native/macos/README.md 记录日期化的公告说明。
+数据包证据端点的独立 Go 固定版本（1.27.2）与其二进制摘要未动：移动它需要在 Linux
+上重建端点、更新二进制摘要及携带它的安装器与身份，并重新部署（见开放事项）。
+macOS `CI` 运行 39872592378 的结果：
+
+- 供应链作业通过：aarch64-apple-darwin 目标图 328 个可达包 0 个漏洞，cargo-deny
+  0 错误／警告／提示。
+- libbox 作业首次全部步骤通过（镜像 20261012.0260.1，Xcode 27.2 beta 2，27B5028f）：
+  Go 模块图与链接图扫描无漏洞、源码绑定的 libbox 构建、Swift 格式与包测试、Xcode
+  目标测试（TEST SUCCEEDED）与分析、真实固定更新签名器边界，以及未签名 0.5.0（50000）
+  骨架构建与产物清单核验（7 个 Mach-O）。
+- 质量作业（新镜像 20261022.0305.3，Xcode 27.2，27B48）中 build-script-boundary、
+  ci-no-masking、证据清单、版本契约、rustfmt、依赖图、UI 329 项、整个工作区 Clippy
+  与 1,327 项 Rust 测试通过；release-tool 测试 3,672 项中 1 项错误、1 项失败、1 项跳过，
+  其后的 shell 语法检查与 ShellCheck 未执行。错误为
+  `test_endpoint_toolchain_pins_are_named_by_key_only`：测试把端点 Go 版本加一个补丁号并
+  配合合成归档摘要，产品移到 1.27.3 后正好与产品版本重合，校验器按“同一版本只有一个
+  归档”正确拒绝。这是测试夹具的假设失效。`329a3b55` 让两项“移动固定版本”测试选择
+  不等于另一条固定版本的下一个补丁号，同版本一致性仍由独立测试覆盖；本机以系统
+  Python 复现了该错误，修正后该模块 131 项全部通过。失败为
+  `test_real_swift_identity_is_clean_repeatable_and_structured`：新镜像的 Swift 报告
+  `6.4.2`，测试硬编码 `6.4`，与 `3dbe2d59` 的情形相同；同一 `xcode-27` 标签现在分配三个
+  镜像版本。放宽该测试或固定 Xcode 选择会改变发布身份规则，保持为开放事项。跳过项
+  仍是未安装固定 Tauri 签名器的 1 项，不计为通过。
+
+### 2026-10-23：产品 TUN——SYSTEM 适配器与 UserAgent 引擎（托管原生验证通过）
+
+`9c7bf1a1` 让 Windows gVisor 投影在 Tunnel 模式加入 `route.auto_detect_interface`，
+Tunnel 数据面准入拒绝缺少该项的配置；macOS（system 栈）投影与摘要不变。依据：引擎
+在 Windows 上是普通进程，没有 Network Extension 的豁免，SYSTEM 把默认路由指向
+适配器后，引擎自己的套接字必须绑定物理默认接口，否则会回流进隧道；固定 sing-tun
+的 Windows 默认接口监视只看 /0 路由，并跳过 Wintun 的 `IF_TYPE_PROP_VIRTUAL`。
+按源码核对（未单独原生验证），sing-box 的 Windows 本地 DNS 配置源只读取有默认网关的
+接口，适配器的在链路路由不提供网关，因此配置了本地 DNS 的引擎也不会把适配器自己的
+DNS 对端当作上游。
+
+`863a262e` 接通产品 Tunnel：
+
+- Tunnel 租约绑定所有者的 UserAgent，删除独立的 `TunnelWorker` 角色（2026-10-22 用户
+  决定）。Authority wire 升到 v7，新增轮询式 `OpenTunnel`（`TunnelPending` 直到 SYSTEM
+  提供端点，只提供一次）与 `ConfirmTunnelEndpoint`。首个请求在专用线程上启动宿主，
+  Windows 创建适配器或首次安装固定驱动时不持有 Authority 锁；每个请求同时续期运行时
+  心跳。Tunnel 的启动等待另加 `tunnel::OPEN_LIMIT`（45 秒）。
+- 适配器接口 GUID 由安装身份派生（SHA-256，v8 UUID），Windows 因而保留同一网络配置
+  文件，残留适配器按身份查找；启动时若该 GUID 的适配器已存在则拒绝，不接管。链路关闭
+  NetBIOS、路由器发现、DAD、转发与有状态配置，设置端点 MTU，先清除该 GUID 残留的地址、
+  路由与解析器，再分配地址计划并逐项回读。
+- 确认端点后按已分配地址构造 `DeliveryPolicy` 并启动泵。Ready 必须声明 SYSTEM 自己的
+  泵上限（`packet_pump_limits`：单包为端点 MTU、每方向 1 个包、每次读 1 个），随后才
+  安装并回读路由与解析器：各地址族默认路由减去 macOS 提供者排除的私网、链路本地、
+  组播、受限广播范围与发布传输主机路由（例如 IPv4 绕过私网时为 67 条前缀），以及
+  地址计划的 DNS 对端。所有地址、路由和解析器都只挂在该适配器上，不写其他接口、
+  代理设置或防火墙策略。
+- 租约离开 Starting/Active 后，SYSTEM 先要求引擎关闭端点；运行时 Job 为空或进入
+  Quarantined/Recovering 时退役宿主：泵结束、会话关闭、适配器关闭，15 秒内按接口与
+  设备观察其消失。Tunnel 记录的 Off 需要空 Job、宿主线程退出和适配器被观察到不存在。
+  SYSTEM 重启后，恢复宿主先按 GUID 移除该安装的 Wintun 设备（`DIF_REMOVE`）并证明
+  其不存在，不创建任何对象。
+- 共享后端在 Windows 上启动、停止并查询普通 Tunnel；TunnelSystemProxy 仍不可用。
+  安装宿主夹具新增 Tunnel 套件：从 Off 开始，直接向适配器 DNS 对端发送 A 查询并
+  解析应答，确认系统为探测地址选择的路由进入适配器，经隧道取回
+  `www.msftconnecttest.com/connecttest.txt`，并在引擎控制器的连接表中找到这条以
+  `tun/cfw-tunnel` 入站记录的连接；随后验证错误代次的停止被拒、重复停止、Off、适配器
+  消失、物理路由恢复、代理设置未变与端口释放。安装运行失败时另收集 SYSTEM 服务最后
+  记录的错误与客户端输出。
+
+本机验证：rustfmt、两个 crate 的 macOS Clippy（`--all-targets --all-features`，
+`-D warnings`）、Windows 目标库的交叉 Clippy（默认与全部特性）、cfw-windows-engine 165 项
+与 cfw-singbox-config 130 项可移植测试、cfw-application 118 项测试。可移植变异检查 30 项
+中 29 项被杀死；存活的一项（去掉 `runtime_exact` 的角色比较）是等价变异：`Peer::same`
+已比较角色，且只有 UserAgent 能绑定。路由减法与适配器 GUID 的期望值由 Python
+`ipaddress`／`hashlib` 独立计算后固定在测试中。示例夹具无法在本机交叉编译（ring 需要
+MSVC 头文件），只能由托管作业首次编译。
+
+托管验证经过（原始失败均保留）：
+
+- `329a3b55`（[共享／原生](https://github.com/billlza/cfw-rs/actions/runs/39880757159)、
+  [桌面](https://github.com/billlza/cfw-rs/actions/runs/39880757037)）：示例夹具的请求计时日志
+  `command_name` 没有覆盖两个新命令，SCM、共享契约、更新包检查与桌面作业都失败于同一编译
+  错误；Wintun 作业通过（49 项数据包测试与生命周期验证）。引擎作业在示例编译前完成了 19 项
+  原生 Rust 引擎测试，包括带 `auto_detect_interface` 的数据包端点引擎用例。`aef7bdad` 补全。
+- `aef7bdad`（[共享／原生](https://github.com/billlza/cfw-rs/actions/runs/39881837080)、
+  [桌面](https://github.com/billlza/cfw-rs/actions/runs/39881835303)）：SCM 作业通过；Clippy 拒绝
+  Tunnel 套件以临时 `String` 比较控制器字段（`cmp_owned`，其建议的数值比较是错误的，控制器
+  端口是十进制字符串）；SCM 崩溃恢复夹具伪造的确认消息硬编码协议版本 6，被 wire v7 当作
+  不支持的版本拒绝。`fbb80d95` 改为按字符串切片比较，并让伪造消息复制真实请求的协议与版本。
+- `fbb80d95`（[共享／原生](https://github.com/billlza/cfw-rs/actions/runs/39883055113)、
+  [桌面](https://github.com/billlza/cfw-rs/actions/runs/39883054290)）：共享契约、SCM、Wintun 与
+  更新包检查通过，两种 SCM 崩溃恢复夹具通过；安装运行进入 Tunnel 套件后在前置检查失败：
+  `ConvertInterfaceGuidToLuid` 对不存在的接口 GUID 返回 ERROR_INVALID_PARAMETER（87），
+  而产品的 `adapter_absent` 与夹具都只把 ERROR_FILE_NOT_FOUND／ERROR_NOT_FOUND 当作不存在。
+  产品在创建适配器前与证明移除时会以同样方式失败。`979ebf3e` 改为在原始接口表
+  （`GetIfTable2Ex(MibIfTableRaw)`）中按 GUID 查找，不存在成为观察结果，列表失败仍是错误，
+  同一 GUID 对应多个接口或零 LUID 一律拒绝；新增的 Windows 单元测试覆盖未知 GUID 与经独立
+  LUID→GUID 转换得到的环回接口。夹具共用该产品查找，并要求经隧道的 HTTP 连接的源地址
+  就是适配器地址。同一运行的桌面作业在本地代理 GUI 会话首次启动时失败：UserAgent 的
+  Authority 工作线程在 Ready 前收到 Stale 拒绝，桌面报告 “authority ended before Ready”
+  （产物 `518282ae610389ede2c41cdf751165ef51bc0407f95ff7ff851c82400d045427`）。症状与
+  `9287fb79` 第一次桌面尝试相同，改动未触及代理路径，SYSTEM 端原因未被收集。`dee84186`
+  让 SYSTEM 服务按阶段保留最近一次错误，GUI 认证失败时以备份语义复制；`5d989e07` 记录
+  Authority 结束活动租约的原因（准备租约过期、连接关闭、心跳过期、控制台会话变化或消失、
+  进程复核失败、停止证明过期、服务排空、隧道泵结束），作为 `lease_ending` 诊断。
+
+`53a9f3c6` 修正凭据生命周期仍拒绝 Tunnel 的遗留检查：`dee84186` 的引擎作业中 Tunnel 套件的
+检查、安装与授权已通过，启动时报告 “credential state is unavailable for maintenance”；
+运行时凭据记录本已绑定 Tunnel 的网络选项，现在只拒绝组合模式。
+
+`53a9f3c6` 的[共享／原生作业](https://github.com/billlza/cfw-rs/actions/runs/39887846302)与
+[桌面作业](https://github.com/billlza/cfw-rs/actions/runs/39887858606)七项全部通过。引擎产物
+`160c86ae8ce920d635b435ed2a939ea9f2adc5611f0cc6ba0718ba2a9a0344a2`（与 API 摘要一致，源码绑定
+`53a9f3c6`）中，安装运行回执的 20 个用例包含 `product_tunnel_routes_dns_and_traffic_then_retires_its_adapter`；
+Tunnel 套件报告：运行身份为 `windows_tunnel_service`、代次 9；适配器 GUID
+`6db660d9-9e0b-82d3-87d0-cf23cbe280f3` 与按安装身份 `406a65b6-…` 独立计算的值一致；向适配器 DNS
+对端的 A 查询返回 5 个地址；系统为探测地址选择的路由进入适配器；经隧道取回探测内容，引擎
+控制器以 `tun/cfw-tunnel` 入站记录了这条连接（源地址 198.18.64.1，即适配器地址，出站链
+`direct`）；错误代次的停止被拒、重复停止、Off 后适配器消失、物理路由恢复、代理设置未变、
+端口释放均为真。阶段计时：启动 2.6 秒→Ready 11.6 秒（含首次安装固定驱动与创建适配器），
+停止 13.3 秒→Off 14.8 秒。同一作业的转发验证（引擎投影已含 `auto_detect_interface`）三档 MTU
+通过，引擎宿主 `44260f44193da14eae8b6ac9215f40aee8becdbd5618c14aef7d50feebc3e338`。桌面产物
+`805b54e50cf512a08578a230f928c417fb0a4ddbb91945d4fbce9184d2d784b5` 的三次 GUI 会话通过（本次本地代理首次
+启动未复现上述间歇失败）。`2835bca7` 在 Tunnel 套件
+正常停止之后再启动一次 Tunnel，终止本桌面启动的 UserAgent（按观察到的映像路径确认），
+随后只观察：SYSTEM 必须在 60 秒内发现运行时丢失、退役适配器并记录 Off，期间后端只可
+报告恢复中、所有者丢失或清理未证明（每条都写入报告），Off 后适配器不存在且物理路由
+恢复。安装运行因此保留第二个 Tunnel 代次（共 10）。
+
+UI 能力：`67593409` 让 Windows 桌面报告 Tunnel 可用，并新增独立的 `tunnel_system_proxy`
+能力（Windows 为 false），协调器对组合模式只读该能力；General 页在已请求系统代理时打开
+TUN（或反之）会以四种语言的专门原因拒绝，不显示无关的旧失败，已请求的开关始终可以
+关闭。UI 测试 329 项本机通过（含新增的组合模式拒绝与能力解析用例），7 项 UI 变异全部
+被杀死。安装 GUI 认证在本地代理与系统代理会话之间新增 TUN 会话：可见开关启动 TUN、
+系统代理开关显示组合模式被拒、控制器描述导入的配置，同会话的原生探针证明该安装的
+适配器存在、系统为探测主机选择的路由进入适配器、HTTP 连接从适配器地址发出且用户
+代理设置不变；关闭 TUN 后交给本地核心，探针确认适配器消失，核心停止后再退出。
+
+### 2026-10-23：开放事项（需要用户决定或外部条件）
+
+以下事项不能由托管 CI 单独完成，或会改变发布身份、持久化契约与产品方向，保持开放：
+
+- **Swift 版本测试与 Xcode 选择**：`xcode-27` 标签同时分配三个镜像版本，“选择最新可用
+  Xcode”使 Swift 在 `6.4` 与 `6.4.2` 之间变化，`test_real_swift_identity_is_clean_repeatable_and_structured`
+  随镜像通过或失败。可选做法是固定 Xcode 选择，或让测试接受同一 6.4 系列的补丁版本；
+  两者都会改变发布工具链身份规则，需要用户决定。此前放宽该测试的尝试未执行。
+- **数据包证据端点的 Go 工具链**：产品已移到 Go 1.27.3，独立的端点仍固定 Go 1.27.2
+  （GO-2026-6809 位于 crypto/x509）。移动它需要在 Linux 上重建端点、更新二进制摘要及携带
+  它的安装器与身份，并重新部署到证据主机。
+- **组合模式（TUN + 系统代理）**：Windows 的系统代理恢复依赖日志中 SystemProxy 模式的
+  持久恢复目标；Tunnel 租约没有对应记录，UserAgent 崩溃后 WinINet 会指向已关闭的端口。
+  开放组合模式需要扩展持久化的租约／恢复契约（`AuthorityMode` 是与 macOS 共享的
+  wire 枚举），属于需要单独决定的契约变更；在此之前 UI 与后端都明确拒绝组合模式。
+- **物理机验收**：睡眠／唤醒、整机重启与断电式恢复、真实登录启动、多用户、Wi-Fi／有线
+  切换与长期运行需要用户确定的 Windows 测试机，云 VM 不能替代。
+- **签名与发布**：Authenticode 代码签名身份、更新签名密钥、正式发布与公共字节核对需要
+  用户提供签名材料并授权发布。
+- **Windows 目标的供应链门禁**：macOS 供应链作业只审计 aarch64-apple-darwin 目标图；
+  x86_64-pc-windows-msvc 的 RustSec／cargo-deny 审计与 Windows 引擎宿主依赖图的
+  govulncheck 尚无托管门禁（可由 CI 实现，未在本轮完成）。
 
 ## 官方资料
 

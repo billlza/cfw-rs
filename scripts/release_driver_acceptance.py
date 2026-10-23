@@ -368,13 +368,21 @@ def _collect(context: Context) -> int:
 
 
 def _stop_instances(context: Context, instances: Sequence[EvidenceInstance], *, report_only: bool) -> None:
-    try:
-        set_instances(context, instances, "stop")
-    except DriverError as error:
-        commands = "; ".join(
-            f"gcloud compute instances stop {item.name} --zone {item.zone} --project {item.project}"
-            for item in instances
-        )
-        print(f"ERROR: {error}. Stop the evidence instances yourself: {commands}", file=sys.stderr)
-        if not report_only:
-            raise
+    # Each instance gets its own stop attempt: one failed stop must not leave
+    # the other running.
+    failures: list[tuple[EvidenceInstance, DriverError]] = []
+    for instance in instances:
+        try:
+            set_instances(context, (instance,), "stop")
+        except DriverError as error:
+            failures.append((instance, error))
+    if not failures:
+        return
+    reasons = "; ".join(str(error) for _instance, error in failures)
+    commands = "; ".join(
+        f"gcloud compute instances stop {item.name} --zone {item.zone} --project {item.project}"
+        for item, _error in failures
+    )
+    print(f"ERROR: {reasons}. Stop the evidence instances yourself: {commands}", file=sys.stderr)
+    if not report_only:
+        raise DriverError(f"the evidence instances were not all stopped: {reasons}", NETWORK)

@@ -360,15 +360,21 @@ fn connection_loop(
     connection.close();
     operation
 }
-fn record(directory: &PrivateDirectory, stage: &str, error: &str) -> Result<()> {
+/// Keep the latest failure of each stage, so a later rejection or reply
+/// failure of the same episode cannot overwrite the error that caused it.
+fn record(directory: &PrivateDirectory, stage: &'static str, error: &str) -> Result<()> {
     let error: String = error.chars().take(2048).collect();
-    let bytes = serde_json::to_vec(
-        &serde_json::json!({"stage":stage,"error":error,"process_id":std::process::id()}),
-    )
+    let unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| HostError::State("system clock precedes the Unix epoch"))?
+        .as_millis();
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "stage":stage,"error":error,"process_id":std::process::id(),"unix_ms":unix_ms
+    }))
     .map_err(|_| HostError::State("diagnostic encoding failed"))?;
     directory
         .write()?
-        .replace("last-runtime-error.json", &bytes, 16384)?;
+        .replace(&format!("last-runtime-error-{stage}.json"), &bytes, 16384)?;
     Ok(())
 }
 fn combine(operation: Result<()>, cleanup: Result<()>) -> Result<()> {

@@ -452,11 +452,11 @@ try {
 } catch { $failure = $_.ToString() }
 finally {
     if ($null -ne $failure) {
-        # Failure diagnostics only. The SYSTEM service records its last error
-        # in its private directory, which backup semantics can read.
+        # Failure diagnostics only. The SYSTEM service records the latest error
+        # of each stage in its private directory, which backup semantics can read.
         try {
             $systemDiagnostics = Join-Path $env:ProgramData 'Clash for Windows\authority-v1\diagnostics'
-            $null = & robocopy $systemDiagnostics $Receipts 'last-runtime-error.json' /B /R:0 /W:0 /NJH /NJS /NP
+            $null = & robocopy $systemDiagnostics $Receipts 'last-runtime-error-*.json' /B /R:0 /W:0 /NJH /NJS /NP
             if ($LASTEXITCODE -ge 8) { $failure = "$failure; SYSTEM diagnostics copy exited $LASTEXITCODE" }
         } catch { $failure = "$failure; SYSTEM diagnostics copy: $($_.ToString())" }
     }

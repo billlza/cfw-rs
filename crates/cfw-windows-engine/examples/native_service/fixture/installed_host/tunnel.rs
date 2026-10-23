@@ -4,6 +4,9 @@
 //! own record of that connection, and verified retirement of the network.
 //! The engine's DIRECT outbound binds to the physical interface, so the
 //! runner keeps its connectivity while the default route enters the tunnel.
+use super::super::tunnel_probe::{
+    PROBE_HOST, adapter_luid, best_route, fetch_through_tunnel, resolve,
+};
 use super::*;
 use cfw_engine_api::{
     EngineBackend, EngineCommandContext, EngineStartRequest, NativeEngineStatus,
@@ -13,24 +16,9 @@ use cfw_singbox_config::{EngineSettings, ProjectionMode, TunnelStack, ValidatedS
 use cfw_windows_engine::{backend::WindowsEngineBackend, runtime_host::InstalledDesktop};
 use std::{
     io::Write,
-    net::{SocketAddr, TcpStream, ToSocketAddrs, UdpSocket},
-};
-use windows_sys::{
-    Win32::{
-        Foundation::{ERROR_FILE_NOT_FOUND, ERROR_NOT_FOUND},
-        NetworkManagement::{
-            IpHelper::{ConvertInterfaceGuidToLuid, GetBestRoute2, MIB_IPFORWARD_ROW2},
-            Ndis::NET_LUID_LH,
-        },
-        Networking::WinSock::{AF_INET, IN_ADDR, IN_ADDR_0, SOCKADDR_IN, SOCKADDR_INET},
-    },
-    core::GUID,
+    net::{SocketAddr, TcpStream, UdpSocket},
 };
 
-/// Windows' own network connectivity probe: a fixed body over plain HTTP.
-const PROBE_HOST: &str = "www.msftconnecttest.com";
-const PROBE_PATH: &str = "/connecttest.txt";
-const PROBE_BODY: &str = "Microsoft Connect Test";
 const PROFILE: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const TUNNEL_MTU: u16 = 1500;
 
@@ -345,17 +333,6 @@ fn parse_a_records(reply: &[u8], id: u16, question_end: usize) -> Result<Vec<Ipv
     Ok(addresses)
 }
 
-fn resolve() -> Result<Ipv4Addr> {
-    (PROBE_HOST, 80)
-        .to_socket_addrs()
-        .map_err(|e| format!("resolve {PROBE_HOST}: {e}"))?
-        .find_map(|address| match address {
-            SocketAddr::V4(address) => Some(*address.ip()),
-            SocketAddr::V6(_) => None,
-        })
-        .ok_or_else(|| format!("{PROBE_HOST} has no IPv4 address"))
-}
-
 /// Fetch the probe over a connection the system routes into the tunnel and,
 /// while it is open, find that connection in the engine's own table.
 fn probe_through_tunnel(
@@ -363,24 +340,8 @@ fn probe_through_tunnel(
     controller: SocketAddr,
     secret: &str,
 ) -> Result<serde_json::Value> {
-    let mut socket = TcpStream::connect_timeout(&SocketAddr::from((target, 80)), LIMIT)
-        .map_err(|e| format!("connect to {target} through the tunnel: {e}"))?;
-    socket
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .map_err(|e| e.to_string())?;
-    socket
-        .set_write_timeout(Some(Duration::from_secs(10)))
-        .map_err(|e| e.to_string())?;
-    let local = socket.local_addr().map_err(|e| e.to_string())?;
-    write!(
-        socket,
-        "GET {PROBE_PATH} HTTP/1.1\r\nHost: {PROBE_HOST}\r\nConnection: keep-alive\r\n\r\n"
-    )
-    .map_err(|e| e.to_string())?;
-    let response = read_http_response(&mut socket)?;
-    if !response.starts_with("HTTP/1.1 200") || !response.ends_with(PROBE_BODY) {
-        return Err("the probe response through the tunnel differs".into());
-    }
+    let fetched = fetch_through_tunnel(target)?;
+    let local = fetched.local;
     let connections = controller_connections(controller, secret)?;
     // The controller reports ports as decimal strings.
     let destination_ip = target.to_string();
@@ -399,7 +360,7 @@ fn probe_through_tunnel(
         })
         .cloned()
         .ok_or("the engine did not record the probe connection on its tunnel inbound")?;
-    drop(socket);
+    drop(fetched.socket);
     Ok(serde_json::json!({
         "inbound": recorded["metadata"]["type"],
         "source_ip": recorded["metadata"]["sourceIP"],
@@ -408,37 +369,6 @@ fn probe_through_tunnel(
         "chains": recorded["chains"],
         "local_address": local.to_string(),
     }))
-}
-
-/// One HTTP/1.1 response with a Content-Length body, read to its end.
-fn read_http_response(socket: &mut TcpStream) -> Result<String> {
-    let mut bytes = Vec::new();
-    let mut buffer = [0u8; 4096];
-    loop {
-        let read = socket.read(&mut buffer).map_err(|e| e.to_string())?;
-        if read == 0 {
-            return Err("probe connection closed before its response completed".into());
-        }
-        bytes.extend_from_slice(&buffer[..read]);
-        if bytes.len() > 65536 {
-            return Err("probe response exceeds its bound".into());
-        }
-        let text = String::from_utf8_lossy(&bytes);
-        if let Some(end) = text.find("\r\n\r\n") {
-            let length = text[..end]
-                .lines()
-                .find_map(|line| {
-                    let (name, value) = line.split_once(':')?;
-                    name.eq_ignore_ascii_case("content-length")
-                        .then(|| value.trim().parse::<usize>().ok())
-                        .flatten()
-                })
-                .ok_or("probe response has no content length")?;
-            if bytes.len() >= end + 4 + length {
-                return Ok(text[..end + 4 + length].to_owned());
-            }
-        }
-    }
 }
 
 fn controller_connections(address: SocketAddr, secret: &str) -> Result<serde_json::Value> {
@@ -498,54 +428,4 @@ fn dechunk(mut body: &str) -> Result<String> {
             .and_then(|rest| rest.strip_prefix("\r\n"))
             .ok_or("chunk terminator is missing")?;
     }
-}
-
-fn adapter_luid(adapter: uuid::Uuid) -> Result<Option<u64>> {
-    let (data1, data2, data3, data4) = adapter.as_fields();
-    let guid = GUID {
-        data1,
-        data2,
-        data3,
-        data4: *data4,
-    };
-    let mut luid = NET_LUID_LH { Value: 0 };
-    match unsafe { ConvertInterfaceGuidToLuid(&guid, &mut luid) } {
-        0 => Ok(Some(unsafe { luid.Value })),
-        ERROR_FILE_NOT_FOUND | ERROR_NOT_FOUND => Ok(None),
-        status => Err(format!("map the tunnel adapter GUID: status {status}")),
-    }
-}
-
-/// The interface Windows itself selects for a destination.
-fn best_route(destination: Ipv4Addr) -> Result<u64> {
-    let target = SOCKADDR_INET {
-        Ipv4: SOCKADDR_IN {
-            sin_family: AF_INET,
-            sin_addr: IN_ADDR {
-                S_un: IN_ADDR_0 {
-                    S_addr: u32::from_ne_bytes(destination.octets()),
-                },
-            },
-            ..Default::default()
-        },
-    };
-    let mut route = MIB_IPFORWARD_ROW2::default();
-    let mut source = SOCKADDR_INET::default();
-    let status = unsafe {
-        GetBestRoute2(
-            std::ptr::null(),
-            0,
-            std::ptr::null(),
-            &target,
-            0,
-            &mut route,
-            &mut source,
-        )
-    };
-    if status != 0 {
-        return Err(format!(
-            "observe the best route to {destination}: status {status}"
-        ));
-    }
-    Ok(unsafe { route.InterfaceLuid.Value })
 }

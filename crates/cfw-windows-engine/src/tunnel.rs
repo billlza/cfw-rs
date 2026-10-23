@@ -25,6 +25,8 @@ pub use channel::{
     ENDPOINT_ACCESS, EndpointHandoff, HandoffError, PacketCancellation, PacketClient, PacketServer,
 };
 #[cfg(windows)]
+pub use device::interface_luid;
+#[cfg(windows)]
 pub(crate) use device::{
     WintunDevice, absent as adapter_absent, wait_until_absent as wait_until_adapter_absent,
 };

@@ -43,6 +43,7 @@ mod request_timing;
 mod restricted;
 mod stress;
 mod transport;
+mod tunnel_probe;
 mod update_package;
 mod user_agent;
 type Result<T> = std::result::Result<T, String>;

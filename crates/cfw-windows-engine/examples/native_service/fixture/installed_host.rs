@@ -347,7 +347,7 @@ pub(super) fn exercise_tunnel() -> Result<()> {
     let mut progress = Progress::new()?;
     progress.record("open_desktop", 0)?;
     let tunnel = tunnel::exercise(&mut progress)?;
-    progress.record("complete", 9)?;
+    progress.record("complete", 10)?;
     println!(
         "{}",
         serde_json::json!({"source":std::env::var("CFW_NATIVE_SERVICE_SOURCE").map_err(|e|e.to_string())?,
@@ -434,6 +434,8 @@ pub(super) fn check_output(
                 .as_array()
                 .is_some_and(|answers| !answers.is_empty())
             && tunnel["fresh_queries"] == 3
+            && tunnel["agent_crash_recovery"]["adapter_absent_after_off"] == true
+            && tunnel["agent_crash_recovery"]["physical_route_restored"] == true
     } else if suite == InstalledSuite::Startup {
         let startup = &report["startup_registration"];
         startup["source"] == report["source"]

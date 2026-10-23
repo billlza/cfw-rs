@@ -53,6 +53,9 @@ const PHASES: &[&str] = &[
     "tunnel_traffic_complete",
     "tunnel_stop",
     "tunnel_off",
+    "tunnel_crash_start",
+    "tunnel_crash_recovering",
+    "tunnel_crash_off",
     "complete",
 ];
 #[derive(Serialize, Deserialize)]

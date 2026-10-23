@@ -193,11 +193,25 @@ async fn exercise_async(
     }
     let _controller = TcpListener::bind(controller_address)
         .map_err(|e| format!("tunnel controller remained: {e}"))?;
+    drop(_controller);
+    let off = checks::snapshot()?;
+    let crash = agent_crash_recovery(
+        desktop,
+        backend,
+        progress,
+        Recovered {
+            adapter,
+            direct_target,
+            direct_route,
+        },
+    )
+    .await?;
     Ok(serde_json::json!({
         "tunnel_runtime": true,
         "runtime": started,
         "active": active,
-        "off": checks::snapshot()?,
+        "off": off,
+        "agent_crash_recovery": crash,
         "adapter": adapter.to_string(),
         "adapter_luid": tunnel_luid,
         "system_route_entered_tunnel": true,
@@ -211,6 +225,192 @@ async fn exercise_async(
         "proxy_unchanged": true,
         "listeners_released": true,
     }))
+}
+
+/// What a recovered Tunnel run must leave behind.
+struct Recovered {
+    adapter: uuid::Uuid,
+    direct_target: Ipv4Addr,
+    direct_route: u64,
+}
+
+/// A second Tunnel run whose UserAgent dies without stopping. SYSTEM alone
+/// must notice, retire its adapter and record Off; the Desktop only observes.
+/// While SYSTEM recovers, the backend reports the recovery or the lost owner;
+/// any other failure, or no Off within the bound, fails the case.
+async fn agent_crash_recovery(
+    desktop: &InstalledDesktop,
+    backend: &WindowsEngineBackend,
+    progress: &mut Progress,
+    expected: Recovered,
+) -> Result<serde_json::Value> {
+    use cfw_engine_api::BackendErrorKind;
+    let lineage = desktop
+        .generations()
+        .load_lineage()
+        .map_err(|e| e.to_string())?;
+    let controller = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(|e| e.to_string())?;
+    let mixed = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(|e| e.to_string())?;
+    let settings = EngineSettings {
+        mixed_port: mixed.local_addr().map_err(|e| e.to_string())?.port(),
+        controller_port: controller.local_addr().map_err(|e| e.to_string())?.port(),
+        tunnel_mtu: TUNNEL_MTU,
+        enable_ipv6: false,
+        bypass_private_networks: true,
+        ..Default::default()
+    };
+    let generation = desktop
+        .generations()
+        .reserve_generation(lineage.generation)
+        .map_err(|e| e.to_string())?;
+    let context = EngineCommandContext {
+        installation_id: lineage.session.installation_id.clone(),
+        config_epoch: lineage.session.config_epoch,
+        generation,
+    };
+    let (request, _secret) = tunnel_request(&settings, context.clone())?;
+    drop((controller, mixed));
+    progress.record("tunnel_crash_start", generation)?;
+    backend
+        .authorize_tunnel_configuration(request.clone())
+        .await
+        .map_err(|e| e.to_string())?;
+    let started = backend
+        .start_tunnel(request)
+        .await
+        .map_err(|e| e.to_string())?;
+    if started.context != context || !started.ready {
+        return Err("crash case started an unrelated tunnel runtime".into());
+    }
+    let luid =
+        adapter_luid(expected.adapter)?.ok_or("crash case adapter is absent while Active")?;
+    let agent = terminate_user_agent()?;
+    progress.record("tunnel_crash_recovering", generation)?;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut transient = Vec::new();
+    loop {
+        match backend.query_status().await {
+            Ok(NativeEngineStatus::Off) => break,
+            Ok(other) => {
+                if !matches!(other, NativeEngineStatus::Tunnel { .. }) {
+                    return Err(format!(
+                        "crash recovery reported another runtime: {other:?}"
+                    ));
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind,
+                    BackendErrorKind::GlobalAuthorityRecovering
+                        | BackendErrorKind::OwnerUnresponsive
+                        | BackendErrorKind::CleanupUnproven
+                ) =>
+            {
+                if transient.len() < 32 {
+                    transient.push(error.to_string());
+                }
+            }
+            Err(error) => return Err(format!("crash recovery failed: {error}")),
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "SYSTEM did not recover the crashed Tunnel run to Off: {transient:?}"
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    progress.record("tunnel_crash_off", generation)?;
+    if adapter_luid(expected.adapter)?.is_some() {
+        return Err("the crashed run's tunnel adapter remained after Off".into());
+    }
+    if best_route(expected.direct_target)? != expected.direct_route {
+        return Err("the physical route was not restored after crash recovery".into());
+    }
+    Ok(serde_json::json!({
+        "generation": generation,
+        "runtime": started,
+        "adapter_luid": luid,
+        "terminated_agent_process_id": agent,
+        "transient_observations": transient,
+        "recovered_off": checks::snapshot()?,
+        "adapter_absent_after_off": true,
+        "physical_route_restored": true,
+    }))
+}
+
+/// Terminate the UserAgent this Desktop launched: the one child process of
+/// this fixture running the installed runtime image.
+fn terminate_user_agent() -> Result<u32> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+        TH32CS_SNAPPROCESS,
+    };
+    let raw = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if raw == INVALID_HANDLE_VALUE {
+        return Err(format!(
+            "snapshot processes: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let snapshot = unsafe { OwnedHandle::from_raw_handle(raw) };
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..unsafe { std::mem::zeroed() }
+    };
+    let me = std::process::id();
+    let mut children = Vec::new();
+    let mut more = unsafe { Process32FirstW(snapshot.as_raw_handle(), &mut entry) } != 0;
+    while more {
+        let length = entry
+            .szExeFile
+            .iter()
+            .position(|unit| *unit == 0)
+            .unwrap_or(entry.szExeFile.len());
+        let name = String::from_utf16_lossy(&entry.szExeFile[..length]);
+        if entry.th32ParentProcessID == me
+            && name.eq_ignore_ascii_case(cfw_windows_engine::runtime_host::RUNTIME_FILE)
+        {
+            children.push(entry.th32ProcessID);
+        }
+        more = unsafe { Process32NextW(snapshot.as_raw_handle(), &mut entry) } != 0;
+    }
+    let [pid] = children[..] else {
+        return Err(format!("expected one UserAgent child, found {children:?}"));
+    };
+    let expected = InstalledRuntime::desktop_path()
+        .map_err(|e| e.to_string())?
+        .with_file_name(cfw_windows_engine::runtime_host::RUNTIME_FILE)
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    let identity = NativePeerProcess::open(pid).map_err(|e| e.to_string())?;
+    if identity
+        .observed_image_path()
+        .map_err(|e| e.to_string())?
+        .canonicalize()
+        .map_err(|e| e.to_string())?
+        != expected
+    {
+        return Err("the UserAgent child is not the installed runtime".into());
+    }
+    let raw = unsafe { OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, 0, pid) };
+    if raw.is_null() {
+        return Err(format!(
+            "open the UserAgent for termination: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let process = unsafe { OwnedHandle::from_raw_handle(raw) };
+    if unsafe { TerminateProcess(process.as_raw_handle(), 0xC0FE) } == 0 {
+        return Err(format!(
+            "terminate the UserAgent: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if unsafe { WaitForSingleObject(process.as_raw_handle(), 10_000) } != WAIT_OBJECT_0 {
+        return Err("the terminated UserAgent did not exit".into());
+    }
+    Ok(pid)
 }
 
 /// The coordinator's Windows projection: the packet-endpoint stack, whose

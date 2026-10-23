@@ -559,9 +559,10 @@ fn run_case(
         thread::spawn(move || std::io::Write::write_all(&mut output, bytes.as_slice()))
     });
     // A Tunnel run may first install the pinned Wintun driver before Ready,
-    // and its stop proves the adapter's removal.
+    // its stop proves the adapter's removal, and a second run waits for
+    // SYSTEM to recover from its UserAgent's termination.
     let limit = if matches!(case, ClientCase::InstalledTunnelDesktop) {
-        Duration::from_secs(150)
+        Duration::from_secs(240)
     } else if matches!(
         case,
         ClientCase::RuntimeDesktop

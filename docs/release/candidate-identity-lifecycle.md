@@ -246,8 +246,10 @@ after a side effect must not rewrite the candidate's own source provenance.
 
 The current v0.4.0 mapping and the ordinary-GA versus assurance boundary are
 defined in [`ga-assurance-policy-v040.md`](ga-assurance-policy-v040.md). The
-authoritative concrete allocation state is
-[`build-allocations-v040.json`](build-allocations-v040.json), interpreted by
-the corresponding source verifier. Historical retirement documents remain
+authoritative concrete allocation state is the ledger of the active product
+version, `build-allocations-v<version>.json` beside this document, interpreted
+by the corresponding source verifier; closed ledgers such as
+[`build-allocations-v040.json`](build-allocations-v040.json) keep the history
+of earlier product versions. Historical retirement documents remain
 facts about earlier workflows; they do not override this forward-only design
 rule.

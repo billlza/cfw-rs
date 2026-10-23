@@ -146,15 +146,14 @@ try {
     ($_.Exception.ToString() + "`n" + $_.ScriptStackTrace) |
         Set-Content -LiteralPath (Join-Path $outputRoot 'qualification-failure.txt') -Encoding utf8NoBOM
     # Failure diagnostics only: the SYSTEM service's latest error of each
-    # stage, read with backup semantics from its private directory.
+    # stage, read with backup semantics from its private directory, which an
+    # administrator cannot even list without them.
     try {
         $systemDiagnostics = Join-Path $machineState 'authority-v1\diagnostics'
-        if (Test-Path -LiteralPath $systemDiagnostics) {
-            $null = & robocopy $systemDiagnostics (Join-Path $outputRoot 'system-diagnostics') 'last-runtime-error-*.json' /B /R:0 /W:0 /NJH /NJS /NP
-            if ($LASTEXITCODE -ge 8) {
-                "SYSTEM diagnostics copy exited $LASTEXITCODE" |
-                    Set-Content -LiteralPath (Join-Path $outputRoot 'system-diagnostics-failure.txt') -Encoding utf8NoBOM
-            }
+        $null = & robocopy $systemDiagnostics (Join-Path $outputRoot 'system-diagnostics') 'last-runtime-error-*.json' /B /R:0 /W:0 /NJH /NJS /NP
+        if ($LASTEXITCODE -ge 8) {
+            "SYSTEM diagnostics copy exited $LASTEXITCODE" |
+                Set-Content -LiteralPath (Join-Path $outputRoot 'system-diagnostics-failure.txt') -Encoding utf8NoBOM
         }
     } catch {
         ($_.Exception.ToString() + "`n" + $_.ScriptStackTrace) |

@@ -243,7 +243,13 @@ compiler (`GO_VERSION`) and the module's minimum Go version past `1.27.1` and
 `golang.org/x/net` to `v0.60.0`; the scan had reported reachable standard
 library and `x/net` HTTP/2, HTTP/1, MIME header and `crypto/tls` findings in
 `1.27.1` and `v0.59.0`, and `html/template` findings in an imported package
-whose affected code the engine does not call. The SOCKS correction
+whose affected code the engine does not call. GO-2026-6809 (2026-10-21:
+`crypto/x509` distrusts known compromised intermediate certificates, reached
+through `Certificate.Verify`) then moved `GO_VERSION` once more, and only it:
+the fix is in the compiler's standard library, and every Go phase runs only
+the pinned compiler (`GOTOOLCHAIN=local`, checked against `GO_VERSION`), so
+the module's minimum Go version stays where the 2026-10-08 releases put it.
+The SOCKS correction
 materializes a checksum-bound
 private build workspace containing the corrected `sing v0.9.4` source while
 preserving the original module cache. The release vulnerability scan checks

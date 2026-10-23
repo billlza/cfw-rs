@@ -111,6 +111,17 @@ def _repeated_pin_values(text: str) -> list[str]:
     )
 
 
+def _release_after_both_go_pins(fixture: Fixture) -> tuple[int, int, int]:
+    """The later of the product and endpoint Go releases, so that one patch
+    release past it is named by neither pin: two pins of one Go release must
+    agree on its archive digest, and either pin may lead the other."""
+    releases: list[tuple[int, int, int]] = []
+    for key in ("GO_VERSION", "PACKET_EVIDENCE_ENDPOINT_GO_VERSION"):
+        major, minor, patch = fixture.env[key].split(".")
+        releases.append((int(major), int(minor), int(patch)))
+    return max(releases)
+
+
 CONTROLLER_RELATIVE_PATH = "crates/cfw-singbox-config/src/controller.rs"
 CONTROLLER_TRIGGER = '"clash_api": {'
 CONTROLLER_SOURCE = (
@@ -638,8 +649,8 @@ class PinnedBuildInputsTests(unittest.TestCase):
         # own Go identities, so a product Go bump leaves their policy, sources
         # and recorded digests untouched.
         fixture = Fixture()
-        major, minor, patch = fixture.env["GO_VERSION"].split(".")
-        next_go = f"{major}.{minor}.{int(patch) + 1}"
+        major, minor, patch = _release_after_both_go_pins(fixture)
+        next_go = f"{major}.{minor}.{patch + 1}"
         fixture.env["GO_VERSION"] = next_go
         fixture.env["GO_DARWIN_ARM64_SHA256"] = _sha(b"next go archive")
         with tempfile.TemporaryDirectory() as temporary:
@@ -673,8 +684,8 @@ class PinnedBuildInputsTests(unittest.TestCase):
         # so moving it edits only its pins (and, once rebuilt, the binary pin
         # with the installer and identities that carry it).
         fixture = Fixture()
-        major, minor, patch = fixture.env["PACKET_EVIDENCE_ENDPOINT_GO_VERSION"].split(".")
-        next_go = f"{major}.{minor}.{int(patch) + 1}"
+        major, minor, patch = _release_after_both_go_pins(fixture)
+        next_go = f"{major}.{minor}.{patch + 1}"
         fixture.env["PACKET_EVIDENCE_ENDPOINT_GO_VERSION"] = next_go
         fixture.env["PACKET_EVIDENCE_ENDPOINT_GO_DARWIN_ARM64_SHA256"] = _sha(
             b"next endpoint go archive"

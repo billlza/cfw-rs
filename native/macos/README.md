@@ -320,7 +320,9 @@ fixed order, each at the path and digest its `SING_BOX_*_PATCH_PATH` and
    absent without an ignore. The `x/crypto` refresh fixes `GO-2026-6354` and
    `GO-2026-6355`; `x/crypto v0.57.0` requires Go `1.26.0` or later. The
    2026-10-08 Go security release and `x/net v0.60.0` fix that day's standard
-   library and `x/net` advisories.
+   library and `x/net` advisories. The Go directive follows `GO_VERSION`, which
+   moved past the 2026-10-21 `GO-2026-6809` `crypto/x509` distrusted
+   intermediate denylist fix.
 2. The raw-packet patch (`SING_BOX_RAW_PACKET_PATCH_PATH`) adds the explicit Darwin raw-packet
    contract. It accepts only a connected `AF_UNIX/SOCK_DGRAM` descriptor,
    validates MTU/routing/GSO constraints, transfers descriptor ownership, and

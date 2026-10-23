@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -20,6 +21,7 @@ from scripts.verify_version_contract import (
 )
 from scripts.tests.release_identity_fixture import (
     NEXT_GA_BUILD,
+    next_patch,
     noncanonical,
     retired_ga_builds,
 )
@@ -94,7 +96,7 @@ class VersionContractTests(unittest.TestCase):
             repository = Path(temporary)
             self.make_repository(repository)
             (repository / "apps/cfw-tauri-shell/tauri.conf.json").write_text(
-                '{"version":"0.5.1"}', encoding="utf-8"
+                json.dumps({"version": next_patch(EXPECTED_VERSION)}), encoding="utf-8"
             )
             with self.assertRaisesRegex(ValueError, "Tauri version"):
                 verify(repository)

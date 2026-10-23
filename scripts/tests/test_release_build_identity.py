@@ -34,6 +34,7 @@ from scripts.release_build_identity import (
     ga_signing_attempt_output_root,
     load_release_identity,
 )
+from scripts.release_git import run_release_git
 from scripts.tests.release_identity_fixture import (
     NEXT_GA_BUILD,
     noncanonical,
@@ -167,6 +168,50 @@ class ReleaseIdentityFileTests(unittest.TestCase):
         ) as raised:
             load_release_identity(self.path)
         self.assertIsInstance(raised.exception.__cause__, IsADirectoryError)
+
+
+# The release tools may name the active product version only in the identity
+# file, in the allocation ledger policies, which hold every product version's
+# history, and in the install-predecessor registry, whose profiles carry the
+# product version they were installed as.
+PRODUCT_VERSION_FILES = frozenset(
+    {
+        RELEASE_IDENTITY_PATH.relative_to(RELEASE_IDENTITY_PATH.parents[1]).as_posix(),
+        "scripts/verify_release_build_allocations.py",
+        "scripts/dormant_app_install.py",
+    }
+)
+# Third-party inputs: upstream patches and lock files, licenses and fixtures.
+THIRD_PARTY_PREFIXES = ("scripts/tests/fixtures/",)
+THIRD_PARTY_SUFFIXES = (".patch",)
+
+
+def release_tool_files_naming(version: str) -> list[str]:
+    """The tracked release-tool files that name `version` as a whole version."""
+
+    repository = RELEASE_IDENTITY_PATH.parents[1]
+    listing = run_release_git(
+        repository,
+        ["ls-files", "-z", "--cached", "--", "scripts", ".github"],
+        protected_roots=("scripts", ".github"),
+    )
+    pattern = re.compile(rb"(?<![0-9.])" + re.escape(version.encode("ascii")) + rb"(?![0-9])")
+    return sorted(
+        relative
+        for raw in filter(None, listing.split(b"\0"))
+        if not (relative := raw.decode("utf-8")).startswith(THIRD_PARTY_PREFIXES)
+        and not relative.endswith(THIRD_PARTY_SUFFIXES)
+        and pattern.search((repository / relative).read_bytes())
+    )
+
+
+class ProductVersionLiteralAuditTests(unittest.TestCase):
+    """A new product version changes the identity file, not the release tools."""
+
+    def test_no_release_tool_names_the_active_product_version(self) -> None:
+        named = release_tool_files_naming(PRODUCT_VERSION)
+        self.assertIn(RELEASE_IDENTITY_PATH.relative_to(RELEASE_IDENTITY_PATH.parents[1]).as_posix(), named)
+        self.assertEqual(sorted(set(named) - PRODUCT_VERSION_FILES), [])
 
 
 class ReleaseBuildIdentityTests(unittest.TestCase):

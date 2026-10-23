@@ -162,9 +162,11 @@ fn refuses_candidate_or_symlink_product_roots() {
     let fixture = Fixture::new();
     let alias = fixture.repository.join("alias");
     std::os::unix::fs::symlink(&fixture.products, &alias).unwrap();
-    let candidate = fixture
-        .repository
-        .join("target/candidates/0.5.0/native-products");
+    let candidate = fixture.repository.join(concat!(
+        "target/candidates/",
+        env!("CARGO_PKG_VERSION"),
+        "/native-products"
+    ));
     fs::create_dir_all(&candidate).unwrap();
     for products in [alias, candidate] {
         assert!(

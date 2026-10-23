@@ -857,17 +857,20 @@ pretend that the earlier reviewer saw a subsequently rebuilt source archive.
 
 ### Single-GA release sequence
 
-The canonical allocation ledger is
-[`docs/release/build-allocations-v050.json`](docs/release/build-allocations-v050.json);
-the closed v0.4.0 ledger
-[`docs/release/build-allocations-v040.json`](docs/release/build-allocations-v040.json)
-retains the earlier history and is only read. The build-boundary gate rejects
-any active validation/final pair or any change to an immutable retired prefix.
-Builds 40021 through 40029 retain their historical retirement records and
-artifacts; none may be relabelled, rebuilt, resubmitted, installed, or reused.
-Build 40030 is retired unbuilt by policy. The consumed 0.5.0 preview
-validation lineages 50001–50025 form the fixed prefix of the v0.5.0 ledger.
-Every retired GA build, in either ledger, keeps its cause, consumed lineage and
+Every product version has one allocation ledger,
+`docs/release/build-allocations-v<version>.json` with the dots of the version
+removed. The ledger of `CFW_PRODUCT_VERSION` is the active one. The ledgers of
+earlier product versions are closed: they retain the earlier history and are
+only read. `scripts/verify_release_build_allocations.py` fixes where each
+ledger starts and, for a closed product version, every record. The
+build-boundary gate rejects any active validation/final pair or any change to
+an immutable retired prefix. Builds 40021 through 40029 retain their
+historical retirement records and artifacts; none may be relabelled, rebuilt,
+resubmitted, installed, or reused. Build 40030 is retired unbuilt by policy.
+The consumed 0.5.0 preview validation lineages 50001–50025 form the fixed
+prefix of the v0.5.0 ledger, which closed with its published GA build 50030
+(status `published`). The v0.5.1 ledger starts at its first GA build, 51001.
+Every retired GA build, in any ledger, keeps its cause, consumed lineage and
 retained evidence in its own `docs/release/ga-build-<build>-retirement.md`;
 those notes, not this guide, are the per-build history. The original v0.5.0
 identity plan is recorded in
@@ -886,8 +889,11 @@ source scripts/release_identity.env
 
 The migration predecessor is the active predecessor: the newest
 `SUPPORTED_PREDECESSORS` profile in `scripts/dormant_app_install.py` whose
-build is below `CFW_GA_BUILD`. Install admission accepts only that profile,
-verified by product version, build number and installed signed-tree digest.
+build is below `CFW_GA_BUILD`, of any product version. Builds increase across
+product versions, so until one of its own GA builds has been installed, a
+product version's GA replaces the release the previous version published.
+Install admission accepts only that profile, verified by product version,
+build number and installed signed-tree digest.
 The SwiftUI dashboard library is signed as one more nested component. Local
 installation and smoke testing do not require the public-release evidence or
 claim GA acceptance.
@@ -900,9 +906,9 @@ table in
 and needs the release owner's approval. These are the allocation files:
 
 1. `scripts/release_identity.env`: `CFW_GA_BUILD=N+1`;
-2. `docs/release/build-allocations-v050.json`: give `N`'s record its exact
-   retired status, append `{"build":"N+1","role":"ga","status":"active_ga"}`
-   and set `active_ga` to `N+1`, keeping canonical JSON;
+2. the ledger of `CFW_PRODUCT_VERSION`: give `N`'s record its exact retired
+   status, append `{"build":"N+1","role":"ga","status":"active_ga"}` and set
+   `active_ga` to `N+1`, keeping canonical JSON;
 3. `docs/release/ga-build-N-retirement.md`: a new note whose classification
    sentence opens a line as ``GA build N is permanently classified as
    `<status>`.`` with that exact ledger status;
@@ -920,18 +926,54 @@ observations accept any canonical build of the product version and are bound
 to the frozen candidate by their consumers.
 
 `./scripts/run_release_ci_gate.sh build-script-boundary` then verifies the
-allocation: the ledger must end with the identity file's build as its one
-`active_ga`; every record between the fixed prefix and that tail must be a
-retired GA with its exact retirement note; no retirement note may exist for a
-build at or above the active GA; every installed retired GA must have a
-registry profile; and every registry profile of the active product version
-must be an allocated build below the active GA. Candidate
-freeze applies the same rules to the artifact repository, so a missing
-predecessor profile fails before signing. The release-tool tests derive every
-build from the identity file and the ledger, and an allocation audit rejects
-any other tracked file of the release source closure, apart from `docs/` and
-the top-level guides, that names a GA-role ledger build outside a digest or
-object-ID token, and any installed tree digest outside the registry.
+allocation: the ledger must start at its policy's first build, stay gap-free
+and end with the identity file's build as its one `active_ga`; every record
+between the fixed prefix and that tail must be a retired GA with its exact
+retirement note; no retirement note may exist for a build at or above the
+active GA; every installed retired GA, and the GA each closed product version
+published, must have a registry profile; and every registry profile of the
+active product version must be an allocated build below the active GA.
+Candidate freeze applies the same rules to the artifact repository, so a
+missing predecessor profile fails before signing. The release-tool tests
+derive every build from the identity file and the ledger, and an allocation
+audit rejects any other tracked file of the release source closure, apart
+from `docs/`, the top-level guides and the first build the ledger policy
+fixes, that names a GA-role ledger build outside a digest or object-ID token,
+and any installed tree digest outside the registry.
+
+#### Opening a product version
+
+The next product version opens after the active one is published, and its
+first GA build needs the release owner's approval. One commit changes:
+
+1. the ledger of the published version: its published GA record takes the
+   status `published` and `active_ga` becomes `null`, keeping canonical JSON;
+   the ledger is closed from then on;
+2. `scripts/verify_release_build_allocations.py`: the published version's
+   policy becomes closed and fixes its retired GA allocations and its
+   published GA; a new policy names the new version's ledger and first build;
+3. `docs/release/build-allocations-v<version>.json` for the new version, with
+   the first GA build as its one `active_ga` record;
+4. `scripts/release_identity.env`: the new `CFW_PRODUCT_VERSION` and its first
+   `CFW_GA_BUILD`;
+5. `scripts/dormant_app_install.py`: the published GA's `PredecessorProfile`
+   with the installed tree SHA-256 that its signed-app manifest, package seals
+   and completed install journals bind;
+6. the surfaces `scripts/verify_version_contract.py` checks: the eleven
+   product package versions in their `Cargo.toml` files and `Cargo.lock`,
+   `PRODUCT_VERSION` in `cfw-core`, `tauri.conf.json`, `MARKETING_VERSION` in
+   `native/macos/project.yml` and the project it generates, the runtime
+   admission `RELEASE_VERSION`, the native observation version with the
+   published version added to its `historicalProductVersions`, and a new first
+   changelog heading `## <version> - Unreleased`.
+
+No release tool names the active product version: a version audit in the
+release-tool tests rejects any tracked file under `scripts/` or `.github/`,
+apart from the identity file, the ledger policies, the predecessor registry
+and third-party fixtures and patches, that does. The new `Cargo.lock` needs
+its own `prepare-cargo-workspace-inputs` before the sealed gates; then
+`version-contract`, `verify-xcode-project`, `build-script-boundary` and
+`release-tool-tests` check the new identity.
 
 #### Running a release with the driver
 

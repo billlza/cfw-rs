@@ -80,12 +80,16 @@ from scripts.tests.release_identity_fixture import next_patch
 # tree digest, so an invented digest would be rejected as a tampered bundle.
 GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
 # Append-only: the canonical-JSON digest of each registered preview-lineage
-# predecessor profile, so the frozen tree identities stay stated only in the
-# registry. The allocation audit keeps GA-role builds out of this file; their
-# profiles are checked against the installed signed tree at admission, which
-# fails closed before any mutation.
+# predecessor profile and of each profile of a closed product version, so the
+# frozen tree identities stay stated only in the registry. The allocation
+# audit keeps the active ledger's GA builds out of this file; their profiles
+# are checked against the installed signed tree at admission, which fails
+# closed before any mutation.
 RETAINED_PREDECESSOR_DIGESTS = {
     "50025": "5d21d6a9fd40e05a466d9a8fc9103c9fdabb6e7d84b7c5bd1ae1b80d56d8daa4",
+    "50028": "28a57f3a6d89cae9bfa7378e2be7b445b6a929a0acaf3e4158abc5b1898e9ff1",
+    "50029": "b86784f7d95d73a48735144e7377d9920c1acddbd60bea4612ed310005b9bc45",
+    "50030": "c3f3734fdcecaf13a8531945f765b7d9aa00c02a727a84966e0301f11728224a",
 }
 OLD = AppIdentity(
     ACTIVE_PREDECESSOR.product_version,
@@ -1768,29 +1772,36 @@ class InstallPredecessorTests(unittest.TestCase):
         version = ACTIVE_RELEASE_IDENTITY.product_version
         self.assertIs(SUPPORTED_PREDECESSORS[ACTIVE_PREDECESSOR.build_number], ACTIVE_PREDECESSOR)
         self.assertEqual(
-            select_active_predecessor(
-                SUPPORTED_PREDECESSORS, version, ACTIVE_RELEASE_IDENTITY.ga_build
-            ),
+            select_active_predecessor(SUPPORTED_PREDECESSORS, ACTIVE_RELEASE_IDENTITY.ga_build),
             ACTIVE_PREDECESSOR,
         )
-        oldest, older, newer_other_version, numeric_not_lexical = (
+        # Builds increase across product versions: until one of its own GA
+        # builds is installed, a product version replaces the release of the
+        # previous one.
+        previous_release, oldest, older, numeric_not_lexical = (
+            PredecessorProfile("0.4.0", "40004", "4" * 64),
             PredecessorProfile(version, "70001", "1" * 64),
             PredecessorProfile(version, "70003", "3" * 64),
-            PredecessorProfile("0.4.0", "70004", "4" * 64),
             PredecessorProfile(version, "800", "8" * 64),
         )
         registry = MappingProxyType(
             {
                 profile.build_number: profile
-                for profile in (oldest, older, newer_other_version, numeric_not_lexical)
+                for profile in (previous_release, oldest, older, numeric_not_lexical)
             }
         )
-        for ga_build, expected in (("70005", older), ("70003", oldest), ("70002", oldest)):
+        for ga_build, expected in (
+            ("70005", older),
+            ("70003", oldest),
+            ("70002", oldest),
+            ("70001", previous_release),
+            ("40005", previous_release),
+        ):
             with self.subTest(ga_build=ga_build):
-                self.assertEqual(select_active_predecessor(registry, version, ga_build), expected)
-        self.assertEqual(select_active_predecessor(registry, version, "70001"), numeric_not_lexical)
+                self.assertEqual(select_active_predecessor(registry, ga_build), expected)
+        self.assertEqual(select_active_predecessor(registry, "40004"), numeric_not_lexical)
         with self.assertRaises(InstallError) as raised:
-            select_active_predecessor(registry, version, "800")
+            select_active_predecessor(registry, "800")
         self.assertEqual(raised.exception.code, "predecessor_registry_invalid")
 
     def test_active_predecessor_requires_its_retained_exact_signed_tree(self) -> None:
@@ -1902,9 +1913,7 @@ class InstallPredecessorTests(unittest.TestCase):
         ):
             with self.subTest(registry=registry):
                 with self.assertRaises(InstallError) as raised:
-                    select_active_predecessor(
-                        MappingProxyType(registry), version, "70005"
-                    )
+                    select_active_predecessor(MappingProxyType(registry), "70005")
                 self.assertEqual(raised.exception.code, "predecessor_registry_invalid")
 
     def test_service_event_contract_is_the_current_vocabulary_at_every_event(self) -> None:

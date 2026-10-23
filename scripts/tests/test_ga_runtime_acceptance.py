@@ -96,7 +96,7 @@ from scripts import dormant_app_install
 from scripts.dormant_app_install import ACTIVE_PREDECESSOR
 from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
 from scripts.tests import test_ga_acceptance_journal_export as journal_fixture
-from scripts.tests.release_identity_fixture import NEXT_GA_BUILD
+from scripts.tests.release_identity_fixture import NEXT_GA_BUILD, next_patch
 from scripts.tests.physical_evidence_fixture import pcap_bytes
 
 
@@ -2130,7 +2130,7 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
             ),
             (
                 dormant_app_install.AppIdentity(
-                    "0.5.1", candidate.build_number, candidate.tree_sha256
+                    next_patch(candidate.version), candidate.build_number, candidate.tree_sha256
                 ),
                 "installed application bytes differ from the closed install journal",
             ),
@@ -4786,7 +4786,7 @@ class GARuntimeSystemExtensionTests(unittest.TestCase):
                     self.MISSING,
                 ),
                 "candidate build under another product version": (
-                    packet_tunnel_listing(row(f"0.5.1/{TO_BUILD}", activated)),
+                    packet_tunnel_listing(row(f"{next_patch(PRODUCT_VERSION)}/{TO_BUILD}", activated)),
                     self.MISSING,
                 ),
             }
@@ -4909,7 +4909,7 @@ class GARuntimeSystemExtensionTests(unittest.TestCase):
         cases = {
             f"retained {version}": (listing(version), self.NOT_EARLIER)
             for version in (
-                f"0.5.1/{TO_BUILD}",
+                f"{next_patch(PRODUCT_VERSION)}/{TO_BUILD}",
                 f"{PRODUCT_VERSION}/{NEXT_GA_BUILD}",
                 "0.6.0/60001",
                 "0.4.0/9223372036854775807",

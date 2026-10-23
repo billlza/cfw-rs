@@ -579,7 +579,7 @@ class CandidateFreezeTests(unittest.TestCase):
         self.assertFalse((self.preflight / "candidate-freeze/intent.json").exists())
 
     def test_allocation_ledger_unknown_field_is_rejected(self) -> None:
-        path = self.repository / "docs/release/build-allocations-v050.json"
+        path = self.repository / allocations.CONTRACT_RELATIVE_PATH
         value = json.loads(path.read_bytes())
         value["unexpected"] = True
         path.write_bytes(_canonical_json(value))
@@ -591,29 +591,40 @@ class CandidateFreezeTests(unittest.TestCase):
         self.assertFalse((self.preflight / "candidate-freeze/intent.json").exists())
 
     def test_retirement_notes_and_registry_bind_the_ledger_before_consumption(self) -> None:
+        # A retirement note naming the active GA contradicts the ledger.
         note = (
             self.repository
             / allocations.RETIREMENT_NOTES_RELATIVE
-            / f"ga-build-{retired_ga_builds()[-1]}-retirement.md"
+            / f"ga-build-{GA_BUILD}-retirement.md"
         )
-        original = note.read_bytes()
-        note.unlink()
+        note.write_text("stray note\n", encoding="utf-8")
         with self.assertRaises(candidate_freeze.CandidateFreezeError) as raised:
             self.freeze()
         self.assertEqual(raised.exception.code, "allocation_ledger_invalid")
         self.assertFalse(raised.exception.consumed)
-        note.write_bytes(original)
+        note.unlink()
         unallocated = {
             **SUPPORTED_PREDECESSORS,
             GA_BUILD: PredecessorProfile(
                 ACTIVE_RELEASE_IDENTITY.product_version, GA_BUILD, "a" * 64
             ),
         }
-        with patch.object(
-            candidate_freeze, "supported_predecessors", return_value=unallocated
-        ), self.assertRaises(candidate_freeze.CandidateFreezeError) as raised:
-            self.freeze()
-        self.assertEqual(raised.exception.code, "allocation_ledger_invalid")
+        published = {
+            policy.published[0]
+            for policy in allocations.POLICIES.values()
+            if policy.published is not None
+        }
+        unregistered = {
+            build: profile
+            for build, profile in SUPPORTED_PREDECESSORS.items()
+            if build not in published
+        }
+        for registry in (unallocated, unregistered):
+            with self.subTest(registry=sorted(registry)), patch.object(
+                candidate_freeze, "supported_predecessors", return_value=registry
+            ), self.assertRaises(candidate_freeze.CandidateFreezeError) as raised:
+                self.freeze()
+            self.assertEqual(raised.exception.code, "allocation_ledger_invalid")
         self.assertFalse((self.preflight / "candidate-freeze/intent.json").exists())
         self.assertFalse(self.final.exists())
         self.assertEqual(self.freeze().build_number, GA_BUILD)

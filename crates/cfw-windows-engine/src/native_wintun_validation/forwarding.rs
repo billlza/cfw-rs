@@ -2,8 +2,9 @@
 //! the real engine's gVisor packet endpoint -> its SOCKS5 outbound -> a local
 //! fixture node, and every reply back the same way. Validation only: the CI runner account owns
 //! the adapter, the fixture address/host route, the pump and the engine. No
-//! Authority lease, TunnelWorker handoff, default route, DNS, firewall or
-//! product backend is involved, so product TUN stays unavailable.
+//! Authority lease, SYSTEM endpoint handoff, default route, DNS, firewall or
+//! product backend is involved; the installed-host Tunnel suite covers the
+//! product path.
 use super::{
     Result,
     library::{self, Library},

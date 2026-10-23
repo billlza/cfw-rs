@@ -11,7 +11,9 @@
   }
   const control = page.locator('label.inline-switch').filter({ has: page.locator('[data-toggle="tunMode"]') });
   await control.click();
-  const local = await observeNative(page, async () => {
+  // The observation runs inside the page, so the started generation is
+  // passed in rather than captured.
+  const local = await observeNative(page, async (startedGeneration) => {
     const value = await window.__TAURI_INTERNALS__.invoke('engine_snapshot');
     if (value.unavailable_reason !== null) throw new Error(`Engine observation unavailable: ${value.unavailable_reason}`);
     const state = value.snapshot.state.state;
@@ -19,7 +21,7 @@
       if (value.snapshot.desired_mode !== 'local_proxy' || value.snapshot.state.runtime.ready !== true ||
           value.snapshot.state.runtime.owner !== 'windows_user_agent' ||
           value.snapshot.config_digest !== value.snapshot.state.runtime.config_digest ||
-          value.snapshot.generation <= before.snapshot.generation) {
+          value.snapshot.generation <= startedGeneration) {
         throw new Error('TUN Mode off did not hand over to a newer ready local core');
       }
       return value;
@@ -29,7 +31,7 @@
       throw new Error(`Unexpected TUN stop result: ${JSON.stringify(value)}`);
     }
     return false;
-  }, undefined, { name: 'TUN stop', timeoutMs: 30000 });
+  }, before.snapshot.generation, { name: 'TUN stop', timeoutMs: 30000 });
   await observeNative(page, () => {
     const input = document.querySelector('[data-toggle="tunMode"]');
     return input && !input.disabled && !input.checked ? { enabled: true, checked: false } : false;

@@ -2955,6 +2955,30 @@ Tunnel 套件报告：运行身份为 `windows_tunnel_service`、代次 9；适�
 报告恢复中、所有者丢失或清理未证明（每条都写入报告），Off 后适配器不存在且物理路由
 恢复。安装运行因此保留第二个 Tunnel 代次（共 10）。
 
+`34bd8afd` 的[共享／原生作业](https://github.com/billlza/cfw-rs/actions/runs/39889931808)中安装运行在
+协调器套件失败：该套件仍断言 Windows 不提供 Tunnel（`f50cea36` 改为要求只提供 Tunnel、不提供
+组合模式）；[桌面作业](https://github.com/billlza/cfw-rs/actions/runs/39889929237)的 TUN 会话观察到
+`awaiting_approval`：共享协调器在调用授权时总是发布等待批准（macOS 需要用户同意保存 VPN 配置），
+Windows 上没有需要批准的内容，General 页却会短暂显示 “Needs approval” 与批准按钮。`ede33417` 让
+`EngineRuntimePlatform` 说明隧道授权是否等待同意，Windows 在授权期间发布 TunnelStarting；macOS 保留
+同意阶段，两个平台均有测试，3 项变异全部被杀死。同一桌面作业的 SYSTEM 诊断复制因管理员对服务
+私有目录执行 `Test-Path` 被拒而失败，`730b475e` 改为直接以 robocopy 备份语义读取。
+
+`730b475e` 的[共享／原生作业](https://github.com/billlza/cfw-rs/actions/runs/39892863105)五项通过。引擎产物
+`c6bdc8a3815c5a36060f9d8e31b145521e8d6f253046378d1a30a993f01925a6`（源码绑定 `730b475e`）：安装运行回执
+21 个用例，包含 `product_tunnel_routes_dns_and_traffic_then_retires_its_adapter` 与
+`product_tunnel_recovers_off_after_its_user_agent_is_terminated`；Tunnel 套件各项再次为真（引擎记录的连接源
+地址 198.18.64.1，入站 `tun/cfw-tunnel`）；UserAgent 终止用例在代次 10 启动 Tunnel 后终止 UserAgent
+（退出码 0xc0fe），期间只观察到 “GlobalAuthorityRecovering”（Authority 正在恢复）与 “OwnerUnresponsive”
+（UserAgent 退出）两条，约 1.1 秒后得到 Off，适配器消失、物理路由恢复；协调器套件报告 Tunnel 可用、
+组合模式不可用。[桌面作业](https://github.com/billlza/cfw-rs/actions/runs/39892860279)的 GUI TUN 会话通过
+启动（`tunnel_active`，所有者 `windows_tunnel_service`，未出现等待批准）、组合模式拒绝（系统代理开关
+禁用并显示专门原因）、控制器检查与同会话原生探针（适配器存在、路由进入适配器、HTTP 从
+198.18.64.1 发出、用户代理设置未变；产物 `76708f1dd52ca5db785fc32b8f8052b440da4e566d88bd96de0593285073bcc9`），
+随后在关闭 TUN 的步骤失败：页面内观察函数引用了只存在于 Node 侧的变量（`before is not defined`），
+属于夹具缺陷；同时收集到的 SYSTEM 诊断（`lease_ending`：连接关闭，自 Active）只反映失败后的会话
+拆除。后续提交把起始代次作为参数传入页面。
+
 UI 能力：`67593409` 让 Windows 桌面报告 Tunnel 可用，并新增独立的 `tunnel_system_proxy`
 能力（Windows 为 false），协调器对组合模式只读该能力；General 页在已请求系统代理时打开
 TUN（或反之）会以四种语言的专门原因拒绝，不显示无关的旧失败，已请求的开关始终可以

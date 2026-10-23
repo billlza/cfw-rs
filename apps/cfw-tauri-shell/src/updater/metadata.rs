@@ -7,17 +7,16 @@ use reqwest::redirect::Policy;
 use semver::Version;
 use serde_json::Value;
 
-use super::contract::{UpdateAuthorization, validate_update};
+use super::contract::{UpdateAuthorization, target, validate_update};
 use super::error::{DownloadFailureStage, NetworkFailureCategory, Result, UpdateError};
 use crate::transport_security::external_https_client_builder;
+use cfw_core::update::ReleaseTarget;
+pub(super) use cfw_core::update::validate_release_asset_url;
 
-const METADATA_URL: &str = "https://github.com/billlza/cfw-rs/releases/latest/download/latest.json";
 const MAX_METADATA_BYTES: u64 = 64 * 1024;
 pub(super) const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 pub(super) const USER_AGENT: &str = concat!("cfw-rs/", env!("CARGO_PKG_VERSION"));
-const RELEASE_ASSET_HOST: &str = "release-assets.githubusercontent.com";
-const RELEASE_ASSET_PATH_PREFIX: &str = "/github-production-release-asset/";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct CheckedUpdate {
@@ -27,16 +26,19 @@ pub(super) struct CheckedUpdate {
 }
 
 pub(super) async fn check_bounded_update() -> Result<Option<CheckedUpdate>> {
+    let release_target = target()?;
     let client = external_https_client_builder()
         .map_err(|_| UpdateError::TlsProviderUnavailable)?
         .user_agent(USER_AGENT)
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(REQUEST_TIMEOUT)
-        .redirect(Policy::custom(validate_metadata_redirect))
+        .redirect(Policy::custom(move |attempt| {
+            validate_metadata_redirect(release_target, attempt)
+        }))
         .build()
         .map_err(|error| sanitized_network_error(DownloadFailureStage::ClientBuild, &error))?;
     let response = client
-        .get(METADATA_URL)
+        .get(release_target.metadata_url())
         .header(ACCEPT, "application/json")
         .send()
         .await
@@ -102,8 +104,10 @@ fn parse_checked_update(bytes: &[u8]) -> Result<Option<CheckedUpdate>> {
         .get("version")
         .and_then(Value::as_str)
         .ok_or(UpdateError::InvalidMetadata("version field".into()))?;
+    let release_target = target()?;
     let platform = raw_manifest
-        .pointer("/platforms/darwin-aarch64")
+        .get("platforms")
+        .and_then(|platforms| platforms.get(release_target.platform_key()))
         .and_then(Value::as_object)
         .ok_or(UpdateError::InvalidMetadata("platform field".into()))?;
     let url = platform
@@ -140,21 +144,10 @@ fn parse_checked_update(bytes: &[u8]) -> Result<Option<CheckedUpdate>> {
 }
 
 fn validate_metadata_redirect(
+    target: ReleaseTarget,
     attempt: reqwest::redirect::Attempt<'_>,
 ) -> reqwest::redirect::Action {
-    let result = match attempt.previous() {
-        [initial] if initial.as_str() == METADATA_URL => {
-            validate_versioned_metadata_url(attempt.url())
-        }
-        [initial, versioned]
-            if initial.as_str() == METADATA_URL
-                && validate_versioned_metadata_url(versioned).is_ok() =>
-        {
-            validate_release_asset_url(attempt.url())
-        }
-        _ => Err("update metadata exceeded the fixed redirect chain".into()),
-    };
-    match result {
+    match target.validate_metadata_redirect(attempt.previous(), attempt.url()) {
         Ok(()) => attempt.follow(),
         Err(error) => attempt.error(error),
     }
@@ -186,59 +179,6 @@ pub(super) fn sanitized_network_error(
     }
 }
 
-pub(super) fn validate_release_asset_url(url: &Url) -> std::result::Result<(), String> {
-    if url.scheme() != "https"
-        || url.host_str() != Some(RELEASE_ASSET_HOST)
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.port().is_some()
-        || url.fragment().is_some()
-    {
-        return Err("redirect origin or authority is not allowed".into());
-    }
-    let path_tail = url
-        .path()
-        .strip_prefix(RELEASE_ASSET_PATH_PREFIX)
-        .ok_or_else(|| "redirect path is not a GitHub release-asset path".to_string())?;
-    let segments = path_tail.split('/').collect::<Vec<_>>();
-    if segments.len() != 2
-        || segments
-            .iter()
-            .any(|segment| segment.is_empty() || segment.contains('%'))
-        || !segments[0].bytes().all(|byte| byte.is_ascii_digit())
-    {
-        return Err("redirect path has an unexpected release-asset identifier".into());
-    }
-    if url.query().is_none_or(str::is_empty) {
-        return Err("redirect is missing GitHub's signed asset query".into());
-    }
-    Ok(())
-}
-
-fn validate_versioned_metadata_url(url: &Url) -> std::result::Result<(), String> {
-    if url.scheme() != "https"
-        || url.host_str() != Some("github.com")
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.port().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-    {
-        return Err("versioned metadata URL has a forbidden authority".into());
-    }
-    let version = url
-        .path()
-        .strip_prefix("/billlza/cfw-rs/releases/download/v")
-        .and_then(|tail| tail.strip_suffix("/latest.json"))
-        .ok_or_else(|| "versioned metadata URL has a forbidden path".to_owned())?;
-    let parsed = Version::parse(version)
-        .map_err(|_| "versioned metadata URL is not strict SemVer".to_owned())?;
-    if parsed.to_string() != version {
-        return Err("versioned metadata URL is not canonical SemVer".into());
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -246,17 +186,23 @@ mod tests {
     use super::*;
 
     fn manifest(version: &str) -> Vec<u8> {
-        let archive = format!("Clash.for.Mac_{version}_aarch64.app.tar.gz");
-        let url =
-            format!("https://github.com/billlza/cfw-rs/releases/download/v{version}/{archive}");
+        let target = target().expect("qualified test target");
+        let url = target.download_url(version, &target.archive_name(version));
+        let platforms = target
+            .platform_keys()
+            .iter()
+            .map(|key| {
+                (
+                    (*key).to_owned(),
+                    json!({ "url": url, "signature": "signature" }),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
         serde_json::to_vec(&json!({
             "version": version,
             "notes": "Release notes",
             "pub_date": "2026-07-22T00:00:00Z",
-            "platforms": {
-                "darwin-aarch64": { "url": url, "signature": "signature" },
-                "darwin-arm64": { "url": url, "signature": "signature" }
-            }
+            "platforms": platforms
         }))
         .expect("manifest")
     }
@@ -285,6 +231,12 @@ mod tests {
 
     #[test]
     fn versioned_metadata_redirect_is_exact() {
+        let validate_versioned_metadata_url = |url: &Url| {
+            ReleaseTarget::MacArm64.validate_metadata_redirect(
+                &[Url::parse(ReleaseTarget::MacArm64.metadata_url()).unwrap()],
+                url,
+            )
+        };
         assert!(
             validate_versioned_metadata_url(
                 &Url::parse(

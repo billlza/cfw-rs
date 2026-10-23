@@ -2,17 +2,17 @@
 //!
 //! Nothing here touches the data plane. Opening the updater's internally
 //! authorized release URL or revealing a directory goes through the operating
-//! system's own `open` utility with a fixed absolute path and separate
-//! arguments: no shell is involved, the URL scheme is restricted to
+//! system's own opener (macOS open or the Windows Shell API): no command
+//! interpreter is involved, the URL scheme is restricted to
 //! `http`/`https`, and every revealed path is one this application owns.
-//! Diagnostics reads SystemConfiguration only, so the
-//! historical `networksetup`, `scutil`, and `route` invocations are gone along
-//! with the fields they produced.
+//! Diagnostics reads native interface and proxy APIs without changing them.
 
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
 use std::process::Command;
 
-use cfw_platform::{MacOsPlatformService, NetworkServiceObservation};
+#[cfg(target_os = "macos")]
+use cfw_platform::MacOsPlatformService;
 use reqwest::Url;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
@@ -20,32 +20,18 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::lifecycle::request_shutdown;
 use crate::settings_store;
 
+#[path = "network_diagnostics.rs"]
+mod diagnostics;
+use diagnostics::NetworkDiagnostics;
+
 /// The operating system's own opener. It is referenced by absolute path and
 /// never through a shell or a PATH lookup.
+#[cfg(target_os = "macos")]
 const OPEN_UTILITY: &str = "/usr/bin/open";
 const MAX_EXTERNAL_URL_BYTES: usize = 2_048;
 const MAX_PAGE_NAME_CHARS: usize = 64;
 const MAX_DEEP_LINKS: usize = 32;
 const MAX_DEEP_LINK_BYTES: usize = 4_096;
-
-/// Fields the retired child-process tools used to supply. They are reported as
-/// explicitly unavailable instead of being silently dropped or invented.
-const UNAVAILABLE_DIAGNOSTICS: [&str; 4] = [
-    "default_route_interface",
-    "hardware_port",
-    "bsd_device",
-    "recommended_clash_proxy_services",
-];
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct NetworkDiagnostics {
-    default_route_interface: Option<String>,
-    service_order: Vec<String>,
-    services: Vec<NetworkServiceObservation>,
-    recommended_clash_proxy_services: Vec<String>,
-    proxied_services: Vec<String>,
-    unavailable: Vec<&'static str>,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -75,9 +61,9 @@ pub(crate) struct DeepLinkParseOutcome {
 /// Opens a URL selected by a trusted Rust callsite. This is deliberately not a
 /// Tauri command: renderer IPC must never bypass the updater's one-use metadata
 /// authorization by supplying its own download destination.
-pub(crate) fn open_trusted_external_url(url: &str) -> Result<(), String> {
+pub(crate) async fn open_trusted_external_url(url: &str) -> Result<(), String> {
     let target = validate_external_url(url)?;
-    open_argument(&target)
+    crate::startup_state::prepare_off_main(move || open_argument(&target)).await
 }
 
 #[tauri::command]
@@ -108,9 +94,19 @@ pub(crate) async fn reveal_logs_directory() -> Result<(), String> {
 }
 
 #[tauri::command]
+#[cfg(target_os = "macos")]
 pub(crate) fn open_login_items_settings() -> Result<(), String> {
     MacOsPlatformService.open_login_items_settings();
     Ok(())
+}
+
+#[tauri::command]
+#[cfg(windows)]
+pub(crate) async fn open_login_items_settings() -> Result<(), String> {
+    crate::startup_state::prepare_off_main(|| {
+        cfw_platform::open_windows_startup_settings().map_err(|error| error.to_string())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -146,7 +142,7 @@ pub(crate) fn toggle_devtools(app: AppHandle) -> Result<(), String> {
     #[cfg(not(debug_assertions))]
     {
         let _ = app;
-        Err("DevTools are disabled in release builds to keep the ARM64 runtime lean".into())
+        Err("DevTools are disabled in release builds".into())
     }
 }
 
@@ -183,27 +179,6 @@ impl Drop for NetworkDiagnosticsActivity {
     }
 }
 
-fn collect_network_diagnostics() -> Result<NetworkDiagnostics, String> {
-    let services = MacOsPlatformService
-        .observe_network_services()
-        .map_err(|error| error.to_string())?;
-    Ok(NetworkDiagnostics {
-        default_route_interface: None,
-        service_order: services
-            .iter()
-            .map(|service| service.display_name.clone())
-            .collect(),
-        recommended_clash_proxy_services: Vec::new(),
-        proxied_services: services
-            .iter()
-            .filter(|service| service.any_proxy_enabled())
-            .map(|service| service.display_name.clone())
-            .collect(),
-        services,
-        unavailable: UNAVAILABLE_DIAGNOSTICS.to_vec(),
-    })
-}
-
 #[tauri::command]
 pub(crate) async fn network_diagnostics(
     gate: tauri::State<'_, NetworkDiagnosticsGate>,
@@ -218,19 +193,19 @@ pub(crate) async fn network_diagnostics(
         )
         .is_err()
     {
-        return Err("macOS network diagnostics are already in progress".into());
+        return Err("network diagnostics are already in progress".into());
     }
 
     let active = std::sync::Arc::clone(&gate.active);
     let task = tauri::async_runtime::spawn_blocking(move || {
         let _activity = NetworkDiagnosticsActivity(active);
-        collect_network_diagnostics()
+        diagnostics::collect()
     });
     match tokio::time::timeout(std::time::Duration::from_secs(5), task).await {
         Ok(result) => result
-            .map_err(|error| format!("macOS network diagnostics task failed: {error}"))?,
+            .map_err(|error| format!("network diagnostics task failed: {error}"))?,
         Err(_) => Err(
-            "macOS network diagnostics timed out after 5 seconds; the isolated probe will not be duplicated while it is still running"
+            "network diagnostics timed out after 5 seconds; the isolated probe will not be duplicated while it is still running"
                 .into(),
         ),
     }
@@ -329,6 +304,7 @@ fn reveal_owned_directory(path: &Path) -> Result<(), String> {
     open_path(path, false)
 }
 
+#[cfg(target_os = "macos")]
 pub(super) fn open_path(path: &Path, reveal_in_finder: bool) -> Result<(), String> {
     if !path.is_absolute() {
         return Err("only an absolute application-owned path can be opened".into());
@@ -340,10 +316,22 @@ pub(super) fn open_path(path: &Path, reveal_in_finder: bool) -> Result<(), Strin
     run_open(command.arg(path))
 }
 
+#[cfg(windows)]
+pub(super) fn open_path(path: &Path, reveal: bool) -> Result<(), String> {
+    cfw_platform::open_windows_path(path, reveal).map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "macos")]
 fn open_argument(url: &str) -> Result<(), String> {
     run_open(Command::new(OPEN_UTILITY).arg(url))
 }
 
+#[cfg(windows)]
+fn open_argument(url: &str) -> Result<(), String> {
+    cfw_platform::open_windows_external_url(url).map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "macos")]
 fn run_open(command: &mut Command) -> Result<(), String> {
     let status = command
         .stdin(std::process::Stdio::null())
@@ -361,7 +349,11 @@ fn run_open(command: &mut Command) -> Result<(), String> {
 /// Absolute path of an application-owned profile envelope, used only to reveal
 /// or open it.
 pub(super) fn owned_profile_path(profiles_dir: &Path, file_name: &str) -> Result<PathBuf, String> {
-    if file_name.contains('/') || file_name.contains("..") {
+    if file_name.is_empty()
+        || file_name.contains(['/', '\\', ':'])
+        || file_name.contains("..")
+        || file_name == "."
+    {
         return Err("profile file name is not a repository entry".into());
     }
     Ok(profiles_dir.join(file_name))
@@ -482,7 +474,15 @@ mod tests {
             owned_profile_path(profiles, "id.profile.json").expect("entry path"),
             profiles.join("id.profile.json")
         );
-        for rejected in ["../escape.json", "nested/id.json", ".."] {
+        for rejected in [
+            "../escape.json",
+            "nested/id.json",
+            "..",
+            r"nested\id.json",
+            r"C:\file.json",
+            ".",
+            "",
+        ] {
             assert!(
                 owned_profile_path(profiles, rejected).is_err(),
                 "accepted escaping entry: {rejected}"
@@ -493,28 +493,5 @@ mod tests {
     #[test]
     fn relative_paths_are_never_opened() {
         assert!(open_path(Path::new("relative/path"), false).is_err());
-    }
-
-    #[test]
-    fn diagnostics_declares_the_fields_the_retired_tools_used_to_supply() {
-        let payload = serde_json::to_value(NetworkDiagnostics {
-            default_route_interface: None,
-            service_order: vec!["Wi-Fi".into()],
-            services: Vec::new(),
-            recommended_clash_proxy_services: Vec::new(),
-            proxied_services: Vec::new(),
-            unavailable: UNAVAILABLE_DIAGNOSTICS.to_vec(),
-        })
-        .expect("serialize diagnostics");
-        assert!(payload["default_route_interface"].is_null());
-        assert_eq!(
-            payload["unavailable"],
-            serde_json::json!([
-                "default_route_interface",
-                "hardware_port",
-                "bsd_device",
-                "recommended_clash_proxy_services",
-            ])
-        );
     }
 }

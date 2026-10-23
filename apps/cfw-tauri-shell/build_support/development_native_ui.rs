@@ -21,6 +21,7 @@ pub const SOURCE_PATHS: &[&str] = &[
     "scripts/publication/bounded_process.py",
     "scripts/publication/__init__.py",
     "apps/cfw-tauri-shell/build.rs",
+    "apps/cfw-tauri-shell/build_support/macos.rs",
     "apps/cfw-tauri-shell/build_support/development_native_ui.rs",
 ];
 

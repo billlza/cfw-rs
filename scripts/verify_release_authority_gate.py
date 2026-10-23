@@ -316,6 +316,7 @@ def verify_repository(root: Path) -> None:
             root / "native/macos/project.yml",
             root / "scripts/build_native_products.sh",
             root / "apps/cfw-tauri-shell/build.rs",
+            root / "apps/cfw-tauri-shell/build_support/macos.rs",
         ]
     )
     for path in candidates:

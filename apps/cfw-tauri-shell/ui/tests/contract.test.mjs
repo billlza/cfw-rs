@@ -204,7 +204,9 @@ test("direct controller mutations are guarded by verified engine activity", () =
 
   for (const [command, maximumDistance] of guardedCommands) {
     const owner = command === "close_connection" ? "connections.js" : "app.js";
-    const app = dashboardSources.find(({ file }) => file.endsWith(`/${owner}`)).source;
+    const source = dashboardSources.find(({ file }) => file === path.join(uiRoot, "src", owner));
+    assert.ok(source, `${owner} must be present in the dashboard source inventory`);
+    const app = source.source;
     // select_proxy has a separate saved-profile path while Off; the final
     // invocation is the live controller mutation and still requires its guard.
     const invocation = command === "select_proxy"

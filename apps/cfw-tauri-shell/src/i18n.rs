@@ -36,11 +36,13 @@ impl NativeLanguage {
     }
 }
 
-pub(crate) fn resolve(language: UiLanguage) -> UiLanguage {
+pub(crate) fn resolve(language: UiLanguage) -> Result<UiLanguage, String> {
     if language == UiLanguage::System {
-        language.resolve(&cfw_platform::preferred_languages())
+        let preferences = cfw_platform::preferred_languages()
+            .map_err(|error| format!("system UI language is unavailable: {error}"))?;
+        Ok(language.resolve(&preferences))
     } else {
-        language
+        Ok(language)
     }
 }
 
@@ -66,7 +68,7 @@ fn catalog(language: UiLanguage) -> Result<Option<&'static Catalog>, String> {
 
 /// Resolve OS preferences and parse bundled messages on the preparation worker.
 pub(crate) fn prepare(language: UiLanguage) -> Result<UiLanguage, String> {
-    let resolved = resolve(language);
+    let resolved = resolve(language)?;
     catalog(resolved)?;
     Ok(resolved)
 }

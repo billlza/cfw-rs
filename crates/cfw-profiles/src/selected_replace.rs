@@ -1,6 +1,5 @@
 use std::fs::File;
 use std::io::Read;
-use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 
 use serde::{Deserialize, Serialize};
 
@@ -125,16 +124,8 @@ impl SelectedProfileReplaceIntent {
 }
 
 pub(crate) fn decode(mut file: File) -> Result<SelectedProfileReplaceIntent, ProfileError> {
-    let metadata = file.metadata()?;
-    if !metadata.file_type().is_file()
-        || metadata.file_type().is_symlink()
-        || metadata.file_type().is_socket()
-        || metadata.nlink() != 1
-        || metadata.permissions().mode() & 0o777 != 0o600
-        || metadata.uid() != effective_user_id()
-    {
-        return Err(ProfileError::UnsafeSelectedReplaceFile);
-    }
+    let metadata =
+        crate::storage::private_metadata(&file, ProfileError::UnsafeSelectedReplaceFile)?;
     if metadata.len() > MAX_SELECTED_REPLACE_BYTES as u64 {
         return Err(ProfileError::SelectedReplaceTooLarge {
             actual: metadata.len(),
@@ -160,10 +151,6 @@ pub(crate) fn decode(mut file: File) -> Result<SelectedProfileReplaceIntent, Pro
         ));
     }
     Ok(intent)
-}
-
-fn effective_user_id() -> u32 {
-    unsafe { libc::geteuid() }
 }
 
 #[cfg(test)]

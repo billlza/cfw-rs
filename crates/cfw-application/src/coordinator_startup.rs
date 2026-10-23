@@ -133,6 +133,7 @@ pub(crate) async fn reconcile_initial_state(
     };
 
     let local = matches!(status, NativeEngineStatus::LocalProxy { .. });
+    let platform = state.runtime_platform;
     match status {
         NativeEngineStatus::Off => {
             state.snapshot.desired_mode = EngineMode::Off;
@@ -155,7 +156,7 @@ pub(crate) async fn reconcile_initial_state(
                 } else {
                     EngineMode::SystemProxy
                 },
-                owner: EngineOwner::ProxyAgent,
+                owner: platform.proxy_owner(),
                 lease_kind: if local {
                     NativeLeaseKind::LocalProxy
                 } else {
@@ -182,7 +183,7 @@ pub(crate) async fn reconcile_initial_state(
             };
             let kind = RecoveredRuntimeKind {
                 mode: EngineMode::Tunnel,
-                owner: EngineOwner::PacketTunnelSystemExtension,
+                owner: platform.tunnel_owner(),
                 lease_kind: NativeLeaseKind::TunnelRuntime,
             };
             if matches!(

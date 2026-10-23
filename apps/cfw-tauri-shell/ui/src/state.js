@@ -35,15 +35,6 @@ export const THEME_OPTIONS = [
   { value: "dark", label: "Dark" },
 ];
 
-/// `FontFamily` is a closed enum in the preference store, so the dashboard
-/// offers exactly the values the backend accepts instead of free text that
-/// would be rejected on save.
-export const FONT_OPTIONS = [
-  { value: "", label: "System" },
-  { value: "Avenir Next", label: "Avenir Next" },
-  { value: "SF Mono", label: "SF Mono" },
-];
-
 export const defaultEngineStatus = {
   desiredMode: "off",
   state: "Off",
@@ -54,6 +45,7 @@ export const defaultEngineStatus = {
   systemProxyAvailable: false,
   localProxyAvailable: false,
   tunnelAvailable: false,
+  tunnelSystemProxyAvailable: false,
   providerManagementAvailable: false,
   availabilityReason: null,
   observationRecheckPending: false,
@@ -66,7 +58,7 @@ export const defaultEngineStatus = {
 };
 
 export const state = {
-  payload: { product: { name: "Clash for Mac", version: null } },
+  payload: { product: { name: "Clash", version: null } },
   settingsSnapshot: defaultSettingsSnapshot,
   settingsUnavailableReason: null,
   launchAtLogin: {

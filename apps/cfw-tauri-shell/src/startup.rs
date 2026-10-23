@@ -26,12 +26,12 @@ async fn initialize(app: AppHandle) -> Result<(), String> {
     let worker = app.clone();
     let (profiles, prepared, language) = prepare_off_main(move || {
         let diagnostics = worker.state::<Diagnostics>();
-        let bridge = diagnostics
-            .startup_step("native_bridge", || {
-                Ok::<_, std::convert::Infallible>(cfw_apple_network::NativeFrameworkBridge::load())
-            })
-            .map_err(|error| error.to_string())?;
-        if let Some(error) = bridge.unavailable_reason() {
+        let store = crate::settings_store()?;
+        store.ensure_layout().map_err(|error| error.to_string())?;
+        let services = diagnostics.startup_step("native_bridge", || {
+            crate::platform_runtime::PlatformRuntime::load(&store.paths().app_home)
+        })?;
+        if let Some(error) = &services.unavailable_reason {
             diagnostics.record(
                 cfw_core::DiagnosticTopic::Startup,
                 "native_bridge_unavailable",
@@ -39,12 +39,12 @@ async fn initialize(app: AppHandle) -> Result<(), String> {
             );
         }
         let profiles = diagnostics.startup_step("profile_store", || {
-            crate::commands::build_managed_profiles(bridge.clone())
+            crate::commands::build_managed_profiles(std::sync::Arc::clone(&services.credentials))
         })?;
         let engine = diagnostics.startup_step("engine_manager", || {
-            crate::engine::prepare_managed_engine(bridge)
+            crate::engine::prepare_managed_engine(services)
         })?;
-        let language = crate::settings_store()?
+        let language = store
             .read_or_default()
             .map_err(|error| error.to_string())?
             .language;
@@ -70,18 +70,22 @@ async fn initialize(app: AppHandle) -> Result<(), String> {
     let worker = app.clone();
     prepare_off_main(move || {
         crate::engine::start_engine_event_forwarder(worker.clone());
+        #[cfg(target_os = "macos")]
         worker
             .state::<Diagnostics>()
             .startup_step("launch_preflight", || {
                 crate::legacy::run_launch_preflight(&worker)
-            })
+            })?;
+        Ok(())
     })
     .await?;
 
+    #[cfg(target_os = "macos")]
     if app.state::<crate::LaunchContext>().is_migration_handoff() {
         app.state::<crate::LaunchContext>()
             .mark_renderer_native_ready()?;
-    } else {
+    }
+    if !app.state::<crate::LaunchContext>().is_migration_handoff() {
         on_main(&app, |app| {
             if !app
                 .state::<crate::lifecycle::AppLifecycle>()

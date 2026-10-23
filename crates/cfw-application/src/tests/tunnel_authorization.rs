@@ -77,6 +77,40 @@ async fn user_consent_outlives_runtime_budget_without_starting_a_tunnel() {
 }
 
 #[tokio::test]
+async fn windows_authorization_asks_no_one_and_is_published_as_starting() {
+    let backend = Arc::new(FakeBackend::windows());
+    let gate = Arc::new(Notify::new());
+    *backend
+        .tunnel_authorization_gate
+        .lock()
+        .expect("authorization gate") = Some(gate.clone());
+    let coordinator = coordinator(backend.clone(), Duration::from_secs(1));
+    let pending = tokio::spawn(start(coordinator.clone()));
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while backend
+            .tunnel_authorization_requests
+            .lock()
+            .expect("authorization requests")
+            .is_empty()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("authorization entered");
+    // While the backend authorizes, the published state is Starting: there
+    // is nothing for the person to approve.
+    assert!(matches!(
+        coordinator.snapshot().state,
+        EngineState::TunnelStarting { .. }
+    ));
+    assert!(backend.tunnel_requests().is_empty());
+    gate.notify_one();
+    let result = pending.await.expect("task").expect("authorized start");
+    assert!(matches!(result.state, EngineState::TunnelActive { .. }));
+}
+
+#[tokio::test]
 async fn rejected_consent_never_starts_the_runtime() {
     let backend = Arc::new(FakeBackend::default());
     *backend

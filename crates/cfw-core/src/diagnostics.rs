@@ -249,7 +249,10 @@ pub fn redact_diagnostic_text(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::{PermissionsExt, symlink};
+    use crate::test_support::{
+        assert_private_file, create_private_directory, remove_directory_link, symlink,
+        write_private,
+    };
 
     static TEST_DIRECTORY_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -263,7 +266,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        std::fs::create_dir(&path).unwrap();
+        create_private_directory(&path);
         path
     }
 
@@ -294,10 +297,7 @@ mod tests {
         assert_eq!(read.len(), MAX_RECORDS);
         assert!(read[0].message.starts_with("attempt 23:"));
         assert_eq!(read.last().unwrap().message, "peer EOF");
-        assert_eq!(
-            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
+        assert_private_file(&path);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -305,11 +305,9 @@ mod tests {
     fn corruption_and_symlinks_fail_without_replacing_evidence() {
         let root = directory();
         let log = root.join("diagnostics");
-        std::fs::create_dir(&log).unwrap();
-        std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o700)).unwrap();
+        create_private_directory(&log);
         let path = log.join("startup.json");
-        std::fs::write(&path, "not json").unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        write_private(&path, "not json");
         let entry = DiagnosticEntry::new("ready", "ready").unwrap();
         assert!(
             DiagnosticJournal::new(&root)
@@ -417,7 +415,7 @@ mod tests {
                 )
                 .is_err()
         );
-        std::fs::remove_file(redirected).unwrap();
+        remove_directory_link(&redirected);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

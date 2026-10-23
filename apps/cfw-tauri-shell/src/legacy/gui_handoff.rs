@@ -3,10 +3,10 @@ use std::time::{Duration, Instant};
 
 use objc2_app_kit::NSRunningApplication;
 
-#[cfg(test)]
-use super::handoff_ticket::ProcessStartIdentity;
-use super::handoff_ticket::{ProcessIdentity, list_exact_processes};
 use super::runtime_plan::LegacyRuntimePlanKind;
+#[cfg(test)]
+use crate::process_identity::ProcessStartIdentity;
+use crate::process_identity::{ProcessIdentity, exact_processes as list_exact_processes};
 
 const LEGACY_GUI_EXECUTABLE: &str = "/Applications/Clash for Mac.app/Contents/MacOS/clash-for-mac";
 const TERMINATION_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(2);

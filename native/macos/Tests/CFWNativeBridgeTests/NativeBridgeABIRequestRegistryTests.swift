@@ -19,10 +19,15 @@ private final class ABIResponseRecorder: @unchecked Sendable {
 private func waitForResponses(
   _ recorder: ABIResponseRecorder,
   count: Int
-) async -> Bool {
-  for _ in 0..<10_000 {
-    if recorder.values.count == count { return true }
-    await Task.yield()
+) async throws -> Bool {
+  // Yield counts are not elapsed time: the loop can finish before a real
+  // watchdog timer is scheduled. Keep a bounded wall-clock wait and reject
+  // duplicate callbacks without changing the registry's operation budget.
+  let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+  while ContinuousClock.now < deadline {
+    let observed = recorder.values.count
+    if observed >= count { return observed == count }
+    try await Task<Never, Never>.sleep(for: .milliseconds(1))
   }
   return false
 }
@@ -155,7 +160,7 @@ struct NativeBridgeABIRequestRegistryTests {
   }
 
   @Test
-  func exactCancellationDoesNotCancelAnotherAcceptedRequest() async {
+  func exactCancellationDoesNotCancelAnotherAcceptedRequest() async throws {
     let registry = NativeBridgeABIRequestRegistry(operationBudget: .seconds(60))
     let firstID = UUID()
     let secondID = UUID()
@@ -184,19 +189,19 @@ struct NativeBridgeABIRequestRegistryTests {
     #expect(secondAccepted)
 
     #expect(registry.cancel(requestID: firstID))
-    #expect(await waitForResponses(first, count: 1))
+    #expect(try await waitForResponses(first, count: 1))
     #expect(first.values == [cancelled])
     #expect(second.values.isEmpty)
     #expect(registry.activeRequestCount == 1)
 
     #expect(registry.cancel(requestID: secondID))
-    #expect(await waitForResponses(second, count: 1))
+    #expect(try await waitForResponses(second, count: 1))
     #expect(second.values == [cancelled])
     #expect(registry.activeRequestCount == 0)
   }
 
   @Test
-  func admissionWatchdogCancelsAndSuppressesLateSuccess() async {
+  func admissionWatchdogCancelsAndSuppressesLateSuccess() async throws {
     let registry = NativeBridgeABIRequestRegistry(operationBudget: .milliseconds(1))
     let recorder = ABIResponseRecorder()
     let cancelled = Data("bounded-timeout".utf8)
@@ -211,13 +216,13 @@ struct NativeBridgeABIRequestRegistryTests {
       })
     #expect(accepted)
 
-    #expect(await waitForResponses(recorder, count: 1))
+    #expect(try await waitForResponses(recorder, count: 1))
     #expect(recorder.values == [cancelled])
     #expect(registry.activeRequestCount == 0)
   }
 
   @Test
-  func completionAndCancellationRaceHasOneTerminalCallback() async {
+  func completionAndCancellationRaceHasOneTerminalCallback() async throws {
     let registry = NativeBridgeABIRequestRegistry(operationBudget: .seconds(60))
 
     for iteration in 0..<100 {
@@ -237,7 +242,7 @@ struct NativeBridgeABIRequestRegistryTests {
 
       async let cancellation: Bool = registry.cancel(requestID: requestID)
       _ = await cancellation
-      #expect(await waitForResponses(recorder, count: 1))
+      #expect(try await waitForResponses(recorder, count: 1))
       #expect(recorder.values == [success] || recorder.values == [cancelled])
     }
 
@@ -245,7 +250,7 @@ struct NativeBridgeABIRequestRegistryTests {
   }
 
   @Test
-  func duplicateLiveRequestIdentityIsRejectedWithoutStealingCallback() async {
+  func duplicateLiveRequestIdentityIsRejectedWithoutStealingCallback() async throws {
     let registry = NativeBridgeABIRequestRegistry(operationBudget: .seconds(60))
     let requestID = UUID()
     let accepted = ABIResponseRecorder()
@@ -270,7 +275,7 @@ struct NativeBridgeABIRequestRegistryTests {
     #expect(rejected.values.isEmpty)
 
     #expect(registry.cancel(requestID: requestID))
-    #expect(await waitForResponses(accepted, count: 1))
+    #expect(try await waitForResponses(accepted, count: 1))
     #expect(accepted.values == [cancelled])
     #expect(registry.activeRequestCount == 0)
   }

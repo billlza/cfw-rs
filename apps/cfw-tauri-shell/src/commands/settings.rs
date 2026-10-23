@@ -1,4 +1,5 @@
 use cfw_core::{SettingsSnapshot, SettingsStore, UiPreferences};
+#[cfg(target_os = "macos")]
 use cfw_platform::{MacOsPlatformService, ServiceModeStatus};
 use serde::Serialize;
 use tauri::{AppHandle, State};
@@ -22,12 +23,19 @@ impl UiSettingsMutations {
 pub(crate) enum UiLoginItemLiveStatus {
     Checking,
     NotRegistered,
+    #[cfg(target_os = "macos")]
     Enabled,
+    #[cfg(windows)]
+    Registered,
+    #[cfg(target_os = "macos")]
     RequiresApproval,
+    #[cfg(target_os = "macos")]
     NotFound,
+    #[cfg(target_os = "macos")]
     Unknown,
 }
 
+#[cfg(target_os = "macos")]
 impl From<ServiceModeStatus> for UiLoginItemLiveStatus {
     fn from(status: ServiceModeStatus) -> Self {
         match status {
@@ -37,6 +45,29 @@ impl From<ServiceModeStatus> for UiLoginItemLiveStatus {
             ServiceModeStatus::NotFound => Self::NotFound,
             ServiceModeStatus::Unknown => Self::Unknown,
         }
+    }
+}
+
+#[cfg(windows)]
+impl From<cfw_windows_engine::WindowsStartupStatus> for UiLoginItemLiveStatus {
+    fn from(status: cfw_windows_engine::WindowsStartupStatus) -> Self {
+        match status {
+            cfw_windows_engine::WindowsStartupStatus::NotRegistered => Self::NotRegistered,
+            cfw_windows_engine::WindowsStartupStatus::Registered => Self::Registered,
+        }
+    }
+}
+
+pub(super) fn live_login_item_status() -> Result<UiLoginItemLiveStatus, String> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(MacOsPlatformService.login_item_status().into())
+    }
+    #[cfg(windows)]
+    {
+        cfw_windows_engine::observe_windows_startup()
+            .map(Into::into)
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -57,41 +88,45 @@ pub(crate) struct UiSettingsSnapshot {
 
 fn launch_at_login_state(
     persisted_intent: bool,
-    status: ServiceModeStatus,
+    status: UiLoginItemLiveStatus,
 ) -> UiLaunchAtLoginState {
     let matches_persisted_intent = match status {
-        ServiceModeStatus::Enabled => persisted_intent,
-        ServiceModeStatus::NotRegistered | ServiceModeStatus::NotFound => !persisted_intent,
-        ServiceModeStatus::RequiresApproval | ServiceModeStatus::Unknown => false,
+        #[cfg(target_os = "macos")]
+        UiLoginItemLiveStatus::Enabled => persisted_intent,
+        #[cfg(windows)]
+        UiLoginItemLiveStatus::Registered => persisted_intent,
+        UiLoginItemLiveStatus::NotRegistered => !persisted_intent,
+        #[cfg(target_os = "macos")]
+        UiLoginItemLiveStatus::NotFound => !persisted_intent,
+        UiLoginItemLiveStatus::Checking => false,
+        #[cfg(target_os = "macos")]
+        UiLoginItemLiveStatus::RequiresApproval | UiLoginItemLiveStatus::Unknown => false,
     };
     UiLaunchAtLoginState {
         persisted_intent,
-        live_status: status.into(),
+        live_status: status,
         matches_persisted_intent,
     }
 }
 
 pub(super) fn with_login_item_status(
     snapshot: SettingsSnapshot,
-    status: ServiceModeStatus,
-) -> UiSettingsSnapshot {
+    status: UiLoginItemLiveStatus,
+) -> Result<UiSettingsSnapshot, String> {
     let launch_at_login = launch_at_login_state(snapshot.settings.launch_at_login, status);
-    UiSettingsSnapshot {
-        resolved_locale: crate::i18n::resolve(snapshot.settings.language),
+    Ok(UiSettingsSnapshot {
+        resolved_locale: crate::i18n::resolve(snapshot.settings.language)?,
         settings: snapshot.settings,
         persisted: snapshot.persisted,
         launch_at_login,
-    }
+    })
 }
 
 pub(crate) fn settings_snapshot_with_live_status(
     store: &SettingsStore,
 ) -> Result<UiSettingsSnapshot, String> {
     let snapshot = store.snapshot().map_err(|error| error.to_string())?;
-    Ok(with_login_item_status(
-        snapshot,
-        MacOsPlatformService.login_item_status(),
-    ))
+    with_login_item_status(snapshot, live_login_item_status()?)
 }
 
 fn write_preferences(
@@ -118,15 +153,17 @@ fn write_renderer_preferences(
     write_preferences(store, preferences)
 }
 
+#[cfg(target_os = "macos")]
 pub(crate) fn sanitize_legacy_preferences(
     store: &SettingsStore,
     preferences: UiPreferences,
 ) -> Result<UiSettingsSnapshot, String> {
     let snapshot = write_preferences(store, preferences)?;
-    Ok(with_login_item_status(
-        snapshot,
-        MacOsPlatformService.login_item_status(),
-    ))
+    live_login_item_status()
+        .and_then(|status| with_login_item_status(snapshot, status))
+        .map_err(|error| {
+            format!("preferences were saved, but their display status is unavailable: {error}")
+        })
 }
 
 #[tauri::command]
@@ -139,7 +176,7 @@ pub(crate) async fn read_settings_snapshot(
         if include_login_item_status == Some(false) {
             let snapshot = store.snapshot().map_err(|error| error.to_string())?;
             Ok(UiSettingsSnapshot {
-                resolved_locale: crate::i18n::resolve(snapshot.settings.language),
+                resolved_locale: crate::i18n::resolve(snapshot.settings.language)?,
                 launch_at_login: UiLaunchAtLoginState {
                     persisted_intent: snapshot.settings.launch_at_login,
                     live_status: UiLoginItemLiveStatus::Checking,
@@ -179,12 +216,17 @@ pub(crate) async fn write_settings_snapshot(
             write_renderer_preferences(&store, settings)
         })
         .await?;
-    crate::i18n::apply(&app, snapshot.settings.language).await?;
+    crate::i18n::apply(&app, snapshot.settings.language)
+        .await
+        .map_err(|error| {
+            format!("preferences were saved, but language application failed: {error}")
+        })?;
     crate::startup_state::prepare_off_main(move || {
-        Ok(with_login_item_status(
-            snapshot,
-            MacOsPlatformService.login_item_status(),
-        ))
+        live_login_item_status()
+            .and_then(|status| with_login_item_status(snapshot, status))
+            .map_err(|error| {
+                format!("preferences were saved, but their display status is unavailable: {error}")
+            })
     })
     .await
 }
@@ -198,6 +240,21 @@ pub(crate) async fn set_launch_at_login_enabled(
     crate::startup_state::prepare_off_main(move || update_launch_at_login(enabled)).await
 }
 
+#[cfg(windows)]
+fn update_launch_at_login(enabled: bool) -> Result<UiSettingsSnapshot, String> {
+    let store = settings_store()?;
+    let (snapshot, status) = cfw_windows_engine::set_windows_startup(enabled, || {
+        let mut preferences = store.read_or_default().map_err(|error| error.to_string())?;
+        preferences.launch_at_login = enabled;
+        write_preferences(&store, preferences)
+    })
+    .map_err(|error| error.to_string())?;
+    with_login_item_status(snapshot, status.into()).map_err(|error| {
+        format!("startup registration and preferences were saved, but their display status is unavailable: {error}")
+    })
+}
+
+#[cfg(target_os = "macos")]
 fn update_launch_at_login(enabled: bool) -> Result<UiSettingsSnapshot, String> {
     let store = settings_store()?;
     let mut preferences = store.read_or_default().map_err(|error| error.to_string())?;
@@ -245,10 +302,10 @@ fn update_launch_at_login(enabled: bool) -> Result<UiSettingsSnapshot, String> {
     }
     preferences.launch_at_login = enabled;
     match write_preferences(&store, preferences) {
-        Ok(snapshot) => Ok(with_login_item_status(
+        Ok(snapshot) => with_login_item_status(
             snapshot,
-            platform.login_item_status(),
-        )),
+            platform.login_item_status().into(),
+        ).map_err(|error| format!("Login Item and preferences were saved, but their display status is unavailable: {error}")),
         Err(persist_error) => match restore_login_item_status(&platform, original_status) {
             Ok(()) => Err(format!(
                 "failed to persist the Login Item preference; restored the previous macOS state: {persist_error}"
@@ -260,6 +317,7 @@ fn update_launch_at_login(enabled: bool) -> Result<UiSettingsSnapshot, String> {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn restore_login_item_status(
     platform: &MacOsPlatformService,
     original_status: ServiceModeStatus,
@@ -302,6 +360,7 @@ fn restore_login_item_status(
     }
 }
 
+#[cfg(target_os = "macos")]
 fn login_item_status_matches(
     current_status: ServiceModeStatus,
     expected_status: ServiceModeStatus,
@@ -337,7 +396,7 @@ mod tests {
             std::process::id(),
             TEST_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
-        let store = SettingsStore::new(cfw_core::MacOsAppPaths::from_app_home(root.join("app")));
+        let store = SettingsStore::new(cfw_core::AppPaths::from_app_home(root.join("app")));
         (root, store)
     }
 
@@ -361,6 +420,7 @@ mod tests {
         assert!(serde_json::from_value::<UiPreferences>(unsafe_value).is_err());
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn login_item_rollback_is_idempotent_for_equivalent_states() {
         assert!(login_item_status_matches(
@@ -385,42 +445,43 @@ mod tests {
         ));
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn login_item_snapshot_keeps_persisted_intent_and_live_status_distinct() {
         let cases = [
             (
                 false,
-                ServiceModeStatus::NotRegistered,
+                UiLoginItemLiveStatus::NotRegistered,
                 UiLoginItemLiveStatus::NotRegistered,
                 true,
             ),
             (
                 true,
-                ServiceModeStatus::NotFound,
+                UiLoginItemLiveStatus::NotFound,
                 UiLoginItemLiveStatus::NotFound,
                 false,
             ),
             (
                 false,
-                ServiceModeStatus::Enabled,
+                UiLoginItemLiveStatus::Enabled,
                 UiLoginItemLiveStatus::Enabled,
                 false,
             ),
             (
                 true,
-                ServiceModeStatus::Enabled,
+                UiLoginItemLiveStatus::Enabled,
                 UiLoginItemLiveStatus::Enabled,
                 true,
             ),
             (
                 true,
-                ServiceModeStatus::RequiresApproval,
+                UiLoginItemLiveStatus::RequiresApproval,
                 UiLoginItemLiveStatus::RequiresApproval,
                 false,
             ),
             (
                 false,
-                ServiceModeStatus::Unknown,
+                UiLoginItemLiveStatus::Unknown,
                 UiLoginItemLiveStatus::Unknown,
                 false,
             ),
@@ -437,9 +498,25 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_startup_reports_registration_without_claiming_os_approval() {
+        for intent in [false, true] {
+            let registered = launch_at_login_state(intent, UiLoginItemLiveStatus::Registered);
+            assert_eq!(registered.matches_persisted_intent, intent);
+            assert_eq!(
+                serde_json::to_value(registered).unwrap()["live_status"],
+                "registered"
+            );
+            let absent = launch_at_login_state(intent, UiLoginItemLiveStatus::NotRegistered);
+            assert_eq!(absent.matches_persisted_intent, !intent);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
     #[test]
     fn login_item_snapshot_has_a_stable_typed_wire_shape() {
-        let expected_locale = crate::i18n::resolve(cfw_core::UiLanguage::System);
+        let expected_locale = crate::i18n::resolve(cfw_core::UiLanguage::System).unwrap();
         let snapshot = with_login_item_status(
             SettingsSnapshot {
                 settings: UiPreferences {
@@ -448,8 +525,9 @@ mod tests {
                 },
                 persisted: true,
             },
-            ServiceModeStatus::RequiresApproval,
-        );
+            UiLoginItemLiveStatus::RequiresApproval,
+        )
+        .expect("resolve snapshot locale");
         assert_eq!(
             serde_json::to_value(snapshot).expect("serialize settings snapshot"),
             serde_json::json!({

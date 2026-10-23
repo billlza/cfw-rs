@@ -2,10 +2,13 @@ use serde::Serialize;
 use thiserror::Error;
 
 use super::admission::InstallAdmissionError;
+#[cfg(target_os = "macos")]
 use super::archive::UpdateArchiveError;
 use super::contract::UpdateContractError;
 use super::outcome::ReviewError;
+#[cfg(target_os = "macos")]
 use super::services::ServiceStateError;
+#[cfg(target_os = "macos")]
 use super::staged_bundle::StagedBundleError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +67,8 @@ pub(super) enum UpdateError {
     AuthorizationChanged,
     #[error("updater state lock failed")]
     StateLock,
+    #[error("updater state lost ownership of its staged resources")]
+    StateOwnership,
     #[error("updater state counter is exhausted")]
     StateCounterExhausted,
     #[error("an update check or release-page authorization is already in progress")]
@@ -138,10 +143,26 @@ pub(super) enum UpdateError {
         stage: &'static str,
         kind: std::io::ErrorKind,
     },
+    #[cfg(windows)]
+    #[error("private Windows update storage failed during {stage}: {source}")]
+    WindowsStorage {
+        stage: &'static str,
+        #[source]
+        source: cfw_windows_storage::Error,
+    },
+    #[cfg(windows)]
+    #[error(transparent)]
+    WindowsStaging(#[from] cfw_windows_engine::update_package::StagingError),
+    #[cfg(windows)]
+    #[error(transparent)]
+    WindowsPackage(#[from] cfw_windows_engine::update_package::PackageError),
+    #[cfg(target_os = "macos")]
     #[error(transparent)]
     Archive(#[from] UpdateArchiveError),
+    #[cfg(target_os = "macos")]
     #[error(transparent)]
     StagedBundle(#[from] StagedBundleError),
+    #[cfg(target_os = "macos")]
     #[error(transparent)]
     Services(#[from] ServiceStateError),
     #[error("the core did not stop for the update: {0}")]
@@ -150,6 +171,7 @@ pub(super) enum UpdateError {
     Journal(String),
     #[error("the update installer did not start: {0}")]
     InstallerStart(String),
+    #[cfg(target_os = "macos")]
     #[error("the update installer's log could not be opened ({0:?})")]
     InstallerLog(std::io::ErrorKind),
     #[error("the application lifecycle did not admit the update: {0}")]
@@ -217,9 +239,10 @@ impl UpdateError {
             Self::Contract(_) => ("metadata_contract", Category::Package),
             Self::MissingAuthorization => ("missing_authorization", Category::State),
             Self::AuthorizationChanged => ("authorization_changed", Category::State),
-            Self::StateLock | Self::StateCounterExhausted | Self::PreviousAttemptUnreviewed => {
-                ("updater_state", Category::Internal)
-            }
+            Self::StateLock
+            | Self::StateOwnership
+            | Self::StateCounterExhausted
+            | Self::PreviousAttemptUnreviewed => ("updater_state", Category::Internal),
             Self::Busy => ("busy", Category::Busy),
             Self::TlsProviderUnavailable => ("tls_unavailable", Category::Internal),
             Self::Network { .. } => ("network", Category::Network),
@@ -253,12 +276,46 @@ impl UpdateError {
             }
             Self::SignatureVerification => ("signature_mismatch", Category::Authenticity),
             Self::Staging { .. } => ("staging_io", Category::Storage),
+            #[cfg(windows)]
+            Self::WindowsStorage { .. } => ("staging_io", Category::Storage),
+            #[cfg(windows)]
+            Self::WindowsStaging(_) => ("staging_io", Category::Storage),
+            #[cfg(windows)]
+            Self::WindowsPackage(error) => {
+                use cfw_windows_engine::update_package::{PackageError, WorkerFailureCategory};
+                // Cleanup failure must not erase a prior authentication refusal.
+                let mut error = error;
+                while let PackageError::Cleanup { operation, .. } = error {
+                    error = operation;
+                }
+                match error {
+                    PackageError::Signature(_)
+                    | PackageError::PublisherMismatch
+                    | PackageError::WorkerRejected {
+                        category: WorkerFailureCategory::Authenticity,
+                        ..
+                    } => ("signature_mismatch", Category::Authenticity),
+                    PackageError::File(cfw_windows_engine::Error::Cancelled) => {
+                        ("download_cancelled", Category::State)
+                    }
+                    PackageError::PublisherUnavailable(_)
+                    | PackageError::WorkerRejected {
+                        category: WorkerFailureCategory::Environment,
+                        ..
+                    } => ("windows_publisher_unavailable", Category::Environment),
+                    _ => ("windows_package_invalid", Category::Package),
+                }
+            }
+            #[cfg(target_os = "macos")]
             Self::Archive(error) => (error.code(), Category::Package),
+            #[cfg(target_os = "macos")]
             Self::StagedBundle(error) => (error.code(), error.category()),
+            #[cfg(target_os = "macos")]
             Self::Services(error) => (error.code(), error.category()),
             Self::EngineStop(_) => ("engine_stop_failed", Category::Engine),
             Self::Journal(_) => ("journal_failed", Category::Storage),
             Self::InstallerStart(_) => ("installer_start_failed", Category::Internal),
+            #[cfg(target_os = "macos")]
             Self::InstallerLog(_) => ("installer_log_unavailable", Category::Storage),
             Self::Lifecycle(_) => ("lifecycle_busy", Category::Busy),
             Self::AppHome(_) => ("app_home_unavailable", Category::Storage),
@@ -281,6 +338,7 @@ mod tests {
             UpdateError::SignatureArchiveMismatch,
             UpdateError::SignatureVerification,
             UpdateError::ReleaseRejected,
+            #[cfg(target_os = "macos")]
             UpdateError::StagedBundle(StagedBundleError::SignatureRejected("codesign".into())),
         ] {
             assert_eq!(
@@ -332,16 +390,19 @@ mod tests {
         );
         // A review that could not finish is not a storage condition the user
         // can relieve by freeing space.
-        for error in [
-            UpdateError::PreviousAttempt(ReviewError::Unavailable("detail".into())),
-            UpdateError::PreviousAttempt(ReviewError::RecordDiscarded("detail".into())),
-        ] {
-            assert_eq!(
-                error.failure().category,
-                FailureCategory::Internal,
-                "{error}"
-            );
-        }
+        assert_eq!(
+            UpdateError::PreviousAttempt(ReviewError::Unavailable("detail".into()))
+                .failure()
+                .category,
+            FailureCategory::Internal
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            UpdateError::PreviousAttempt(ReviewError::RecordDiscarded("detail".into()))
+                .failure()
+                .category,
+            FailureCategory::Internal
+        );
     }
 
     #[test]
@@ -387,12 +448,18 @@ mod tests {
             UpdateError::ReleaseRejected,
             UpdateError::PreviousAttemptUnreviewed,
             UpdateError::PreviousAttempt(ReviewError::Unavailable("detail".into())),
+            #[cfg(target_os = "macos")]
             UpdateError::PreviousAttempt(ReviewError::RecordDiscarded("detail".into())),
+            #[cfg(target_os = "macos")]
             UpdateError::Services(ServiceStateError::Unavailable("detail".into())),
+            #[cfg(target_os = "macos")]
             UpdateError::InstallAdmission(InstallAdmissionError::StagingVolumeMismatch),
+            #[cfg(target_os = "macos")]
             UpdateError::Archive(UpdateArchiveError::EscapingSymlink),
+            #[cfg(target_os = "macos")]
             UpdateError::StagedBundle(StagedBundleError::RequiresNewerSystem),
             UpdateError::InstallerStart("detail".into()),
+            #[cfg(target_os = "macos")]
             UpdateError::InstallerLog(std::io::ErrorKind::PermissionDenied),
             UpdateError::AppHome("detail".into()),
             UpdateError::ProcessIdentity("detail".into()),

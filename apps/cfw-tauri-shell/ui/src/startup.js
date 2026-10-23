@@ -6,7 +6,7 @@ import { t, setLocale, resolveLocale } from "./i18n.js";
   function localizeStartup() {
     document.querySelectorAll("[data-i18n]").forEach((element) => { element.textContent = t(element.dataset.i18n); });
     const screen = document.querySelector(".startup-screen");
-    screen?.setAttribute("aria-label", t("Starting Clash for Mac"));
+    screen?.setAttribute("aria-label", t("Starting dashboard"));
   }
   localizeStartup();
   const deadlineMs = 15000;
@@ -66,7 +66,7 @@ import { t, setLocale, resolveLocale } from "./i18n.js";
     logs.textContent = t("Open diagnostic logs");
     logs.addEventListener("click", () => {
       invoke("reveal_logs_directory").catch(() => {
-        status.textContent = t("Logs could not be opened. Use Clash for Mac → Open diagnostic logs from the macOS menu bar.");
+        status.textContent = t("Logs could not be opened. Try Open diagnostic logs from the application menu.");
       });
     });
     panel.append(heading, detail, code, reload, logs, status);

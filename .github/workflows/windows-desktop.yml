@@ -1,0 +1,337 @@
+name: Windows desktop development build
+
+on:
+  push:
+    branches: [lza/cfw-0.5.0-windows-shell]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  desktop:
+    name: Windows x64 shared desktop application
+    runs-on: windows-2025
+    timeout-minutes: 50
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify source and read toolchain pins
+        id: pins
+        env:
+          EXPECTED_SOURCE: ${{ github.sha }}
+        run: |
+          $source = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $source -cne $env:EXPECTED_SOURCE) { throw 'Source identity mismatch' }
+          $pins = Get-Content scripts/dependency_pins.env -Raw
+          foreach ($name in @('RUST_VERSION', 'NODE_VERSION', 'NPM_VERSION', 'NPM_ARCHIVE_SHA256', 'PYTHON_VERSION')) {
+            $pinMatches = [regex]::Matches($pins, "(?m)^${name}=([A-Za-z0-9.]+)\r?`$")
+            if ($pinMatches.Count -ne 1) { throw "Missing or ambiguous pin: $name" }
+            "$name=$($pinMatches[0].Groups[1].Value)" >> $env:GITHUB_OUTPUT
+          }
+          New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence') -ErrorAction Stop | Out-Null
+          [ordered]@{ source=$source; phase='initialized'; release_accepted=$false } |
+            ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/run-receipt.json') -Encoding utf8NoBOM
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: ${{ steps.pins.outputs.RUST_VERSION }}
+          components: clippy,rustfmt
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ steps.pins.outputs.NODE_VERSION }}
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ steps.pins.outputs.PYTHON_VERSION }}
+      - name: Verify bounded WebView2 startup observation
+        run: |
+          python -m unittest discover -s scripts/windows/tests -p test_webview_probe.py -v 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/webview-probe-tests.log')
+          if ($LASTEXITCODE -ne 0) { throw 'WebView2 readiness boundary tests failed' }
+      - name: Build the pinned native engine for the installed desktop
+        run: |
+          $evidence = Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence'
+          $engineRoot = Join-Path $env:RUNNER_TEMP 'cfw-desktop-engine'
+          try {
+            python scripts/windows_engine.py build --repository "$pwd" --output $engineRoot 2>&1 |
+              Tee-Object -FilePath (Join-Path $evidence 'engine-build.log')
+            if ($LASTEXITCODE -ne 0) { throw 'Installed desktop engine build or GA contract tests failed' }
+          } finally {
+            $artifacts = Join-Path $engineRoot 'artifacts'
+            if (Test-Path -LiteralPath $artifacts -PathType Container) {
+              Copy-Item -LiteralPath $artifacts -Destination (Join-Path $evidence 'engine') -Recurse -ErrorAction Stop
+            }
+          }
+      - name: Prepare pinned npm and shared UI
+        env:
+          CFW_NPM_VERSION: ${{ steps.pins.outputs.NPM_VERSION }}
+          CFW_NPM_ARCHIVE_SHA256: ${{ steps.pins.outputs.NPM_ARCHIVE_SHA256 }}
+        run: |
+          Start-Transcript -LiteralPath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/ui-preparation.log') -ErrorAction Stop
+          try {
+            $npmRoot = Join-Path $env:RUNNER_TEMP 'cfw-desktop-npm'
+            New-Item -ItemType Directory -Path $npmRoot -ErrorAction Stop | Out-Null
+            $archive = Join-Path $npmRoot 'npm.tgz'
+            Invoke-WebRequest "https://registry.npmjs.org/npm/-/npm-$($env:CFW_NPM_VERSION).tgz" -OutFile $archive
+            if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:CFW_NPM_ARCHIVE_SHA256) { throw 'npm archive digest mismatch' }
+            tar -xzf $archive -C $npmRoot
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot extract pinned npm' }
+            $npmCli = Join-Path $npmRoot 'package/bin/npm-cli.js'
+            if ((node $npmCli --version) -cne $env:CFW_NPM_VERSION -or $LASTEXITCODE -ne 0) { throw 'npm version mismatch' }
+            Push-Location apps/cfw-tauri-shell
+            try {
+              node $npmCli ci --ignore-scripts=false --install-links=true
+              if ($LASTEXITCODE -ne 0) { throw 'Locked UI dependency installation failed' }
+            } finally { Pop-Location }
+            ./scripts/build_ui_windows.ps1
+            node $npmCli ci --prefix scripts/windows/gui --ignore-scripts --no-audit --no-fund
+            if ($LASTEXITCODE -ne 0) { throw 'Locked WebView2 validation tool installation failed' }
+          } finally { Stop-Transcript -ErrorAction Stop }
+      - name: Verify native desktop file boundaries
+        run: |
+          cargo clippy --locked -p cfw-windows-storage --all-targets -- -D warnings 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-storage-clippy.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Windows desktop storage Clippy failed' }
+          cargo test --locked -p cfw-windows-storage --all-targets 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-storage-tests.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Windows desktop native storage tests failed' }
+      - name: Verify Windows launch admission
+        run: |
+          $tests = Join-Path $env:RUNNER_TEMP 'cfw-desktop-launch-tests.exe'
+          New-Item -ItemType File -Path (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-launch-build.log') -ErrorAction Stop | Out-Null
+          rustc --edition=2024 --test apps/cfw-tauri-shell/src/launch.rs -D warnings -o $tests 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-launch-build.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Windows desktop launch test build failed' }
+          & $tests 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-launch-tests.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Windows desktop launch admission tests failed' }
+      - name: Verify native desktop build identity
+        run: |
+          cargo clippy --locked -p cfw-core --all-targets -- -D warnings 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-product-clippy.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Windows desktop product identity Clippy failed' }
+          cargo test --locked -p cfw-core product::tests 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-product-tests.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Windows desktop product identity test failed' }
+          cargo test --locked -p cfw-core update:: 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-update-contract-tests.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Windows desktop release target contract tests failed' }
+      - name: Verify native desktop process observations
+        env:
+          CFW_NATIVE_PROCESS_OBSERVATION_TESTS: '1'
+          CFW_NATIVE_SERVICE_SOURCE: ${{ github.sha }}
+        run: |
+          cargo clippy --locked -p cfw-windows-engine --all-targets --features native-engine-validation,native-service-validation -- -D warnings 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-process-clippy.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Windows desktop process Clippy failed' }
+          cargo test --locked -p cfw-windows-engine --test desktop_process_observation 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-process-tests.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Windows desktop native process tests failed' }
+          cargo test --locked -p cfw-windows-engine --lib peer::observation::tests 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-process-error-tests.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Windows desktop process error classification failed' }
+          cargo run --locked -p cfw-windows-engine --features native-service-validation --example native-service-fixture -- --desktop-process-validation 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-medium-process-tests.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Windows medium-integrity desktop process observation failed' }
+      - name: Verify native shell dispatch
+        env:
+          CFW_NATIVE_SHELL_TESTS: '1'
+          CFW_NATIVE_SHELL_SOURCE: ${{ github.sha }}
+        run: |
+          cargo clippy --locked -p cfw-platform --all-targets --features native-shell-validation -- -D warnings 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-shell-clippy.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Windows native shell Clippy failed' }
+          cargo build --locked -p cfw-platform --example native-shell-dispatch-fixture --features native-shell-validation 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-shell-build.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Windows native shell recipient build failed' }
+          $env:CFW_NATIVE_SHELL_FIXTURE = Join-Path $PWD 'target/debug/examples/native-shell-dispatch-fixture.exe'
+          cargo test --locked -p cfw-platform --test native_shell_dispatch --features native-shell-validation -- --test-threads=1 --nocapture 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-shell-tests.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Windows native shell dispatch validation failed' }
+      - name: Check the complete Windows desktop target
+        run: |
+          cargo check --locked -p cfw-tauri-shell --bin clash-for-mac 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/check.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Windows desktop type check failed' }
+      - name: Deny desktop warnings and check formatting
+        run: |
+          cargo fmt --all -- --check
+          if ($LASTEXITCODE -ne 0) { throw 'Formatting differs' }
+          cargo clippy --locked -p cfw-tauri-shell --all-targets -- -D warnings 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/clippy.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Windows desktop Clippy failed' }
+      - name: Verify Windows desktop and updater contracts
+        run: |
+          cargo test --locked -p cfw-tauri-shell --test windows_update_journal -- --test-threads=1 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-update-journal-tests.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Windows updater journal or process lease verification failed' }
+          cargo test --locked -p cfw-tauri-shell --bin clash-for-mac -- --test-threads=1 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/desktop-tests.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Windows desktop or updater verification failed' }
+      - name: Build the desktop development executable
+        run: |
+          cargo build --locked -p cfw-tauri-shell --bin clash-for-mac 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/build.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Windows desktop build failed' }
+          $binary = Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/Clash for Windows.exe'
+          Copy-Item -LiteralPath 'target/debug/clash-for-mac.exe' -Destination $binary -ErrorAction Stop
+          [ordered]@{
+            source = (git rev-parse HEAD)
+            target = 'x86_64-pc-windows-msvc'
+            profile = 'debug'
+            filename = 'Clash for Windows.exe'
+            bytes = (Get-Item -LiteralPath $binary).Length
+            sha256 = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
+            native_gui_exercised = $false
+            installed_runtime_exercised = $false
+            release_accepted = $false
+          } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/build-receipt.json') -Encoding utf8NoBOM
+      - name: Execute copied desktop startup admission
+        run: |
+          $evidence = Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence'
+          $binary = Join-Path $evidence 'Clash for Windows.exe'
+          $cases = @(
+            @{ name='invalid-finisher-transaction'; arguments=@('--finish-update-v1', 'not-a-transaction'); exit=64; message='Windows update argument admission:' },
+            @{ name='invalid-update-restart'; arguments=@('--resume-update-v1', 'not-a-transaction'); exit=78; message='update restart admission failed:' },
+            @{ name='apple-maintenance-refused'; arguments=@('--service-maintenance-v2', 'status'); exit=64; message='startup argument admission failed:' }
+          )
+          $receipts = @()
+          foreach ($case in $cases) {
+            $start = [System.Diagnostics.ProcessStartInfo]::new()
+            $start.FileName = $binary
+            $start.WorkingDirectory = $evidence
+            $start.UseShellExecute = $false
+            $start.RedirectStandardOutput = $true
+            $start.RedirectStandardError = $true
+            foreach ($argument in $case.arguments) { $start.ArgumentList.Add($argument) }
+            $process = [System.Diagnostics.Process]::new()
+            $process.StartInfo = $start
+            try {
+              if (-not $process.Start()) { throw "Cannot start copied desktop: $($case.name)" }
+              $stdout = $process.StandardOutput.ReadToEndAsync()
+              $stderr = $process.StandardError.ReadToEndAsync()
+              $exited = $process.WaitForExit(15000)
+              if (-not $exited) {
+                $process.Kill($true)
+                $process.WaitForExit()
+              }
+              $output = $stdout.GetAwaiter().GetResult()
+              $errors = $stderr.GetAwaiter().GetResult()
+              ($output + $errors) | Set-Content -LiteralPath (Join-Path $evidence "$($case.name).log") -Encoding utf8NoBOM
+              if (-not $exited) { throw "Copied desktop startup admission timed out: $($case.name)" }
+              if ($process.ExitCode -ne $case.exit -or -not $errors.Contains($case.message)) {
+                throw "Copied desktop did not reach the expected admission boundary: $($case.name), exit=$($process.ExitCode)"
+              }
+              $receipts += [ordered]@{ name=$case.name; exit_code=$process.ExitCode }
+            } finally { $process.Dispose() }
+          }
+          [ordered]@{
+            source = (git rev-parse HEAD)
+            sha256 = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
+            cases = $receipts
+            native_gui_exercised = $false
+            installed_runtime_exercised = $false
+            update_handoff_exercised = $false
+            release_accepted = $false
+          } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $evidence 'startup-receipt.json') -Encoding utf8NoBOM
+      - name: Preserve and verify desktop-generated source changes
+        run: |
+          $evidence = Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence'
+          $status = @(git status --porcelain=v1 --untracked-files=all)
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot observe desktop build source status' }
+          $status | Set-Content -LiteralPath (Join-Path $evidence 'desktop-generated-source-status.txt') -Encoding utf8NoBOM
+          $schemaDiff = @(git diff -- apps/cfw-tauri-shell/gen/schemas/)
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot preserve generated schema differences' }
+          $schemaText = if ($schemaDiff.Count -eq 0) { '' } else { ($schemaDiff -join "`n") + "`n" }
+          [IO.File]::WriteAllText((Join-Path $evidence 'desktop-generated-schemas.diff'), $schemaText, [Text.UTF8Encoding]::new($false))
+          $generated = @(
+            'apps/cfw-tauri-shell/gen/schemas/windows-schema.json',
+            'apps/cfw-tauri-shell/gen/schemas/desktop-schema.json',
+            'apps/cfw-tauri-shell/gen/schemas/acl-manifests.json',
+            'apps/cfw-tauri-shell/gen/schemas/capabilities.json'
+          )
+          foreach ($entry in $status) {
+            if ($entry.Length -lt 4 -or $generated -cnotcontains $entry.Substring(3)) {
+              throw "Desktop build changed a source outside Tauri's generated schemas: $entry"
+            }
+          }
+          Copy-Item -LiteralPath 'apps/cfw-tauri-shell/gen/schemas' -Destination (Join-Path $evidence 'generated-schemas') -Recurse -ErrorAction Stop
+      - name: Build the real desktop development MSI
+        run: |
+          $evidence = Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence'
+          cargo build --locked -p cfw-windows-engine --bin cfw-windows-runtime 2>&1 |
+            Tee-Object -FilePath (Join-Path $evidence 'runtime-build.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Installed desktop runtime build failed' }
+          ./scripts/windows/build_development_msi.ps1 -Runtime (Join-Path $PWD 'target/debug/cfw-windows-runtime.exe') `
+            -DesktopDirectory $evidence -EngineDirectory (Join-Path $evidence 'engine') `
+            -Source (git rev-parse HEAD) -Output (Join-Path $evidence 'msi')
+      - name: Install and exercise the actual ordinary-user desktop
+        # Four separately retained GUI sessions (each bounded at 200 seconds)
+        # plus bounded MSI work.
+        timeout-minutes: 24
+        env:
+          CFW_NATIVE_SERVICE_MUTATION_TESTS: '1'
+        run: |
+          $evidence = Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence'
+          ./scripts/windows/validate_installed_gui.ps1 -PackageDirectory (Join-Path $evidence 'msi') `
+            -Launcher (Join-Path $PWD 'target/debug/examples/native-service-fixture.exe') `
+            -Source (git rev-parse HEAD) -Output (Join-Path $evidence 'installed-gui')
+      - name: Preserve desktop build output and diagnostics
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: cfw-desktop-development-windows-x64
+          path: ${{ runner.temp }}/cfw-desktop-evidence/
+          if-no-files-found: error
+          retention-days: 14
+
+  package-inspection:
+    name: Windows native update package inspection
+    runs-on: windows-2025
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify package source and Rust pin
+        id: pins
+        env:
+          EXPECTED_SOURCE: ${{ github.sha }}
+        run: |
+          $source = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $source -cne $env:EXPECTED_SOURCE) { throw 'Source identity mismatch' }
+          $pins = Get-Content scripts/dependency_pins.env -Raw
+          $pinMatches = [regex]::Matches($pins, '(?m)^RUST_VERSION=([0-9.]+)\r?$')
+          if ($pinMatches.Count -ne 1) { throw 'Missing or ambiguous Rust pin' }
+          "RUST_VERSION=$($pinMatches[0].Groups[1].Value)" >> $env:GITHUB_OUTPUT
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: ${{ steps.pins.outputs.RUST_VERSION }}
+          components: clippy,rustfmt
+      - name: Verify native signed MSI inspection
+        timeout-minutes: 8
+        env:
+          CFW_NATIVE_PACKAGE_TESTS: '1'
+          CFW_PACKAGE_SOURCE: ${{ github.sha }}
+        run: |
+          ./scripts/fixtures/windows_update_package.ps1 -Source $env:CFW_PACKAGE_SOURCE -Evidence (Join-Path $env:RUNNER_TEMP 'cfw-package-evidence')
+      - name: Preserve package inspection output and diagnostics
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: cfw-update-package-inspection-windows-x64
+          path: ${{ runner.temp }}/cfw-package-evidence/
+          if-no-files-found: error
+          retention-days: 14

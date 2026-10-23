@@ -1,6 +1,5 @@
 use std::fs::File;
 use std::io::Read;
-use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 
 use serde::{Deserialize, Serialize};
 
@@ -48,16 +47,7 @@ pub(crate) fn encode(selection: &ProfileSelection) -> Result<Vec<u8>, ProfileErr
 }
 
 pub(crate) fn decode(mut file: File) -> Result<ProfileSelection, ProfileError> {
-    let metadata = file.metadata()?;
-    if !metadata.file_type().is_file()
-        || metadata.file_type().is_symlink()
-        || metadata.file_type().is_socket()
-        || metadata.nlink() != 1
-        || metadata.permissions().mode() & 0o777 != 0o600
-        || metadata.uid() != effective_user_id()
-    {
-        return Err(ProfileError::UnsafeSelectionFile);
-    }
+    let metadata = crate::storage::private_metadata(&file, ProfileError::UnsafeSelectionFile)?;
     if metadata.len() > MAX_SELECTION_BYTES as u64 {
         return Err(ProfileError::SelectionTooLarge {
             actual: metadata.len(),
@@ -104,10 +94,6 @@ pub(crate) fn validate_digest(digest: &str) -> Result<(), ProfileError> {
             "profile_digest must be a lowercase SHA-256 digest".to_owned(),
         ))
     }
-}
-
-fn effective_user_id() -> u32 {
-    unsafe { libc::geteuid() }
 }
 
 #[cfg(test)]

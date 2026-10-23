@@ -1,14 +1,18 @@
 use std::ffi::OsString;
 
+#[cfg(target_os = "macos")]
 use crate::legacy::{LaunchArguments, parse_launch_arguments};
 
 pub(crate) const STARTUP_USAGE_EXIT_CODE: i32 = 64;
 pub(crate) const STARTUP_ADMISSION_EXIT_CODE: i32 = 78;
-pub(crate) const SERVICE_MAINTENANCE_FLAG: &str = "--service-maintenance-v2";
+#[cfg(target_os = "macos")]
+use crate::service_maintenance::SERVICE_MAINTENANCE_FLAG;
+pub(crate) const FINISH_UPDATE_FLAG: &str = "--finish-update-v1";
 
-#[cfg(feature = "physical-release-evidence")]
+#[cfg(all(target_os = "macos", feature = "physical-release-evidence"))]
 pub(crate) const PACKET_EVIDENCE_FLAG: &str = "--physical-packet-evidence-v5";
 
+#[cfg(target_os = "macos")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ServiceMaintenanceAction {
     ProveOff,
@@ -27,15 +31,21 @@ pub(crate) enum ServiceMaintenanceAction {
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum LaunchMode {
     Dashboard,
+    #[cfg(target_os = "macos")]
     MigrationHandoff {
         token: String,
     },
+    #[cfg(target_os = "macos")]
     ServiceMaintenance(ServiceMaintenanceAction),
     /// The installer process of one recorded update transaction.
     FinishUpdate {
         transaction: String,
     },
-    #[cfg(feature = "physical-release-evidence")]
+    #[cfg(windows)]
+    ResumeAfterUpdate {
+        transaction: String,
+    },
+    #[cfg(all(target_os = "macos", feature = "physical-release-evidence"))]
     PacketEvidence,
 }
 
@@ -43,10 +53,12 @@ impl std::fmt::Debug for LaunchMode {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Dashboard => formatter.write_str("Dashboard"),
+            #[cfg(target_os = "macos")]
             Self::MigrationHandoff { .. } => formatter
                 .debug_struct("MigrationHandoff")
                 .field("token", &"[redacted]")
                 .finish(),
+            #[cfg(target_os = "macos")]
             Self::ServiceMaintenance(action) => formatter
                 .debug_tuple("ServiceMaintenance")
                 .field(action)
@@ -55,7 +67,12 @@ impl std::fmt::Debug for LaunchMode {
                 .debug_struct("FinishUpdate")
                 .field("transaction", transaction)
                 .finish(),
-            #[cfg(feature = "physical-release-evidence")]
+            #[cfg(windows)]
+            Self::ResumeAfterUpdate { transaction } => formatter
+                .debug_struct("ResumeAfterUpdate")
+                .field("transaction", transaction)
+                .finish(),
+            #[cfg(all(target_os = "macos", feature = "physical-release-evidence"))]
             Self::PacketEvidence => formatter.write_str("PacketEvidence"),
         }
     }
@@ -65,6 +82,18 @@ pub(crate) fn parse_launch_mode(arguments: &[OsString]) -> Result<LaunchMode, St
     if arguments.is_empty() {
         return Ok(LaunchMode::Dashboard);
     }
+    #[cfg(windows)]
+    if let [flag, transaction] = arguments
+        && flag == "--resume-update-v1"
+    {
+        let transaction = transaction
+            .to_str()
+            .ok_or("update restart transaction is not UTF-8")?;
+        return Ok(LaunchMode::ResumeAfterUpdate {
+            transaction: transaction.to_owned(),
+        });
+    }
+    #[cfg(target_os = "macos")]
     if let [flag, action] = arguments
         && flag == SERVICE_MAINTENANCE_FLAG
     {
@@ -93,7 +122,7 @@ pub(crate) fn parse_launch_mode(arguments: &[OsString]) -> Result<LaunchMode, St
         return Ok(LaunchMode::ServiceMaintenance(action));
     }
     if let [flag, transaction] = arguments
-        && flag == crate::updater::FINISH_UPDATE_FLAG
+        && flag == FINISH_UPDATE_FLAG
     {
         let transaction = transaction
             .to_str()
@@ -102,15 +131,27 @@ pub(crate) fn parse_launch_mode(arguments: &[OsString]) -> Result<LaunchMode, St
             transaction: transaction.to_owned(),
         });
     }
-    #[cfg(feature = "physical-release-evidence")]
+    #[cfg(all(target_os = "macos", feature = "physical-release-evidence"))]
     if arguments == [OsString::from(PACKET_EVIDENCE_FLAG)] {
         return Ok(LaunchMode::PacketEvidence);
     }
-    match parse_launch_arguments(arguments)? {
-        LaunchArguments::MigrationHandoff { token } => Ok(LaunchMode::MigrationHandoff { token }),
-        LaunchArguments::Dashboard => {
-            Err("startup arguments are not a supported exact mode".into())
+    #[cfg(target_os = "macos")]
+    {
+        match parse_launch_arguments(arguments)? {
+            LaunchArguments::MigrationHandoff { token } => {
+                Ok(LaunchMode::MigrationHandoff { token })
+            }
+            LaunchArguments::Dashboard => {
+                Err("startup arguments are not a supported exact mode".into())
+            }
         }
+    }
+    #[cfg(windows)]
+    {
+        // Windows 0.5 is the first release of this implementation. CFM's
+        // historical migration and Apple service commands carry no Windows
+        // authority and must fail before startup performs any I/O.
+        Err("startup arguments are not a supported exact Windows mode".into())
     }
 }
 
@@ -128,9 +169,9 @@ mod tests {
             vec![OsString::from("--unknown")],
             vec![OsString::from("profile.json")],
             vec![OsString::from("--migration-handoff")],
-            vec![OsString::from(SERVICE_MAINTENANCE_FLAG)],
+            vec![OsString::from("--service-maintenance-v2")],
             vec![
-                OsString::from(SERVICE_MAINTENANCE_FLAG),
+                OsString::from("--service-maintenance-v2"),
                 OsString::from("unknown"),
             ],
         ] {
@@ -138,6 +179,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn service_maintenance_modes_are_exact_and_closed() {
         let cases = [
@@ -202,7 +244,7 @@ mod tests {
 
     #[test]
     fn update_installer_mode_takes_exactly_one_transaction() {
-        let flag = OsString::from(crate::updater::FINISH_UPDATE_FLAG);
+        let flag = OsString::from(FINISH_UPDATE_FLAG);
         assert_eq!(
             parse_launch_mode(&[
                 flag.clone(),
@@ -217,7 +259,7 @@ mod tests {
         assert!(parse_launch_mode(&[flag, OsString::from("one"), OsString::from("two")]).is_err());
     }
 
-    #[cfg(feature = "physical-release-evidence")]
+    #[cfg(all(target_os = "macos", feature = "physical-release-evidence"))]
     #[test]
     fn packet_evidence_mode_has_one_exact_secret_free_shape() {
         assert_eq!(
@@ -230,6 +272,57 @@ mod tests {
                 OsString::from("--extra"),
             ])
             .is_err()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_rejects_every_apple_service_action_and_migration_handoff() {
+        for action in [
+            "prove-off",
+            "prove-installed-40019-off",
+            "status",
+            "retire-orphaned-services",
+            "unregister-proxy-agent",
+            "unregister-installed-40019-proxy-agent",
+            "unregister-global-authority",
+            "unregister-installed-40019-global-authority",
+            "recover-installed-40019-global-authority",
+            "register-global-authority",
+            "register-proxy-agent",
+        ] {
+            assert!(
+                parse_launch_mode(&[
+                    OsString::from("--service-maintenance-v2"),
+                    OsString::from(action),
+                ])
+                .is_err(),
+                "{action}"
+            );
+        }
+        for arguments in [
+            vec![
+                OsString::from("--migration-handoff"),
+                OsString::from("--migration-ticket"),
+                OsString::from("00000000-0000-4000-8000-000000000001"),
+            ],
+            vec![OsString::from("--physical-packet-evidence-v5")],
+        ] {
+            assert!(parse_launch_mode(&arguments).is_err());
+        }
+        assert_ne!(STARTUP_USAGE_EXIT_CODE, 0);
+        assert_ne!(STARTUP_ADMISSION_EXIT_CODE, 0);
+        assert_ne!(STARTUP_USAGE_EXIT_CODE, STARTUP_ADMISSION_EXIT_CODE);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_non_unicode_arguments_never_become_dashboard_or_update_authority() {
+        use std::os::windows::ffi::OsStringExt;
+        let unpaired_surrogate = OsString::from_wide(&[0xd800]);
+        assert!(parse_launch_mode(std::slice::from_ref(&unpaired_surrogate)).is_err());
+        assert!(
+            parse_launch_mode(&[OsString::from(FINISH_UPDATE_FLAG), unpaired_surrogate]).is_err()
         );
     }
 }

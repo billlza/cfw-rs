@@ -424,7 +424,7 @@ mod tests {
     use std::cell::Cell;
     use std::fs;
 
-    use cfw_core::MacOsAppPaths;
+    use cfw_core::AppPaths;
 
     use super::*;
 
@@ -472,7 +472,7 @@ mod tests {
     #[test]
     fn active_fresh_replacements_verify_real_resources_without_proxy_queries() {
         let temporary = tempfile::tempdir().expect("fresh recovery fixture");
-        let store = SettingsStore::new(MacOsAppPaths::from_app_home(temporary.path().join("app")));
+        let store = SettingsStore::new(AppPaths::from_app_home(temporary.path().join("app")));
         store.ensure_layout().expect("new settings layout");
         store
             .commit_legacy_retirement()
@@ -501,7 +501,7 @@ mod tests {
     #[test]
     fn active_fresh_system_proxy_cannot_skip_new_legacy_resources() {
         let temporary = tempfile::tempdir().expect("fresh recovery fixture");
-        let store = SettingsStore::new(MacOsAppPaths::from_app_home(temporary.path().join("app")));
+        let store = SettingsStore::new(AppPaths::from_app_home(temporary.path().join("app")));
         store.ensure_layout().expect("new settings layout");
         for path in [
             store.paths().legacy_settings_file.clone(),

@@ -1,0 +1,477 @@
+name: Windows shared contracts
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-contracts-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  wintun-lifecycle:
+    name: Windows Wintun adapter lifecycle
+    runs-on: windows-2025
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Verify driver qualification source and toolchain pins
+        id: pins
+        env:
+          EXPECTED_SOURCE: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          $source = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $source -cne $env:EXPECTED_SOURCE) { throw 'Driver qualification source mismatch' }
+          $pins = Get-Content scripts/dependency_pins.env -Raw
+          foreach ($name in @('RUST_VERSION', 'PYTHON_VERSION')) {
+            $values = [regex]::Matches($pins, "(?m)^${name}=([0-9]+\.[0-9]+\.[0-9]+)\r?`$")
+            if ($values.Count -ne 1) { throw "Missing or ambiguous pin: $name" }
+            "$name=$($values[0].Groups[1].Value)" >> $env:GITHUB_OUTPUT
+          }
+          $evidence = Join-Path $env:RUNNER_TEMP 'cfw-wintun-validation'
+          New-Item -ItemType Directory -Path $evidence -ErrorAction Stop | Out-Null
+          [ordered]@{ source=$source; phase='initialized'; release_accepted=$false } | ConvertTo-Json |
+            Set-Content -LiteralPath (Join-Path $evidence 'source.json') -Encoding utf8NoBOM
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: ${{ steps.pins.outputs.RUST_VERSION }}
+          components: clippy,rustfmt
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ steps.pins.outputs.PYTHON_VERSION }}
+      - name: Verify and stage the official driver distribution
+        run: |
+          $evidence = Join-Path $env:RUNNER_TEMP 'cfw-wintun-validation'
+          python -m unittest discover -s scripts/tests -p test_wintun_validation_staging.py -v 2>&1 |
+            Tee-Object -FilePath (Join-Path $evidence 'staging-tests.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Wintun staging boundary tests failed' }
+          python scripts/stage_wintun_validation.py --repository "$pwd" --output (Join-Path $evidence 'distribution') 2>&1 |
+            Tee-Object -FilePath (Join-Path $evidence 'staging.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Wintun distribution verification failed' }
+      - name: Build the isolated native lifecycle probe
+        run: |
+          $evidence = Join-Path $env:RUNNER_TEMP 'cfw-wintun-validation'
+          cargo test --locked -p cfw-windows-engine --lib --features native-service-validation packet 2>&1 |
+            Tee-Object -FilePath (Join-Path $evidence 'packet-contract-tests.log') | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw 'Wintun packet boundary tests failed' }
+          cargo clippy --locked -p cfw-windows-engine --features native-service-validation --example native-wintun-probe -- -D warnings 2>&1 |
+            Tee-Object -FilePath (Join-Path $evidence 'clippy.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Wintun lifecycle probe Clippy failed' }
+          cargo build --locked -p cfw-windows-engine --features native-service-validation --example native-wintun-probe 2>&1 |
+            Tee-Object -FilePath (Join-Path $evidence 'build.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Wintun lifecycle probe build failed' }
+          $probe = Join-Path $PWD 'target/debug/examples/native-wintun-probe.exe'
+          $copied = Join-Path $evidence 'native-wintun-probe.exe'
+          Copy-Item -LiteralPath $probe -Destination $copied -ErrorAction Stop
+          $digest = (Get-FileHash $probe -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ((Get-FileHash $copied -Algorithm SHA256).Hash.ToLowerInvariant() -cne $digest) { throw 'Copied Wintun probe changed' }
+          [ordered]@{ source=(git rev-parse HEAD); filename='native-wintun-probe.exe'; bytes=(Get-Item $copied).Length; sha256=$digest } |
+            ConvertTo-Json | Set-Content -LiteralPath (Join-Path $evidence 'probe.json') -Encoding utf8NoBOM
+      - name: Observe normal adapter retirement and owned recovery after abrupt exit
+        env:
+          CFW_NATIVE_TUN_MUTATION_TESTS: '1'
+        run: |
+          $evidence = Join-Path $env:RUNNER_TEMP 'cfw-wintun-validation'
+          ./scripts/windows/validate_wintun_lifecycle.ps1 -Probe (Join-Path $evidence 'native-wintun-probe.exe') `
+            -Payload (Join-Path $evidence 'distribution/payload') -Output (Join-Path $evidence 'lifecycle') -Source (git rev-parse HEAD)
+      - name: Preserve driver lifecycle observations
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: cfw-wintun-validation-windows-x64
+          path: ${{ runner.temp }}/cfw-wintun-validation/
+          if-no-files-found: error
+          retention-days: 14
+
+  engine:
+    name: Windows x64 engine build and loopback traffic
+    runs-on: windows-2025
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Verify source identity and read the pinned Python version
+        id: engine-pins
+        env:
+          EXPECTED_SOURCE: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          $actualSource = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $actualSource -cne $env:EXPECTED_SOURCE) { throw "Source identity mismatch" }
+          $pins = Get-Content scripts/dependency_pins.env -Raw
+          foreach ($name in @('PYTHON_VERSION', 'RUST_VERSION')) {
+            $versions = [regex]::Matches($pins, "(?m)^${name}=([0-9]+\.[0-9]+\.[0-9]+)\r?`$")
+            if ($versions.Count -ne 1) { throw "Missing or ambiguous tool pin: $name" }
+            "$name=$($versions[0].Groups[1].Value)" >> $env:GITHUB_OUTPUT
+          }
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ steps.engine-pins.outputs.PYTHON_VERSION }}
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: ${{ steps.engine-pins.outputs.RUST_VERSION }}
+      - name: Build and test the exact CFM engine source on Windows
+        run: |
+          python -m unittest discover -s scripts/tests -p test_windows_engine.py -v
+          if ($LASTEXITCODE -ne 0) { throw "Windows engine source contract tests failed" }
+          python scripts/windows_engine.py build --repository "$pwd" --output "$env:RUNNER_TEMP/cfw-windows-engine"
+      - name: Verify real loopback proxy traffic and child cleanup
+        run: python scripts/fixtures/windows_engine_smoke.py --artifacts "$env:RUNNER_TEMP/cfw-windows-engine/artifacts"
+      - name: Verify the Rust owner against the real native engine host
+        run: |
+          $artifactRoot = Join-Path $env:RUNNER_TEMP 'cfw-windows-engine/artifacts'
+          $receipt = Get-Content (Join-Path $artifactRoot 'build-receipt.json') -Raw | ConvertFrom-Json
+          $policyPath = Join-Path $env:SystemRoot 'PolicyDefinitions/inetres.admx'
+          [xml]$policyDefinitions = Get-Content $policyPath -Raw -ErrorAction Stop
+          $proxyPolicyBindings = @(
+            @{ Value = 'Proxy'; Key = 'Software\Policies\Microsoft\Internet Explorer\Control Panel' },
+            @{ Value = 'Autoconfig'; Key = 'Software\Policies\Microsoft\Internet Explorer\Control Panel' },
+            @{ Value = 'ProxySettingsPerUser'; Key = 'Software\Policies\Microsoft\Windows\CurrentVersion\Internet Settings' }
+          )
+          foreach ($binding in $proxyPolicyBindings) {
+            $proxyPolicies = @($policyDefinitions.policyDefinitions.policies.policy | Where-Object {
+              $_.key -ieq $binding.Key -and $_.valueName -ieq $binding.Value
+            })
+            if ($proxyPolicies.Count -ne 1) { throw "Missing or ambiguous installed proxy policy mapping: $($binding.Value)" }
+            "Verified Windows policy: $($proxyPolicies[0].name), value=$($binding.Value), scope=$($proxyPolicies[0].class)"
+          }
+          $env:CFW_ENGINE_HOST_PATH = Join-Path $artifactRoot $receipt.host_artifact.filename
+          $env:CFW_ENGINE_HOST_SHA256 = $receipt.host_artifact.sha256
+          $env:CFW_ENGINE_HOST_VERSION = $receipt.engine_version.TrimStart('v')
+          # This job owns a disposable Windows user context. The proxy tests
+          # require explicit opt-in, save the actual settings and restore them.
+          $env:CFW_NATIVE_PROXY_MUTATION_TESTS = '1'
+          $env:CFW_NATIVE_PROXY_RECEIPTS = $artifactRoot
+          $env:CFW_NATIVE_PROXY_SOURCE = $receipt.product_source
+          "Native proxy test session: $((Get-Process -Id $PID).SessionId)"
+          cargo test --locked -p cfw-windows-engine --features native-engine-validation --test native_engine -- --test-threads=1 --nocapture 2>&1 | Tee-Object -FilePath (Join-Path $artifactRoot 'rust-host-tests.txt')
+          if ($LASTEXITCODE -ne 0) { throw "Native Rust engine ownership validation failed" }
+          $env:CFW_NATIVE_SERVICE_MUTATION_TESTS = '1'
+          $env:CFW_NATIVE_SERVICE_SOURCE = $receipt.product_source
+          $env:CFW_NATIVE_SERVICE_RECEIPTS = $artifactRoot
+          cargo test --locked -p cfw-windows-engine --features native-service-validation --example native-service-fixture release_observation:: -- --test-threads=1 2>&1 | Tee-Object -FilePath (Join-Path $artifactRoot 'release-observation-tests.txt')
+          if ($LASTEXITCODE -ne 0) { throw "Windows product observation schema tests failed" }
+          cargo run --locked -p cfw-windows-engine --features native-service-validation --example native-service-fixture -- --runtime-validation 2>&1 | Tee-Object -FilePath (Join-Path $artifactRoot 'user-agent-runtime-tests.txt')
+          if ($LASTEXITCODE -ne 0) { throw "Native UserAgent engine and proxy lifecycle validation failed" }
+          cargo run --locked -p cfw-windows-engine --features native-service-validation --example native-service-fixture -- --runtime-restart-validation 2>&1 | Tee-Object -FilePath (Join-Path $artifactRoot 'runtime-restart-tests.txt')
+          if ($LASTEXITCODE -ne 0) { throw "Native SCM crash and runtime recovery validation failed" }
+          cargo run --locked -p cfw-windows-engine --features native-service-validation --example native-service-fixture -- --runtime-local-restart-validation 2>&1 | Tee-Object -FilePath (Join-Path $artifactRoot 'runtime-local-restart-tests.txt')
+          if ($LASTEXITCODE -ne 0) { throw "Native SCM LocalProxy crash recovery validation failed" }
+          cargo build --locked -p cfw-windows-engine --bin cfw-windows-runtime
+          if ($LASTEXITCODE -ne 0) { throw "Product Windows runtime build failed" }
+          ./scripts/fixtures/windows_installed_runtime.ps1 -Runtime (Join-Path $PWD 'target/debug/cfw-windows-runtime.exe') -DesktopFixture (Join-Path $PWD 'target/debug/examples/native-service-fixture.exe') -Engine $env:CFW_ENGINE_HOST_PATH -EngineVersion $env:CFW_ENGINE_HOST_VERSION -Source $receipt.product_source -Receipts $artifactRoot
+      - name: Forward real Windows traffic through Wintun, the packet pump and the native engine
+        # Runs last: it installs the Wintun driver and briefly owns one test
+        # address and host route per IP family on its own adapter in this
+        # disposable VM.
+        timeout-minutes: 8
+        env:
+          CFW_NATIVE_TUN_MUTATION_TESTS: '1'
+        run: |
+          $artifactRoot = Join-Path $env:RUNNER_TEMP 'cfw-windows-engine/artifacts'
+          $receipt = Get-Content (Join-Path $artifactRoot 'build-receipt.json') -Raw | ConvertFrom-Json
+          $source = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $source -cne $receipt.product_source) { throw 'Forwarding validation source mismatch' }
+          $dll = Join-Path $artifactRoot $receipt.wintun_artifact.filename
+          if ((Get-FileHash $dll -Algorithm SHA256).Hash.ToLowerInvariant() -cne $receipt.wintun_artifact.sha256) { throw 'Engine-pinned Wintun DLL changed' }
+          $signature = Get-AuthenticodeSignature -FilePath $dll
+          if ($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate) { throw "Official Wintun signature is not valid: $($signature.Status)" }
+          $engine = Join-Path $artifactRoot $receipt.host_artifact.filename
+          if ((Get-FileHash $engine -Algorithm SHA256).Hash.ToLowerInvariant() -cne $receipt.host_artifact.sha256) { throw 'Engine host changed after its build receipt' }
+          cargo build --locked -p cfw-windows-engine --features native-service-validation --example native-wintun-probe 2>&1 |
+            Tee-Object -FilePath (Join-Path $artifactRoot 'tunnel-forwarding-build.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Wintun forwarding probe build failed' }
+          $output = Join-Path $artifactRoot 'tunnel-forwarding'
+          $start = [Diagnostics.ProcessStartInfo]::new((Join-Path $PWD 'target/debug/examples/native-wintun-probe.exe'))
+          $start.UseShellExecute = $false
+          $start.RedirectStandardOutput = $true
+          $start.RedirectStandardError = $true
+          foreach ($argument in @('--engine-forwarding', $dll, $engine, $receipt.host_artifact.sha256, $receipt.engine_version.TrimStart('v'), $output)) {
+            $start.ArgumentList.Add($argument)
+          }
+          $start.Environment['CFW_NATIVE_TUN_SOURCE'] = $source
+          $process = [Diagnostics.Process]::Start($start)
+          $probeId = $process.Id
+          $probeStarted = $process.StartTime.ToFileTimeUtc()
+          try {
+            $stdout = $process.StandardOutput.ReadToEndAsync()
+            $stderr = $process.StandardError.ReadToEndAsync()
+            $exited = $process.WaitForExit(360000)
+            if (-not $exited) {
+              # This retained probe process tree is the disposable fixture.
+              $process.Kill($true)
+              if (-not $process.WaitForExit(10000)) { throw 'Timed-out forwarding probe did not retire' }
+            }
+            if (-not $stdout.Wait(10000) -or -not $stderr.Wait(10000)) { throw 'Forwarding probe output did not drain' }
+            [IO.File]::WriteAllText((Join-Path $artifactRoot 'tunnel-forwarding-stdout.log'), $stdout.GetAwaiter().GetResult())
+            [IO.File]::WriteAllText((Join-Path $artifactRoot 'tunnel-forwarding-stderr.log'), $stderr.GetAwaiter().GetResult())
+            if (-not $exited) { throw 'Wintun forwarding probe exceeded its deadline' }
+            if ($process.ExitCode -ne 0) { throw "Wintun forwarding probe failed ($($process.ExitCode)); inspect retained observations" }
+          } finally { $process.Dispose() }
+          $initial = Get-Content (Join-Path $output 'initial.json') -Raw | ConvertFrom-Json
+          $result = Get-Content (Join-Path $output 'result.json') -Raw | ConvertFrom-Json
+          $families = @($result.ip_families) -join ','
+          if ($initial.source -cne $source -or $initial.engine_sha256 -cne $receipt.host_artifact.sha256 -or
+              $initial.process_id -ne $probeId -or $initial.process_creation_time -ne $probeStarted -or
+              ((@($result.cases) | ForEach-Object { $_.mtu }) -join ',') -cne '1280,1500,9000' -or
+              $result.source -cne $source -or -not $result.success -or $null -ne $result.failure -or
+              -not $result.wintun_engine_forwarding_verified -or @($result.cases).Count -ne 3 -or
+              $families -cne 'ipv4,ipv6' -or
+              $result.authority_lease_exercised -or $result.system_to_user_handoff_exercised -or
+              $result.default_routes_modified -or $result.dns_modified -or $result.firewall_modified -or
+              $result.product_tunnel_backend_exercised -or $result.release_accepted) {
+            throw 'Wintun forwarding receipt is invalid or overstates its scope'
+          }
+          foreach ($case in @($result.cases)) {
+            if ($case.source -cne $source -or -not $case.windows_to_engine_forwarding_verified -or
+                -not $case.engine_to_windows_forwarding_verified -or -not $case.adapter_absence_observed -or
+                -not $case.causal_control.connect_without_pump_timed_out -or $case.pump.to_engine.largest_packet -ne $case.mtu -or
+                $case.pump.to_system.largest_packet -ne $case.mtu -or $case.pump.peer_close_code -notin @(109, 232) -or
+                (@($case.traffic.PSObject.Properties.Name) -join ',') -cne $families -or
+                (@($case.causal_control.families.PSObject.Properties.Name) -join ',') -cne $families -or
+                $case.traffic.ipv4.tcp.local -notmatch '^192\.0\.2\.10:\d+$' -or
+                $case.traffic.ipv6.tcp.local -notmatch '^\[2001:db8:1::10\]:\d+$' -or
+                $case.traffic.ipv4.udp.answer_bytes -ne ($case.mtu - 28) -or $case.traffic.ipv6.udp.answer_bytes -ne ($case.mtu - 48)) {
+              throw "Wintun forwarding case $($case.mtu) is incomplete"
+            }
+            # The adapter received exactly what the pump delivered under the
+            # policy for its own addresses; refused packets never reached it.
+            $counters = $case.interface_counters
+            $refused = $case.pump.refused
+            if ($case.adapter_dhcpv4_enabled_at_creation -isnot [bool] -or $case.adapter_dhcpv4_enabled_with_fixture_addresses -isnot [bool] -or
+                $case.delivery_policy.ipv4 -cne '192.0.2.10' -or $case.delivery_policy.ipv6 -cne '2001:db8:1::10' -or
+                $counters.received_equals_delivered -ne $true -or
+                ($counters.after.in_unicast_packets - $counters.before.in_unicast_packets) -ne $case.pump.to_system.packets -or
+                ($counters.after.in_octets - $counters.before.in_octets) -ne $case.pump.to_system.bytes -or
+                $counters.after.in_non_unicast_packets -ne $counters.before.in_non_unicast_packets -or
+                $counters.after.in_discards -ne $counters.before.in_discards -or $counters.after.in_errors -ne $counters.before.in_errors -or
+                (@($refused.PSObject.Properties.Name | Sort-Object) -join ',') -cne 'destination,protocol,source' -or
+                $refused.source.packets -ne 0 -or $refused.protocol.packets -ne 0 -or $null -eq $refused.destination.packets -or
+                @(@($refused.destination, $refused.source, $refused.protocol) | Where-Object { ($_.packets -eq 0) -ne ($null -eq $_.first) }).Count -ne 0) {
+              throw "Wintun forwarding case $($case.mtu) did not bind deliveries to its policy"
+            }
+          }
+          "Verified Windows IPv4/IPv6 TCP and UDP through Wintun, the packet pump and the native engine at MTU $(@($result.cases).mtu -join '/')" | Out-Host
+      - name: Upload the verified unsigned engine component
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: cfw-engine-ci-windows-x64
+          path: ${{ runner.temp }}/cfw-windows-engine/artifacts/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Record failed engine validation
+        if: failure()
+        run: |
+          $failureDirectory = Join-Path $env:RUNNER_TEMP 'cfw-windows-engine/artifacts'
+          New-Item -ItemType Directory -Force -Path $failureDirectory -ErrorAction Stop | Out-Null
+          "Windows engine validation failed. The workflow job log contains the failed phase and diagnostic output. Run: $env:GITHUB_RUN_ID" | Set-Content -Path (Join-Path $failureDirectory 'engine-ci-failure.txt') -Encoding utf8NoBOM
+      - name: Preserve native engine failure details
+        if: failure()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: cfw-engine-windows-failure-logs
+          path: |
+            ${{ runner.temp }}/cfw-windows-engine/artifacts/*.jsonl
+            ${{ runner.temp }}/cfw-windows-engine/artifacts/*receipt.json
+            ${{ runner.temp }}/cfw-windows-engine/artifacts/*-client.json
+            ${{ runner.temp }}/cfw-windows-engine/artifacts/runtime-restart-*.json
+            ${{ runner.temp }}/cfw-windows-engine/artifacts/runtime-stop-*.json
+            ${{ runner.temp }}/cfw-windows-engine/artifacts/local-restart/**
+            ${{ runner.temp }}/cfw-windows-engine/artifacts/installed-host-*.json
+            ${{ runner.temp }}/cfw-windows-engine/artifacts/installed-host-*-client-output.txt
+            ${{ runner.temp }}/cfw-windows-engine/artifacts/last-runtime-error-*.json
+            ${{ runner.temp }}/cfw-windows-engine/artifacts/installed-service-maintenance.json
+            ${{ runner.temp }}/cfw-windows-engine/artifacts/msi/**
+            ${{ runner.temp }}/cfw-windows-engine/artifacts/tunnel-forwarding/**
+            ${{ runner.temp }}/cfw-windows-engine/artifacts/*.wire-validation.json
+            ${{ runner.temp }}/cfw-windows-engine/artifacts/*.off-admission.json
+            ${{ runner.temp }}/cfw-windows-engine/artifacts/*.rejection.json
+            ${{ runner.temp }}/cfw-windows-engine/artifacts/*.txt
+            ${{ runner.temp }}/cfw-windows-engine/artifacts/*.log
+            ${{ runner.temp }}/cfw-windows-engine/artifacts/*.etl
+          if-no-files-found: error
+          retention-days: 14
+      - name: Record the component validation boundary
+        run: |
+          "Built the GA-pinned Windows engine twice from independent caches and ran its native package tests and loopback HTTP/SOCKS TCP/UDP checks." >> $env:GITHUB_STEP_SUMMARY
+          "The Rust owner additionally checks private-pipe identity, real WinINet HTTP through current-user proxy settings, exact restoration before engine stop, owner-process exit, conflicting settings, startup failure and emergency cleanup." >> $env:GITHUB_STEP_SUMMARY
+          "A validation probe forwards real Windows IPv4/IPv6 TCP and UDP through its own Wintun adapter, the packet pump and the engine's packet endpoint at three MTUs; engine packets reach Windows only under the delivery policy for the adapter's own addresses, and the adapter's receive counters equal the pump's deliveries. It runs as the CI account without an Authority lease, user handoff, default route, DNS or firewall ownership." >> $env:GITHUB_STEP_SUMMARY
+          "This unsigned engine component does not establish Windows desktop hosting, global service/TUN/system-proxy recovery, installation, signing or release acceptance." >> $env:GITHUB_STEP_SUMMARY
+
+  service-peer:
+    name: Windows SCM service peer authentication
+    runs-on: windows-2025
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Verify the service fixture source and Rust pin
+        id: service-pins
+        env:
+          EXPECTED_SOURCE: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          $actualSource = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $actualSource -cne $env:EXPECTED_SOURCE) { throw "Source identity mismatch" }
+          $pins = Get-Content scripts/dependency_pins.env -Raw
+          $versions = [regex]::Matches($pins, '(?m)^RUST_VERSION=([0-9]+\.[0-9]+\.[0-9]+)\r?$')
+          if ($versions.Count -ne 1) { throw "Missing or ambiguous Rust pin" }
+          "version=$($versions[0].Groups[1].Value)" >> $env:GITHUB_OUTPUT
+          "source=$actualSource" >> $env:GITHUB_OUTPUT
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: ${{ steps.service-pins.outputs.version }}
+      - name: Verify SCM peer authentication with disposable SYSTEM services
+        env:
+          CFW_NATIVE_SERVICE_SOURCE: ${{ steps.service-pins.outputs.source }}
+        run: |
+          $artifactRoot = Join-Path $env:RUNNER_TEMP 'cfw-service-peer'
+          New-Item -ItemType Directory -Path $artifactRoot -ErrorAction Stop | Out-Null
+          cargo test --locked -p cfw-windows-engine --features native-service-validation --lib authority::runtime_job::validation::keeper::tests::ordinary_user_cannot_create_job_keeper_probes -- --exact 2>&1 | Tee-Object -FilePath (Join-Path $artifactRoot 'job-keeper-admission-tests.txt')
+          if ($LASTEXITCODE -ne 0 -or -not (Select-String -Path (Join-Path $artifactRoot 'job-keeper-admission-tests.txt') -SimpleMatch 'test result: ok. 1 passed' -Quiet)) { throw "Job keeper fixture admission failed" }
+          cargo test --locked -p cfw-windows-engine --features native-service-validation --lib tunnel::channel::handoff::tests::ordinary_user_cannot_create_packet_handoff_probes -- --exact 2>&1 | Tee-Object -FilePath (Join-Path $artifactRoot 'packet-handoff-admission-tests.txt')
+          if ($LASTEXITCODE -ne 0 -or -not (Select-String -Path (Join-Path $artifactRoot 'packet-handoff-admission-tests.txt') -SimpleMatch 'test result: ok. 1 passed' -Quiet)) { throw "Packet handoff fixture admission failed" }
+          cargo test --locked -p cfw-windows-engine --features native-service-validation --example native-service-fixture 2>&1 | Tee-Object -FilePath (Join-Path $artifactRoot 'runtime-diagnostics-tests.txt')
+          if ($LASTEXITCODE -ne 0) { throw "Runtime fixture diagnostic preservation failed" }
+          # Only this disposable VM installs uniquely named fixtures. The
+          # product adapter requests read-only SCM/process access.
+          $env:CFW_NATIVE_SERVICE_MUTATION_TESTS = '1'
+          $env:CFW_NATIVE_SERVICE_RECEIPTS = $artifactRoot
+          cargo run --locked -p cfw-windows-engine --features native-service-validation --example native-service-fixture 2>&1 | Tee-Object -FilePath (Join-Path $artifactRoot 'service-peer-tests.txt')
+          if ($LASTEXITCODE -ne 0) { throw "Native SCM service-peer authentication failed" }
+      - name: Upload verified service peer validation
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: cfw-service-peer-ci-windows-x64
+          path: ${{ runner.temp }}/cfw-service-peer/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Record failed service validation
+        if: failure()
+        run: |
+          $artifactRoot = Join-Path $env:RUNNER_TEMP 'cfw-service-peer'
+          New-Item -ItemType Directory -Force -Path $artifactRoot -ErrorAction Stop | Out-Null
+          "Windows SCM validation failed; see the workflow job and native log. Run: $env:GITHUB_RUN_ID" | Set-Content -Path (Join-Path $artifactRoot 'service-peer-failure.txt') -Encoding utf8NoBOM
+      - name: Preserve failed service validation
+        if: failure()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: cfw-service-peer-windows-failure-logs
+          path: ${{ runner.temp }}/cfw-service-peer/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Record service validation scope
+        run: |
+          "Validated SCM configuration/security, live process/image/pipe identity, an unprivileged client, negative cases and temporary-service cleanup." >> $env:GITHUB_STEP_SUMMARY
+          "These disposable fixtures do not establish the product service backend, privileged runtime/TUN behavior, signing, installation or release acceptance." >> $env:GITHUB_STEP_SUMMARY
+
+  storage-contract:
+    name: Windows directory durability contract
+    runs-on: windows-2025
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Check directory metadata flush behavior
+        shell: pwsh
+        run: ./scripts/fixtures/windows_storage_contract.ps1
+
+  shared-contracts:
+    name: Windows x64 shared Rust and UI contracts
+    runs-on: windows-2025
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CARGO_TERM_COLOR: always
+      NPM_CONFIG_AUDIT: "false"
+      NPM_CONFIG_FUND: "false"
+      NPM_CONFIG_UPDATE_NOTIFIER: "false"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Verify source and read pinned validation tool versions
+        id: pins
+        env:
+          EXPECTED_SOURCE: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          $actualSource = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { throw "Cannot inspect the checked out source" }
+          if ($actualSource -cne $env:EXPECTED_SOURCE) { throw "Source identity mismatch" }
+          $lineEndings = git ls-files --eol -- contracts/typed-profile-v1.json crates/cfw-singbox-config/src/tests/goldens/direct-tunnel.json
+          if ($LASTEXITCODE -ne 0 -or $lineEndings.Count -ne 2) { throw "Cannot inspect the source contract line endings" }
+          foreach ($entry in $lineEndings) {
+            Write-Output $entry
+            if ($entry -cnotmatch '^i/lf\s+w/lf\s+') { throw "Source contracts must retain LF bytes on Windows" }
+          }
+          $pins = Get-Content scripts/dependency_pins.env -Raw
+          foreach ($name in @("RUST_VERSION", "NODE_VERSION", "NPM_VERSION", "NPM_ARCHIVE_SHA256")) {
+            $pattern = if ($name -eq "NPM_ARCHIVE_SHA256") { "[0-9a-f]{64}" } else { "[0-9]+\.[0-9]+\.[0-9]+" }
+            $values = [regex]::Matches($pins, "(?m)^${name}=($pattern)\r?`$")
+            if ($values.Count -ne 1) { throw "Missing or ambiguous pin: $name" }
+            "$name=$($values[0].Groups[1].Value)" >> $env:GITHUB_OUTPUT
+          }
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: ${{ steps.pins.outputs.RUST_VERSION }}
+          components: clippy,rustfmt
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ steps.pins.outputs.NODE_VERSION }}
+      - name: Prepare the hash-pinned npm distribution
+        env:
+          CFW_NPM_VERSION: ${{ steps.pins.outputs.NPM_VERSION }}
+          CFW_NPM_ARCHIVE_SHA256: ${{ steps.pins.outputs.NPM_ARCHIVE_SHA256 }}
+        run: |
+          $npmRoot = Join-Path $env:RUNNER_TEMP "cfw-npm"
+          New-Item -ItemType Directory -Path $npmRoot -ErrorAction Stop | Out-Null
+          $archive = Join-Path $npmRoot "npm.tgz"
+          Invoke-WebRequest "https://registry.npmjs.org/npm/-/npm-$($env:CFW_NPM_VERSION).tgz" -OutFile $archive
+          $digest = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($digest -cne $env:CFW_NPM_ARCHIVE_SHA256) { throw "npm archive digest mismatch" }
+          tar -xzf $archive -C $npmRoot
+          if ($LASTEXITCODE -ne 0) { throw "Cannot extract the verified npm distribution" }
+          $npmCli = Join-Path $npmRoot "package/bin/npm-cli.js"
+          $npmVersion = node $npmCli --version
+          if ($LASTEXITCODE -ne 0 -or $npmVersion -cne $env:CFW_NPM_VERSION) { throw "npm version mismatch" }
+          "CFW_NPM_CLI=$npmCli" >> $env:GITHUB_ENV
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Check shared Rust contracts on Windows
+        run: cargo clippy --locked -p cfw-engine-api -p cfw-singbox-config -p cfw-controller -p cfw-application -p cfw-core -p cfw-windows-storage -p cfw-profiles -p cfw-windows-credentials -p cfw-windows-engine -p cfw-platform --all-targets --features cfw-windows-engine/native-engine-validation,cfw-windows-engine/native-service-validation -- -D warnings
+      - name: Test shared Rust contracts on Windows
+        run: cargo test --locked --no-fail-fast -p cfw-engine-api -p cfw-singbox-config -p cfw-controller -p cfw-application -p cfw-core -p cfw-windows-storage -p cfw-profiles -p cfw-windows-credentials -p cfw-windows-engine -p cfw-platform --all-targets
+      - name: Install locked UI dependencies
+        working-directory: apps/cfw-tauri-shell
+        run: node $env:CFW_NPM_CLI ci --ignore-scripts=false --install-links=true
+      - name: Build and test the shared UI on Windows
+        working-directory: apps/cfw-tauri-shell
+        run: node $env:CFW_NPM_CLI test
+      - name: Record the scope of this validation
+        run: |
+          "Validated the shared Rust packages, Windows storage and native desktop observations, and the bundled UI contract tests on Windows x64." >> $env:GITHUB_STEP_SUMMARY
+          "This job does not build or launch a Windows application, install a service or TUN driver, or establish desktop, network, signing, or release acceptance." >> $env:GITHUB_STEP_SUMMARY

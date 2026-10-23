@@ -1,0 +1,328 @@
+use super::{AuthorityError, Result, secret::Ticket};
+use crate::{
+    authority_journal::{AuthorityCommittedState, JournalOperation, RecordedOwner},
+    connection_binding::ConnectionBinding,
+};
+use cfw_engine_api::authority_v1::{
+    AuthorityMode, AuthorityState, PacketPumpLimits, RootContext, WireValidate,
+};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+/// Machine-wide monotonic allocation, separate from a live runtime lease.
+/// Only the authenticated Authority publishes this value to Desktop clients.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorityLineage {
+    pub installation_id: Uuid,
+    pub config_epoch: u64,
+    pub generation: u64,
+}
+impl AuthorityLineage {
+    pub(super) fn validate(&self) -> Result<()> {
+        if self.installation_id.is_nil() || self.config_epoch == 0 {
+            return Err(AuthorityError::Invalid);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrepareRequest {
+    pub root: RootContext,
+    pub operation_id: Uuid,
+    pub mode: AuthorityMode,
+    pub config_sha256: [u8; 32],
+    pub identity_sha256: [u8; 32],
+    pub expected_revision: u64,
+}
+impl PrepareRequest {
+    pub(super) fn validate(&self) -> Result<()> {
+        if self.root.installation_id.is_nil()
+            || self.operation_id.is_nil()
+            || self.expected_revision == 0
+            || self.root.validate().is_err()
+        {
+            return Err(AuthorityError::Invalid);
+        }
+        Ok(())
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperationContext {
+    pub root: RootContext,
+    pub operation_id: Uuid,
+    pub mode: AuthorityMode,
+    pub config_sha256: [u8; 32],
+    pub identity_sha256: [u8; 32],
+    pub owner: RecordedOwner,
+    pub prepared_revision: u64,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LeaseContext {
+    pub operation: OperationContext,
+    pub lease_id: Uuid,
+}
+impl LeaseContext {
+    pub(super) fn recorded(&self) -> Result<JournalOperation> {
+        Ok(JournalOperation::new(
+            self.operation.operation_id,
+            self.operation.mode,
+            self.operation.config_sha256,
+            self.operation.identity_sha256,
+            self.lease_id,
+            self.operation.owner.clone(),
+        )?)
+    }
+}
+
+/// Cannot be cloned, debug-printed or serialized. The preparation ticket may
+/// claim a runtime binding once; it does not itself authorize starting a child.
+pub struct PreparedTicket {
+    pub(super) context: LeaseContext,
+    pub(super) ticket: Ticket,
+}
+impl PreparedTicket {
+    pub fn context(&self) -> &LeaseContext {
+        &self.context
+    }
+    pub fn with_ticket<T>(&self, consume: impl FnOnce(&[u8]) -> T) -> T {
+        self.ticket.expose(consume)
+    }
+}
+/// Produced only after the runtime binding's journal commit and fresh native
+/// admission. The runtime still has to check its config/image and own resources.
+pub struct RuntimeStartAuthorization {
+    pub(super) context: LeaseContext,
+    pub(super) committed_revision: u64,
+    pub(super) keeper_handle: u64,
+}
+impl RuntimeStartAuthorization {
+    pub fn context(&self) -> &LeaseContext {
+        &self.context
+    }
+    pub fn committed_revision(&self) -> u64 {
+        self.committed_revision
+    }
+    /// A zero-access handle value in the authenticated recipient's process.
+    /// It is not a service-side handle and must never be closed here.
+    pub fn keeper_handle(&self) -> u64 {
+        self.keeper_handle
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadyReport {
+    pub context: LeaseContext,
+    pub runtime_digest: [u8; 32],
+    pub ready_flags: u8,
+    pub packet_pump_limits: Option<PacketPumpLimits>,
+    pub observed_millis: u64,
+}
+impl ReadyReport {
+    pub(super) fn validate(&self) -> Result<()> {
+        let mode = self.context.operation.mode;
+        if self.observed_millis == 0
+            || self.runtime_digest != self.context.operation.identity_sha256
+            || self.ready_flags
+                != if mode == AuthorityMode::LocalProxy {
+                    0b011
+                } else {
+                    0b111
+                }
+            || (mode == AuthorityMode::Tunnel) != self.packet_pump_limits.is_some()
+            || self
+                .packet_pump_limits
+                .as_ref()
+                .is_some_and(|limits| limits.validate().is_err())
+        {
+            return Err(AuthorityError::Invalid);
+        }
+        Ok(())
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoppedReport {
+    pub context: LeaseContext,
+    pub engine_stopped: bool,
+    pub transport_closed: bool,
+    pub os_restored: bool,
+    pub observed_millis: u64,
+}
+impl StoppedReport {
+    pub(super) fn validate(&self) -> Result<()> {
+        if self.observed_millis == 0
+            || !self.engine_stopped
+            || !self.transport_closed
+            || !self.os_restored
+        {
+            return Err(AuthorityError::Invalid);
+        }
+        Ok(())
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthoritySnapshot {
+    pub state: AuthorityState,
+    /// None means a publication outcome is uncertain, not revision zero/Off.
+    pub revision: Option<u64>,
+    pub root: Option<RootContext>,
+}
+
+/// Committed configuration identity and the controller's policy phase. This
+/// has no connection/ticket authority and performs no fresh OS observation.
+/// Retain recovery bindings; do not convert it into Ready or global Off.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RecordedRuntimeScope {
+    pub(super) snapshot: AuthoritySnapshot,
+    pub(super) operation: Option<JournalOperation>,
+}
+impl RecordedRuntimeScope {
+    pub fn snapshot(&self) -> &AuthoritySnapshot {
+        &self.snapshot
+    }
+    pub fn operation(&self) -> Option<&JournalOperation> {
+        self.operation.as_ref()
+    }
+}
+
+/// Independent cleanup observations, not a wire DTO. Construction belongs to
+/// native observation adapters; there is no serde or default constructor.
+/// Tests exercise policy through an explicit validation-only constructor.
+pub struct CleanupEvidence {
+    pub(super) binding: CleanupBinding,
+    pub(super) revision: u64,
+    pub(super) lease_id: Option<Uuid>,
+    pub(super) proxy_listener_closed: bool,
+    pub(super) system_proxy_restored: bool,
+    pub(super) tunnel_engine_stopped: bool,
+    pub(super) packet_pump_closed: bool,
+    pub(super) managed_tunnel_off: bool,
+    pub(super) endpoints_closed: bool,
+    pub(super) secret_buffers_cleared: bool,
+}
+pub(super) enum CleanupBinding {
+    Runtime(super::ProxyRecoveryTarget),
+    RecordedOff(AuthorityCommittedState),
+    LocalRuntime(AuthorityCommittedState),
+    /// A Tunnel run: its Job is empty and SYSTEM's own tunnel network has
+    /// retired, with the adapter observed absent.
+    TunnelRuntime(AuthorityCommittedState),
+    #[cfg(any(test, feature = "native-service-validation"))]
+    Validation,
+}
+impl CleanupEvidence {
+    pub(super) fn validate_scope(&self, metadata: Option<&AuthorityCommittedState>) -> Result<()> {
+        match &self.binding {
+            CleanupBinding::LocalRuntime(target) | CleanupBinding::TunnelRuntime(target) => {
+                let mode = if matches!(self.binding, CleanupBinding::LocalRuntime(_)) {
+                    AuthorityMode::LocalProxy
+                } else {
+                    AuthorityMode::Tunnel
+                };
+                target.validate()?;
+                let operation = target.operation().ok_or(AuthorityError::CleanupUnproven)?;
+                if !matches!(
+                    target.state(),
+                    AuthorityState::Preparing
+                        | AuthorityState::Starting
+                        | AuthorityState::Active
+                        | AuthorityState::Stopping
+                        | AuthorityState::Quarantined
+                ) || operation.mode() != mode
+                    || metadata != Some(target)
+                    || self.revision != target.revision()
+                    || self.lease_id != Some(operation.lease_id())
+                {
+                    return Err(AuthorityError::Stale);
+                }
+            }
+            CleanupBinding::RecordedOff(target) => {
+                target.validate()?;
+                if target.state() != AuthorityState::Off
+                    || target.operation().is_some()
+                    || metadata != Some(target)
+                    || self.revision != target.revision()
+                    || self.lease_id.is_some()
+                {
+                    return Err(AuthorityError::Stale);
+                }
+            }
+            CleanupBinding::Runtime(target) => {
+                target.validate()?;
+                let metadata = metadata.ok_or(AuthorityError::Recovering)?;
+                if target.revision != self.revision
+                    || target.revision != metadata.revision()
+                    || target.root != *metadata.root()
+                    || Some(&target.operation) != metadata.operation()
+                    || Some(target.operation.lease_id()) != self.lease_id
+                {
+                    return Err(AuthorityError::Stale);
+                }
+            }
+            #[cfg(any(test, feature = "native-service-validation"))]
+            CleanupBinding::Validation => {}
+        }
+        Ok(())
+    }
+    pub(super) fn exact(&self) -> bool {
+        self.proxy_listener_closed
+            && self.system_proxy_restored
+            && self.tunnel_engine_stopped
+            && self.packet_pump_closed
+            && self.managed_tunnel_off
+            && self.endpoints_closed
+            && self.secret_buffers_cleared
+    }
+    #[cfg(any(test, feature = "native-service-validation"))]
+    pub fn for_validation(revision: u64, lease_id: Option<Uuid>, complete: bool) -> Self {
+        Self {
+            binding: CleanupBinding::Validation,
+            revision,
+            lease_id,
+            proxy_listener_closed: complete,
+            system_proxy_restored: complete,
+            tunnel_engine_stopped: complete,
+            packet_pump_closed: complete,
+            managed_tunnel_off: complete,
+            endpoints_closed: complete,
+            secret_buffers_cleared: complete,
+        }
+    }
+}
+/// Every mode, Tunnel included, runs its engine in the lease owner's
+/// UserAgent. SYSTEM keeps the tunnel adapter and packet pump itself and
+/// hands the UserAgent only a packet endpoint, so no third runtime role
+/// exists.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Role {
+    Desktop,
+    UserAgent,
+}
+#[derive(Clone)]
+pub(super) struct Peer {
+    pub owner: RecordedOwner,
+    pub connection: ConnectionBinding,
+    pub role: Role,
+}
+impl Peer {
+    pub(super) fn same(&self, other: &Self) -> bool {
+        self.owner == other.owner && self.connection == other.connection && self.role == other.role
+    }
+    pub(super) fn live(&self) -> Result<()> {
+        self.owner.validate()?;
+        if !self.connection.is_open() {
+            return Err(AuthorityError::Identity);
+        }
+        Ok(())
+    }
+}
+pub(super) fn metadata_lease_id(value: Option<&AuthorityCommittedState>) -> Option<Uuid> {
+    value.and_then(|s| s.operation().map(JournalOperation::lease_id))
+}

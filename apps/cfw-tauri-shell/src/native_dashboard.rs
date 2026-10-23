@@ -221,7 +221,7 @@ async fn execute_control(
     let requested_retry = enabled && retry_target(&observed, control).is_some();
     let result = crate::engine_controls::apply_observed_control(
         &app.state::<crate::engine::ManagedEngine>(),
-        &app.state::<crate::legacy::LegacyRetirementGate>(),
+        &app.state::<crate::platform_maintenance::PlatformMaintenanceGate>(),
         &app.state::<crate::commands::ManagedProfiles>(),
         control,
         enabled,
@@ -245,7 +245,7 @@ async fn execute_control(
 
 fn controls_for(app: &AppHandle, snapshot: &EngineSnapshot) -> Controls {
     let engine = app.state::<crate::engine::ManagedEngine>();
-    let retirement = app.state::<crate::legacy::LegacyRetirementGate>();
+    let retirement = app.state::<crate::platform_maintenance::PlatformMaintenanceGate>();
     let lifecycle_ok = app
         .state::<crate::lifecycle::AppLifecycle>()
         .startup_work_allowed()
@@ -253,7 +253,7 @@ fn controls_for(app: &AppHandle, snapshot: &EngineSnapshot) -> Controls {
     // The process/journal observation can perform I/O. Sample it once per
     // projected frame on this worker; execution still rechecks under its lease.
     let start_admission = if lifecycle_ok {
-        crate::legacy::require_network_start_allowed(&retirement)
+        crate::platform_maintenance::require_start_allowed(&retirement)
     } else {
         Err("network changes are unavailable while the application is exiting or migrating".into())
     };

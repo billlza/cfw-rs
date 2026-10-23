@@ -1,3 +1,5 @@
+import { platformPresentation } from "./platform-presentation.js";
+
 const CUTOVER_TARGETS = new Set(["system_proxy", "tunnel"]);
 const HANDOFF_FAILURE_CODES = new Set([
   "migration_handoff_admission_failed",
@@ -130,15 +132,21 @@ export function normalizeBootPayload(value) {
     || typeof value.native_ui.window_glass !== "boolean") {
     throw new TypeError("boot native UI capabilities are invalid");
   }
-  if (!exactKeys(value.product, ["architecture", "license", "minimum_macos", "name", "version"])) {
+  if (!exactKeys(value.product, ["architecture", "license", "minimum_os_version", "name", "operating_system", "version"])) {
     throw new TypeError("boot product fields are invalid");
   }
   if (typeof value.migration_handoff !== "boolean") {
     throw new TypeError("boot migration role is invalid");
   }
   const product = Object.fromEntries(
-    Object.entries(value.product).map(([key, field]) => [key, boundedProductField(field, `product ${key}`)]),
+    Object.entries(value.product).map(([key, field]) => [
+      key,
+      key === "minimum_os_version" && field === null && value.product.operating_system === "windows"
+        ? null
+        : boundedProductField(field, `product ${key}`),
+    ]),
   );
+  platformPresentation(product.operating_system);
   const migrationHandoffStatus = normalizeMigrationHandoffStatus(value.migration_handoff_status);
   const rendererReady = value.migration_handoff_renderer_ready;
   if (!value.migration_handoff) {
@@ -160,6 +168,10 @@ export function normalizeBootPayload(value) {
     }
   } else {
     throw new TypeError("handoff boot payload requires renderer readiness authority");
+  }
+  if (product.operating_system === "windows"
+    && (value.migration_handoff || migrationHandoffStatus.state !== "idle" || rendererReady !== null)) {
+    throw new TypeError("Windows boot payload cannot grant historical Mac handoff authority");
   }
   return {
     product,
@@ -194,9 +206,16 @@ export function normalizeMigrationHandoffStatus(value) {
   throw new TypeError("migration handoff status is invalid");
 }
 
-export function normalizeRetirementStatus(value) {
+export function normalizeRetirementStatus(value, operatingSystem) {
+  platformPresentation(operatingSystem);
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new TypeError("legacy retirement status is invalid");
+  }
+  if (operatingSystem === "windows") {
+    if (!exactKeys(value, ["state"]) || value.state !== "not_applicable") {
+      throw new TypeError("historical maintenance status is invalid for this Windows release");
+    }
+    return { state: "not_applicable" };
   }
   switch (value.state) {
     case "awaiting_confirmation":
@@ -238,6 +257,9 @@ export function unverifiableRetirementStatus(message) {
 
 export function migrationRoute(retirement, migrationHandoff) {
   switch (retirement?.state) {
+    case "not_applicable":
+      if (migrationHandoff) throw new TypeError("an inapplicable maintenance scope cannot own a handoff");
+      return "none";
     case "cleared":
       return "none";
     case "cleaning":
@@ -267,6 +289,7 @@ export function migrationRoute(retirement, migrationHandoff) {
 /// surface without requiring the user to discover the maintenance entry.
 export function legacyMaintenanceRoute(retirement, migrationHandoff, maintenanceOpen = false) {
   const route = migrationRoute(retirement, migrationHandoff);
+  if (retirement?.state === "not_applicable") return "none";
   if (route === "none") return maintenanceOpen ? "complete" : "none";
   if (migrationHandoff || maintenanceOpen
     || retirement?.state === "cleaning"

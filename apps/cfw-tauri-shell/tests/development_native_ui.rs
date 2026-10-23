@@ -1,3 +1,5 @@
+#![cfg(target_os = "macos")]
+// These contracts inspect Apple native products and Swift UI build artifacts.
 #[path = "../build_support/development_native_ui.rs"]
 mod development_native_ui;
 

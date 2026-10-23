@@ -3,6 +3,15 @@ use std::fmt;
 use cfw_singbox_config::{CredentialAudience, CredentialSlot};
 use serde::{Deserialize, Serialize};
 
+/// Native, credential-aware probes belong to the engine boundary, separately
+/// from credential persistence. The result must match the requested node order.
+pub trait ProfileDelayBackend: Send + Sync + 'static {
+    fn test_profile_delays(
+        &self,
+        request: ProfileDelayTestRequest,
+    ) -> crate::BackendFuture<'_, Vec<ProfileProxyDelay>>;
+}
+
 /// One explicitly requested batch of application-originated HTTPS probes. This
 /// request has no engine generation, ownership capability or OS integration.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]

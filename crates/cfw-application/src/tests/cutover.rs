@@ -29,6 +29,39 @@ fn replacement_profile() -> ValidatedSingBoxProfile {
 }
 
 #[tokio::test]
+async fn windows_cutover_and_tunnel_start_share_the_same_bound_projection() {
+    let backend = Arc::new(FakeBackend::windows());
+    let coordinator = coordinator(backend.clone());
+    let settings = EngineSettings::default();
+    let profile = replacement_profile();
+    let id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    let prepared = coordinator
+        .prepare_cutover(
+            EngineMode::Tunnel,
+            id.into(),
+            profile.clone(),
+            settings.clone(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        prepared
+            .tunnel_request()
+            .config_json
+            .contains(r#""stack":"gvisor""#)
+    );
+    assert!(backend.operations().is_empty());
+    coordinator
+        .set_mode(EngineMode::Tunnel, id.into(), profile, settings)
+        .await
+        .unwrap();
+    assert_eq!(
+        backend.tunnel_requests(),
+        [prepared.tunnel_request().clone()]
+    );
+}
+
+#[tokio::test]
 async fn cutover_preparation_rejects_off_and_direct_only_profiles() {
     let coordinator = coordinator(Arc::new(FakeBackend::default()));
     let settings = EngineSettings::default();

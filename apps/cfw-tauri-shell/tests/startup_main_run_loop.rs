@@ -16,7 +16,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 #[cfg(target_os = "macos")]
-use cfw_core::{MacOsAppPaths, SettingsStore, UiPreferences};
+use cfw_core::{AppPaths, SettingsStore, UiPreferences};
 #[cfg(target_os = "macos")]
 use dispatch2::DispatchQueue;
 #[cfg(target_os = "macos")]
@@ -26,7 +26,7 @@ use startup_state::{NativeStartup, prepare_off_main};
 fn main() {
     assert_eq!(unsafe { libc::pthread_main_np() }, 1);
     let root = tempfile::tempdir().unwrap();
-    let store = SettingsStore::new(MacOsAppPaths::from_app_home(root.path().join("app")));
+    let store = SettingsStore::new(AppPaths::from_app_home(root.path().join("app")));
     store.write(&UiPreferences::default()).unwrap();
     let lock = std::fs::File::open(&store.paths().app_home).unwrap();
     assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);

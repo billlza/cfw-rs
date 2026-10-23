@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use cfw_engine_api::{
     CutoverPreflightRequest, EngineBackend, EngineGenerationStore, EngineMode,
-    EngineSessionIdentity, EngineSnapshot,
+    EngineRuntimePlatform, EngineSessionIdentity, EngineSnapshot,
 };
 use cfw_singbox_config::{EngineSettings, ValidatedSingBoxProfile};
 use tokio::{
@@ -29,6 +29,7 @@ pub(crate) enum StartupReconciliation {
 
 pub(crate) struct CoordinatorRuntime {
     pub(crate) backend: Arc<dyn EngineBackend>,
+    pub(crate) runtime_platform: EngineRuntimePlatform,
     pub(crate) session: EngineSessionIdentity,
     pub(crate) generation_store: Option<Arc<dyn EngineGenerationStore>>,
     pub(crate) options: CoordinatorOptions,
@@ -86,12 +87,15 @@ pub(crate) async fn run_coordinator(
 ) {
     let CoordinatorRuntime {
         backend,
+        runtime_platform,
         session,
         generation_store,
         options,
         startup_reconciliation,
     } = runtime;
     let mut state = CoordinatorState {
+        // Use the same pinned backend selection as controller consumers.
+        runtime_platform,
         snapshot: initial_snapshot,
         native_lease: None,
         quarantine: None,

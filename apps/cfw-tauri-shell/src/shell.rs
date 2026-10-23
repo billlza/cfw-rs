@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use cfw_controller::ProxiesSnapshot;
+use cfw_core::PRODUCT_NAME;
 use cfw_engine_api::{EngineEvent, EngineMode, EngineSnapshot, EngineState};
 use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -11,7 +12,6 @@ use crate::commands::controller_client_for_app;
 use crate::lifecycle::request_shutdown;
 use crate::updater::check_for_updates;
 
-const PRODUCT_NAME: &str = "Clash for Mac";
 pub(crate) const TRAY_ID: &str = "cfw-tray";
 const APP_MENU_ABOUT_ID: &str = "about";
 const APP_MENU_CHECK_UPDATE_ID: &str = "check-update";
@@ -416,7 +416,12 @@ fn build_tray_menu(
             None::<&str>,
         )?),
     ];
-    let ready = ready_mode(snapshot);
+    let ready = ready_mode(
+        app.state::<crate::engine::ManagedEngine>()
+            .coordinator
+            .runtime_platform(),
+        snapshot,
+    );
     items.push(Box::new(MenuItem::with_id(
         app,
         "core-start",
@@ -544,7 +549,14 @@ pub(crate) async fn refresh_tray_from_controller(app: &AppHandle) -> Result<(), 
     let mut groups = Vec::new();
     let mut route_mode = None;
     let mut observation_error = None;
-    if ready_mode(&snapshot).is_some() {
+    if ready_mode(
+        app.state::<crate::engine::ManagedEngine>()
+            .coordinator
+            .runtime_platform(),
+        &snapshot,
+    )
+    .is_some()
+    {
         match controller_client_for_app(app) {
             Ok(client) => {
                 let (proxies, configs) = tokio::join!(client.proxies(), client.configs());
@@ -583,27 +595,11 @@ pub(crate) async fn refresh_tray_from_controller(app: &AppHandle) -> Result<(), 
     }
 }
 
-fn ready_mode(snapshot: &EngineSnapshot) -> Option<EngineMode> {
-    match &snapshot.state {
-        EngineState::LocalProxyActive { runtime }
-        | EngineState::ProxyActive { runtime }
-        | EngineState::TunnelActive { runtime }
-        | EngineState::TunnelSystemProxyActive { runtime }
-            if runtime.ready
-                && snapshot.desired_mode == snapshot.state.active_mode()
-                && runtime.context.generation == snapshot.generation
-                && snapshot.config_digest.as_deref() == Some(runtime.config_digest.as_str())
-                && runtime.owner
-                    == if snapshot.desired_mode.tunnel_enabled() {
-                        cfw_engine_api::EngineOwner::PacketTunnelSystemExtension
-                    } else {
-                        cfw_engine_api::EngineOwner::ProxyAgent
-                    } =>
-        {
-            Some(snapshot.desired_mode)
-        }
-        _ => None,
-    }
+fn ready_mode(
+    platform: cfw_engine_api::EngineRuntimePlatform,
+    snapshot: &EngineSnapshot,
+) -> Option<EngineMode> {
+    crate::engine::ready_runtime(platform, snapshot).map(|_| snapshot.desired_mode)
 }
 
 fn start_tray_state_updates(app: AppHandle) {
@@ -719,13 +715,20 @@ fn handle_tray_proxy_event(app: &AppHandle, id: &str) {
 }
 
 pub(crate) fn apply_silent_start(app: &AppHandle) -> Result<(), String> {
-    app.set_activation_policy(tauri::ActivationPolicy::Accessory)
-        .map_err(|error| error.to_string())?;
-    app.set_dock_visibility(false)
-        .map_err(|error| error.to_string())?;
+    #[cfg(target_os = "macos")]
+    {
+        app.set_activation_policy(tauri::ActivationPolicy::Accessory)
+            .map_err(|error| error.to_string())?;
+        app.set_dock_visibility(false)
+            .map_err(|error| error.to_string())?;
+    }
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| "main window is unavailable during silent start".to_string())?;
+    #[cfg(windows)]
+    window
+        .set_skip_taskbar(true)
+        .map_err(|error| error.to_string())?;
     window.hide().map_err(|error| error.to_string())
 }
 
@@ -749,14 +752,23 @@ pub(crate) fn show_dashboard(app: &AppHandle) {
 }
 
 fn show_main_page_result(app: &AppHandle, page: MainPage) -> Result<(), String> {
-    app.set_activation_policy(tauri::ActivationPolicy::Regular)
-        .map_err(|error| error.to_string())?;
-    app.set_dock_visibility(true)
-        .map_err(|error| error.to_string())?;
+    #[cfg(target_os = "macos")]
+    {
+        app.set_activation_policy(tauri::ActivationPolicy::Regular)
+            .map_err(|error| error.to_string())?;
+        app.set_dock_visibility(true)
+            .map_err(|error| error.to_string())?;
+    }
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| "main window is unavailable".to_string())?;
+    #[cfg(windows)]
+    window
+        .set_skip_taskbar(false)
+        .map_err(|error| error.to_string())?;
     window.show().map_err(|error| error.to_string())?;
+    #[cfg(windows)]
+    window.unminimize().map_err(|error| error.to_string())?;
     window.set_focus().map_err(|error| error.to_string())?;
     app.state::<crate::LaunchContext>().note_window_presented();
     app.emit("cfw://page", page.id())
@@ -994,7 +1006,28 @@ mod tests {
             generation: 2,
             config_digest: Some(runtime.config_digest.clone()),
         };
-        assert_eq!(ready_mode(&snapshot), Some(EngineMode::SystemProxy));
+        assert_eq!(
+            ready_mode(cfw_engine_api::EngineRuntimePlatform::MacOs, &snapshot),
+            Some(EngineMode::SystemProxy)
+        );
+        assert_eq!(
+            ready_mode(cfw_engine_api::EngineRuntimePlatform::Windows, &snapshot),
+            None
+        );
+        snapshot.state = EngineState::ProxyActive {
+            runtime: RuntimeIdentity {
+                owner: EngineOwner::WindowsUserAgent,
+                ..runtime.clone()
+            },
+        };
+        assert_eq!(
+            ready_mode(cfw_engine_api::EngineRuntimePlatform::Windows, &snapshot),
+            Some(EngineMode::SystemProxy)
+        );
+        assert_eq!(
+            ready_mode(cfw_engine_api::EngineRuntimePlatform::MacOs, &snapshot),
+            None
+        );
         for state in [
             EngineState::Off,
             EngineState::ProxyStarting { generation: 2 },
@@ -1018,13 +1051,22 @@ mod tests {
             },
         ] {
             snapshot.state = state;
-            assert_eq!(ready_mode(&snapshot), None);
+            assert_eq!(
+                ready_mode(cfw_engine_api::EngineRuntimePlatform::MacOs, &snapshot),
+                None
+            );
         }
         snapshot.state = EngineState::ProxyActive { runtime };
         snapshot.generation += 1;
-        assert_eq!(ready_mode(&snapshot), None);
+        assert_eq!(
+            ready_mode(cfw_engine_api::EngineRuntimePlatform::MacOs, &snapshot),
+            None
+        );
         snapshot.generation -= 1;
         snapshot.config_digest = Some("cd".repeat(32));
-        assert_eq!(ready_mode(&snapshot), None);
+        assert_eq!(
+            ready_mode(cfw_engine_api::EngineRuntimePlatform::MacOs, &snapshot),
+            None
+        );
     }
 }

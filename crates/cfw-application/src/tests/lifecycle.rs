@@ -940,6 +940,10 @@ async fn backend_errors_do_not_fallback_to_another_mode() {
     struct FailingBackend;
 
     impl EngineBackend for FailingBackend {
+        fn runtime_platform(&self) -> cfw_engine_api::EngineRuntimePlatform {
+            cfw_engine_api::EngineRuntimePlatform::MacOs
+        }
+
         fn check_configuration(&self, _request: EngineStartRequest) -> BackendFuture<'_, ()> {
             Box::pin(async { Ok(()) })
         }
@@ -1260,6 +1264,7 @@ fn startup_service_reconciliation_admission_rejects_leases_and_quarantine() {
         ..Default::default()
     };
     let mut state = CoordinatorState {
+        runtime_platform: cfw_engine_api::EngineRuntimePlatform::MacOs,
         snapshot,
         native_lease: None,
         quarantine: None,

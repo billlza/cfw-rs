@@ -47,6 +47,22 @@ def _sha(body: bytes) -> str:
     return hashlib.sha256(body).hexdigest()
 
 
+def _next_go_release(version: str, *, other: str) -> str:
+    """The next Go patch release after `version` that is not `other`.
+
+    The product and the packet-evidence endpoint pin Go independently, so the
+    two pins may sit one patch release apart. A pin moved by a synthetic test
+    must not land on the other pin's release with a synthetic archive digest:
+    one release has one archive, which
+    `test_endpoint_and_product_go_pins_agree_on_one_release` covers.
+    """
+    major, minor, patch = version.split(".")
+    candidate = int(patch) + 1
+    while f"{major}.{minor}.{candidate}" == other:
+        candidate += 1
+    return f"{major}.{minor}.{candidate}"
+
+
 # Synthetic, self-consistent patch bodies. Their real SHA-256 digests replace the
 # shipped patch path and digest pins so the verifier logic can be exercised
 # without needing SHA-256 preimages of the shipped patches.
@@ -638,8 +654,10 @@ class PinnedBuildInputsTests(unittest.TestCase):
         # own Go identities, so a product Go bump leaves their policy, sources
         # and recorded digests untouched.
         fixture = Fixture()
-        major, minor, patch = fixture.env["GO_VERSION"].split(".")
-        next_go = f"{major}.{minor}.{int(patch) + 1}"
+        next_go = _next_go_release(
+            fixture.env["GO_VERSION"],
+            other=fixture.env["PACKET_EVIDENCE_ENDPOINT_GO_VERSION"],
+        )
         fixture.env["GO_VERSION"] = next_go
         fixture.env["GO_DARWIN_ARM64_SHA256"] = _sha(b"next go archive")
         with tempfile.TemporaryDirectory() as temporary:
@@ -673,8 +691,10 @@ class PinnedBuildInputsTests(unittest.TestCase):
         # so moving it edits only its pins (and, once rebuilt, the binary pin
         # with the installer and identities that carry it).
         fixture = Fixture()
-        major, minor, patch = fixture.env["PACKET_EVIDENCE_ENDPOINT_GO_VERSION"].split(".")
-        next_go = f"{major}.{minor}.{int(patch) + 1}"
+        next_go = _next_go_release(
+            fixture.env["PACKET_EVIDENCE_ENDPOINT_GO_VERSION"],
+            other=fixture.env["GO_VERSION"],
+        )
         fixture.env["PACKET_EVIDENCE_ENDPOINT_GO_VERSION"] = next_go
         fixture.env["PACKET_EVIDENCE_ENDPOINT_GO_DARWIN_ARM64_SHA256"] = _sha(
             b"next endpoint go archive"
@@ -972,7 +992,11 @@ class PinnedBuildInputsTests(unittest.TestCase):
         # Removing a pin from both the pin file and the policy cannot pass: the
         # fixed key set still requires it (build_native_products.sh, for one,
         # skips its Xcode identity check when XCODE_VERSION is unset).
-        for key in ("XCODE_VERSION", "GOVULNCHECK_MODULE_SUM", "NPM_ARCHIVE_SHA256"):
+        for key in (
+            "XCODE_VERSION", "GOVULNCHECK_MODULE_SUM", "NPM_ARCHIVE_SHA256",
+            "GO_WINDOWS_AMD64_SHA256", "WINTUN_WINDOWS_AMD64_SHA256",
+            "WINTUN_BINARY_LICENSE_PATH",
+        ):
             with self.subTest(key=key):
                 fixture = Fixture()
                 del fixture.env[key]
@@ -1012,6 +1036,54 @@ class PinnedBuildInputsTests(unittest.TestCase):
         self._assert_fails(
             fixture, "pins the policy does not declare: UNDECLARED_TOOL_VERSION"
         )
+
+    def test_windows_go_archive_digest_is_required_and_validated(self) -> None:
+        fixture = Fixture()
+        del fixture.env["GO_WINDOWS_AMD64_SHA256"]
+        self._assert_fails(fixture, "missing required pins: GO_WINDOWS_AMD64_SHA256")
+        for malformed in ("A" * 64, "0" * 63, "windows-go-archive"):
+            with self.subTest(digest=malformed):
+                fixture = Fixture()
+                fixture.env["GO_WINDOWS_AMD64_SHA256"] = malformed
+                self._assert_fails(fixture, "GO_WINDOWS_AMD64_SHA256 is not a sha256 value")
+
+    def test_windows_wintun_pins_are_required_and_validated(self) -> None:
+        # The Windows engine package admits the official Wintun archive, DLL
+        # and binary licence by these pins; each is a declared release pin.
+        keys = (
+            "WINTUN_VERSION", "WINTUN_ARCHIVE_SHA256", "WINTUN_WINDOWS_AMD64_SHA256",
+            "WINTUN_BINARY_LICENSE_PATH", "WINTUN_BINARY_LICENSE_SHA256",
+        )
+        for key in keys:
+            with self.subTest(missing=key):
+                fixture = Fixture()
+                del fixture.env[key]
+                self._assert_fails(fixture, f"missing required pins: {key}$")
+        malformed = (
+            ("WINTUN_VERSION", "0.14", "WINTUN_VERSION is not a version value"),
+            ("WINTUN_ARCHIVE_SHA256", "A" * 64, "WINTUN_ARCHIVE_SHA256 is not a sha256 value"),
+            (
+                "WINTUN_WINDOWS_AMD64_SHA256", "0" * 63,
+                "WINTUN_WINDOWS_AMD64_SHA256 is not a sha256 value",
+            ),
+            (
+                "WINTUN_BINARY_LICENSE_SHA256", "wintun-license",
+                "WINTUN_BINARY_LICENSE_SHA256 is not a sha256 value",
+            ),
+            (
+                "WINTUN_BINARY_LICENSE_PATH", "native/windows/wintun LICENSE.txt",
+                "WINTUN_BINARY_LICENSE_PATH is not a repository-path value",
+            ),
+            (
+                "WINTUN_BINARY_LICENSE_PATH", "native/../LICENSE.txt",
+                "WINTUN_BINARY_LICENSE_PATH path has an unsafe component",
+            ),
+        )
+        for key, value, pattern in malformed:
+            with self.subTest(key=key, value=value):
+                fixture = Fixture()
+                fixture.env[key] = value
+                self._assert_fails(fixture, pattern)
 
     def test_every_pin_format_rejects_a_malformed_value(self) -> None:
         malformed = {

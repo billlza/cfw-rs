@@ -1,0 +1,9 @@
+{
+  "name": "cfw-windows-gui-validation",
+  "private": true,
+  "version": "0.0.0",
+  "description": "CI-only attachment to the installed application's WebView2",
+  "devDependencies": {
+    "@playwright/cli": "0.1.22"
+  }
+}

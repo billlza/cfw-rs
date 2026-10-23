@@ -34,6 +34,7 @@ SOURCE_PATHS = (
     "native/dashboard/include", "scripts/prepare_development_native_ui.py",
     "scripts/hash_artifact.py", "scripts/publication/bounded_process.py",
     "scripts/publication/__init__.py", "apps/cfw-tauri-shell/build.rs",
+    "apps/cfw-tauri-shell/build_support/macos.rs",
     "apps/cfw-tauri-shell/build_support/development_native_ui.rs",
 )
 

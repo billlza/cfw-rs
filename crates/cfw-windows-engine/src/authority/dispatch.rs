@@ -1,0 +1,239 @@
+use super::{
+    AuthorityError, WindowsAuthority,
+    wire::{self, Command, Message, Request, Response, WireError},
+};
+use crate::{
+    AuthenticatedServiceRequest, LocalServiceConnection, ServiceAuthorizationError,
+    ServiceClientRole, ServicePeerAuthorization, ServiceTransportError, UserAgentLeaseRequirement,
+    authorize_service_request,
+};
+use std::time::Instant;
+
+#[derive(Debug, thiserror::Error)]
+pub enum DispatchError {
+    #[error("Windows authority request: {0}")]
+    Wire(#[from] WireError),
+    #[error("Windows authority request admission: {0}")]
+    Authorization(#[from] ServiceAuthorizationError),
+}
+/// Owns the exact admitted request until its only reply. Publication errors are
+/// retained for the service supervisor as well as reported with a closed wire
+/// code. A send failure is delivery-uncertain; it never retries or undoes a grant.
+pub struct AuthorizedReply {
+    authorization: ServicePeerAuthorization,
+    message: Message,
+    rejection: Option<AuthorityError>,
+    proxy_recovery: Option<super::ProxyRecoveryObservation>,
+}
+impl AuthorizedReply {
+    /// Available only to the service supervisor handling this exact reply.
+    /// A wire acknowledgement is not a constructor for native cleanup evidence.
+    pub fn proxy_recovery_observation(&self) -> Option<&super::ProxyRecoveryObservation> {
+        self.proxy_recovery.as_ref()
+    }
+    pub fn rejection(&self) -> Option<&AuthorityError> {
+        self.rejection.as_ref()
+    }
+    pub fn send(
+        self,
+        connection: &mut LocalServiceConnection,
+        deadline: Instant,
+    ) -> Result<Option<AuthorityError>, ServiceTransportError> {
+        connection.reply(
+            self.authorization.request(),
+            self.message.as_bytes(),
+            deadline,
+        )?;
+        Ok(self.rejection)
+    }
+}
+impl WindowsAuthority {
+    /// Call under the service lifecycle guard, and retain that guard until the
+    /// returned reply is sent. This binds dispatch to the actual message bytes;
+    /// callers cannot substitute a second command for an admitted request.
+    pub fn handle(
+        &mut self,
+        connection: &mut LocalServiceConnection,
+        request: AuthenticatedServiceRequest,
+        deadline: Instant,
+    ) -> Result<AuthorizedReply, DispatchError> {
+        let command = Request::decode(request.body())?;
+        let requirement = if matches!(command.command, Command::Observe) {
+            UserAgentLeaseRequirement::OwnedLeaseOrNone
+        } else {
+            UserAgentLeaseRequirement::OwnedLease
+        };
+        let mut authorization = authorize_service_request(
+            connection,
+            request,
+            self.lease_owner(),
+            requirement,
+            deadline,
+        )?;
+        authorization.erase_request_body();
+        let admitted_role = authorization.request().role();
+        let allowed = match admitted_role {
+            ServiceClientRole::Desktop => matches!(
+                command.command,
+                Command::Observe
+                    | Command::LoadLineage
+                    | Command::ReadRuntimeScope
+                    | Command::BeginProxyRecovery(_)
+                    | Command::ConfirmProxyRecovery(_)
+                    | Command::BeginProxyCleanup(_)
+                    | Command::ReconcileProxyCleanup(_)
+                    | Command::RetainRuntime(_)
+                    | Command::ConfirmRuntimeReference(_)
+                    | Command::ReserveGeneration(_)
+                    | Command::Prepare(_)
+                    | Command::BeginStop(_)
+                    | Command::AbortPrepared(_)
+                    | Command::OwnedLease
+            ),
+            ServiceClientRole::UserAgent => matches!(
+                command.command,
+                Command::Observe
+                    | Command::BindUserAgent(_)
+                    | Command::ConfirmRuntimeKeeper(_)
+                    | Command::OpenTunnel(_)
+                    | Command::ConfirmTunnelEndpoint(_)
+                    | Command::Ready(_)
+                    | Command::Heartbeat(_)
+                    | Command::Stopped(_)
+                    | Command::OwnedLease
+            ),
+        };
+        let new_start = matches!(
+            command.command,
+            Command::Prepare(_) | Command::ReserveGeneration(_)
+        );
+        let outcome = if self.draining && new_start {
+            Err(AuthorityError::Recovering)
+        } else if allowed {
+            self.execute(&authorization, command.command)
+        } else {
+            Err(AuthorityError::Identity)
+        };
+        let (message, rejection, proxy_recovery) = match outcome {
+            Ok((response, observed)) => (response.encode(command.id)?, None, observed),
+            Err(error) => (wire::rejection(command.id, &error)?, Some(error), None),
+        };
+        Ok(AuthorizedReply {
+            authorization,
+            message,
+            rejection,
+            proxy_recovery,
+        })
+    }
+    fn execute(
+        &mut self,
+        authorization: &ServicePeerAuthorization,
+        command: Command,
+    ) -> Result<(Response, Option<super::ProxyRecoveryObservation>), AuthorityError> {
+        let response =
+            match command {
+                Command::Observe => Response::Observed(self.poll()?),
+                Command::RetainRuntime(context) => {
+                    Response::RuntimeRetained(self.retain_runtime(authorization, &context)?)
+                }
+                Command::ConfirmRuntimeReference(input) => Response::Status(
+                    self.confirm_runtime_reference(authorization, &input.context, input.handle)?,
+                ),
+                Command::LoadLineage => Response::Lineage(self.lineage(authorization)?),
+                Command::ReadRuntimeScope => {
+                    Response::RuntimeScope(self.recorded_runtime_scope(authorization)?)
+                }
+                Command::BeginProxyRecovery(target) => {
+                    Response::ProxyRecoveryGranted(self.begin_proxy_recovery(
+                        authorization,
+                        target,
+                        super::ProxyRecoveryPurpose::Observe,
+                    )?)
+                }
+                Command::ConfirmProxyRecovery(report) => {
+                    let observed = self.confirm_proxy_recovery(
+                        authorization,
+                        report,
+                        super::ProxyRecoveryPurpose::Observe,
+                    )?;
+                    return Ok((
+                        Response::ProxyRecoveryObserved(observed.receipt()?),
+                        Some(observed),
+                    ));
+                }
+                Command::BeginProxyCleanup(target) => {
+                    Response::ProxyRecoveryGranted(self.begin_proxy_recovery(
+                        authorization,
+                        target,
+                        super::ProxyRecoveryPurpose::ReconcileOff,
+                    )?)
+                }
+                Command::ReconcileProxyCleanup(report) => {
+                    let observed = self.confirm_proxy_recovery(
+                        authorization,
+                        report,
+                        super::ProxyRecoveryPurpose::ReconcileOff,
+                    )?;
+                    let snapshot = self.reconcile_proxy_cleanup(authorization, &observed)?;
+                    return Ok((
+                        Response::ProxyCleanupReconciled(wire::ProxyCleanupReceipt {
+                            recovery: observed.receipt()?,
+                            snapshot,
+                        }),
+                        Some(observed),
+                    ));
+                }
+                Command::ReserveGeneration(expected) => {
+                    Response::Lineage(self.reserve_generation(authorization, &expected)?)
+                }
+                Command::Prepare(input) => {
+                    let ticket = self.prepare(authorization, input)?;
+                    let material = ticket
+                        .with_ticket(wire::TicketMaterial::from_slice)
+                        .map_err(|_| AuthorityError::Invalid)?;
+                    Response::Prepared(wire::PreparedGrant {
+                        context: ticket.context().clone(),
+                        ticket: material,
+                    })
+                }
+                Command::BindUserAgent(input) => {
+                    let grant = input.ticket.with_bytes(|ticket| {
+                        self.bind_user_agent(authorization, input.context.clone(), ticket)
+                    })?;
+                    Response::Bound(wire::BoundGrant {
+                        context: grant.context().clone(),
+                        committed_revision: grant.committed_revision(),
+                        keeper_handle: grant.keeper_handle(),
+                        keeper: None,
+                    })
+                }
+                Command::Ready(input) => Response::Status(self.ready(authorization, input)?),
+                Command::ConfirmRuntimeKeeper(input) => Response::Status(
+                    self.confirm_runtime_keeper(authorization, &input.context, input.handle)?,
+                ),
+                Command::OpenTunnel(input) => match self.open_tunnel(authorization, &input)? {
+                    super::native::TunnelProgress::Pending => Response::TunnelPending,
+                    super::native::TunnelProgress::Offered(offer) => Response::TunnelOffered(offer),
+                },
+                Command::ConfirmTunnelEndpoint(input) => Response::Status(
+                    self.confirm_tunnel_endpoint(authorization, &input.context, input.handle)?,
+                ),
+                Command::Heartbeat(context) => {
+                    Response::Status(self.heartbeat(authorization, &context)?)
+                }
+                Command::BeginStop(input) => Response::Status(self.begin_stop(
+                    authorization,
+                    &input.context,
+                    input.expected_revision,
+                )?),
+                Command::AbortPrepared(input) => Response::Status(self.abort_prepared(
+                    authorization,
+                    &input.context,
+                    input.expected_revision,
+                )?),
+                Command::Stopped(input) => Response::Status(self.stopped(authorization, input)?),
+                Command::OwnedLease => Response::Lease(self.owned_lease(authorization)?),
+            };
+        Ok((response, None))
+    }
+}

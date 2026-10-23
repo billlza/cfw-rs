@@ -10,20 +10,18 @@ use super::contract::UpdateAuthorization;
 use super::error::{Result, UpdateError};
 use super::outcome::InstallOutcome;
 
-#[derive(Default)]
-pub(crate) struct UpdaterSecurityState {
-    inner: Arc<Mutex<Inner>>,
+pub(crate) struct UpdaterSecurityState<R = super::StagedResources> {
+    inner: Arc<Mutex<Inner<R>>>,
     check_serialization: tokio::sync::Mutex<()>,
 }
 
-#[derive(Default)]
-struct Inner {
+struct Inner<R> {
     authorization_generation: u64,
     authorization: Option<UpdateAuthorization>,
     /// The release whose download failed authentication in this run.
     rejected: Option<UpdateAuthorization>,
     previous_attempt: PreviousAttempt,
-    install: InstallState,
+    install: InstallState<R>,
 }
 
 /// Whether the attempt an earlier run recorded has been dealt with. Nothing is
@@ -40,16 +38,14 @@ enum PreviousAttempt {
 
 /// One installation attempt at a time, from the review of the previous one to
 /// the hand-off.
-#[derive(Default)]
-enum InstallState {
-    #[default]
+enum InstallState<R> {
     Idle,
     Reviewing,
     Preparing {
         version: String,
         cancellation: Arc<DownloadCancellation>,
     },
-    Staged(StagedUpdate),
+    Staged(StagedUpdate<R>),
     Committing {
         version: String,
     },
@@ -73,23 +69,26 @@ pub(super) enum PendingPhase {
 
 /// Ownership of the reviewing slot. Dropping it without `complete` leaves the
 /// previous attempt unreviewed, so the next request reviews it again.
-pub(super) struct ReviewLease {
-    state: Arc<Mutex<Inner>>,
+pub(super) struct ReviewLease<R> {
+    state: Arc<Mutex<Inner<R>>>,
     resolved: bool,
 }
 
-/// A verified bundle waiting in its staging area for the user to install it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct StagedUpdate {
+/// A verified release and its owned platform resources waiting for installation.
+/// Resource custody moves through staging, commit and cancellation; it is never
+/// reconstructed by cloning a path or a version claim.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct StagedUpdate<R = super::StagedResources> {
     pub(super) transaction: Uuid,
     pub(super) installed: BundleIdentity,
     pub(super) staged: BundleIdentity,
+    pub(super) resources: R,
 }
 
 /// Ownership of the preparing slot. Dropping it without `stage` returns the
 /// updater to idle, whatever interrupted the preparation.
-pub(super) struct PreparationLease {
-    state: Arc<Mutex<Inner>>,
+pub(super) struct PreparationLease<R> {
+    state: Arc<Mutex<Inner<R>>>,
     pub(super) cancellation: Arc<DownloadCancellation>,
     resolved: bool,
 }
@@ -97,9 +96,9 @@ pub(super) struct PreparationLease {
 /// Ownership of the committing slot. Dropping it without `handed_off` returns
 /// the staged update to the waiting state, whatever ended the hand-off, so the
 /// user can install or discard it without downloading it again.
-pub(super) struct CommitLease {
-    state: Arc<Mutex<Inner>>,
-    staged: StagedUpdate,
+pub(super) struct CommitLease<R> {
+    state: Arc<Mutex<Inner<R>>>,
+    staged: Option<StagedUpdate<R>>,
     handed_off: bool,
 }
 
@@ -139,13 +138,13 @@ impl DownloadCancellation {
 }
 
 /// What a cancellation request found.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum Cancelled {
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Cancelled<R = super::StagedResources> {
     Nothing,
     /// A download or verification was running and has been told to stop.
     Preparation,
     /// A staged update was discarded; its staging area must be removed.
-    Staged(Uuid),
+    Staged(StagedUpdate<R>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -154,7 +153,22 @@ pub(super) struct AuthorizedCheck {
     authorization: UpdateAuthorization,
 }
 
-impl UpdaterSecurityState {
+impl<R> Default for UpdaterSecurityState<R> {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(Inner {
+                authorization_generation: 0,
+                authorization: None,
+                rejected: None,
+                previous_attempt: PreviousAttempt::default(),
+                install: InstallState::Idle,
+            })),
+            check_serialization: tokio::sync::Mutex::new(()),
+        }
+    }
+}
+
+impl<R> UpdaterSecurityState<R> {
     pub(super) fn try_serialize_checks(&self) -> Result<tokio::sync::MutexGuard<'_, ()>> {
         self.check_serialization
             .try_lock()
@@ -239,7 +253,7 @@ impl UpdaterSecurityState {
 
     /// Claims the installation slot to review the previous attempt. Returns
     /// `None` once it has been reviewed: that happens once per process.
-    pub(super) fn begin_review(&self) -> Result<Option<ReviewLease>> {
+    pub(super) fn begin_review(&self) -> Result<Option<ReviewLease<R>>> {
         let mut inner = self.inner.lock().map_err(|_| UpdateError::StateLock)?;
         if matches!(inner.previous_attempt, PreviousAttempt::Reviewed { .. }) {
             return Ok(None);
@@ -286,7 +300,7 @@ impl UpdaterSecurityState {
     }
 
     /// Claims the single installation slot for a new download.
-    pub(super) fn begin_preparation(&self, version: &str) -> Result<PreparationLease> {
+    pub(super) fn begin_preparation(&self, version: &str) -> Result<PreparationLease<R>> {
         let mut inner = self.inner.lock().map_err(|_| UpdateError::StateLock)?;
         if matches!(inner.previous_attempt, PreviousAttempt::Unreviewed) {
             return Err(UpdateError::PreviousAttemptUnreviewed);
@@ -308,7 +322,7 @@ impl UpdaterSecurityState {
 
     /// Stops a running preparation or discards a staged update. Once the
     /// hand-off has begun there is nothing left that can be cancelled.
-    pub(super) fn cancel_install(&self) -> Result<Cancelled> {
+    pub(super) fn cancel_install(&self) -> Result<Cancelled<R>> {
         let mut inner = self.inner.lock().map_err(|_| UpdateError::StateLock)?;
         match &inner.install {
             InstallState::Idle | InstallState::Reviewing => Ok(Cancelled::Nothing),
@@ -317,21 +331,22 @@ impl UpdaterSecurityState {
                 cancellation.cancel();
                 Ok(Cancelled::Preparation)
             }
-            InstallState::Staged(staged) => {
-                let transaction = staged.transaction;
-                inner.install = InstallState::Idle;
-                Ok(Cancelled::Staged(transaction))
+            InstallState::Staged(_) => {
+                match std::mem::replace(&mut inner.install, InstallState::Idle) {
+                    InstallState::Staged(staged) => Ok(Cancelled::Staged(staged)),
+                    _ => Err(UpdateError::StateOwnership),
+                }
             }
             InstallState::Committing { .. } => Err(UpdateError::CancellationTooLate),
         }
     }
 
     /// Takes the staged update of exactly this version for installation.
-    pub(super) fn begin_commit(&self, expected_version: &str) -> Result<CommitLease> {
+    pub(super) fn begin_commit(&self, expected_version: &str) -> Result<CommitLease<R>> {
         let mut inner = self.inner.lock().map_err(|_| UpdateError::StateLock)?;
-        let staged = match &inner.install {
+        let version = match &inner.install {
             InstallState::Staged(staged) if staged.staged.version == expected_version => {
-                staged.clone()
+                staged.staged.version.clone()
             }
             InstallState::Staged(_) => return Err(UpdateError::AuthorizationChanged),
             InstallState::Idle => return Err(UpdateError::NoStagedUpdate),
@@ -339,18 +354,19 @@ impl UpdaterSecurityState {
             | InstallState::Preparing { .. }
             | InstallState::Committing { .. } => return Err(UpdateError::InstallAlreadyActive),
         };
-        inner.install = InstallState::Committing {
-            version: staged.staged.version.clone(),
+        let previous = std::mem::replace(&mut inner.install, InstallState::Committing { version });
+        let InstallState::Staged(staged) = previous else {
+            return Err(UpdateError::StateOwnership);
         };
         Ok(CommitLease {
             state: self.inner.clone(),
-            staged,
+            staged: Some(staged),
             handed_off: false,
         })
     }
 }
 
-impl ReviewLease {
+impl<R> ReviewLease<R> {
     /// Ends the review: the previous attempt is dealt with and `unreported`
     /// is what the dashboard still has to be told.
     pub(super) fn complete(mut self, unreported: InstallOutcome) -> Result<()> {
@@ -362,7 +378,7 @@ impl ReviewLease {
     }
 }
 
-impl Drop for ReviewLease {
+impl<R> Drop for ReviewLease<R> {
     fn drop(&mut self) {
         if self.resolved {
             return;
@@ -374,9 +390,9 @@ impl Drop for ReviewLease {
     }
 }
 
-impl CommitLease {
-    pub(super) fn staged(&self) -> &StagedUpdate {
-        &self.staged
+impl<R> CommitLease<R> {
+    pub(super) fn staged(&self) -> Result<&StagedUpdate<R>> {
+        self.staged.as_ref().ok_or(UpdateError::StateOwnership)
     }
 
     /// The installer process owns the update now; this process only exits.
@@ -385,26 +401,34 @@ impl CommitLease {
     }
 }
 
-impl Drop for CommitLease {
+impl<R> Drop for CommitLease<R> {
     fn drop(&mut self) {
         if self.handed_off {
             return;
         }
         match self.state.lock() {
-            Ok(mut inner) => inner.install = InstallState::Staged(self.staged.clone()),
+            Ok(mut inner) => match self.staged.take() {
+                Some(staged) => inner.install = InstallState::Staged(staged),
+                None => eprintln!("updater commit lease lost its staged resources"),
+            },
             Err(_) => eprintln!("updater state lock failed while releasing a hand-off"),
         }
     }
 }
 
-impl PreparationLease {
+impl<R> PreparationLease<R> {
     /// Records the verified bundle as ready to install.
-    pub(super) fn stage(mut self, staged: StagedUpdate) -> Result<()> {
+    pub(super) fn stage(mut self, staged: StagedUpdate<R>) -> Result<()> {
         let mut inner = self.state.lock().map_err(|_| UpdateError::StateLock)?;
         // A cancellation that arrived after the last check still wins: the
         // caller discards what it staged.
         if self.cancellation.is_cancelled() {
             return Err(UpdateError::DownloadCancelled);
+        }
+        if !matches!(&inner.install, InstallState::Preparing { version, .. }
+            if version == &staged.staged.version)
+        {
+            return Err(UpdateError::AuthorizationChanged);
         }
         inner.install = InstallState::Staged(staged);
         self.resolved = true;
@@ -412,7 +436,7 @@ impl PreparationLease {
     }
 }
 
-impl Drop for PreparationLease {
+impl<R> Drop for PreparationLease<R> {
     fn drop(&mut self) {
         if self.resolved {
             return;
@@ -427,6 +451,10 @@ impl Drop for PreparationLease {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // State-machine unit tests use an inert resource value; product Windows
+    // instantiations retain the real staging lease and inspected MSI.
+    type UpdaterSecurityState = super::UpdaterSecurityState<()>;
+    type StagedUpdate = super::StagedUpdate<()>;
 
     fn authorization(version: &str) -> UpdateAuthorization {
         UpdateAuthorization {
@@ -511,6 +539,7 @@ mod tests {
     fn staged(version: &str) -> StagedUpdate {
         StagedUpdate {
             transaction: Uuid::from_u128(11),
+            resources: (),
             installed: BundleIdentity {
                 version: "0.4.0".into(),
                 build: 40074,
@@ -519,6 +548,122 @@ mod tests {
                 version: version.into(),
                 build: 50021,
             },
+        }
+    }
+
+    struct TrackedResource {
+        allocation: Box<u64>,
+        drops: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Drop for TrackedResource {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn tracked_stage(
+        drops: &Arc<std::sync::atomic::AtomicUsize>,
+    ) -> super::StagedUpdate<TrackedResource> {
+        let stage = staged("0.5.0");
+        super::StagedUpdate {
+            transaction: stage.transaction,
+            installed: stage.installed,
+            staged: stage.staged,
+            resources: TrackedResource {
+                allocation: Box::new(91),
+                drops: drops.clone(),
+            },
+        }
+    }
+
+    fn reviewed_resources() -> super::UpdaterSecurityState<TrackedResource> {
+        let state = super::UpdaterSecurityState::default();
+        state
+            .begin_review()
+            .unwrap()
+            .unwrap()
+            .complete(InstallOutcome::None)
+            .unwrap();
+        state
+    }
+
+    #[test]
+    fn commit_rollback_and_cancel_move_the_same_nonclone_resource() {
+        let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state = reviewed_resources();
+        let stage = tracked_stage(&drops);
+        let address = std::ptr::from_ref(stage.resources.allocation.as_ref());
+        state
+            .begin_preparation("0.5.0")
+            .unwrap()
+            .stage(stage)
+            .unwrap();
+        let commit = state.begin_commit("0.5.0").unwrap();
+        assert_eq!(
+            std::ptr::from_ref(commit.staged().unwrap().resources.allocation.as_ref()),
+            address
+        );
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        drop(commit);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        let Cancelled::Staged(stage) = state.cancel_install().unwrap() else {
+            panic!("cancel must transfer the retained resources");
+        };
+        assert_eq!(
+            std::ptr::from_ref(stage.resources.allocation.as_ref()),
+            address
+        );
+        assert!(state.pending().unwrap().is_none());
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        drop(stage);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn completed_handoff_releases_resources_once_without_restaging() {
+        let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state = reviewed_resources();
+        state
+            .begin_preparation("0.5.0")
+            .unwrap()
+            .stage(tracked_stage(&drops))
+            .unwrap();
+        state.begin_commit("0.5.0").unwrap().handed_off();
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            state.cancel_install(),
+            Err(UpdateError::CancellationTooLate)
+        ));
+        assert!(matches!(
+            state.begin_commit("0.5.0"),
+            Err(UpdateError::InstallAlreadyActive)
+        ));
+        drop(state);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn cancellation_or_wrong_version_cannot_publish_owned_resources() {
+        for cancelled in [true, false] {
+            let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let state = reviewed_resources();
+            let lease = state
+                .begin_preparation(if cancelled { "0.5.0" } else { "0.6.0" })
+                .unwrap();
+            if cancelled {
+                assert!(matches!(state.cancel_install(), Ok(Cancelled::Preparation)));
+            }
+            let result = lease.stage(tracked_stage(&drops));
+            assert!(matches!(
+                (cancelled, result),
+                (true, Err(UpdateError::DownloadCancelled))
+                    | (false, Err(UpdateError::AuthorizationChanged))
+            ));
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            assert!(state.pending().unwrap().is_none());
+            drop(state);
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
         }
     }
 
@@ -688,7 +833,7 @@ mod tests {
             Err(UpdateError::AuthorizationChanged)
         ));
         let committing = state.begin_commit("0.5.0").expect("commit");
-        assert_eq!(committing.staged(), &staged("0.5.0"));
+        assert_eq!(committing.staged().expect("owned stage"), &staged("0.5.0"));
         assert_eq!(
             state.pending().expect("pending"),
             pending(PendingPhase::Committing)
@@ -710,7 +855,7 @@ mod tests {
         );
         assert_eq!(
             state.cancel_install().expect("discard"),
-            Cancelled::Staged(Uuid::from_u128(11))
+            Cancelled::Staged(staged("0.5.0"))
         );
         assert_eq!(state.cancel_install().expect("idle"), Cancelled::Nothing);
         assert_eq!(state.pending().expect("pending"), None);

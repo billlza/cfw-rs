@@ -7,13 +7,13 @@
       http-equiv="Content-Security-Policy"
       content="default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; img-src 'self' data:; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"
     />
-    <title>Clash for Mac</title>
+    <title>Clash</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
     <header class="status-bar" data-tauri-drag-region>
       <div class="status-progress" aria-hidden="true"><i id="traffic-progress"></i></div>
-      <span id="status-title">Clash for Mac</span>
+      <span id="status-title">Clash</span>
       <button id="reload-button" class="status-button" title="Reload dashboard" data-i18n="Reload">Reload</button>
     </header>
 
@@ -46,10 +46,10 @@
         <h2 id="page-title" class="visually-hidden">General</h2>
         <p id="page-summary" class="visually-hidden">Runtime overview</p>
         <section id="page" class="page" aria-live="polite">
-          <div class="startup-screen" role="status" aria-label="Starting Clash for Mac">
+          <div class="startup-screen" role="status" aria-label="Starting dashboard">
             <span class="startup-spinner" aria-hidden="true"></span>
             <div>
-              <strong data-i18n="Starting Clash for Mac">Starting Clash for Mac</strong>
+              <strong data-i18n="Starting dashboard">Starting dashboard</strong>
               <p data-i18n="Loading verified settings and network state…">Loading verified settings and network state…</p>
             </div>
           </div>

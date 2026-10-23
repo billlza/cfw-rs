@@ -1,33 +1,25 @@
 use std::fs;
-use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::*;
+use crate::test_support::{create_private_directory, symlink, write_private};
 
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 const REQUIRED_BASE: &str = "retain_window_bounds: true\nlaunch_at_login: false\nsilent_start: false\nsystem_proxy: false\n";
 
-fn paths(name: &str) -> (PathBuf, MacOsAppPaths) {
+fn paths(name: &str) -> (PathBuf, AppPaths) {
     let root = std::env::temp_dir().join(format!(
         "cfw-legacy-settings-{name}-{}-{}",
         std::process::id(),
         TEST_COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
-    let paths = MacOsAppPaths::from_app_home(root.join("app"));
+    let paths = AppPaths::from_app_home(root.join("app"));
     (root, paths)
 }
 
-fn write_legacy(paths: &MacOsAppPaths, text: &str) {
-    fs::create_dir_all(&paths.app_home).expect("create app home");
-    fs::set_permissions(&paths.app_home, fs::Permissions::from_mode(0o700))
-        .expect("set app home mode");
-    fs::write(&paths.legacy_settings_file, text).expect("write legacy settings");
-    fs::set_permissions(
-        &paths.legacy_settings_file,
-        fs::Permissions::from_mode(0o600),
-    )
-    .expect("set legacy settings mode");
+fn write_legacy(paths: &AppPaths, text: &str) {
+    write_private(&paths.legacy_settings_file, text);
 }
 
 #[test]
@@ -146,7 +138,11 @@ fn changed_legacy_source_is_not_deleted_after_parsing() {
     let migration = LegacySettingsMigration::read(&paths)
         .expect("read migration")
         .expect("legacy source");
-    write_legacy(&paths, &format!("{REQUIRED_BASE}theme: light\n"));
+    fs::write(
+        &paths.legacy_settings_file,
+        format!("{REQUIRED_BASE}theme: light\n"),
+    )
+    .expect("change the bytes without replacing the inode");
     assert!(matches!(
         migration.remove_source(&paths),
         Err(SettingsStoreError::LegacySourceChanged)
@@ -158,9 +154,7 @@ fn changed_legacy_source_is_not_deleted_after_parsing() {
 #[test]
 fn symlink_and_hard_link_legacy_sources_are_rejected() {
     let (root, paths) = paths("unsafe-source");
-    fs::create_dir_all(&paths.app_home).expect("create app home");
-    fs::set_permissions(&paths.app_home, fs::Permissions::from_mode(0o700))
-        .expect("set app home mode");
+    create_private_directory(&paths.app_home);
     let outside = root.join("outside.yaml");
     fs::write(&outside, b"theme: dark\n").expect("write outside source");
     symlink(&outside, &paths.legacy_settings_file).expect("create legacy symlink");

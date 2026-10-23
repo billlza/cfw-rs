@@ -34,31 +34,15 @@ use journal::{
     LegacySessionJournalIdentity,
 };
 
+pub(crate) use crate::process_identity::ProcessIdentity;
 pub(crate) use admission::require_canonical_handoff_candidate;
-pub(crate) use handoff_ticket::{
-    ConsumedHandoffTicket, LaunchArguments, ProcessIdentity, RendererReadyChallenge,
-    parse_launch_arguments,
-};
+pub(crate) use handoff_ticket::{ConsumedHandoffTicket, RendererReadyChallenge};
+#[cfg(target_os = "macos")]
+pub(crate) use handoff_ticket::{LaunchArguments, parse_launch_arguments};
 pub(crate) use journal::MigrationHandoffLease;
 
 pub use state_gate::LegacyRetirementGate;
 pub(crate) use state_gate::LegacyRetirementStatus;
-
-/// The exact kernel identity of this process, which must be running the given
-/// executable. A reused PID never compares equal to it.
-pub(crate) fn current_process_identity(executable: &Path) -> Result<ProcessIdentity, String> {
-    handoff_ticket::observe_exact_process(std::process::id(), executable)?
-        .ok_or_else(|| "this process is not running the expected executable".to_owned())
-}
-
-pub(crate) fn process_identity_exists(identity: &ProcessIdentity) -> Result<bool, String> {
-    handoff_ticket::identity_exists(identity)
-}
-
-/// Every process of this user that runs exactly the given executable.
-pub(crate) fn exact_processes(executable: &Path) -> Result<Vec<ProcessIdentity>, String> {
-    handoff_ticket::list_exact_processes(executable)
-}
 
 /// Normal networking does not depend on deleting legacy data. The existing
 /// mode/maintenance permit serializes this observation with explicit cleanup.
@@ -349,7 +333,7 @@ pub(crate) async fn disable_service_mode(
     // credential, validates both libbox configs, proves global Off, and for a
     // Tunnel target proves the System Extension is ready.
     let live_outcome =
-        run_native_preflight(engine.preflight_backend.as_ref(), current_request.clone()).await?;
+        run_native_preflight(engine.legacy_preflight()?, current_request.clone()).await?;
     validate_outcome_binding(&current_request, &live_outcome)?;
     if !matches!(live_outcome, CutoverPreflightOutcome::Ready { .. }) {
         return Err(
@@ -630,8 +614,7 @@ pub(crate) async fn recover_legacy_cutover(
             &request,
             &settings,
         )?;
-        let outcome =
-            run_native_preflight(engine.preflight_backend.as_ref(), request.clone()).await?;
+        let outcome = run_native_preflight(engine.legacy_preflight()?, request.clone()).await?;
         validate_outcome_binding(&request, &outcome)?;
         if !matches!(outcome, CutoverPreflightOutcome::Ready { .. }) {
             let message = "System Extension approval is still pending; replacement recovery made no further network change";
@@ -815,8 +798,7 @@ async fn start_replacement_with_endpoint_rebind(
             )?;
         }
 
-        let outcome =
-            run_native_preflight(engine.preflight_backend.as_ref(), request.clone()).await?;
+        let outcome = run_native_preflight(engine.legacy_preflight()?, request.clone()).await?;
         validate_outcome_binding(&request, &outcome)?;
         if !matches!(outcome, CutoverPreflightOutcome::Ready { .. }) {
             return Err(

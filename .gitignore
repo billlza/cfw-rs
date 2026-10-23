@@ -27,6 +27,7 @@ __pycache__/
 
 # UI esbuild
 /apps/cfw-tauri-shell/node_modules/
+/scripts/windows/gui/node_modules/
 /apps/cfw-tauri-shell/ui/dist/
 # The parallel React prototype is retired. Keep any local remnants out of the
 # source graph and release SBOM without deleting user-owned untracked files.

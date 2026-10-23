@@ -16,7 +16,7 @@ use std::fs;
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 
-use cfw_engine_api::EngineMode;
+use cfw_engine_api::{EngineMode, EngineRuntimePlatform};
 use cfw_profiles::StoredProfile;
 use cfw_singbox_config::{EngineSettings, ProjectionMode};
 use serde::Serialize;
@@ -25,7 +25,7 @@ use tauri::State;
 
 use super::ManagedProfiles;
 use crate::engine::{ManagedEngine, apply_admitted_engine_mode};
-use crate::legacy::LegacyRetirementGate;
+use crate::platform_maintenance::PlatformMaintenanceGate;
 use crate::settings_store;
 
 /// Placeholder written over the controller secret in a preview.
@@ -66,7 +66,7 @@ pub(crate) struct GeoIpDatabaseStatus {
 #[tauri::command]
 pub(crate) async fn apply_active_profile(
     engine: State<'_, ManagedEngine>,
-    retirement: State<'_, LegacyRetirementGate>,
+    retirement: State<'_, PlatformMaintenanceGate>,
     profiles: State<'_, ManagedProfiles>,
 ) -> Result<ProfileApplyResult, String> {
     let (mode, mode_lease) = engine
@@ -75,7 +75,12 @@ pub(crate) async fn apply_active_profile(
         .map_err(|error| error.to_string())?;
     let selected = require_selected_profile(&profiles)?;
     let settings = engine.engine_settings()?;
-    let projected = project_for_mode(&selected, &settings, mode)?;
+    let projected = project_for_mode(
+        &selected,
+        &settings,
+        mode,
+        engine.coordinator.runtime_platform(),
+    )?;
     if mode != EngineMode::Off {
         apply_admitted_engine_mode(&engine, &retirement, &profiles, mode, mode_lease).await?;
     } else {
@@ -116,7 +121,12 @@ pub(crate) async fn read_runtime_config_text(
     };
     let projected = selected
         .profile
-        .project(&selected.record.id, mode, &settings)
+        .project_with_tunnel_stack(
+            &selected.record.id,
+            mode,
+            &settings,
+            engine.coordinator.runtime_platform().tunnel_stack(),
+        )
         .map_err(|error| error.to_string())?;
     let secret = engine
         .controller_access()?
@@ -155,12 +165,13 @@ fn require_selected_profile(profiles: &ManagedProfiles) -> Result<StoredProfile,
 }
 
 /// Projects the profile for the mode a start would use and returns the projected
-/// configuration size. Both modes are projected while the engine is off, so a
-/// staged profile is proven startable either way.
+/// configuration size. All modes are projected while the engine is off; this
+/// validates their templates without granting a native start capability.
 fn project_for_mode(
     selected: &StoredProfile,
     settings: &EngineSettings,
     mode: EngineMode,
+    platform: EngineRuntimePlatform,
 ) -> Result<usize, String> {
     let modes: &[ProjectionMode] = match mode {
         EngineMode::LocalProxy => &[ProjectionMode::LocalProxy],
@@ -178,7 +189,12 @@ fn project_for_mode(
     for mode in modes {
         let projected = selected
             .profile
-            .project(&selected.record.id, *mode, settings)
+            .project_with_tunnel_stack(
+                &selected.record.id,
+                *mode,
+                settings,
+                platform.tunnel_stack(),
+            )
             .map_err(|error| error.to_string())?;
         bytes = bytes.max(projected.as_json().len());
     }
@@ -319,19 +335,23 @@ mod tests {
     fn staged_profiles_are_projected_for_both_modes_while_the_engine_is_off() {
         let settings = EngineSettings::default();
         let selected = stored();
-        assert!(project_for_mode(&selected, &settings, EngineMode::Off).expect("off") > 0);
-        assert!(
-            project_for_mode(&selected, &settings, EngineMode::SystemProxy).expect("proxy") > 0
-        );
-        assert!(project_for_mode(&selected, &settings, EngineMode::Tunnel).expect("tunnel") > 0);
-
-        // An MTU the tunnel projection rejects must fail the staged validation
-        // rather than being discovered at start time.
-        let invalid = EngineSettings {
-            tunnel_mtu: 1,
-            ..EngineSettings::default()
-        };
-        assert!(project_for_mode(&selected, &invalid, EngineMode::Off).is_err());
+        for platform in [EngineRuntimePlatform::MacOs, EngineRuntimePlatform::Windows] {
+            for mode in [
+                EngineMode::Off,
+                EngineMode::LocalProxy,
+                EngineMode::SystemProxy,
+                EngineMode::Tunnel,
+                EngineMode::TunnelSystemProxy,
+            ] {
+                assert!(project_for_mode(&selected, &settings, mode, platform).unwrap() > 0);
+            }
+            // Invalid MTU fails staging before a native start can be attempted.
+            let invalid = EngineSettings {
+                tunnel_mtu: 1,
+                ..EngineSettings::default()
+            };
+            assert!(project_for_mode(&selected, &invalid, EngineMode::Off, platform).is_err());
+        }
     }
 
     #[test]

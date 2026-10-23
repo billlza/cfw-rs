@@ -18,7 +18,7 @@ use cfw_controller::{
     ConnectionsSnapshot, ControllerClient, ControllerEndpoint, ControllerError, ControllerSnapshot,
     ControllerVersion, ProxyDelayResult, RulesSnapshot, StructuredLogEntry,
 };
-use cfw_engine_api::{EngineOwner, EngineSnapshot, EngineState, RuntimeIdentity};
+use cfw_engine_api::{EngineRuntimePlatform, EngineSnapshot, EngineState, RuntimeIdentity};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -139,28 +139,10 @@ fn controller_client_cache() -> &'static Mutex<Option<(ControllerEndpoint, Contr
 /// talk to. Every other state fails closed: there is no start path, no probe of
 /// an unknown listener, and no fallback here.
 pub(super) fn running_runtime_identity(
+    platform: EngineRuntimePlatform,
     snapshot: &EngineSnapshot,
 ) -> Result<&RuntimeIdentity, ControllerCommandError> {
-    match &snapshot.state {
-        EngineState::LocalProxyActive { runtime } | EngineState::ProxyActive { runtime }
-            if runtime.ready
-                && runtime.owner == EngineOwner::ProxyAgent
-                && runtime.context.generation == snapshot.generation
-                && snapshot.config_digest.as_deref() == Some(runtime.config_digest.as_str()) =>
-        {
-            Ok(runtime)
-        }
-        EngineState::TunnelActive { runtime }
-        | EngineState::TunnelSystemProxyActive { runtime }
-            if runtime.ready
-                && runtime.owner == EngineOwner::PacketTunnelSystemExtension
-                && runtime.context.generation == snapshot.generation
-                && snapshot.config_digest.as_deref() == Some(runtime.config_digest.as_str()) =>
-        {
-            Ok(runtime)
-        }
-        _ => Err(ControllerCommandError::EngineNotRunning),
-    }
+    crate::engine::ready_runtime(platform, snapshot).ok_or(ControllerCommandError::EngineNotRunning)
 }
 
 fn client_for_endpoint(
@@ -186,7 +168,7 @@ pub(super) fn controller_client(
     engine: &ManagedEngine,
 ) -> Result<ControllerClient, ControllerCommandError> {
     let snapshot = engine.coordinator.snapshot();
-    let runtime = running_runtime_identity(&snapshot)?;
+    let runtime = running_runtime_identity(engine.coordinator.runtime_platform(), &snapshot)?;
     let controller = engine
         .active_controller_access(runtime.context.generation, &runtime.config_digest)
         .map_err(ControllerCommandError::ClientUnavailable)?;
@@ -391,8 +373,8 @@ pub(super) async fn probe_saved_nodes(
             target_url: Some(policy.url),
             expected_status: Some(policy.expected_status),
         };
-        return profiles
-            .credential_vault()
+        return engine
+            .profile_delay_backend
             .test_profile_delays(request)
             .await
             .map(|results| {
@@ -796,8 +778,9 @@ fn start_stream(
     streams: &LiveStreams,
     kind: StreamKind,
 ) -> Result<StreamBinding, String> {
-    let snapshot = app.state::<ManagedEngine>().coordinator.snapshot();
-    let runtime = running_runtime_identity(&snapshot)
+    let engine = app.state::<ManagedEngine>();
+    let snapshot = engine.coordinator.snapshot();
+    let runtime = running_runtime_identity(engine.coordinator.runtime_platform(), &snapshot)
         .map_err(|error| error.to_ipc())?
         .clone();
     let reservation = reserve_stream(streams.slot(kind), kind, runtime)?;
@@ -842,8 +825,10 @@ async fn supervise_stream(app: &AppHandle, kind: StreamKind, binding: &StreamBin
 }
 
 fn stream_binding_is_current(app: &AppHandle, binding: &StreamBinding) -> bool {
-    let snapshot = app.state::<ManagedEngine>().coordinator.snapshot();
-    running_runtime_identity(&snapshot).is_ok_and(|runtime| runtime == &binding.runtime)
+    let engine = app.state::<ManagedEngine>();
+    let snapshot = engine.coordinator.snapshot();
+    running_runtime_identity(engine.coordinator.runtime_platform(), &snapshot)
+        .is_ok_and(|runtime| runtime == &binding.runtime)
 }
 
 fn client_for_stream(app: &AppHandle, binding: &StreamBinding) -> Result<ControllerClient, String> {
@@ -1160,13 +1145,14 @@ mod tests {
 
     fn snapshot(state: EngineState) -> EngineSnapshot {
         let (desired_mode, generation, config_digest) = match &state {
-            EngineState::ProxyActive { runtime } => (
-                EngineMode::SystemProxy,
+            EngineState::LocalProxyActive { runtime } | EngineState::ProxyActive { runtime } => (
+                state.active_mode(),
                 runtime.context.generation,
                 Some(runtime.config_digest.clone()),
             ),
-            EngineState::TunnelActive { runtime } => (
-                EngineMode::Tunnel,
+            EngineState::TunnelActive { runtime }
+            | EngineState::TunnelSystemProxyActive { runtime } => (
+                state.active_mode(),
                 runtime.context.generation,
                 Some(runtime.config_digest.clone()),
             ),
@@ -1196,6 +1182,79 @@ mod tests {
     }
 
     #[test]
+    fn windows_controller_commands_accept_the_ready_user_agent() {
+        let active = snapshot(EngineState::ProxyActive {
+            runtime: runtime_for(EngineOwner::WindowsUserAgent, 7, "digest", true),
+        });
+        running_runtime_identity(EngineRuntimePlatform::Windows, &active)
+            .expect("Windows controller commands are reachable");
+    }
+
+    #[test]
+    fn controller_identity_checks_platform_mode_readiness_generation_and_digest() {
+        for platform in [EngineRuntimePlatform::MacOs, EngineRuntimePlatform::Windows] {
+            for mode in [
+                EngineMode::LocalProxy,
+                EngineMode::SystemProxy,
+                EngineMode::Tunnel,
+                EngineMode::TunnelSystemProxy,
+            ] {
+                for mismatch in 0..6 {
+                    let owner = if mode.tunnel_enabled() {
+                        platform.tunnel_owner()
+                    } else {
+                        platform.proxy_owner()
+                    };
+                    let mut runtime = runtime_for(owner, 7, "digest", true);
+                    match mismatch {
+                        1 => {
+                            runtime.owner = match platform {
+                                EngineRuntimePlatform::MacOs => {
+                                    if mode.tunnel_enabled() {
+                                        EngineOwner::WindowsTunnelService
+                                    } else {
+                                        EngineOwner::WindowsUserAgent
+                                    }
+                                }
+                                EngineRuntimePlatform::Windows => {
+                                    if mode.tunnel_enabled() {
+                                        EngineOwner::PacketTunnelSystemExtension
+                                    } else {
+                                        EngineOwner::ProxyAgent
+                                    }
+                                }
+                            }
+                        }
+                        2 => runtime.ready = false,
+                        _ => {}
+                    }
+                    let state = match mode {
+                        EngineMode::LocalProxy => EngineState::LocalProxyActive { runtime },
+                        EngineMode::SystemProxy => EngineState::ProxyActive { runtime },
+                        EngineMode::Tunnel => EngineState::TunnelActive { runtime },
+                        EngineMode::TunnelSystemProxy => {
+                            EngineState::TunnelSystemProxyActive { runtime }
+                        }
+                        EngineMode::Off => unreachable!(),
+                    };
+                    let mut active = snapshot(state);
+                    match mismatch {
+                        3 => active.generation += 1,
+                        4 => active.config_digest = Some("other-digest".into()),
+                        5 => active.desired_mode = EngineMode::Off,
+                        _ => {}
+                    }
+                    assert_eq!(
+                        running_runtime_identity(platform, &active).is_ok(),
+                        mismatch == 0,
+                        "{platform:?} {mode:?} mismatch {mismatch}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn controller_access_requires_a_running_ready_engine() {
         for state in [
             EngineState::Off,
@@ -1218,8 +1277,9 @@ mod tests {
                 runtime: runtime_for(EngineOwner::PacketTunnelSystemExtension, 7, "digest", false),
             },
         ] {
-            let error = running_runtime_identity(&snapshot(state.clone()))
-                .expect_err("a controller must not be reachable without a ready engine");
+            let error =
+                running_runtime_identity(EngineRuntimePlatform::MacOs, &snapshot(state.clone()))
+                    .expect_err("a controller must not be reachable without a ready engine");
             assert!(
                 matches!(error, ControllerCommandError::EngineNotRunning),
                 "unexpected error for {state:?}: {error:?}"
@@ -1234,7 +1294,7 @@ mod tests {
                 runtime: runtime_for(EngineOwner::PacketTunnelSystemExtension, 7, "digest", true),
             },
         ] {
-            running_runtime_identity(&snapshot(state))
+            running_runtime_identity(EngineRuntimePlatform::MacOs, &snapshot(state))
                 .expect("a ready engine exposes its loopback controller");
         }
     }

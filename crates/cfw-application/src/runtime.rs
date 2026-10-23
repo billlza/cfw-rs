@@ -34,6 +34,7 @@ pub(crate) const OBSERVATION_GRACE_MISSES: u32 = 3;
 const _: () = assert!(OBSERVATION_GRACE_MISSES >= 2);
 
 pub(crate) struct CoordinatorState {
+    pub(crate) runtime_platform: cfw_engine_api::EngineRuntimePlatform,
     pub(crate) snapshot: EngineSnapshot,
     pub(crate) native_lease: Option<NativeLease>,
     /// Fail-closed quarantine set when an accepted operation ends with cleanup
@@ -137,13 +138,13 @@ pub(crate) async fn reconcile_active_runtime(
     let (expected_mode, expected_owner, expected_runtime) = match &baseline.state {
         EngineState::LocalProxyActive { runtime } | EngineState::ProxyActive { runtime } => (
             baseline.state.active_mode(),
-            EngineOwner::ProxyAgent,
+            state.runtime_platform.proxy_owner(),
             runtime.clone(),
         ),
         EngineState::TunnelActive { runtime }
         | EngineState::TunnelSystemProxyActive { runtime } => (
             baseline.state.active_mode(),
-            EngineOwner::PacketTunnelSystemExtension,
+            state.runtime_platform.tunnel_owner(),
             runtime.clone(),
         ),
         _ => return Ok(()),

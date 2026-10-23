@@ -24,7 +24,9 @@ pub const MAX_MESSAGE_BYTES: usize = 8192;
 const PROTOCOL: &str = "cfw.windows.authority";
 // v6 also transfers a separately verified, zero-access Desktop lifetime
 // reference. It remains distinct from the UserAgent's execution binding.
-const VERSION: u16 = 6;
+// v7 lets the bound Tunnel UserAgent open SYSTEM's tunnel network, poll it
+// until SYSTEM offers a packet endpoint, and confirm that endpoint.
+const VERSION: u16 = 7;
 
 #[derive(Debug, thiserror::Error)]
 pub enum WireError {
@@ -49,6 +51,16 @@ pub enum WireError {
     #[cfg(windows)]
     #[error("Windows authority runtime keeper: {0}")]
     Keeper(#[from] super::RuntimeJobError),
+    // Boxed: handoff errors can carry installation errors, which carry these.
+    #[cfg(windows)]
+    #[error("Windows authority packet endpoint adoption: {0}")]
+    Handoff(Box<crate::tunnel::HandoffError>),
+}
+#[cfg(windows)]
+impl From<crate::tunnel::HandoffError> for WireError {
+    fn from(error: crate::tunnel::HandoffError) -> Self {
+        Self::Handoff(Box::new(error))
+    }
 }
 type Result<T> = std::result::Result<T, WireError>;
 
@@ -154,6 +166,8 @@ pub(super) enum CommandTag {
     Prepare,
     BindUserAgent,
     ConfirmRuntimeKeeper,
+    OpenTunnel,
+    ConfirmTunnelEndpoint,
     Ready,
     Heartbeat,
     BeginStop,
@@ -172,6 +186,40 @@ pub struct BindRequest {
 pub struct KeeperRequest {
     pub context: LeaseContext,
     pub handle: u64,
+}
+/// The network options of the bound Tunnel run, from its digest-bound start
+/// request. SYSTEM derives its adapter plan from these alone; the system proxy
+/// port of a combined run stays with the UserAgent and is not sent. The first
+/// request starts SYSTEM's tunnel network; repeating the same request reports
+/// its progress until SYSTEM offers the endpoint, exactly once.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TunnelOpenRequest {
+    pub context: LeaseContext,
+    pub ipv6_enabled: bool,
+    pub bypass_private_networks: bool,
+    pub direct_ipv4_hosts: cfw_singbox_config::DirectIpv4HostRoutes,
+    pub mtu: u16,
+}
+impl TunnelOpenRequest {
+    pub fn new(context: LeaseContext, options: &cfw_engine_api::TunnelNetworkOptions) -> Self {
+        Self {
+            context,
+            ipv6_enabled: options.ipv6_enabled,
+            bypass_private_networks: options.bypass_private_networks,
+            direct_ipv4_hosts: options.direct_ipv4_hosts,
+            mtu: options.mtu,
+        }
+    }
+    pub fn network_options(&self) -> cfw_engine_api::TunnelNetworkOptions {
+        cfw_engine_api::TunnelNetworkOptions {
+            ipv6_enabled: self.ipv6_enabled,
+            bypass_private_networks: self.bypass_private_networks,
+            direct_ipv4_hosts: self.direct_ipv4_hosts,
+            mtu: self.mtu,
+            system_proxy_port: None,
+        }
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -196,6 +244,8 @@ pub enum Command {
     Prepare(PrepareRequest),
     BindUserAgent(BindRequest),
     ConfirmRuntimeKeeper(KeeperRequest),
+    OpenTunnel(TunnelOpenRequest),
+    ConfirmTunnelEndpoint(KeeperRequest),
     Ready(ReadyReport),
     Heartbeat(LeaseContext),
     BeginStop(StopRequest),
@@ -219,6 +269,8 @@ impl Command {
             Self::Prepare(_) => CommandTag::Prepare,
             Self::BindUserAgent(_) => CommandTag::BindUserAgent,
             Self::ConfirmRuntimeKeeper(_) => CommandTag::ConfirmRuntimeKeeper,
+            Self::OpenTunnel(_) => CommandTag::OpenTunnel,
+            Self::ConfirmTunnelEndpoint(_) => CommandTag::ConfirmTunnelEndpoint,
             Self::Ready(_) => CommandTag::Ready,
             Self::Heartbeat(_) => CommandTag::Heartbeat,
             Self::BeginStop(_) => CommandTag::BeginStop,
@@ -252,6 +304,25 @@ impl Command {
             Self::BindUserAgent(input) => validate_context(&input.context),
             Self::ConfirmRuntimeKeeper(input) | Self::ConfirmRuntimeReference(input) => {
                 validate_context(&input.context)?;
+                validate_handle(input.handle)
+            }
+            Self::OpenTunnel(input) => {
+                validate_context(&input.context)?;
+                if input.context.operation.mode
+                    != cfw_engine_api::authority_v1::AuthorityMode::Tunnel
+                    || !crate::tunnel::HANDOFF_MTU.contains(&input.mtu)
+                {
+                    return Err(WireError::Malformed);
+                }
+                Ok(())
+            }
+            Self::ConfirmTunnelEndpoint(input) => {
+                validate_context(&input.context)?;
+                if input.context.operation.mode
+                    != cfw_engine_api::authority_v1::AuthorityMode::Tunnel
+                {
+                    return Err(WireError::Malformed);
+                }
                 validate_handle(input.handle)
             }
             Self::Ready(report) => {
@@ -354,9 +425,10 @@ impl Request {
             }
             Command::Prepare(input) => envelope(self.id, tag, input),
             Command::BindUserAgent(input) => envelope(self.id, tag, input),
-            Command::ConfirmRuntimeKeeper(input) | Command::ConfirmRuntimeReference(input) => {
-                envelope(self.id, tag, input)
-            }
+            Command::ConfirmRuntimeKeeper(input)
+            | Command::ConfirmRuntimeReference(input)
+            | Command::ConfirmTunnelEndpoint(input) => envelope(self.id, tag, input),
+            Command::OpenTunnel(input) => envelope(self.id, tag, input),
             Command::Ready(input) => envelope(self.id, tag, input),
             Command::Heartbeat(input) | Command::RetainRuntime(input) => {
                 envelope(self.id, tag, input)
@@ -400,6 +472,8 @@ impl Request {
             CommandTag::Prepare => Command::Prepare(decode(body)?),
             CommandTag::BindUserAgent => Command::BindUserAgent(decode(body)?),
             CommandTag::ConfirmRuntimeKeeper => Command::ConfirmRuntimeKeeper(decode(body)?),
+            CommandTag::OpenTunnel => Command::OpenTunnel(decode(body)?),
+            CommandTag::ConfirmTunnelEndpoint => Command::ConfirmTunnelEndpoint(decode(body)?),
             CommandTag::ConfirmRuntimeReference => Command::ConfirmRuntimeReference(decode(body)?),
             CommandTag::RetainRuntime => Command::RetainRuntime(decode(body)?),
             CommandTag::Ready => Command::Ready(decode(body)?),
@@ -436,6 +510,7 @@ pub enum Rejection {
     Publication,
     Observation,
     Entropy,
+    Tunnel,
 }
 impl Rejection {
     pub(super) fn of(error: &AuthorityError) -> Self {
@@ -461,6 +536,8 @@ impl Rejection {
             | AuthorityError::RuntimeEndpoints(_) => Self::Observation,
             #[cfg(windows)]
             AuthorityError::Entropy(_) => Self::Entropy,
+            #[cfg(windows)]
+            AuthorityError::Tunnel(_) | AuthorityError::Handoff(_) => Self::Tunnel,
         }
     }
 }
@@ -476,6 +553,8 @@ enum ResponseTag {
     RuntimeRetained,
     Prepared,
     Bound,
+    TunnelPending,
+    TunnelOffered,
     Status,
     Lease,
     Rejected,
@@ -570,6 +649,11 @@ pub enum Response {
     RuntimeRetained(RuntimeReferenceGrant),
     Prepared(PreparedGrant),
     Bound(BoundGrant),
+    /// SYSTEM is still creating or configuring its tunnel adapter.
+    TunnelPending,
+    /// Where SYSTEM placed the packet endpoint in the requesting UserAgent.
+    /// Adoption still verifies the handle locally and through confirmation.
+    TunnelOffered(crate::tunnel::EndpointOffer),
     Status(AuthoritySnapshot),
     Lease(LeaseContext),
 }
@@ -609,6 +693,13 @@ impl Response {
                         keeper_handle: value.keeper_handle,
                     },
                 )
+            }
+            Self::TunnelPending => envelope(id, ResponseTag::TunnelPending, &Empty {}),
+            Self::TunnelOffered(value) => {
+                if !value.is_well_formed() {
+                    return Err(WireError::Malformed);
+                }
+                envelope(id, ResponseTag::TunnelOffered, value)
             }
             Self::Status(value) => envelope(id, ResponseTag::Status, value),
             Self::Lease(value) => envelope(id, ResponseTag::Lease, value),
@@ -801,6 +892,23 @@ pub(super) fn response(
                 keeper: None,
             }))
         }
+        (Command::OpenTunnel(input), ResponseTag::TunnelPending) => {
+            let _: Empty = decode(payload)?;
+            if input.context.operation.owner != *owner {
+                return Err(WireError::Correlation);
+            }
+            Ok(Response::TunnelPending)
+        }
+        (Command::OpenTunnel(input), ResponseTag::TunnelOffered) => {
+            let value: crate::tunnel::EndpointOffer = decode(payload)?;
+            if !value.is_well_formed() {
+                return Err(WireError::Malformed);
+            }
+            if value.mtu != input.mtu || input.context.operation.owner != *owner {
+                return Err(WireError::Correlation);
+            }
+            Ok(Response::TunnelOffered(value))
+        }
         (Command::OwnedLease, ResponseTag::Lease) => {
             let value: LeaseContext = decode(payload)?;
             validate_context(&value)?;
@@ -819,7 +927,7 @@ pub(super) fn response(
                         && input.context.operation.prepared_revision.checked_add(2)
                             == value.revision,
                 ),
-                Command::ConfirmRuntimeKeeper(input) => (
+                Command::ConfirmRuntimeKeeper(input) | Command::ConfirmTunnelEndpoint(input) => (
                     &input.context,
                     value.state == AuthorityState::Starting
                         && input.context.operation.prepared_revision.checked_add(1)

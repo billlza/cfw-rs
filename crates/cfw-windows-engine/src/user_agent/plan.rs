@@ -32,13 +32,32 @@ impl PlannedConfiguration {
                 let references = request.credential_references();
                 let material =
                     vault.resolve_for_engine(request.credential_audience(), &references)?;
-                Ok(request.prepare_proxy(material.expose_to_engine())?)
+                Ok(match request.mode() {
+                    ProjectionMode::Tunnel => {
+                        request.prepare_tunnel_data_plane(material.expose_to_engine())?
+                    }
+                    _ => request.prepare_proxy(material.expose_to_engine())?,
+                })
             }
+        }
+    }
+    /// The digest-bound network options of a Tunnel request, which SYSTEM's
+    /// tunnel network is opened with before the engine starts.
+    #[cfg(windows)]
+    pub(super) fn tunnel_options(&self) -> Option<cfw_engine_api::TunnelNetworkOptions> {
+        match self {
+            Self::Prepared(_) => None,
+            Self::Requested { request, .. } => request.shared_request().tunnel_options,
         }
     }
 }
 impl UserAgentPlan {
+    /// A pre-resolved configuration carries no network options, so it can
+    /// only plan a listener data plane; Tunnel runs use the start request.
     pub fn new(binding: BindRequest, config: PreparedConfig) -> Result<Self> {
+        if config.mode().has_tunnel() {
+            return Err(UserAgentError::Mode);
+        }
         Self::check(
             &binding,
             config.mode(),
@@ -104,9 +123,9 @@ impl UserAgentPlan {
         let mode = match mode {
             ProjectionMode::LocalProxy => AuthorityMode::LocalProxy,
             ProjectionMode::SystemProxy => AuthorityMode::SystemProxy,
-            ProjectionMode::Tunnel | ProjectionMode::TunnelSystemProxy => {
-                return Err(UserAgentError::Mode);
-            }
+            ProjectionMode::Tunnel => AuthorityMode::Tunnel,
+            // The combined mode's system proxy is not yet owned on Windows.
+            ProjectionMode::TunnelSystemProxy => return Err(UserAgentError::Mode),
         };
         if binding.context.operation.mode != mode {
             return Err(UserAgentError::Mode);

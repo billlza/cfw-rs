@@ -174,9 +174,9 @@ impl InstalledDesktop {
         deadline: Instant,
     ) -> Result<DesktopUserAgent> {
         let request = CheckedStartConfiguration::new(request)?;
-        self.prepare_checked_proxy(request, deadline)
+        self.prepare_checked_run(request, deadline)
     }
-    pub(crate) fn prepare_checked_proxy(
+    pub(crate) fn prepare_checked_run(
         &self,
         request: CheckedStartConfiguration,
         deadline: Instant,

@@ -33,6 +33,9 @@ use error::{desktop_error, host_error};
 type Result<T> = std::result::Result<T, BackendError>;
 const LIMIT: Duration = Duration::from_secs(60);
 const NATIVE_LIMIT: Duration = Duration::from_secs(30);
+/// Ready for a Tunnel run includes SYSTEM's adapter creation, which may first
+/// install the pinned Wintun driver. Still inside the worker's `LIMIT`.
+const TUNNEL_READY_LIMIT: Duration = Duration::from_secs(55);
 /// The application watchdog outlives bounded native admission and retirement;
 /// it never changes a native timeout or admits an uncertain cleanup as Off.
 pub const OUTER_WATCHDOG: Duration = Duration::from_secs(65);
@@ -157,7 +160,7 @@ impl Active {
             .clone()
     }
     fn matches(&self, runtime: &RuntimeIdentity) -> bool {
-        runtime.owner == cfw_engine_api::EngineOwner::WindowsUserAgent
+        runtime.owner == owner(self.mode)
             && runtime.ready
             && runtime.context == self.context
             && runtime.config_digest == self.digest
@@ -331,7 +334,12 @@ impl WindowsEngineBackend {
                 .active
                 .as_mut()
                 .ok_or_else(|| fail(Kind::Internal, "runtime owner was not retained"))?;
-            let observed = receive_ready.recv_timeout(left(deadline)?.min(NATIVE_LIMIT));
+            let ready_limit = if mode.has_tunnel() {
+                TUNNEL_READY_LIMIT
+            } else {
+                NATIVE_LIMIT
+            };
+            let observed = receive_ready.recv_timeout(left(deadline)?.min(ready_limit));
             let ready = match observed {
                 Ok(ready) => ready,
                 Err(error) => {
@@ -360,7 +368,12 @@ impl WindowsEngineBackend {
                         ProjectionMode::SystemProxy => {
                             cfw_engine_api::authority_v1::AuthorityMode::SystemProxy
                         }
-                        _ => return Err(fail(Kind::Internal, "invalid proxy owner mode")),
+                        ProjectionMode::Tunnel => {
+                            cfw_engine_api::authority_v1::AuthorityMode::Tunnel
+                        }
+                        ProjectionMode::TunnelSystemProxy => {
+                            return Err(fail(Kind::Internal, "invalid runtime owner mode"));
+                        }
                     }
                 || ready.authority().state != AuthorityState::Active
             {
@@ -485,7 +498,7 @@ fn run_owned(
     ready: SyncSender<DesktopReady>,
     queries: crate::user_agent::desktop::DesktopStatusRequests,
 ) -> (Option<DesktopUserAgent>, Result<()>) {
-    let mut owner = match desktop.prepare_checked_proxy(request, Instant::now() + NATIVE_LIMIT) {
+    let mut owner = match desktop.prepare_checked_run(request, Instant::now() + NATIVE_LIMIT) {
         Ok(owner) => owner,
         Err(error) => return (None, Err(host_error(error))),
     };
@@ -573,7 +586,23 @@ fn query(shared: &Shared, state: &mut State, deadline: Instant) -> Result<Native
         ProjectionMode::SystemProxy => Ok(NativeEngineStatus::SystemProxy {
             runtime: live.runtime,
         }),
-        _ => Err(fail(Kind::Internal, "proxy owner contained a tunnel mode")),
+        ProjectionMode::Tunnel => Ok(NativeEngineStatus::Tunnel {
+            runtime: live.runtime,
+        }),
+        ProjectionMode::TunnelSystemProxy => Err(fail(
+            Kind::Internal,
+            "runtime owner contained the combined mode",
+        )),
+    }
+}
+/// The shared coordinator's owner of a Windows run: the UserAgent for proxy
+/// modes, and the SYSTEM tunnel service, which owns the adapter and pump while
+/// the UserAgent hosts the engine, for Tunnel.
+fn owner(mode: ProjectionMode) -> cfw_engine_api::EngineOwner {
+    if mode.has_tunnel() {
+        EngineRuntimePlatform::Windows.tunnel_owner()
+    } else {
+        EngineRuntimePlatform::Windows.proxy_owner()
     }
 }
 fn off_matches(
@@ -603,21 +632,16 @@ fn combined(operation: BackendError, cleanup: BackendError) -> BackendError {
         format!("{operation}; cleanup: {cleanup}"),
     )
 }
-fn tunnel_unavailable<T: Send + 'static>() -> BackendFuture<'static, T> {
-    Box::pin(async {
-        Err(fail(
-            Kind::Unavailable,
-            "Windows Tunnel backend is not yet implemented",
-        ))
-    })
-}
-fn unavailable_request<T: Send + 'static>(
+fn combined_unavailable<T: Send + 'static>(
     request: EngineStartRequest,
 ) -> BackendFuture<'static, T> {
     let pending = PendingRequest(Some(request));
     Box::pin(async move {
         let _pending = pending;
-        tunnel_unavailable().await
+        Err(fail(
+            Kind::Unavailable,
+            "the combined Tunnel and System Proxy mode is not yet available on Windows",
+        ))
     })
 }
 impl SystemProxyAuthorization for WindowsEngineBackend {
@@ -670,19 +694,54 @@ impl EngineBackend for WindowsEngineBackend {
     fn stop_system_proxy(&self, context: EngineCommandContext) -> BackendFuture<'_, ()> {
         self.stop(context, ProjectionMode::SystemProxy)
     }
+    /// The MSI installs the SYSTEM service and the official Wintun DLL with
+    /// administrator consent; there is no per-user extension to approve. The
+    /// installed service is admitted here exactly as for any other run.
     fn install_tunnel(&self, _: EngineCommandContext) -> BackendFuture<'_, TunnelInstallOutcome> {
-        tunnel_unavailable()
+        Box::pin(self.worker(&self.shared.capacity, |shared, _, deadline| {
+            shared
+                .desktop
+                .observe_authority(deadline)
+                .map(|_| TunnelInstallOutcome::Ready)
+                .map_err(host_error)
+        }))
     }
     fn cancel_tunnel_install(&self, _: EngineCommandContext) -> BackendFuture<'_, ()> {
-        tunnel_unavailable()
+        // `install_tunnel` never waits for an approval, so nothing is pending.
+        Box::pin(async {
+            Err(fail(
+                Kind::StaleOperation,
+                "no Windows tunnel installation approval is pending",
+            ))
+        })
     }
+    /// No first-time consent exists on Windows: the installed SYSTEM service
+    /// already owns the tunnel network. The request is still checked so an
+    /// unsupported mode fails here rather than at start.
     fn authorize_tunnel_configuration(&self, request: EngineStartRequest) -> BackendFuture<'_, ()> {
-        unavailable_request(request)
+        if request.mode == ProjectionMode::TunnelSystemProxy {
+            return combined_unavailable(request);
+        }
+        let mut pending = PendingRequest(Some(request));
+        Box::pin(async move {
+            let request = crate::CheckedStartConfiguration::new(pending.take()?)
+                .map_err(|error| host_error(HostError::Executable(error)))?;
+            if request.mode() != ProjectionMode::Tunnel {
+                return Err(fail(
+                    Kind::ConfigurationRejected,
+                    "requested tunnel mode differs from operation",
+                ));
+            }
+            Ok(())
+        })
     }
     fn start_tunnel(&self, request: EngineStartRequest) -> BackendFuture<'_, RuntimeIdentity> {
-        unavailable_request(request)
+        if request.mode == ProjectionMode::TunnelSystemProxy {
+            return combined_unavailable(request);
+        }
+        self.start(request, ProjectionMode::Tunnel)
     }
-    fn stop_tunnel(&self, _: EngineCommandContext) -> BackendFuture<'_, ()> {
-        tunnel_unavailable()
+    fn stop_tunnel(&self, context: EngineCommandContext) -> BackendFuture<'_, ()> {
+        self.stop(context, ProjectionMode::Tunnel)
     }
 }

@@ -23,9 +23,11 @@ mod recovery;
 mod runtime_reference;
 mod startup;
 mod supervisor;
+mod tunnel;
 pub use local_cleanup::VerifiedLocalCleanup;
 pub use recovery::ProxyRecoveryObservation;
 pub use startup::{ObservedRecordedOff, VerifiedOffAdmission};
+pub(super) use tunnel::TunnelProgress;
 
 /// The service owns one instance behind its lifecycle guard. This component
 /// binds native callers and persists policy; the runtime supervisor still owns
@@ -42,6 +44,11 @@ pub struct WindowsAuthority {
     desktop_reference_confirmed: bool,
     cleanup_context: Option<LeaseContext>,
     proxy_recovery: Option<super::recovery::ProxyRecoveryAdmission>,
+    /// SYSTEM's tunnel network of the current or last Tunnel run. It is kept
+    /// through suspension so its adapter is still retired and proven absent.
+    tunnel: Option<tunnel::TunnelRun>,
+    /// Removes an adapter an earlier SYSTEM process left, for recovery.
+    tunnel_recovery: Option<crate::tunnel::TunnelHost>,
     pub(super) draining: bool,
     #[cfg(feature = "native-service-validation")]
     next_fault: Option<crate::authority_journal::JournalFaultPoint>,
@@ -105,6 +112,8 @@ impl WindowsAuthority {
             desktop_reference_confirmed: false,
             cleanup_context: None,
             proxy_recovery: None,
+            tunnel: None,
+            tunnel_recovery: None,
             draining: false,
             #[cfg(feature = "native-service-validation")]
             next_fault: None,
@@ -423,6 +432,13 @@ impl WindowsAuthority {
         }
         let mut candidate = self.machine.clone();
         candidate.ready(&peer, &report, now)?;
+        // The machine accepted this exact report for the bound runtime; a
+        // Tunnel run is routed only now, before Active is published.
+        if report.context.operation.mode == cfw_engine_api::authority_v1::AuthorityMode::Tunnel
+            && self.machine.phase() == AuthorityState::Starting
+        {
+            self.route_tunnel_for_ready(&report, deadline)?;
+        }
         self.commit(candidate)?;
         self.after_publication(authorization, deadline)?;
         Ok(self.snapshot())

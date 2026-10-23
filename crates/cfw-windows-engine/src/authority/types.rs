@@ -211,13 +211,21 @@ pub(super) enum CleanupBinding {
     Runtime(super::ProxyRecoveryTarget),
     RecordedOff(AuthorityCommittedState),
     LocalRuntime(AuthorityCommittedState),
+    /// A Tunnel run: its Job is empty and SYSTEM's own tunnel network has
+    /// retired, with the adapter observed absent.
+    TunnelRuntime(AuthorityCommittedState),
     #[cfg(any(test, feature = "native-service-validation"))]
     Validation,
 }
 impl CleanupEvidence {
     pub(super) fn validate_scope(&self, metadata: Option<&AuthorityCommittedState>) -> Result<()> {
         match &self.binding {
-            CleanupBinding::LocalRuntime(target) => {
+            CleanupBinding::LocalRuntime(target) | CleanupBinding::TunnelRuntime(target) => {
+                let mode = if matches!(self.binding, CleanupBinding::LocalRuntime(_)) {
+                    AuthorityMode::LocalProxy
+                } else {
+                    AuthorityMode::Tunnel
+                };
                 target.validate()?;
                 let operation = target.operation().ok_or(AuthorityError::CleanupUnproven)?;
                 if !matches!(
@@ -227,7 +235,7 @@ impl CleanupEvidence {
                         | AuthorityState::Active
                         | AuthorityState::Stopping
                         | AuthorityState::Quarantined
-                ) || operation.mode() != AuthorityMode::LocalProxy
+                ) || operation.mode() != mode
                     || metadata != Some(target)
                     || self.revision != target.revision()
                     || self.lease_id != Some(operation.lease_id())
@@ -288,11 +296,14 @@ impl CleanupEvidence {
         }
     }
 }
+/// Every mode, Tunnel included, runs its engine in the lease owner's
+/// UserAgent. SYSTEM keeps the tunnel adapter and packet pump itself and
+/// hands the UserAgent only a packet endpoint, so no third runtime role
+/// exists.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Role {
     Desktop,
     UserAgent,
-    TunnelWorker,
 }
 #[derive(Clone)]
 pub(super) struct Peer {
@@ -310,13 +321,6 @@ impl Peer {
             return Err(AuthorityError::Identity);
         }
         Ok(())
-    }
-}
-pub(super) fn expected_role(mode: AuthorityMode) -> Role {
-    if mode == AuthorityMode::Tunnel {
-        Role::TunnelWorker
-    } else {
-        Role::UserAgent
     }
 }
 pub(super) fn metadata_lease_id(value: Option<&AuthorityCommittedState>) -> Option<Uuid> {

@@ -304,8 +304,9 @@ try {
                 $raw = & $desktopPath --installed-host-probe
                 if ($LASTEXITCODE -ne 0) { throw 'Installed post-runtime probe failed' }
                 $probe = $raw | ConvertFrom-Json
-                if ($probe.lineage.generation -ne 8) { throw 'Installed runtime did not retain the five backend and three application generations' }
+                if ($probe.lineage.generation -ne 9) { throw 'Installed runtime did not retain the five backend, three application and one tunnel generations' }
                 $cases.Add('product_service_and_agent_run_both_proxy_modes')
+                $cases.Add('product_tunnel_routes_dns_and_traffic_then_retires_its_adapter')
             }
             $probes += $probe
             if ($iteration -eq 0) {
@@ -450,6 +451,15 @@ try {
     $msiReport.completed_history_reinstall_exercised = $true
 } catch { $failure = $_.ToString() }
 finally {
+    if ($null -ne $failure) {
+        # Failure diagnostics only. The SYSTEM service records its last error
+        # in its private directory, which backup semantics can read.
+        try {
+            $systemDiagnostics = Join-Path $env:ProgramData 'Clash for Windows\authority-v1\diagnostics'
+            $null = & robocopy $systemDiagnostics $Receipts 'last-runtime-error.json' /B /R:0 /W:0 /NJH /NJS /NP
+            if ($LASTEXITCODE -ge 8) { $failure = "$failure; SYSTEM diagnostics copy exited $LASTEXITCODE" }
+        } catch { $failure = "$failure; SYSTEM diagnostics copy: $($_.ToString())" }
+    }
     try {
         if ($null -ne $msiInFlight) {
             $completionPath = Join-Path $msiEvidence "$msiInFlight.json"

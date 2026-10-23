@@ -23,6 +23,7 @@ pub(super) enum ClientCase {
     InstalledProfileDesktop,
     InstalledCoordinatorDesktop,
     InstalledStartupDesktop,
+    InstalledTunnelDesktop,
     ProcessObservation,
     UpdateInspection,
     RejectedRuntime,
@@ -46,6 +47,7 @@ impl ClientCase {
             Self::InstalledProfileDesktop => "--installed-profile-client",
             Self::InstalledCoordinatorDesktop => "--installed-coordinator-client",
             Self::InstalledStartupDesktop => "--installed-startup-client",
+            Self::InstalledTunnelDesktop => "--installed-tunnel-client",
             Self::ProcessObservation => "--desktop-process-client",
             Self::UpdateInspection => "--update-package-client",
             Self::RejectedRuntime => "--rejected-agent-runtime",
@@ -69,6 +71,7 @@ impl ClientCase {
             Self::InstalledProfileDesktop => "installed-host-profile".into(),
             Self::InstalledCoordinatorDesktop => "installed-host-coordinator".into(),
             Self::InstalledStartupDesktop => "installed-host-startup".into(),
+            Self::InstalledTunnelDesktop => "installed-host-tunnel".into(),
             Self::ProcessObservation => format!("{name}-process"),
             Self::UpdateInspection => format!("{name}-update"),
             Self::RejectedRuntime => format!("{name}-runtime-rejected"),
@@ -114,7 +117,8 @@ impl ClientCase {
             Self::InstalledHostDesktop
             | Self::InstalledBackendDesktop
             | Self::InstalledBackendExitDesktop
-            | Self::InstalledCoordinatorDesktop => {
+            | Self::InstalledCoordinatorDesktop
+            | Self::InstalledTunnelDesktop => {
                 serde_json::json!({"product_service":true,"product_agent":true,"desktop_is_fixture":true,"release_accepted":false})
             }
             Self::InstalledProfileDesktop => {
@@ -134,6 +138,7 @@ impl ClientCase {
                 | Self::InstalledProfileDesktop
                 | Self::InstalledCoordinatorDesktop
                 | Self::InstalledStartupDesktop
+                | Self::InstalledTunnelDesktop
         )
     }
     fn installed_suite(self) -> Result<installed_host::InstalledSuite> {
@@ -144,6 +149,7 @@ impl ClientCase {
             Self::InstalledProfileDesktop => Ok(installed_host::InstalledSuite::Profile),
             Self::InstalledCoordinatorDesktop => Ok(installed_host::InstalledSuite::Coordinator),
             Self::InstalledStartupDesktop => Ok(installed_host::InstalledSuite::Startup),
+            Self::InstalledTunnelDesktop => Ok(installed_host::InstalledSuite::Tunnel),
             _ => Err("client is not an installed suite".into()),
         }
     }
@@ -552,7 +558,11 @@ fn run_case(
     let writer = writer.map(|(mut output, bytes)| {
         thread::spawn(move || std::io::Write::write_all(&mut output, bytes.as_slice()))
     });
-    let limit = if matches!(
+    // A Tunnel run may first install the pinned Wintun driver before Ready,
+    // and its stop proves the adapter's removal.
+    let limit = if matches!(case, ClientCase::InstalledTunnelDesktop) {
+        Duration::from_secs(150)
+    } else if matches!(
         case,
         ClientCase::RuntimeDesktop
             | ClientCase::RuntimeRestartDesktop
@@ -637,6 +647,7 @@ pub(super) fn run_installed_host(image: &Path, expected: [u8; 32]) -> Result<()>
         ClientCase::InstalledProfileDesktop,
         ClientCase::InstalledCoordinatorDesktop,
         ClientCase::InstalledStartupDesktop,
+        ClientCase::InstalledTunnelDesktop,
     ] {
         let exercise = || {
             run_case(
@@ -853,7 +864,8 @@ fn client_body(name: &str, hex: &str, case: ClientCase) -> Result<()> {
         | ClientCase::InstalledBackendExitDesktop
         | ClientCase::InstalledProfileDesktop
         | ClientCase::InstalledCoordinatorDesktop
-        | ClientCase::InstalledStartupDesktop => {
+        | ClientCase::InstalledStartupDesktop
+        | ClientCase::InstalledTunnelDesktop => {
             return Err("installed host client must use its separate test entrypoint".into());
         }
         ClientCase::RuntimeRestartDesktop => {

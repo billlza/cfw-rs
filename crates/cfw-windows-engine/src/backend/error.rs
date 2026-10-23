@@ -172,11 +172,15 @@ fn wire_kind(error: &WireError) -> Kind {
             Rejection::Publication => Kind::GlobalAuthorityRecovering,
             Rejection::Observation => Kind::GlobalAuthorityRecovering,
             Rejection::Entropy => Kind::Internal,
+            // SYSTEM could not create, configure or route its tunnel network.
+            Rejection::Tunnel => Kind::Unavailable,
         },
         WireError::Transport(error) => transport_kind(error),
         WireError::Identity(_) | WireError::Owner(_) | WireError::Keeper(_) => {
             Kind::IdentityRejected
         }
+        // The endpoint SYSTEM offered could not be adopted as its own pipe.
+        WireError::Handoff(_) => Kind::IdentityRejected,
         WireError::Version => Kind::GlobalAuthorityProtocolMismatch,
         WireError::Correlation | WireError::Length | WireError::Malformed => Kind::InvalidMessage,
     }

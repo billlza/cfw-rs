@@ -14,10 +14,10 @@ overlay cannot change production files; its before/after hashes are recorded
 separately. The original GA tree and six patch pins remain unchanged. Native CI
 also repeats the corrected fixture 200 times and retains the full event log.
 
-The component starts local and SystemProxy data planes; SystemProxy settings
-require the separate durable owner described below. Tunnel modes still require
-Windows platform authority and restoration contracts. This is not an
-`EngineBackend`, a Windows service, or
+The component starts local, SystemProxy and Tunnel data planes; SystemProxy
+settings require the separate durable owner described below, and a Tunnel run
+feeds the engine from SYSTEM's own adapter as described under Tunnel. The
+combined Tunnel and System Proxy mode is not admitted. A stopped child is not
 proof of `NativeEngineStatus::Off`. The full Windows feature/UI target remains
 in `docs/planning/cfw-0.5.0.md`.
 
@@ -28,9 +28,9 @@ in `docs/planning/cfw-0.5.0.md`.
   projection digest. Resolved secret bytes are never hashed into public identity.
   The caller must first resolve material for the projection's exact audience
   under its lifecycle guard. This component does not grant vault authorization.
-  All four modes can be checked. `PreparedConfig` separately admits local and
-  SystemProxy data planes, so a checked tunnel projection is not a start
-  capability. A local projection cannot become SystemProxy ownership.
+  All four modes can be checked. `PreparedConfig` separately admits local,
+  SystemProxy and packet-fed Tunnel data planes, so a checked projection is not
+  a start capability. A local projection cannot become SystemProxy ownership.
   Optional LAN sharing remains a separate observed listener. Only the
   `cfw-system-proxy` inbound supplies the current-user OS proxy endpoint;
   `cfw-lan-proxy` cannot replace it or cause an otherwise valid shared
@@ -58,7 +58,10 @@ credential-slot placeholders. The digest calculation is shared with the Rust
 projection producer; existing identity fields and Mac wire schemas are unchanged.
 Proxy preparation additionally checks the app-owned loopback controller, distinct
 mixed/LAN roles and the shared LAN source policy. A checked tunnel candidate
-cannot become UserAgent proxy ownership.
+cannot become UserAgent proxy ownership; Tunnel preparation admits exactly one
+gVisor `cfw-tunnel` inbound fed by an inherited endpoint, without auto_route,
+and requires `route.auto_detect_interface` so the engine's own sockets stay on
+the physical interface.
 
 The template contains the original process's controller key, so a receiver keeps
 those bytes rather than reprojecting with a different key. Owned template and
@@ -164,6 +167,54 @@ authority acceptance remain separate.
 Microsoft documents [connection option allocation and restoration](https://learn.microsoft.com/en-us/windows/win32/api/wininet/ns-wininet-internet_per_conn_optionw),
 [LAN versus RAS scope](https://learn.microsoft.com/en-us/windows/win32/api/wininet/ns-wininet-internet_per_conn_option_listw)
 and [the proxy-change policy](https://learn.microsoft.com/en-us/windows/client-management/mdm/policy-csp-internetexplorer#disableproxychange).
+
+## Tunnel
+
+A Tunnel lease is bound to the lease owner's UserAgent, which hosts the engine
+as in the proxy modes; there is no separate tunnel runtime role. SYSTEM owns
+what Windows sees: one Wintun adapter, its link, routes and resolvers, and the
+packet pump between that adapter's session and the engine's endpoint.
+
+- The bound UserAgent sends `OpenTunnel` with the run's digest-bound network
+  options. SYSTEM starts a dedicated host thread and answers `TunnelPending`;
+  the UserAgent repeats the same request until SYSTEM offers the endpoint, at
+  most `tunnel::OPEN_LIMIT` (which covers the first installation of the pinned
+  driver). The Authority guard is never held while Windows creates an adapter,
+  and each request renews the bound runtime's liveness. A lost offer is never
+  offered again.
+- The adapter's interface GUID is derived from the installation identity, so
+  Windows keeps one network profile and a leftover adapter is found by
+  identity. An adapter present when a run starts is refused, never adopted.
+- The link gets NetBIOS off and router discovery, duplicate-address
+  detection, forwarding and stateful configuration off, the endpoint MTU, and
+  interface metric zero for routed families. Windows keeps addresses, routes
+  and resolvers per interface GUID, so residual ones are removed before the
+  address plan's addresses are assigned. Every setting is read back.
+- Once the link is configured, SYSTEM places the endpoint in the UserAgent
+  (`EndpointHandoff`) and offers it once; `ConfirmTunnelEndpoint` compares the
+  UserAgent's own copy and starts the pump with a `DeliveryPolicy` built from
+  the assigned addresses. The engine inherits the adopted endpoint.
+- Ready must attest SYSTEM's own pump bounds (`tunnel::packet_pump_limits`).
+  Only then does SYSTEM install the routes, each family's default route less
+  the macOS provider's excluded ranges, and the address plan's DNS peers as the
+  adapter's only resolvers, and read them back before Active is published.
+- When the lease leaves Starting/Active, SYSTEM expects the engine to close
+  its endpoint. It retires the host once the runtime Job is empty, or at once
+  when the stop is quarantined or recovering: the pump finishes or stops, the
+  session ends, the adapter closes, and its absence, by interface and by device,
+  is observed within 15 seconds.
+- Off for a Tunnel record needs an empty Job, the host thread's exit and the
+  observed absence of the adapter. After a SYSTEM restart a recovery host
+  removes the installation's Wintun device by GUID (`DIF_REMOVE`) and proves its
+  absence first. Every address, route and resolver names the adapter, and
+  nothing is written to another interface, proxy settings or firewall policy,
+  so removing the adapter restores the network. Only the NetBIOS setting is
+  kept, under the adapter's own interface GUID.
+
+Windows may still send name queries to other interfaces' resolvers; the
+adapter's resolvers are preferred, not exclusive. A family the profile does not
+enable is not captured, as on macOS. The installed-host `Tunnel` suite runs the
+product through the shared backend with real system DNS and HTTP traffic.
 
 ## Service peer admission
 
@@ -433,11 +484,13 @@ OS I/O cannot be retired within cleanup is not reported as successfully joined.
 
 `UserAgentSession` binds a checked `UserAgentPlan` through the native Authority
 channel before starting the child. The plan separately checks the configuration
-bytes digest and product identity digest and rejects tunnel modes. A dedicated
-control worker renews the same bound connection while native engine operations
-run. Revocation interrupts engine RPC waits; an Authority/transport failure
-remains an error. The synchronous lifecycle owner must run on a dedicated
-thread, and its caller retains it on failure for explicit cleanup/recovery.
+bytes digest and product identity digest and rejects the combined mode; a
+pre-resolved configuration carries no network options and cannot plan a Tunnel
+run. A dedicated control worker renews the same bound connection while native
+engine operations run. Revocation interrupts engine RPC waits; an
+Authority/transport failure remains an error. The synchronous lifecycle owner
+must run on a dedicated thread, and its caller retains it on failure for
+explicit cleanup/recovery.
 
 Ready requires observed child listeners, exact proxy ownership for SystemProxy
 and an authenticated Authority acknowledgement. Stop restores the exact prior

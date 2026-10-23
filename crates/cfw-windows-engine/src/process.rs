@@ -350,24 +350,7 @@ impl EngineProcess {
             }
         }
     }
-    pub(crate) fn spawn_retained(
-        executable: VerifiedExecutable,
-        runtime_directory: &Path,
-        timeout: Duration,
-        cancellation: Option<Arc<AtomicBool>>,
-        keeper: Option<&crate::authority::RuntimeKeeper>,
-    ) -> Result<Self, ChildLaunchFailure> {
-        Self::spawn_retained_with_packet(
-            executable,
-            runtime_directory,
-            timeout,
-            cancellation,
-            keeper,
-            None,
-        )
-    }
-
-    fn spawn_retained_with_packet(
+    pub(crate) fn spawn_retained_with_packet(
         executable: VerifiedExecutable,
         runtime_directory: &Path,
         timeout: Duration,

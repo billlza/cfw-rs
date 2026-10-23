@@ -18,6 +18,7 @@ mod coordinator;
 mod profile;
 mod progress;
 mod startup_registration;
+mod tunnel;
 use progress::Progress;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -28,6 +29,7 @@ pub(super) enum InstalledSuite {
     Profile,
     Coordinator,
     Startup,
+    Tunnel,
 }
 impl InstalledSuite {
     fn prefix(self) -> &'static str {
@@ -38,6 +40,7 @@ impl InstalledSuite {
             Self::Profile => "installed-host-profile",
             Self::Coordinator => "installed-host-coordinator",
             Self::Startup => "installed-host-startup",
+            Self::Tunnel => "installed-host-tunnel",
         }
     }
 }
@@ -339,6 +342,21 @@ pub(super) fn exercise_coordinator() -> Result<()> {
     Ok(())
 }
 
+pub(super) fn exercise_tunnel() -> Result<()> {
+    require_opt_in()?;
+    let mut progress = Progress::new()?;
+    progress.record("open_desktop", 0)?;
+    let tunnel = tunnel::exercise(&mut progress)?;
+    progress.record("complete", 9)?;
+    println!(
+        "{}",
+        serde_json::json!({"source":std::env::var("CFW_NATIVE_SERVICE_SOURCE").map_err(|e|e.to_string())?,
+        "product_service":true,"product_agent":true,"desktop_is_fixture":true,"medium_integrity":true,
+        "backend_tunnel":tunnel,"release_accepted":false})
+    );
+    Ok(())
+}
+
 pub(super) fn exercise_startup() -> Result<()> {
     require_opt_in()?;
     let mut progress = Progress::new()?;
@@ -397,6 +415,25 @@ pub(super) fn check_output(
             && report["coordinator"]["proxy_restored"] == true
             && report["coordinator"]["coordinator_retired"] == true
             && report["coordinator"]["lineage_generation"] == 8
+    } else if suite == InstalledSuite::Tunnel {
+        let tunnel = &report["backend_tunnel"];
+        [
+            "tunnel_runtime",
+            "system_route_entered_tunnel",
+            "stale_stop_rejected",
+            "idempotent_stop",
+            "adapter_absent_after_off",
+            "physical_route_restored",
+            "proxy_unchanged",
+            "listeners_released",
+        ]
+        .iter()
+        .all(|key| tunnel[*key] == true)
+            && tunnel["engine_recorded_tunnel_connection"]["inbound"] == "tun/cfw-tunnel"
+            && tunnel["tunnel_resolver_answers"]
+                .as_array()
+                .is_some_and(|answers| !answers.is_empty())
+            && tunnel["fresh_queries"] == 3
     } else if suite == InstalledSuite::Startup {
         let startup = &report["startup_registration"];
         startup["source"] == report["source"]
@@ -584,6 +621,7 @@ pub(super) fn combine_reports(directory: &Path) -> Result<()> {
             "startup_registration",
             "registration_removed",
         ),
+        (InstalledSuite::Tunnel, "backend_tunnel", "tunnel_runtime"),
     ] {
         let report = read(&directory.join(format!("{}-lifecycle.json", suite.prefix())))?;
         if direct["source"] != report["source"]

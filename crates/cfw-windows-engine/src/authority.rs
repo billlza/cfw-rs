@@ -87,6 +87,25 @@ pub enum AuthorityError {
     #[cfg(windows)]
     #[error("Windows authority system entropy failed with status {0:#x}")]
     Entropy(i32),
+    // Boxed: tunnel errors can carry installation errors, which carry these.
+    #[cfg(windows)]
+    #[error("Windows authority tunnel network: {0}")]
+    Tunnel(Box<crate::tunnel::Error>),
+    #[cfg(windows)]
+    #[error("Windows authority packet endpoint handoff: {0}")]
+    Handoff(Box<crate::tunnel::HandoffError>),
+}
+#[cfg(windows)]
+impl From<crate::tunnel::Error> for AuthorityError {
+    fn from(error: crate::tunnel::Error) -> Self {
+        Self::Tunnel(Box::new(error))
+    }
+}
+#[cfg(windows)]
+impl From<crate::tunnel::HandoffError> for AuthorityError {
+    fn from(error: crate::tunnel::HandoffError) -> Self {
+        Self::Handoff(Box::new(error))
+    }
 }
 pub type Result<T> = std::result::Result<T, AuthorityError>;
 

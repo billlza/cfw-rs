@@ -35,7 +35,13 @@ pub fn run_agent(installation: InstalledRuntime) -> Result<()> {
     let (sender, receiver) = mpsc::sync_channel(1);
     thread::scope(|scope| -> Result<()> {
         let worker = scope.spawn(|| session.run_observed(&stop, sender, observation));
-        let readiness = match receiver.recv_timeout(Duration::from_secs(20)) {
+        let ready_limit =
+            if context.operation.mode == cfw_engine_api::authority_v1::AuthorityMode::Tunnel {
+                Duration::from_secs(20) + crate::tunnel::OPEN_LIMIT
+            } else {
+                Duration::from_secs(20)
+            };
+        let readiness = match receiver.recv_timeout(ready_limit) {
             Ok(ready)
                 if ready.context() == &context
                     && ready.authority().state

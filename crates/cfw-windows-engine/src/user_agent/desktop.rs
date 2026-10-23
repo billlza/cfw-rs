@@ -16,8 +16,7 @@ use crate::{
     service_transport::check_deadline,
 };
 use cfw_engine_api::{
-    EngineCommandContext, EngineOwner, EngineStartRequest, RuntimeIdentity,
-    authority_v1::AuthorityState,
+    EngineCommandContext, EngineStartRequest, RuntimeIdentity, authority_v1::AuthorityState,
 };
 use std::{
     fs::File,
@@ -32,6 +31,10 @@ use std::{
 
 const COMMAND_LIMIT: Duration = Duration::from_secs(5);
 const START_LIMIT: Duration = Duration::from_secs(15);
+/// A Tunnel start also waits for SYSTEM's adapter, which may first install
+/// the pinned Wintun driver.
+const TUNNEL_START_LIMIT: Duration =
+    Duration::from_secs(START_LIMIT.as_secs() + crate::tunnel::OPEN_LIMIT.as_secs());
 const STOP_LIMIT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, thiserror::Error)]
@@ -307,7 +310,13 @@ impl DesktopUserAgent {
             .pending
             .take()
             .ok_or(DesktopError::State("missing launch"))?;
-        let deadline = Instant::now() + START_LIMIT;
+        let deadline = Instant::now()
+            + if self.context.operation.mode == cfw_engine_api::authority_v1::AuthorityMode::Tunnel
+            {
+                TUNNEL_START_LIMIT
+            } else {
+                START_LIMIT
+            };
         match UserAgentChild::launch(
             Arc::clone(&self.agent_image),
             invocation,
@@ -443,9 +452,18 @@ impl DesktopUserAgent {
             return Err(DesktopError::Context);
         }
         let root = &self.context.operation.root;
+        let platform = cfw_engine_api::EngineRuntimePlatform::Windows;
         Ok(DesktopLive {
             runtime: RuntimeIdentity {
-                owner: EngineOwner::WindowsUserAgent,
+                // SYSTEM owns a Tunnel run's adapter and pump; its UserAgent
+                // hosts the engine. Proxy runs belong to the UserAgent alone.
+                owner: if self.context.operation.mode
+                    == cfw_engine_api::authority_v1::AuthorityMode::Tunnel
+                {
+                    platform.tunnel_owner()
+                } else {
+                    platform.proxy_owner()
+                },
                 context: EngineCommandContext {
                     installation_id: root.installation_id.to_string(),
                     config_epoch: root.epoch,

@@ -2,7 +2,10 @@ use super::plan::PlannedConfiguration;
 use super::{Result, UserAgentError, UserAgentPlan, control::ControlSession};
 use crate::{
     EngineProcess, PreparedConfig, VerifiedExecutable, WindowsSystemProxy,
-    authority::{AuthoritySnapshot, LeaseContext, ReadyReport, StoppedReport, wire::BindRequest},
+    authority::{
+        AuthoritySnapshot, LeaseContext, ReadyReport, StoppedReport,
+        wire::{BindRequest, TunnelOpenRequest},
+    },
     process::ChildLaunchFailure,
 };
 use cfw_engine_api::{EngineCommandContext, authority_v1::AuthorityMode};
@@ -284,6 +287,24 @@ impl UserAgentSession {
         if stop.load(Ordering::Acquire) {
             return Ok(StopReason::Requested);
         }
+        let tunnel = self.context.operation.mode == AuthorityMode::Tunnel;
+        // SYSTEM's adapter and pump exist before the engine is configured; the
+        // endpoint is adopted only after SYSTEM confirms this process's copy.
+        let packet = if tunnel {
+            let options = self
+                .planned
+                .as_ref()
+                .ok_or(UserAgentError::State)?
+                .tunnel_options()
+                .ok_or(UserAgentError::Mode)?;
+            Some(
+                self.control()?
+                    .open_tunnel(TunnelOpenRequest::new(self.context.clone(), &options))?,
+            )
+        } else {
+            None
+        };
+        self.live()?;
         self.configuration = Some(
             self.planned
                 .take()
@@ -294,12 +315,14 @@ impl UserAgentSession {
         let assets = self.assets.take().ok_or(UserAgentError::State)?;
         self._storage_guard = assets.storage;
         self.proxy = assets.proxy;
-        match EngineProcess::spawn_retained(
+        let packet_mtu = packet.as_ref().map(crate::tunnel::PacketClient::mtu);
+        match EngineProcess::spawn_retained_with_packet(
             assets.executable,
             &assets.directory,
             NATIVE_TIMEOUT,
             Some(Arc::clone(&self.cancel)),
             self.keeper.as_ref(),
+            packet,
         ) {
             Ok(owner) => self.child = Some(owner),
             Err(ChildLaunchFailure { error, owner }) => {
@@ -335,8 +358,12 @@ impl UserAgentSession {
         let authority = self.control()?.ready(ReadyReport {
             context: self.context.clone(),
             runtime_digest: self.context.operation.identity_sha256,
-            ready_flags: if self.proxy.is_some() { 0b111 } else { 0b011 },
-            packet_pump_limits: None,
+            ready_flags: if self.proxy.is_some() || tunnel {
+                0b111
+            } else {
+                0b011
+            },
+            packet_pump_limits: packet_mtu.map(crate::tunnel::packet_pump_limits),
             observed_millis: self.stamp()?,
         })?;
         self.live()?;

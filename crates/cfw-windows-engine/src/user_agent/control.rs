@@ -3,8 +3,9 @@ use crate::{
     ServiceClientRole, VerifiedExecutable,
     authority::{
         AuthorityChannel, AuthoritySnapshot, ReadyReport, StoppedReport,
-        wire::{BindRequest, BoundGrant, Command, Request, Response},
+        wire::{BindRequest, BoundGrant, Command, Request, Response, TunnelOpenRequest},
     },
+    tunnel::PacketClient,
 };
 use cfw_engine_api::authority_v1::{AuthorityState, COMMAND_TIMEOUT_MS};
 use std::{
@@ -21,6 +22,11 @@ const COMMAND: Duration = Duration::from_millis(COMMAND_TIMEOUT_MS);
 const HEARTBEAT: Duration = Duration::from_secs(1);
 type ControlResult<T> = std::result::Result<T, Arc<ControlError>>;
 enum Work {
+    OpenTunnel(
+        TunnelOpenRequest,
+        Instant,
+        SyncSender<ControlResult<PacketClient>>,
+    ),
     Ready(
         ReadyReport,
         Instant,
@@ -128,6 +134,15 @@ impl ControlSession {
                 mpsc::TrySendError::Disconnected(_) => ControlError::Disconnected,
             })
         })
+    }
+    /// Open SYSTEM's tunnel network and adopt its packet endpoint on the
+    /// bound connection, before the engine is started. The bound covers the
+    /// first installation of the pinned Wintun driver.
+    pub(super) fn open_tunnel(&self, request: TunnelOpenRequest) -> Result<PacketClient> {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let deadline = Instant::now() + crate::tunnel::OPEN_LIMIT;
+        self.enqueue(Work::OpenTunnel(request, deadline, sender))?;
+        self.receive(receiver, deadline)
     }
     pub(super) fn ready(&self, report: ReadyReport) -> Result<AuthoritySnapshot> {
         let (sender, receiver) = mpsc::sync_channel(1);
@@ -261,6 +276,12 @@ fn run(
             return Ok(());
         }
         match receiver.recv_timeout(HEARTBEAT) {
+            Ok(Work::OpenTunnel(request, deadline, reply)) => send_result(
+                reply,
+                channel
+                    .open_tunnel(request, deadline)
+                    .map_err(|error| Arc::new(ControlError::Wire(error))),
+            )?,
             Ok(Work::Ready(report, deadline, reply)) => send_result(
                 reply,
                 exchange(&mut channel, Command::Ready(report), deadline),

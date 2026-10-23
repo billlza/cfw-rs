@@ -3,9 +3,16 @@
 #[cfg(windows)]
 mod channel;
 #[cfg(windows)]
+mod device;
+#[cfg(windows)]
 mod driver;
 mod endpoint;
+#[cfg(windows)]
+mod host;
+#[cfg(windows)]
+mod network;
 mod packet;
+mod plan;
 mod policy;
 #[cfg(windows)]
 mod pump;
@@ -18,10 +25,19 @@ pub use channel::{
     ENDPOINT_ACCESS, EndpointHandoff, HandoffError, PacketCancellation, PacketClient, PacketServer,
 };
 #[cfg(windows)]
+pub(crate) use device::{
+    WintunDevice, absent as adapter_absent, wait_until_absent as wait_until_adapter_absent,
+};
+#[cfg(windows)]
 pub use driver::{Adapter, Library, Session, interface_identity, observe};
 #[cfg(all(windows, feature = "native-service-validation"))]
 pub(crate) use driver::{InterfaceCounters, absence_within_deadline, counters, wait_absent};
 pub use endpoint::{EndpointOffer, HANDOFF_MTU};
+#[cfg(windows)]
+pub use host::{PumpSummary, TunnelHost, TunnelRetirement};
+#[cfg(windows)]
+pub use network::{NetworkPhase, NetworkReceipt};
+pub use plan::{FamilyPlan, Ipv4Prefix, Ipv6Prefix, TunnelNetworkPlan, adapter_guid};
 pub use policy::{DeliveryPolicy, Refusal, RefusalReason};
 #[cfg(windows)]
 pub use pump::{
@@ -86,6 +102,23 @@ impl From<String> for Error {
 pub type Result<T> = std::result::Result<T, Error>;
 /// Wintun allocates one ring of this capacity in each direction.
 pub const RING_CAPACITY_BYTES: u32 = 128 * 1024;
+
+/// The bounds a Windows Tunnel Ready attests for SYSTEM's packet pump: in
+/// user space it holds one packet of the endpoint MTU per direction and reads
+/// one at a time. The Wintun rings and the endpoint pipe are kernel buffers,
+/// bounded by `RING_CAPACITY_BYTES` and the pipe capacity, not pump queues.
+pub fn packet_pump_limits(mtu: u16) -> cfw_engine_api::authority_v1::PacketPumpLimits {
+    cfw_engine_api::authority_v1::PacketPumpLimits {
+        maximum_packet_bytes: mtu,
+        maximum_queued_bytes: 2 * u32::from(mtu),
+        maximum_queued_packets: 2,
+        maximum_read_batch: 1,
+    }
+}
+
+/// How long SYSTEM may take to create and configure a tunnel adapter, which
+/// includes the first installation of the pinned Wintun driver.
+pub const OPEN_LIMIT: Duration = Duration::from_secs(45);
 
 /// Longest one packet may wait for the engine endpoint or the system send
 /// ring. Shorter than the engine's own five-second write deadline, so a full

@@ -288,7 +288,7 @@ impl Machine {
     fn runtime_exact(&self, peer: &Peer, context: &LeaseContext) -> Result<()> {
         peer.live()?;
         let lease = self.lease_exact(context)?;
-        if peer.role != expected_role(context.operation.mode)
+        if peer.role != Role::UserAgent
             || lease.runtime.as_ref().is_none_or(|bound| !peer.same(bound))
         {
             return Err(AuthorityError::Identity);
@@ -326,9 +326,7 @@ impl Machine {
         if now >= lease.expires {
             return Err(AuthorityError::Expired);
         }
-        if peer.owner != context.operation.owner
-            || peer.role != expected_role(context.operation.mode)
-        {
+        if peer.owner != context.operation.owner || peer.role != Role::UserAgent {
             return Err(AuthorityError::Identity);
         }
         if lease
@@ -632,6 +630,17 @@ impl Machine {
         }
         Ok(TimerAction::None)
     }
+    /// `peer` is the bound runtime of the current lease and Ready is pending.
+    pub(super) fn require_starting_runtime(
+        &self,
+        peer: &Peer,
+        context: &LeaseContext,
+    ) -> Result<()> {
+        if self.phase != AuthorityState::Starting {
+            return Err(AuthorityError::Stale);
+        }
+        self.runtime_exact(peer, context)
+    }
     pub(super) fn lease_for_owner(&self, peer: &Peer) -> Result<LeaseContext> {
         peer.live()?;
         let lease = self.lease.as_ref().ok_or(AuthorityError::Identity)?;
@@ -665,6 +674,14 @@ impl Machine {
         Ok(&lease.context)
     }
     pub(super) fn local_stopped_cleanup_target(&self) -> Result<AuthorityCommittedState> {
+        self.stopped_cleanup_target(cfw_engine_api::authority_v1::AuthorityMode::LocalProxy)
+    }
+    /// The committed record of an acknowledged stop of a `mode` lease that
+    /// still holds its original binding until cleanup commits.
+    pub(super) fn stopped_cleanup_target(
+        &self,
+        mode: cfw_engine_api::authority_v1::AuthorityMode,
+    ) -> Result<AuthorityCommittedState> {
         if !self.durable_known {
             return Err(AuthorityError::Recovering);
         }
@@ -673,7 +690,7 @@ impl Machine {
         }
         let lease = self.lease.as_ref().ok_or(AuthorityError::CleanupUnproven)?;
         let metadata = self.metadata.as_ref().ok_or(AuthorityError::Recovering)?;
-        if lease.context.operation.mode != cfw_engine_api::authority_v1::AuthorityMode::LocalProxy
+        if lease.context.operation.mode != mode
             || !lease.owner_stopped
             || lease.ticket.is_some()
             || lease.accepted_ready.is_some()
@@ -687,6 +704,13 @@ impl Machine {
         Ok(metadata.clone())
     }
     pub(super) fn local_recovery_target(&self) -> Result<AuthorityCommittedState> {
+        self.recovery_target(cfw_engine_api::authority_v1::AuthorityMode::LocalProxy)
+    }
+    /// The committed record of a `mode` run whose execution lease was lost.
+    pub(super) fn recovery_target(
+        &self,
+        mode: cfw_engine_api::authority_v1::AuthorityMode,
+    ) -> Result<AuthorityCommittedState> {
         if !self.durable_known || self.phase != AuthorityState::Recovering {
             return Err(AuthorityError::Recovering);
         }
@@ -694,9 +718,7 @@ impl Machine {
         metadata.restart_action()?;
         if self.lease.is_some()
             || metadata.state() == AuthorityState::Off
-            || metadata.operation().is_none_or(|op| {
-                op.mode() != cfw_engine_api::authority_v1::AuthorityMode::LocalProxy
-            })
+            || metadata.operation().is_none_or(|op| op.mode() != mode)
             || metadata.revision() != self.revision
         {
             return Err(AuthorityError::CleanupUnproven);

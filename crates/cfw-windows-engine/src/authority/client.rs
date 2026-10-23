@@ -3,7 +3,16 @@ use crate::{
     NativePeerProcess, ServiceChannel, ServiceClientRole, ServiceTransportError,
     VerifiedExecutable, authority_journal::RecordedOwner,
 };
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+/// Each tunnel progress request has the ordinary command bound; the whole
+/// open is bounded by its caller's deadline.
+const TUNNEL_POLL_REQUEST: Duration =
+    Duration::from_millis(cfw_engine_api::authority_v1::COMMAND_TIMEOUT_MS);
+const TUNNEL_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// One authenticated connection and its native user identity. A malformed,
 /// unrelated or timed-out reply closes it; no delivery-uncertain command is
@@ -53,6 +62,52 @@ impl AuthorityChannel {
             self.channel = Some(channel);
         }
         response
+    }
+    /// Open SYSTEM's tunnel network for the bound Tunnel lease, polling the
+    /// same request until SYSTEM offers its endpoint by `deadline`, then adopt
+    /// the endpoint SYSTEM placed in this process. SYSTEM compares this
+    /// process's own copy before the transferred value is closed. Any failure
+    /// after the offer closes this connection, which revokes the lease.
+    pub fn open_tunnel(
+        &mut self,
+        request: wire::TunnelOpenRequest,
+        deadline: Instant,
+    ) -> Result<crate::tunnel::PacketClient, WireError> {
+        let context = request.context.clone();
+        let offer = loop {
+            let attempt = Request::new(wire::Command::OpenTunnel(request.clone()))?;
+            match self.request(attempt, deadline.min(Instant::now() + TUNNEL_POLL_REQUEST))? {
+                Response::TunnelOffered(offer) => break offer,
+                Response::TunnelPending => {
+                    if Instant::now() + TUNNEL_POLL_INTERVAL >= deadline {
+                        return Err(ServiceTransportError::Deadline.into());
+                    }
+                    std::thread::sleep(TUNNEL_POLL_INTERVAL);
+                }
+                _ => return Err(WireError::Correlation),
+            }
+        };
+        let mut channel = self.channel.take().ok_or(ServiceTransportError::Closed)?;
+        let owner = RecordedOwner::from_native(self.identity.identity().user_session())?;
+        let authority = channel.packet_authority()?;
+        let identity = &self.identity;
+        let client = crate::tunnel::PacketClient::adopt(&offer, &authority, |handle| {
+            let confirmation =
+                Request::new(wire::Command::ConfirmTunnelEndpoint(wire::KeeperRequest {
+                    context,
+                    handle,
+                }))?;
+            let message = confirmation.encode()?;
+            identity.revalidate()?;
+            let reply = channel.request(message.as_bytes(), deadline)?;
+            identity.revalidate()?;
+            match wire::response(&confirmation, reply.as_bytes(), &owner)? {
+                Response::Status(_) => Ok(()),
+                _ => Err(WireError::Correlation),
+            }
+        })?;
+        self.channel = Some(channel);
+        Ok(client)
     }
     fn confirm_keeper(
         &self,

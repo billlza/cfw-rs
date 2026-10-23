@@ -20,9 +20,6 @@ mod packets;
 mod recovery;
 use library::{Library, observe, wait_absent};
 type Result<T> = std::result::Result<T, String>;
-fn native_error(operation: &str) -> String {
-    format!("{operation}: {}", std::io::Error::last_os_error())
-}
 
 fn source() -> Result<String> {
     // GitHub-hosted runners are disposable; GITHUB_ACTIONS alone is also set
@@ -316,7 +313,7 @@ fn abrupt_owner_exit(library: &Library, dll: &Path, output: &Path, source: &str)
             }
             Ok(_) => return Err("foreign adapter GUID was admitted for recovery".into()),
         }
-        let device = recovery::OwnedDevice::retain(&ready, peer, id)?;
+        let mut device = recovery::OwnedDevice::retain(&ready, peer, id)?;
         let live_removal = device.remove_after_owner_exit();
         if live_removal != Err("live adapter owner cannot be recovered".into()) {
             return Err(format!(
@@ -336,7 +333,7 @@ fn abrupt_owner_exit(library: &Library, dll: &Path, output: &Path, source: &str)
         Ok((ready, device))
     })();
     let exit = terminate_child(&mut child);
-    let (ready, device, status) = match (outcome, exit) {
+    let (ready, mut device, status) = match (outcome, exit) {
         (Ok((ready, device)), Ok(status)) => (ready, device, status),
         (Err(error), Ok(_)) | (Ok(_), Err(error)) => return Err(error),
         (Err(error), Err(cleanup)) => return Err(format!("{error}; child cleanup: {cleanup}")),

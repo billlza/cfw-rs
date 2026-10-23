@@ -1,4 +1,4 @@
-use super::{Result, UserAgentError, UserAgentRuntime};
+use super::{Result, UserAgentRuntime};
 use crate::{VerifiedExecutable, WindowsSystemProxy};
 use cfw_engine_api::authority_v1::AuthorityMode;
 use cfw_windows_storage::PrivateDirectory;
@@ -37,9 +37,10 @@ impl UserRuntimeStorage {
         mode: AuthorityMode,
     ) -> Result<UserAgentRuntime> {
         let proxy = match mode {
-            AuthorityMode::LocalProxy => None,
+            // A Tunnel engine owns no WinINet settings: SYSTEM routes its
+            // adapter instead.
+            AuthorityMode::LocalProxy | AuthorityMode::Tunnel => None,
             AuthorityMode::SystemProxy => Some(self.proxy.clone()),
-            AuthorityMode::Tunnel => return Err(UserAgentError::Mode),
         };
         let mut runtime = UserAgentRuntime::new(executable, self.root.join("engine-v1"), proxy);
         runtime.storage = Some(Arc::clone(&self.directory));

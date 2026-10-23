@@ -172,12 +172,13 @@ fn protocol_and_header_are_closed_before_dispatch() {
     let good = Request::new(Command::Observe).unwrap().encode().unwrap();
     let text = std::str::from_utf8(good.as_bytes()).unwrap();
     for altered in [
-        text.replace("\"version\":6", "\"version\":1"),
-        text.replace("\"version\":6", "\"version\":2"),
-        text.replace("\"version\":6", "\"version\":3"),
-        text.replace("\"version\":6", "\"version\":4"),
-        text.replace("\"version\":6", "\"version\":5"),
-        text.replace("\"version\":6", "\"version\":7"),
+        text.replace("\"version\":7", "\"version\":1"),
+        text.replace("\"version\":7", "\"version\":2"),
+        text.replace("\"version\":7", "\"version\":3"),
+        text.replace("\"version\":7", "\"version\":4"),
+        text.replace("\"version\":7", "\"version\":5"),
+        text.replace("\"version\":7", "\"version\":6"),
+        text.replace("\"version\":7", "\"version\":8"),
         text.replace(PROTOCOL, "cfm.authority"),
     ] {
         assert!(matches!(
@@ -186,11 +187,11 @@ fn protocol_and_header_are_closed_before_dispatch() {
         ));
     }
     for altered in [
-        text.replace("\"version\":6", "\"version\":6,\"version\":6"),
+        text.replace("\"version\":7", "\"version\":7,\"version\":7"),
         text.replace("\"kind\":\"observe\"", "\"kind\":\"reconcile_off\""),
         text.replace("\"payload\":{}", "\"payload\":{\"ticket\":[1]}"),
         format!("{text}{{}}"),
-        text.replace("\"version\":6", "\"unknown\":true,\"version\":6"),
+        text.replace("\"version\":7", "\"unknown\":true,\"version\":7"),
     ] {
         assert!(Request::decode(altered.as_bytes()).is_err());
     }
@@ -381,7 +382,7 @@ fn bound_keeper_receipts_reject_unsafe_values_and_never_adopt_from_the_codec() {
         response(&request, &serde_json::to_vec(&missing).unwrap(), &owner()),
         Err(WireError::Malformed)
     ));
-    for version in [1, 2, 3, 4, 5, 7] {
+    for version in [1, 2, 3, 4, 5, 6, 8] {
         let mut changed = original.clone();
         changed["version"] = serde_json::json!(version);
         assert!(matches!(
@@ -1025,4 +1026,248 @@ fn unknown_publication_is_an_error_and_recorded_scope_cannot_answer_an_owned_lea
         response(&lease_request, recorded.as_bytes(), &owner()),
         Err(WireError::Correlation)
     ));
+}
+
+fn tunnel_context() -> LeaseContext {
+    let mut value = context();
+    value.operation.mode = AuthorityMode::Tunnel;
+    value
+}
+fn tunnel_open(mtu: u16) -> TunnelOpenRequest {
+    TunnelOpenRequest::new(
+        tunnel_context(),
+        &cfw_engine_api::TunnelNetworkOptions {
+            ipv6_enabled: true,
+            bypass_private_networks: true,
+            direct_ipv4_hosts: cfw_singbox_config::DirectIpv4HostRoutes::none(),
+            mtu,
+            system_proxy_port: Some(7890),
+        },
+    )
+}
+fn offer(mtu: u16) -> crate::tunnel::EndpointOffer {
+    crate::tunnel::EndpointOffer {
+        handle: 0x1a4,
+        adapter: Uuid::from_u128(9),
+        mtu,
+    }
+}
+
+#[test]
+fn tunnel_commands_roundtrip_closed_payloads_for_tunnel_leases_only() {
+    let open = tunnel_open(1500);
+    // SYSTEM's plan sees every network option of the run; a combined run's
+    // proxy port stays with the UserAgent.
+    for ipv6_enabled in [false, true] {
+        for bypass_private_networks in [false, true] {
+            for direct_ipv4_hosts in [
+                cfw_singbox_config::DirectIpv4HostRoutes::none(),
+                serde_json::from_value(serde_json::json!([
+                    cfw_singbox_config::RELEASE_PACKET_TRANSPORT_IPV4
+                ]))
+                .unwrap(),
+            ] {
+                let mut options = cfw_engine_api::TunnelNetworkOptions {
+                    ipv6_enabled,
+                    bypass_private_networks,
+                    direct_ipv4_hosts,
+                    mtu: 1280,
+                    system_proxy_port: Some(7890),
+                };
+                let request = TunnelOpenRequest::new(tunnel_context(), &options);
+                options.system_proxy_port = None;
+                assert_eq!(request.network_options(), options);
+            }
+        }
+    }
+    for command in [
+        Command::OpenTunnel(open),
+        Command::ConfirmTunnelEndpoint(KeeperRequest {
+            context: tunnel_context(),
+            handle: 4,
+        }),
+    ] {
+        let request = Request::new(command).unwrap();
+        let bytes = request.encode().unwrap();
+        let decoded = Request::decode(bytes.as_bytes()).unwrap();
+        assert_eq!(bytes.as_bytes(), decoded.encode().unwrap().as_bytes());
+        let mut malformed: serde_json::Value = serde_json::from_slice(bytes.as_bytes()).unwrap();
+        malformed["payload"]["extra"] = serde_json::json!(true);
+        assert!(matches!(
+            Request::decode(&serde_json::to_vec(&malformed).unwrap()),
+            Err(WireError::Malformed)
+        ));
+    }
+    // A proxy lease cannot open or confirm a tunnel, even if encoded by hand.
+    let mut proxy = tunnel_open(1500);
+    proxy.context = context();
+    assert!(matches!(
+        Request::new(Command::OpenTunnel(proxy)),
+        Err(WireError::Malformed)
+    ));
+    assert!(matches!(
+        Request::new(Command::ConfirmTunnelEndpoint(KeeperRequest {
+            context: context(),
+            handle: 4,
+        })),
+        Err(WireError::Malformed)
+    ));
+    for mtu in [0, 1279, 1501, 9000] {
+        assert!(
+            matches!(
+                Request::new(Command::OpenTunnel(tunnel_open(mtu))),
+                Err(WireError::Malformed)
+            ),
+            "{mtu}"
+        );
+    }
+    for handle in [0, 1, 2, u64::MAX] {
+        assert!(matches!(
+            Request::new(Command::ConfirmTunnelEndpoint(KeeperRequest {
+                context: tunnel_context(),
+                handle,
+            })),
+            Err(WireError::Malformed)
+        ));
+    }
+    let valid = Request::new(Command::OpenTunnel(tunnel_open(1280)))
+        .unwrap()
+        .encode()
+        .unwrap();
+    let mut foreign: serde_json::Value = serde_json::from_slice(valid.as_bytes()).unwrap();
+    foreign["payload"]["direct_ipv4_hosts"] = serde_json::json!(["1.1.1.1"]);
+    assert!(matches!(
+        Request::decode(&serde_json::to_vec(&foreign).unwrap()),
+        Err(WireError::Malformed)
+    ));
+}
+
+#[test]
+fn tunnel_offer_reply_is_bound_to_the_request_mtu_owner_and_a_handle_value() {
+    let request = Request::new(Command::OpenTunnel(tunnel_open(1400))).unwrap();
+    let reply = Response::TunnelOffered(offer(1400))
+        .encode(request.id)
+        .unwrap();
+    assert!(matches!(
+        response(&request, reply.as_bytes(), &owner()),
+        Ok(Response::TunnelOffered(value)) if value == offer(1400)
+    ));
+    let other = Response::TunnelOffered(offer(1500))
+        .encode(request.id)
+        .unwrap();
+    assert!(matches!(
+        response(&request, other.as_bytes(), &owner()),
+        Err(WireError::Correlation)
+    ));
+    let mut stranger = owner();
+    stranger = serde_json::from_value(serde_json::json!({
+        "sid": [1, 1, 0, 0, 0, 0, 0, 5, 21, 0, 0, 1],
+        "authentication_id": 99,
+        "session_id": 2
+    }))
+    .unwrap_or(stranger);
+    assert!(matches!(
+        response(&request, reply.as_bytes(), &stranger),
+        Err(WireError::Correlation)
+    ));
+    // A malformed offer can neither be encoded nor accepted from the wire.
+    assert!(matches!(
+        Response::TunnelOffered(crate::tunnel::EndpointOffer {
+            handle: 3,
+            ..offer(1400)
+        })
+        .encode(request.id),
+        Err(WireError::Malformed)
+    ));
+    let mut forged: serde_json::Value = serde_json::from_slice(reply.as_bytes()).unwrap();
+    forged["payload"]["handle"] = serde_json::json!(0);
+    assert!(matches!(
+        response(&request, &serde_json::to_vec(&forged).unwrap(), &owner()),
+        Err(WireError::Malformed)
+    ));
+    let unrelated = observed(AuthorityState::Starting, Some(3))
+        .encode(request.id)
+        .unwrap();
+    assert!(matches!(
+        response(&request, unrelated.as_bytes(), &owner()),
+        Err(WireError::Correlation)
+    ));
+    // Progress carries no payload and is bound to the requesting owner.
+    let pending = Response::TunnelPending.encode(request.id).unwrap();
+    assert!(matches!(
+        response(&request, pending.as_bytes(), &owner()),
+        Ok(Response::TunnelPending)
+    ));
+    assert!(matches!(
+        response(&request, pending.as_bytes(), &stranger),
+        Err(WireError::Correlation)
+    ));
+    let mut padded: serde_json::Value = serde_json::from_slice(pending.as_bytes()).unwrap();
+    padded["payload"]["handle"] = serde_json::json!(4);
+    assert!(matches!(
+        response(&request, &serde_json::to_vec(&padded).unwrap(), &owner()),
+        Err(WireError::Malformed)
+    ));
+    // Neither progress nor an offer answers any other command.
+    let confirm = Request::new(Command::ConfirmTunnelEndpoint(KeeperRequest {
+        context: tunnel_context(),
+        handle: 4,
+    }))
+    .unwrap();
+    for reply in [
+        Response::TunnelPending.encode(confirm.id).unwrap(),
+        Response::TunnelOffered(offer(1400))
+            .encode(confirm.id)
+            .unwrap(),
+    ] {
+        assert!(matches!(
+            response(&confirm, reply.as_bytes(), &owner()),
+            Err(WireError::Correlation)
+        ));
+    }
+}
+
+#[test]
+fn tunnel_endpoint_confirmation_requires_the_exact_starting_revision_and_root() {
+    let request = Request::new(Command::ConfirmTunnelEndpoint(KeeperRequest {
+        context: tunnel_context(),
+        handle: 4,
+    }))
+    .unwrap();
+    let expected = AuthoritySnapshot {
+        state: AuthorityState::Starting,
+        revision: Some(3),
+        root: Some(tunnel_context().operation.root),
+    };
+    let bytes = Response::Status(expected.clone())
+        .encode(request.id)
+        .unwrap();
+    assert!(matches!(
+        response(&request, bytes.as_bytes(), &owner()),
+        Ok(Response::Status(_))
+    ));
+    for changed in [
+        AuthoritySnapshot {
+            state: AuthorityState::Active,
+            revision: Some(4),
+            ..expected.clone()
+        },
+        AuthoritySnapshot {
+            revision: Some(4),
+            ..expected.clone()
+        },
+        AuthoritySnapshot {
+            root: Some(RootContext {
+                generation: 2,
+                ..tunnel_context().operation.root
+            }),
+            ..expected
+        },
+    ] {
+        let bytes = Response::Status(changed).encode(request.id).unwrap();
+        assert!(matches!(
+            response(&request, bytes.as_bytes(), &owner()),
+            Err(WireError::Correlation)
+        ));
+    }
 }

@@ -22,11 +22,28 @@ impl WindowsAuthority {
         if state.revision.is_none() {
             return Err(AuthorityError::Recovering);
         }
-        let local = self
+        let mode = self
             .machine
             .metadata()
             .and_then(|m| m.operation())
-            .is_some_and(|o| o.mode() == AuthorityMode::LocalProxy);
+            .map(|o| o.mode());
+        if mode == Some(AuthorityMode::Tunnel) || self.tunnel.is_some() {
+            self.drive_tunnel()?;
+            let reconcilable = match state.state {
+                AuthorityState::Recovering => true,
+                // Only an acknowledged stop keeps its binding until Off.
+                AuthorityState::Stopping => self
+                    .machine
+                    .stopped_cleanup_target(AuthorityMode::Tunnel)
+                    .is_ok(),
+                _ => false,
+            };
+            if mode == Some(AuthorityMode::Tunnel) && reconcilable {
+                self.reconcile_tunnel()?;
+            }
+            return Ok(self.snapshot());
+        }
+        let local = mode == Some(AuthorityMode::LocalProxy);
         if local
             && matches!(
                 state.state,

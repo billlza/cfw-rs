@@ -18,6 +18,7 @@ use uuid::Uuid;
 mod local_recovery;
 mod local_stop;
 mod startup;
+mod tunnel_stop;
 
 fn owner() -> RecordedOwner {
     serde_json::from_value(
@@ -322,12 +323,12 @@ fn readiness_is_exact_and_only_identical_replay_is_idempotent() {
 }
 
 #[test]
-fn tunnel_policy_needs_a_distinct_worker_and_bounded_packet_evidence() {
+fn tunnel_policy_binds_the_user_agent_and_needs_bounded_packet_evidence() {
     let now = Instant::now();
     let mut value = off();
     let host = peer(Role::Desktop);
     let revision = allocate(&mut value, &host);
-    let worker = peer(Role::TunnelWorker);
+    let agent = peer(Role::UserAgent);
     let token = Ticket::for_test([7; 32]);
     let context = value
         .prepare(
@@ -341,21 +342,28 @@ fn tunnel_policy_needs_a_distinct_worker_and_bounded_packet_evidence() {
             now,
         )
         .unwrap();
-    assert!(
-        value
-            .bind(&peer(Role::UserAgent), &context, &[7; 32], now)
-            .is_err()
-    );
-    value.bind(&worker, &context, &[7; 32], now).unwrap();
+    // The Desktop that prepared the run cannot claim its execution binding.
+    assert!(value.bind(&host, &context, &[7; 32], now).is_err());
+    assert_eq!(value.phase(), AuthorityState::Preparing);
+    value.bind(&agent, &context, &[7; 32], now).unwrap();
     let mut ready = report(&context);
-    assert!(value.ready(&worker, &ready, now).is_err());
+    assert!(value.ready(&agent, &ready, now).is_err());
+    assert!(value.ready(&host, &ready, now).is_err());
     ready.packet_pump_limits = Some(PacketPumpLimits {
         maximum_packet_bytes: 1500,
         maximum_queued_bytes: 1024 * 1024,
         maximum_queued_packets: 1024,
         maximum_read_batch: 64,
     });
-    value.ready(&worker, &ready, now).unwrap();
+    let mut oversized = ready.clone();
+    oversized.packet_pump_limits = Some(PacketPumpLimits {
+        maximum_packet_bytes: 9000,
+        maximum_queued_bytes: 1024 * 1024,
+        maximum_queued_packets: 1024,
+        maximum_read_batch: 64,
+    });
+    assert!(value.ready(&agent, &oversized, now).is_err());
+    value.ready(&agent, &ready, now).unwrap();
     assert_eq!(value.phase(), AuthorityState::Active);
 }
 

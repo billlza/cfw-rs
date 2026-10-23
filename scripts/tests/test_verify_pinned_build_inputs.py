@@ -47,6 +47,22 @@ def _sha(body: bytes) -> str:
     return hashlib.sha256(body).hexdigest()
 
 
+def _next_go_release(version: str, *, other: str) -> str:
+    """The next Go patch release after `version` that is not `other`.
+
+    The product and the packet-evidence endpoint pin Go independently, so the
+    two pins may sit one patch release apart. A pin moved by a synthetic test
+    must not land on the other pin's release with a synthetic archive digest:
+    one release has one archive, which
+    `test_endpoint_and_product_go_pins_agree_on_one_release` covers.
+    """
+    major, minor, patch = version.split(".")
+    candidate = int(patch) + 1
+    while f"{major}.{minor}.{candidate}" == other:
+        candidate += 1
+    return f"{major}.{minor}.{candidate}"
+
+
 # Synthetic, self-consistent patch bodies. Their real SHA-256 digests replace the
 # shipped patch path and digest pins so the verifier logic can be exercised
 # without needing SHA-256 preimages of the shipped patches.
@@ -109,17 +125,6 @@ def _repeated_pin_values(text: str) -> list[str]:
         for key, value in SHIPPED_PINS.items()
         if _pin_value_pattern(value).search(text)
     )
-
-
-def _release_after_both_go_pins(fixture: Fixture) -> tuple[int, int, int]:
-    """The later of the product and endpoint Go releases, so that one patch
-    release past it is named by neither pin: two pins of one Go release must
-    agree on its archive digest, and either pin may lead the other."""
-    releases: list[tuple[int, int, int]] = []
-    for key in ("GO_VERSION", "PACKET_EVIDENCE_ENDPOINT_GO_VERSION"):
-        major, minor, patch = fixture.env[key].split(".")
-        releases.append((int(major), int(minor), int(patch)))
-    return max(releases)
 
 
 CONTROLLER_RELATIVE_PATH = "crates/cfw-singbox-config/src/controller.rs"
@@ -649,8 +654,10 @@ class PinnedBuildInputsTests(unittest.TestCase):
         # own Go identities, so a product Go bump leaves their policy, sources
         # and recorded digests untouched.
         fixture = Fixture()
-        major, minor, patch = _release_after_both_go_pins(fixture)
-        next_go = f"{major}.{minor}.{patch + 1}"
+        next_go = _next_go_release(
+            fixture.env["GO_VERSION"],
+            other=fixture.env["PACKET_EVIDENCE_ENDPOINT_GO_VERSION"],
+        )
         fixture.env["GO_VERSION"] = next_go
         fixture.env["GO_DARWIN_ARM64_SHA256"] = _sha(b"next go archive")
         with tempfile.TemporaryDirectory() as temporary:
@@ -684,8 +691,10 @@ class PinnedBuildInputsTests(unittest.TestCase):
         # so moving it edits only its pins (and, once rebuilt, the binary pin
         # with the installer and identities that carry it).
         fixture = Fixture()
-        major, minor, patch = _release_after_both_go_pins(fixture)
-        next_go = f"{major}.{minor}.{patch + 1}"
+        next_go = _next_go_release(
+            fixture.env["PACKET_EVIDENCE_ENDPOINT_GO_VERSION"],
+            other=fixture.env["GO_VERSION"],
+        )
         fixture.env["PACKET_EVIDENCE_ENDPOINT_GO_VERSION"] = next_go
         fixture.env["PACKET_EVIDENCE_ENDPOINT_GO_DARWIN_ARM64_SHA256"] = _sha(
             b"next endpoint go archive"

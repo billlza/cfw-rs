@@ -179,6 +179,15 @@ vulnerabilities without an ignore. It still reports `GO-2026-5932` at module
 scope because `golang.org/x/crypto/openpgp` has no fixed version; that package
 is absent from the scanned import graph.
 
+Two advisories published after the 0.5.0 GA concern the same distrusted
+certificate authority intermediates. `GO-2026-6809` (2026-10-21) adds a
+`crypto/x509` denylist that `Certificate.Verify` applies; the scanned libbox
+graph reaches it, so `GO_VERSION` and the security patch's module Go directive
+moved to the fixed compiler release. `RUSTSEC-2026-0382` (2026-10-20) makes
+`rustls-webpki` reject those intermediates; the shipped Rust graph moved from
+`0.103.15` to `0.103.16`, which changes no other locked package. The released
+0.5.0 artifacts keep their recorded inputs.
+
 The v1.13.15 rebase overlap is explicit. The raw-packet and endpoint-conflict patches share no path
 with the upstream v1.13.14-to-v1.13.15 change set. The DNS patch shares only
 `protocol/tailscale/dns_transport.go`; its rebased hunk preserves upstream's
@@ -255,6 +264,13 @@ in the projection (`crates/cfw-singbox-config/src/controller.rs`) reachable.
 `scripts/verify_pinned_build_inputs.py` requires the pinned tag list to be
 exactly the policy's required tags and fails closed if that block exists without
 the tag.
+
+The Rust target audit denies warning advisories as well as vulnerabilities.
+`RUSTSEC-2026-0386` (informational, unsound) reports that tokio's safe
+`AsyncFd` constructors violate I/O safety, so the shipped Rust graph moved from
+tokio `1.53.1` to the fixed `1.53.3`, which changes no other locked package.
+That release deprecates those constructors; the workspace calls none of them,
+so the move adds no warning.
 
 ## Artifact identity
 

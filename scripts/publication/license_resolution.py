@@ -77,6 +77,9 @@ _CARGO_LICENSE_DONORS = {
     ),
 }
 _CARGO_VENDORED_VERSION_RE = re.compile(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?")
+# The reviewed donor texts, for consumers that must recognise a donor-resolved
+# license (scripts/publication/review_carryover.py).
+CARGO_LICENSE_DONOR_SHA256 = frozenset(digest for _crate, digest in _CARGO_LICENSE_DONORS.values())
 
 
 def _is_license_operand(token: str) -> bool:
@@ -168,6 +171,12 @@ def _license_ids(expression: str) -> set[str]:
     # Exception identifiers are intentionally included: a manual conclusion
     # must bind the exception text as well as every license text.
     return {token for token in SPDX_TOKEN_RE.findall(expression) if token.upper() not in OPERATORS}
+
+
+def license_identifiers(expression: str) -> set[str]:
+    """Every license and exception identifier a manual conclusion must bind text for."""
+
+    return _license_ids(expression)
 
 
 def _license_branches(expression: str) -> list[frozenset[str]]:

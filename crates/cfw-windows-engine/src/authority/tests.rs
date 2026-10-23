@@ -1,5 +1,5 @@
 use super::{
-    machine::{Machine, TimerAction},
+    machine::{Machine, RevokeCause, TimerAction},
     secret::Ticket,
     types::*,
     *,
@@ -292,7 +292,7 @@ fn new_connections_of_the_same_user_cannot_inherit_views_or_commands() {
     assert_eq!(value.lease_for_owner(&runtime).unwrap(), context);
     host.connection.close();
     assert!(value.lease_for_owner(&host).is_err());
-    assert!(value.timer_action(now).unwrap() == TimerAction::Revoke);
+    assert!(value.timer_action(now).unwrap() == TimerAction::Revoke(RevokeCause::ConnectionClosed));
 }
 
 #[test]
@@ -528,7 +528,10 @@ fn only_the_bound_runtime_can_renew_liveness_and_a_clock_regression_is_an_error(
         .heartbeat(&runtime, &context, now + Duration::from_secs(1))
         .unwrap();
     assert!(value.timer_action(now + Duration::from_secs(5)).unwrap() == TimerAction::None);
-    assert!(value.timer_action(now + Duration::from_secs(6)).unwrap() == TimerAction::Revoke);
+    assert!(
+        value.timer_action(now + Duration::from_secs(6)).unwrap()
+            == TimerAction::Revoke(RevokeCause::HeartbeatExpired)
+    );
     value.revoke(true, now + Duration::from_secs(6)).unwrap();
     assert_eq!(value.phase(), AuthorityState::Stopping);
     assert_eq!(

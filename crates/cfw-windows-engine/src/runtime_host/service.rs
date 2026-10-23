@@ -212,6 +212,9 @@ fn serve(installation: InstalledRuntime, status: SERVICE_STATUS_HANDLE) -> Resul
                         }
                     }
                 }
+                if let Some(ending) = state.take_lease_ending() {
+                    record(&diagnostics, "lease_ending", &ending.to_string())?;
+                }
                 let snapshot = state.snapshot();
                 if drain.is_some()
                     && snapshot.state == AuthorityState::Off
@@ -340,7 +343,11 @@ fn connection_loop(
             let mut state = authority
                 .lock()
                 .map_err(|_| HostError::State("authority guard poisoned"))?;
-            let reply = match state.handle(&mut connection, request, Instant::now() + COMMAND) {
+            let handled = state.handle(&mut connection, request, Instant::now() + COMMAND);
+            if let Some(ending) = state.take_lease_ending() {
+                record(diagnostics, "lease_ending", &ending.to_string())?;
+            }
+            let reply = match handled {
                 Ok(reply) => reply,
                 Err(error) => {
                     record(diagnostics, "request_admission", &error.to_string())?;

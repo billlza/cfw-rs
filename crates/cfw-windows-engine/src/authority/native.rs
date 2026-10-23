@@ -1,6 +1,6 @@
 use super::{
     AuthorityError, Result,
-    machine::{Machine, TimerAction},
+    machine::{Machine, RevokeCause, TimerAction},
     runtime_job::{self, RuntimeJob},
     secret::Ticket,
     types::*,
@@ -29,6 +29,24 @@ pub use recovery::ProxyRecoveryObservation;
 pub use startup::{ObservedRecordedOff, VerifiedOffAdmission};
 pub(super) use tunnel::TunnelProgress;
 
+/// Why a live lease ended: a timer, the console, a process observation, a
+/// service drain or the tunnel pump. For service diagnostics only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LeaseEnding {
+    pub cause: &'static str,
+    pub from: AuthorityState,
+    pub revision: u64,
+}
+impl std::fmt::Display for LeaseEnding {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{} (from {:?} at revision {})",
+            self.cause, self.from, self.revision
+        )
+    }
+}
+
 /// The service owns one instance behind its lifecycle guard. This component
 /// binds native callers and persists policy; the runtime supervisor still owns
 /// actual engine/proxy/TUN effects and produces independent cleanup evidence.
@@ -49,6 +67,8 @@ pub struct WindowsAuthority {
     tunnel: Option<tunnel::TunnelRun>,
     /// Removes an adapter an earlier SYSTEM process left, for recovery.
     tunnel_recovery: Option<crate::tunnel::TunnelHost>,
+    /// Why the last live lease ended, until the service records it.
+    lease_ending: Option<LeaseEnding>,
     pub(super) draining: bool,
     #[cfg(feature = "native-service-validation")]
     next_fault: Option<crate::authority_journal::JournalFaultPoint>,
@@ -114,6 +134,7 @@ impl WindowsAuthority {
             proxy_recovery: None,
             tunnel: None,
             tunnel_recovery: None,
+            lease_ending: None,
             draining: false,
             #[cfg(feature = "native-service-validation")]
             next_fault: None,
@@ -526,6 +547,7 @@ impl WindowsAuthority {
         match self.machine.timer_action(now)? {
             TimerAction::None => Ok(()),
             TimerAction::AbortUnbound => {
+                self.note_ending("prepared lease expired or its host disconnected");
                 let mut candidate = self.machine.clone();
                 candidate.abort_prepared(None, candidate.revision(), now)?;
                 self.commit(candidate)?;
@@ -533,19 +555,30 @@ impl WindowsAuthority {
                 candidate.finish_unbound_abort()?;
                 self.commit(candidate)
             }
-            TimerAction::Revoke => {
+            TimerAction::Revoke(cause) => {
+                self.note_ending(match cause {
+                    RevokeCause::ConnectionClosed => "host or runtime connection closed",
+                    RevokeCause::HeartbeatExpired => "runtime heartbeat expired",
+                });
                 let mut candidate = self.machine.clone();
                 candidate.revoke(false, now)?;
                 self.commit(candidate)
             }
             TimerAction::Quarantine => {
+                self.note_ending("stop attestation expired");
                 let mut candidate = self.machine.clone();
                 candidate.quarantine_expired_stop()?;
                 self.commit(candidate)
             }
         }
     }
-    fn revoke_current(&mut self, console_change: bool, now: Instant) -> Result<()> {
+    fn revoke_current(
+        &mut self,
+        console_change: bool,
+        cause: &'static str,
+        now: Instant,
+    ) -> Result<()> {
+        self.note_ending(cause);
         if self.machine.phase() == AuthorityState::Preparing {
             let mut candidate = self.machine.clone();
             candidate.abort_prepared(None, candidate.revision(), now)?;
@@ -572,12 +605,16 @@ impl WindowsAuthority {
         let console = LiveConsoleSession::observe();
         match console {
             Ok(console) if self.owner_session.as_ref() == Some(console.identity()) => {}
-            Ok(_) | Err(ServiceAuthorizationError::NoActiveConsole) => {
-                self.revoke_current(true, now)?;
+            Ok(_) => {
+                self.revoke_current(true, "console session changed", now)?;
+                return Ok(self.snapshot());
+            }
+            Err(ServiceAuthorizationError::NoActiveConsole) => {
+                self.revoke_current(true, "no active console session", now)?;
                 return Ok(self.snapshot());
             }
             Err(error) => {
-                self.revoke_current(false, now)?;
+                self.revoke_current(false, "console session observation failed", now)?;
                 return Err(error.into());
             }
         }
@@ -598,10 +635,29 @@ impl WindowsAuthority {
             Ok(())
         })();
         if let Err(error) = observed {
-            self.revoke_current(false, now)?;
+            self.revoke_current(false, "host or runtime process revalidation failed", now)?;
             return Err(error);
         }
         Ok(self.snapshot())
+    }
+    /// Remember why a live lease is being ended. Diagnostics only: the
+    /// journal transition remains the record of what happened.
+    fn note_ending(&mut self, cause: &'static str) {
+        let from = self.machine.phase();
+        if matches!(
+            from,
+            AuthorityState::Preparing | AuthorityState::Starting | AuthorityState::Active
+        ) {
+            self.lease_ending = Some(LeaseEnding {
+                cause,
+                from,
+                revision: self.machine.revision(),
+            });
+        }
+    }
+    /// The last live lease's ending, once.
+    pub fn take_lease_ending(&mut self) -> Option<LeaseEnding> {
+        self.lease_ending.take()
     }
     #[cfg(feature = "native-service-validation")]
     pub fn release_runtime_job_observer_for_validation(&mut self) -> Result<()> {

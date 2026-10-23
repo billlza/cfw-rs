@@ -6,7 +6,7 @@ impl WindowsAuthority {
         require_service()?;
         self.draining = true;
         if self.machine.context().is_some() {
-            self.revoke_current(false, Instant::now())?;
+            self.revoke_current(false, "service drain", Instant::now())?;
         }
         Ok(())
     }

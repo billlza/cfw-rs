@@ -165,7 +165,7 @@ impl WindowsAuthority {
             && self.machine.context() == Some(&run.context);
         if live {
             if run.host.pump_ended() {
-                self.revoke_current(false, Instant::now())?;
+                self.revoke_current(false, "tunnel packet pump ended", Instant::now())?;
                 return Err(crate::tunnel::Error::from(
                     "tunnel packet pump ended while the lease was live",
                 )

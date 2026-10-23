@@ -35,8 +35,16 @@ pub(super) struct Machine {
 pub(super) enum TimerAction {
     None,
     AbortUnbound,
-    Revoke,
+    Revoke(RevokeCause),
     Quarantine,
+}
+/// Why a timer revokes a Starting or Active lease, kept for diagnostics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RevokeCause {
+    /// The host or the bound runtime closed its connection.
+    ConnectionClosed,
+    /// The bound runtime sent no heartbeat within the command timeout.
+    HeartbeatExpired,
 }
 
 impl Machine {
@@ -610,14 +618,14 @@ impl Machine {
                     .as_ref()
                     .is_none_or(|peer| !peer.connection.is_open())
             {
-                return Ok(TimerAction::Revoke);
+                return Ok(TimerAction::Revoke(RevokeCause::ConnectionClosed));
             }
             let last = lease.heartbeat.ok_or(AuthorityError::Invalid)?;
             let elapsed = now
                 .checked_duration_since(last)
                 .ok_or(AuthorityError::Invalid)?;
             return Ok(if elapsed >= HEARTBEAT {
-                TimerAction::Revoke
+                TimerAction::Revoke(RevokeCause::HeartbeatExpired)
             } else {
                 TimerAction::None
             });

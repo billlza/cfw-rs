@@ -45,8 +45,18 @@ pub(super) fn exercise(
     let grant = begin(channel, target.clone())?;
     // A false report has the public challenge context but no challenge bytes.
     // It is not a local observation and must fail before producing evidence.
+    // Its envelope copies a genuine request's protocol and version, so only
+    // the forged payload can be refused.
+    let genuine: serde_json::Value = serde_json::from_slice(
+        Request::new(Command::Observe)
+            .map_err(|e| e.to_string())?
+            .encode()
+            .map_err(|e| e.to_string())?
+            .as_bytes(),
+    )
+    .map_err(|e| e.to_string())?;
     let forged = serde_json::json!({
-        "protocol":"cfw.windows.authority", "version":6,
+        "protocol":genuine["protocol"], "version":genuine["version"],
         "request_id":uuid::Uuid::new_v4(), "kind":"confirm_proxy_recovery",
         "payload": {"context":grant.context(), "ticket":vec![0u8;32],
             "recorded_process_id":1, "recorded_process_creation_time":1},

@@ -382,6 +382,9 @@ fn probe_through_tunnel(
         return Err("the probe response through the tunnel differs".into());
     }
     let connections = controller_connections(controller, secret)?;
+    // The controller reports ports as decimal strings.
+    let destination_ip = target.to_string();
+    let source_port = local.port().to_string();
     let recorded = connections["connections"]
         .as_array()
         .ok_or("engine connection table is malformed")?
@@ -391,8 +394,8 @@ fn probe_through_tunnel(
             metadata["type"] == "tun/cfw-tunnel"
                 && metadata["network"] == "tcp"
                 && metadata["destinationPort"] == "80"
-                && metadata["destinationIP"] == target.to_string()
-                && metadata["sourcePort"] == local.port().to_string()
+                && metadata["destinationIP"] == destination_ip.as_str()
+                && metadata["sourcePort"] == source_port.as_str()
         })
         .cloned()
         .ok_or("the engine did not record the probe connection on its tunnel inbound")?;

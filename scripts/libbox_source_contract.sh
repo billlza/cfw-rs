@@ -575,6 +575,10 @@ libbox_validate_patched_source() {
 # build_libbox.sh. The three toolchain digests must already come from the
 # managed tree verifiers; accepting caller-provided paths or a metadata subset
 # would allow a stale but internally consistent Libbox artifact to be signed.
+# The Xcode identity is the caller's effective one, as
+# release_toolchain_contract.sh leaves it: the pinned Xcode in production, the
+# observed one in the unsigned-validation role. cgo compiles and links Libbox
+# with that Xcode, so a Libbox built by another one is refused.
 libbox_verify_xcframework_artifact() {
   if [[ $# -ne 6 ]]; then
     echo "error: libbox_verify_xcframework_artifact requires repository, artifact, manifest, and three verified Go tree digests" >&2
@@ -586,6 +590,10 @@ libbox_verify_xcframework_artifact() {
   local go_toolchain_tree_sha256="$4"
   local go_tools_tree_sha256="$5"
   local go_module_cache_tree_sha256="$6"
+  if [[ -z "${XCODE_VERSION:-}" || -z "${XCODE_BUILD_VERSION:-}" ]]; then
+    echo "error: Libbox verification requires the effective Xcode identity" >&2
+    return 1
+  fi
 
   cfw_run_release_python_script \
     "$repository" \
@@ -620,5 +628,7 @@ libbox_verify_xcframework_artifact() {
     --metadata "patchedDiffSha256=$SING_BOX_PATCHED_DIFF_SHA256" \
     --metadata "combinedDiffSha256=$SING_BOX_COMBINED_DIFF_SHA256" \
     --metadata "patchedGoModSha256=$SING_BOX_PATCHED_GO_MOD_SHA256" \
-    --metadata "patchedGoSumSha256=$SING_BOX_PATCHED_GO_SUM_SHA256"
+    --metadata "patchedGoSumSha256=$SING_BOX_PATCHED_GO_SUM_SHA256" \
+    --metadata "xcodeVersion=$XCODE_VERSION" \
+    --metadata "xcodeBuild=$XCODE_BUILD_VERSION"
 }

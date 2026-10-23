@@ -53,7 +53,10 @@ fn packet_stack_is_bound_before_hashing_and_preserves_every_other_projected_fiel
                             actual["inbounds"][0]["address"].as_array().unwrap().len(),
                             1 + usize::from(ipv6)
                         );
+                        assert!(expected["route"].get("auto_detect_interface").is_none());
+                        assert_eq!(actual["route"]["auto_detect_interface"], true);
                         expected["inbounds"][0]["stack"] = "gvisor".into();
+                        expected["route"]["auto_detect_interface"] = true.into();
                         assert_eq!(actual, expected);
                         assert_ne!(packet.configuration_digest(), system.configuration_digest());
                         assert_ne!(packet.digest(), system.digest());

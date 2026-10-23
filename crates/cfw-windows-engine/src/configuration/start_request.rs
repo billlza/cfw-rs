@@ -339,6 +339,11 @@ fn tunnel_controller(
     options: &TunnelNetworkOptions,
 ) -> Result<SocketAddr, Error> {
     let controller = owned_controller(root, audience, true)?;
+    // SYSTEM routes the default route into its adapter; an engine whose own
+    // sockets followed that route would loop them back into the tunnel.
+    if root["route"]["auto_detect_interface"] != true {
+        return Err(invalid());
+    }
     let inbounds = root["inbounds"].as_array().ok_or_else(invalid)?;
     if !(1..=2).contains(&inbounds.len()) {
         return Err(invalid());

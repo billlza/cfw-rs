@@ -94,6 +94,8 @@ impl ProjectionMode {
 /// Packet-processing implementation selected by the trusted native backend.
 /// This is not an imported profile field or a user preference. It is selected
 /// before canonicalization so both configuration digests bind the actual stack.
+/// `Gvisor` is the Windows packet-endpoint stack, whose tunnel projections
+/// also bind the engine's outbound sockets to the physical default interface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TunnelStack {
     System,
@@ -620,6 +622,14 @@ impl ValidatedSingBoxProfile {
             }
             root.get_mut("experimental")
                 .expect("app-owned experimental settings")["cache_file"] = cache;
+        }
+        // The Windows packet-endpoint stack runs the engine as an ordinary
+        // process while its platform owner routes the default route into the
+        // tunnel adapter. Outside any Network Extension exemption, its own
+        // sockets must bind to the physical default interface or they would
+        // loop back into the tunnel.
+        if mode.has_tunnel() && tunnel_stack == TunnelStack::Gvisor {
+            route.insert("auto_detect_interface".into(), Value::Bool(true));
         }
         if !route.is_empty() {
             root.insert("route".into(), Value::Object(route));

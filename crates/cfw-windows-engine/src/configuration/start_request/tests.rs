@@ -394,6 +394,34 @@ fn tunnel_data_plane_admits_only_the_exact_packet_fed_projection() {
 }
 
 #[test]
+fn tunnel_data_plane_requires_outbound_binding_to_the_physical_interface() {
+    let settings = EngineSettings::default();
+    let document: Value = serde_json::from_str(&tunnel_request(&settings).config_json).unwrap();
+    assert_eq!(document["route"]["auto_detect_interface"], true);
+    for change in 0..3 {
+        let mut value = tunnel_request(&settings);
+        edit(&mut value, |root| match change {
+            0 => {
+                root["route"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("auto_detect_interface");
+            }
+            1 => root["route"]["auto_detect_interface"] = false.into(),
+            2 => root["route"]["auto_detect_interface"] = "true".into(),
+            _ => unreachable!(),
+        });
+        assert!(
+            CheckedStartConfiguration::new(value)
+                .unwrap()
+                .prepare_tunnel_data_plane([])
+                .is_err(),
+            "change {change}"
+        );
+    }
+}
+
+#[test]
 fn tunnel_data_plane_rejects_other_modes_and_the_system_stack() {
     let settings = EngineSettings::default();
     for (mode, stack) in [

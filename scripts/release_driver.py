@@ -521,7 +521,7 @@ def _updater(context: Context) -> int:
 
 # install -------------------------------------------------------------------------
 #
-# The install sequence is five fixed transactions. Each has its own journal and
+# The install sequence is four fixed transactions. Each has its own journal and
 # refuses to repeat a completed transaction, so the driver records each success
 # and resumes after the last one. A failure is never retried automatically:
 # every transaction has exactly one documented recovery (RELEASE.md step 6).
@@ -532,12 +532,50 @@ INSTALL_STEPS: Final = (
     ("install", ("./scripts/run_dormant_app_install.sh", "--install")),
     ("recommission", ("./scripts/run_current_service_transaction.sh", "--recommission")),
 )
+INSTALL_STEP_NAMES: Final = frozenset(name for name, _ in INSTALL_STEPS)
 INSTALL_RECOVERY: Final = {
     "archive-history": "rerun `run install`; the archiver resumes its own two renames",
     "decommission": "run `run install --recover-service`",
     "install": "run `run install --recover-install`; never retry the install itself",
     "recommission": "if it reports journal_not_terminal, finish the install with `run install --recover-install` first; "
     "otherwise run `run install --recover-service`",
+}
+
+
+@dataclass(frozen=True)
+class InstallRecovery:
+    """One documented recovery and the result lines that prove what it completed.
+
+    Both transactions recover forward only, so a successful recovery reports
+    the step it finished; that step is recorded, and ``run install`` then
+    resumes after it instead of repeating a completed transaction.
+    """
+
+    stage: str
+    argv: tuple[str, ...]
+    proofs: tuple[tuple[re.Pattern[str], str], ...]
+
+
+INSTALL_RECOVERIES: Final = {
+    "--recover-install": InstallRecovery(
+        "install-recover",
+        ("./scripts/run_dormant_app_install.sh", "--recover"),
+        ((re.compile(r"^dormant install transaction installed: ", re.MULTILINE), "install"),),
+    ),
+    "--recover-service": InstallRecovery(
+        "install-recover-service",
+        ("./scripts/run_current_service_transaction.sh", "--recover"),
+        (
+            (re.compile(r"^current-service transaction decommissioned: ", re.MULTILINE), "decommission"),
+            (re.compile(r"^current-service transaction recommissioned: ", re.MULTILINE), "recommission"),
+        ),
+    ),
+    # Records a DNS observation continuation; it completes no transaction.
+    "--continue-after-dns-change": InstallRecovery(
+        "install-continue-after-dns-change",
+        ("./scripts/run_current_service_transaction.sh", "--continue-after-dns-change"),
+        (),
+    ),
 }
 
 
@@ -558,24 +596,15 @@ def _install_done(context: Context) -> bool:
 
 def _install(context: Context) -> int:
     arguments = list(context.arguments)
-    recovery = {
-        "--recover-install": ("install-recover", ["./scripts/run_dormant_app_install.sh", "--recover"]),
-        "--recover-service": ("install-recover-service", ["./scripts/run_current_service_transaction.sh", "--recover"]),
-        "--continue-after-dns-change": (
-            "install-continue-after-dns-change",
-            ["./scripts/run_current_service_transaction.sh", "--continue-after-dns-change"],
-        ),
-    }
-    if len(arguments) > 1 or (arguments and arguments[0] not in recovery):
-        raise DriverError(f"install accepts no argument or one of {', '.join(recovery)}", USAGE)
+    if len(arguments) > 1 or (arguments and arguments[0] not in INSTALL_RECOVERIES):
+        raise DriverError(f"install accepts no argument or one of {', '.join(INSTALL_RECOVERIES)}", USAGE)
     for name in ("seal-prepackage", "dmg", "updater"):
         if not STAGES_BY_NAME[name].is_done(context):
             raise DriverError(f"the {name} stage has not completed; nothing is installed before packaging", PREREQUISITE)
     common_guards(context)
-    if arguments:
-        stage, argv = recovery[arguments[0]]
-        return run_entry(context, stage, argv)
     record = dict(read_record(context.release, "install") or {})
+    if arguments:
+        return _recover_install(context, INSTALL_RECOVERIES[arguments[0]], record)
     previous = _previous_build(context)
     for name, template in INSTALL_STEPS:
         if record.get(name) is True:
@@ -585,13 +614,38 @@ def _install(context: Context) -> int:
         if status != 0:
             print(f"install stopped at {name}: {INSTALL_RECOVERY[name]}")
             return status
-        record[name] = True
-        write_record(context.release, "install", {key: value for key, value in record.items()
-                                                  if key in {step for step, _ in INSTALL_STEPS}})
+        _record_install_step(context, record, name)
+    _require_installed_release(context)
+    return 0
+
+
+def _recover_install(context: Context, recovery: InstallRecovery, record: dict[str, object]) -> int:
+    status, log = run_logged(context, recovery.stage, recovery.argv)
+    if status != 0 or not recovery.proofs:
+        return status
+    output = log.read_text(encoding="utf-8", errors="replace")
+    completed = [step for pattern, step in recovery.proofs if pattern.search(output)]
+    if len(completed) != 1:
+        raise DriverError(
+            f"{recovery.stage} succeeded but did not report which transaction it completed; see {log}",
+            PREREQUISITE,
+        )
+    _record_install_step(context, record, completed[0])
+    print(f"{recovery.stage}: {completed[0]} is complete; `next` names the step to run now")
+    if all(record.get(name) is True for name in INSTALL_STEP_NAMES):
+        _require_installed_release(context)
+    return 0
+
+
+def _record_install_step(context: Context, record: dict[str, object], name: str) -> None:
+    record[name] = True
+    write_record(context.release, "install", {key: value for key, value in record.items() if key in INSTALL_STEP_NAMES})
+
+
+def _require_installed_release(context: Context) -> None:
     build = installed_build(context.machine)
     if build != context.release.build:
         raise DriverError(f"/Applications holds build {build}, not {context.release.build}", MACHINE)
-    return 0
 
 
 def _export_done(context: Context) -> bool:

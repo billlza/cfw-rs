@@ -448,6 +448,50 @@ class StageCommandTests(DriverFixture):
                          ["./scripts/run_archive_install_history.sh", "--previous-build", "90001"])
         self.assertTrue(read_record(self.release, "install")["archive-history"])
 
+    def test_a_recovered_installation_is_recorded_and_the_sequence_resumes_after_it(self) -> None:
+        self.complete_packaging()
+        write_record(self.release, "install", {"archive-history": True, "decommission": True})
+        self.machine.outputs = ["dormant install transaction installed: 0.5.0 (90002); application was not launched\n"]
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(command_run(self.context("--recover-install"), "install"), 0)
+        self.assertIs(read_record(self.release, "install")["install"], True)
+        with patch.object(release_driver, "_previous_build", return_value="90001"), \
+                patch.object(release_driver, "installed_build", return_value="90002"), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(command_run(self.context(), "install"), 0)
+        self.assertEqual([argv for argv, _ in self.machine.executed][-1],
+                         ["./scripts/run_current_service_transaction.sh", "--recommission"])
+
+    def test_a_recovered_service_transaction_records_the_phase_it_reports(self) -> None:
+        self.complete_packaging()
+        write_record(self.release, "install", {"archive-history": True})
+        self.machine.outputs = ["current-service transaction decommissioned: 90002\n"]
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(command_run(self.context("--recover-service"), "install"), 0)
+        record = read_record(self.release, "install")
+        self.assertIs(record["decommission"], True)
+        self.assertNotIn("recommission", record)
+        write_record(self.release, "install", {"archive-history": True, "decommission": True, "install": True})
+        self.machine.outputs = ["current-service transaction recommissioned: 90002\n"]
+        with patch.object(release_driver, "installed_build", return_value="90001"), \
+                contextlib.redirect_stdout(io.StringIO()), \
+                self.assertRaisesRegex(DriverError, "holds build 90001, not 90002") as raised:
+            command_run(self.context("--recover-service"), "install")
+        self.assertEqual(raised.exception.status, MACHINE)
+        self.assertTrue(release_driver._install_done(self.context()))
+
+    def test_a_recovery_without_its_proof_line_records_nothing(self) -> None:
+        self.complete_packaging()
+        write_record(self.release, "install", {"archive-history": True, "decommission": True})
+        self.machine.outputs = ["recovered\n"]
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(DriverError, "did not report"):
+            command_run(self.context("--recover-install"), "install")
+        self.assertNotIn("install", read_record(self.release, "install"))
+        self.machine.outputs = ["DNS observation continuation recorded\n"]
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(command_run(self.context("--continue-after-dns-change"), "install"), 0)
+        self.assertNotIn("install", read_record(self.release, "install"))
+
     def complete_packaging(self) -> None:
         ga, inputs = self.release.ga, self.release.stage_inputs
         write_record(self.release, "ci", {"commit": COMMIT, "run_id": 7})
@@ -558,6 +602,20 @@ class AcceptanceTests(DriverFixture):
                 self.assertRaisesRegex(DriverError, f"could not start {first.name}: ERROR: .*Reauthentication failed"):
             release_driver_acceptance._collect(self.context())
         self.assertEqual([argv[3] for argv in self.gcloud_calls()].count("stop"), 2)
+
+    def test_every_instance_gets_its_own_stop_attempt(self) -> None:
+        self.prepare_collect()
+        first, second = release_driver_acceptance.evidence_instances(release_driver.REPOSITORY)
+        self.machine.answer((release_driver_acceptance.GCLOUD, "compute", "instances", "stop", first.name),
+                            status=1, stderr="ERROR: (gcloud.compute.instances.stop) quota exceeded\n")
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as errors, \
+                self.assertRaisesRegex(DriverError, f"not all stopped: .*{first.name}.*quota exceeded"):
+            release_driver_acceptance._stop_instances(
+                self.context(), (first, second), report_only=False
+            )
+        self.assertEqual([argv[4] for argv in self.gcloud_calls() if argv[3] == "stop"], [first.name, second.name])
+        self.assertIn(f"gcloud compute instances stop {first.name}", errors.getvalue())
+        self.assertNotIn(f"gcloud compute instances stop {second.name}", errors.getvalue())
 
     def prepare_collect(self) -> None:
         (self.release.acceptance / "migration-journals").mkdir(parents=True)

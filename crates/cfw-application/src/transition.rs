@@ -208,7 +208,13 @@ pub(crate) async fn transition(
 
             // Human consent saves only a disabled descriptor. Keep it outside
             // the ordinary start budget and before credentials or tickets exist.
-            state.snapshot.state = EngineState::AwaitingApproval { generation };
+            // Where nothing asks a person, authorization is part of starting
+            // and is never shown as awaiting approval.
+            state.snapshot.state = if state.runtime_platform.tunnel_authorization_awaits_consent() {
+                EngineState::AwaitingApproval { generation }
+            } else {
+                EngineState::TunnelStarting { generation }
+            };
             state.native_lease = Some(NativeLease {
                 kind: NativeLeaseKind::TunnelRuntime,
                 context: context.clone(),

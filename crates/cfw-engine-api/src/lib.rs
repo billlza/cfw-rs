@@ -99,6 +99,17 @@ impl EngineRuntimePlatform {
             Self::Windows => EngineOwner::WindowsTunnelService,
         }
     }
+
+    /// Whether authorizing a tunnel configuration waits for a person. macOS
+    /// saves the VPN configuration only after the user's consent. On Windows
+    /// the SYSTEM service was approved when the MSI was installed, so its
+    /// authorization is a configuration check with nothing to approve.
+    pub const fn tunnel_authorization_awaits_consent(self) -> bool {
+        match self {
+            Self::MacOs => true,
+            Self::Windows => false,
+        }
+    }
 }
 
 impl EngineOwner {

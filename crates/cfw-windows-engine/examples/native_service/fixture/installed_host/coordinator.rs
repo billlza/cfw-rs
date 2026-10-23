@@ -30,8 +30,10 @@ pub(super) fn exercise(progress: &mut Progress) -> Result<serde_json::Value> {
     let initial_diagnostics =
         serde_json::to_value(network_diagnostics::collect()?).map_err(|e| e.to_string())?;
     let prepared = platform_runtime::PlatformRuntime::load(&desktop.paths().root)?.prepare()?;
+    // Windows offers Tunnel on its own; the combined mode stays closed.
     if !prepared.services.proxy_available
-        || prepared.services.tunnel_available
+        || !prepared.services.tunnel_available
+        || prepared.services.tunnel_system_proxy_available
         || prepared.services.legacy_preflight.is_some()
         || prepared.services.unavailable_reason.is_some()
         || prepared.services.backend.runtime_platform()
@@ -271,7 +273,8 @@ pub(super) fn exercise(progress: &mut Progress) -> Result<serde_json::Value> {
             "process_observation":process_observation,
             "final_observation_sequence":final_sequence,
             "network_diagnostics_sha256":diagnostics_digest,
-            "tunnel_available":false,"legacy_cutover_available":false}),
+            "tunnel_available":true,"tunnel_system_proxy_available":false,
+            "legacy_cutover_available":false}),
         )
     })
 }

@@ -871,5 +871,7 @@
   "System Proxy is unavailable in this Windows session.": "System Proxy is unavailable in this Windows session.",
   "TUN Mode is unavailable in this Windows build.": "TUN Mode is unavailable in this Windows build.",
   "TUN Mode routes device traffic through a Windows virtual network adapter.": "TUN Mode routes device traffic through a Windows virtual network adapter.",
-  "TUN Mode uses a Windows virtual network adapter to route traffic. The switch is available only when Windows tunnel support is ready.": "TUN Mode uses a Windows virtual network adapter to route traffic. The switch is available only when Windows tunnel support is ready."
+  "TUN Mode uses a Windows virtual network adapter to route traffic. The switch is available only when Windows tunnel support is ready.": "TUN Mode uses a Windows virtual network adapter to route traffic. The switch is available only when Windows tunnel support is ready.",
+  "TUN Mode and System Proxy cannot run together until both report capability.": "TUN Mode and System Proxy cannot run together until both report capability.",
+  "TUN Mode and System Proxy cannot run together in this Windows build. Turn one off first.": "TUN Mode and System Proxy cannot run together in this Windows build. Turn one off first."
 }

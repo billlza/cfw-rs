@@ -89,6 +89,17 @@ test("combined readiness checks both switches only after one ready tunnel attest
   assert.equal(tunnelValueLabel(failed), "Failed");
 });
 
+test("the combined mode's capability is read on its own and only as an explicit true", () => {
+  for (const [value, expected] of [[true, true], [false, false], [undefined, false], ["true", false], [1, false], [null, false]]) {
+    const envelope = proxyEnvelope();
+    envelope.capabilities = { system_proxy: true, tunnel: true, tunnel_system_proxy: value };
+    const engine = normalizeEngineStatus(envelope);
+    assert.equal(engine.systemProxyAvailable, true);
+    assert.equal(engine.tunnelAvailable, true);
+    assert.equal(engine.tunnelSystemProxyAvailable, expected, String(value));
+  }
+});
+
 test("accepts an identity-bound active proxy snapshot", () => {
   const engine = normalizeEngineStatus(proxyEnvelope());
   assert.equal(engine.mode, "system-proxy");
@@ -208,7 +219,7 @@ test("keeps the fail-closed capability reason and the tunnel lifecycle labels", 
       config_digest: null,
       state: { state: "awaiting_approval", generation: 2 },
     },
-    capabilities: { system_proxy: true, tunnel: true },
+    capabilities: { system_proxy: true, tunnel: true, tunnel_system_proxy: true },
   });
   assert.equal(awaiting.state, "AwaitingApproval");
   assert.equal(tunnelValueLabel(awaiting), "Needs approval");

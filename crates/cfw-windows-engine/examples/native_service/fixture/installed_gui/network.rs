@@ -106,6 +106,79 @@ pub(super) fn proxy_digest(snapshot: &ProxySettings) -> Result<String> {
     ))
 }
 
+/// The GUI this scenario launched, verified as the installed desktop in the
+/// observer's own user session at medium integrity.
+struct ObservedGui {
+    pid: u32,
+    process: NativePeerProcess,
+    image: PathBuf,
+    launch: serde_json::Value,
+}
+impl ObservedGui {
+    fn open(source: &str, receipts: &Path) -> Result<Self> {
+        let installed = cfw_windows_engine::runtime_host::InstalledRuntime::open()
+            .map_err(|e| e.to_string())?;
+        let _image = installed.desktop().map_err(|e| e.to_string())?;
+        let file = std::fs::File::open(receipts.join("launch.json")).map_err(|e| e.to_string())?;
+        let mut bytes = Vec::new();
+        file.take(16 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| e.to_string())?;
+        if bytes.len() > 16 * 1024 {
+            return Err("GUI launch receipt exceeds its bound".into());
+        }
+        let launch: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        let pid = launch["process_id"]
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .filter(|value| *value != 0)
+            .ok_or("invalid GUI launch process")?;
+        let process = NativePeerProcess::open(pid).map_err(|e| e.to_string())?;
+        let observer = NativePeerProcess::open(std::process::id()).map_err(|e| e.to_string())?;
+        let image = cfw_windows_engine::runtime_host::InstalledRuntime::desktop_path()
+            .map_err(|e| e.to_string())?
+            .canonicalize()
+            .map_err(|e| e.to_string())?;
+        if launch["source"].as_str() != Some(source)
+            || launch["process_creation_time"].as_u64()
+                != Some(process.identity().process_creation_time())
+            || process.identity().user_session() != observer.identity().user_session()
+            || process.identity().integrity_rid() != 0x2000
+        {
+            return Err("traffic observation does not match the launched GUI user session".into());
+        }
+        let gui = Self {
+            pid,
+            process,
+            image,
+            launch,
+        };
+        gui.recheck("network probe GUI image differs from the installed desktop")?;
+        Ok(gui)
+    }
+    /// This public observation revalidates identity/liveness on the retained
+    /// process object before and after querying its image, without reopening PID.
+    fn recheck(&self, failure: &str) -> Result<()> {
+        if self
+            .process
+            .observed_image_path()
+            .map_err(|e| e.to_string())?
+            .canonicalize()
+            .map_err(|e| e.to_string())?
+            != self.image
+        {
+            return Err(failure.into());
+        }
+        Ok(())
+    }
+    fn original_proxy_digest(&self) -> Result<&str> {
+        self.launch["user_proxy_before_sha256"]
+            .as_str()
+            .ok_or_else(|| "missing original user proxy digest".into())
+    }
+}
+
 pub(super) fn probe(operation: &str, port: &str) -> Result<()> {
     if !["http", "closed", "system-http"].contains(&operation) {
         return Err("unknown GUI network probe".into());
@@ -115,50 +188,12 @@ pub(super) fn probe(operation: &str, port: &str) -> Result<()> {
     if port == 0 {
         return Err("GUI proxy port must be nonzero".into());
     }
-    let installed =
-        cfw_windows_engine::runtime_host::InstalledRuntime::open().map_err(|e| e.to_string())?;
-    let _image = installed.desktop().map_err(|e| e.to_string())?;
-    let file = std::fs::File::open(receipts.join("launch.json")).map_err(|e| e.to_string())?;
-    let mut bytes = Vec::new();
-    file.take(16 * 1024 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| e.to_string())?;
-    if bytes.len() > 16 * 1024 {
-        return Err("GUI launch receipt exceeds its bound".into());
-    }
-    let launch: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-    let pid = launch["process_id"]
-        .as_u64()
-        .and_then(|value| u32::try_from(value).ok())
-        .filter(|value| *value != 0)
-        .ok_or("invalid GUI launch process")?;
-    let gui = NativePeerProcess::open(pid).map_err(|e| e.to_string())?;
-    let observer = NativePeerProcess::open(std::process::id()).map_err(|e| e.to_string())?;
-    let expected_image = cfw_windows_engine::runtime_host::InstalledRuntime::desktop_path()
-        .map_err(|e| e.to_string())?
-        .canonicalize()
-        .map_err(|e| e.to_string())?;
-    if launch["source"].as_str() != Some(source.as_str())
-        || launch["process_creation_time"].as_u64() != Some(gui.identity().process_creation_time())
-        || gui.identity().user_session() != observer.identity().user_session()
-        || gui.identity().integrity_rid() != 0x2000
-    {
-        return Err("traffic observation does not match the launched GUI user session".into());
-    }
-    if gui
-        .observed_image_path()
-        .map_err(|e| e.to_string())?
-        .canonicalize()
-        .map_err(|e| e.to_string())?
-        != expected_image
-    {
-        return Err("network probe GUI image differs from the installed desktop".into());
-    }
+    let observed = ObservedGui::open(&source, &receipts)?;
+    let pid = observed.pid;
+    let gui = &observed.process;
     let before = proxy_snapshot()?;
     let digest = proxy_digest(&before)?;
-    let original_digest = launch["user_proxy_before_sha256"]
-        .as_str()
-        .ok_or("missing original user proxy digest")?;
+    let original_digest = observed.original_proxy_digest()?;
     let system_proxy = operation == "system-http";
     let native_user_proxy = if system_proxy {
         let state =
@@ -196,17 +231,7 @@ pub(super) fn probe(operation: &str, port: &str) -> Result<()> {
         verify_closed_listener(&source, &receipts, address)?;
         None
     };
-    // This public observation revalidates identity/liveness on the retained
-    // process object before and after querying its image, without reopening PID.
-    if gui
-        .observed_image_path()
-        .map_err(|e| e.to_string())?
-        .canonicalize()
-        .map_err(|e| e.to_string())?
-        != expected_image
-    {
-        return Err("network probe GUI image changed during observation".into());
-    }
+    observed.recheck("network probe GUI image changed during observation")?;
     if proxy_snapshot()? != before {
         return Err(format!(
             "user proxy options changed during the {operation} probe"
@@ -226,6 +251,68 @@ pub(super) fn probe(operation: &str, port: &str) -> Result<()> {
             "system_proxy_applied":system_proxy,"applied_user_proxy_unchanged":system_proxy,
             "native_user_proxy":native_user_proxy,
             "wininet_request_flags":wininet_request_flags,"wininet_via_proxy_verified":system_proxy,
+            "release_accepted": false
+        }),
+    )
+}
+
+/// The GUI's TUN Mode, observed from the same user session: while it is on,
+/// the installation's adapter exists, Windows routes the probe host into it
+/// and a plain HTTP fetch leaves from the adapter's own address; once it is
+/// off, the adapter is gone. TUN Mode never touches the user proxy options.
+pub(super) fn tunnel_probe(operation: &str, installation: &str) -> Result<()> {
+    use super::super::tunnel_probe::{adapter_luid, best_route, fetch_through_tunnel, resolve};
+    let on = match operation {
+        "tunnel-http" => true,
+        "tunnel-closed" => false,
+        _ => return Err("unknown GUI tunnel probe".into()),
+    };
+    let (source, receipts) = validation_context()?;
+    let installation =
+        uuid::Uuid::parse_str(installation).map_err(|_| "invalid GUI installation identity")?;
+    let observed = ObservedGui::open(&source, &receipts)?;
+    let before = proxy_snapshot()?;
+    let digest = proxy_digest(&before)?;
+    if digest != observed.original_proxy_digest()? {
+        return Err("TUN Mode changed the original user proxy options".into());
+    }
+    let adapter = cfw_windows_engine::tunnel::adapter_guid(installation);
+    let luid = adapter_luid(adapter)?;
+    let target = resolve()?;
+    let route = best_route(target)?;
+    let local = if on {
+        let luid = luid.ok_or("the GUI's tunnel adapter is absent while TUN Mode is on")?;
+        if route != luid {
+            return Err(format!(
+                "the system route to {target} does not enter the GUI's tunnel adapter"
+            ));
+        }
+        Some(fetch_through_tunnel(target)?.local.to_string())
+    } else {
+        if luid.is_some() {
+            return Err("the GUI's tunnel adapter remained after TUN Mode was turned off".into());
+        }
+        None
+    };
+    observed.recheck("tunnel probe GUI image changed during observation")?;
+    if proxy_snapshot()? != before {
+        return Err(format!(
+            "user proxy options changed during the {operation} probe"
+        ));
+    }
+    write(
+        &receipts,
+        &format!("{operation}-probe.json"),
+        &serde_json::json!({
+            "document": "cfw-installed-gui-tunnel-probe-v1", "source": source,
+            "operation": operation,
+            "gui_process_id": observed.pid,
+            "gui_process_creation_time": observed.process.identity().process_creation_time(),
+            "gui_same_user_session": true, "installation_id": installation,
+            "adapter": adapter, "adapter_luid": luid, "adapter_absent": luid.is_none(),
+            "target": target, "route_luid": route, "route_entered_tunnel": on,
+            "local_address": local, "http_through_tunnel_verified": on,
+            "user_proxy_sha256": digest, "user_proxy_unchanged": true,
             "release_accepted": false
         }),
     )

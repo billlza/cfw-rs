@@ -313,6 +313,8 @@ export function normalizeEngineStatus(value) {
     tunnelActive: modeHasTunnel(mode),
     systemProxyAvailable: capabilities.system_proxy === true,
     tunnelAvailable: capabilities.tunnel === true,
+    // Each integration on its own does not imply their combination.
+    tunnelSystemProxyAvailable: capabilities.tunnel_system_proxy === true,
     providerManagementAvailable: capabilities.provider_management === true,
     availabilityReason: reason,
     startupRecoveryAvailable: value.startup_recovery_available === true

@@ -2,7 +2,7 @@ param(
     [Parameter(Mandatory)][string]$Launcher,
     [Parameter(Mandatory)][string]$Source,
     [Parameter(Mandatory)][string]$Output,
-    [Parameter(Mandatory)][ValidateSet('fresh-off', 'local-proxy', 'system-proxy-quit')][string]$Scenario,
+    [Parameter(Mandatory)][ValidateSet('fresh-off', 'local-proxy', 'tunnel', 'system-proxy-quit')][string]$Scenario,
     [Parameter(Mandatory)][ref]$SessionResult
 )
 Set-StrictMode -Version Latest
@@ -31,6 +31,8 @@ $receipt = [ordered]@{
     imported_profile_id=$null; active_runtime=$null; proxy_port=$null
     http_forwarding_verified=$false; listener_released=$false; engine_stopped=$false; user_proxy_unchanged=$false
     wininet_proxy_verified=$false; active_quit_exercised=$false; original_user_proxy_restored=$false
+    tunnel_runtime=$null; http_through_tunnel_verified=$false; combined_mode_refused=$false
+    tunnel_adapter_retired=$false; core_preserved_after_tunnel=$false
     startup_registration_exercised=$false; actual_sign_in_exercised=$false
     physical_display_exercised=$false; network_mode_exercised=$false; release_accepted=$false
 }
@@ -51,7 +53,7 @@ function Invoke-Playwright([string]$Name, [string[]]$Arguments) {
         return ($result -join "`n")
     } finally { Pop-Location }
 }
-function Invoke-GuiScenario([ValidateSet('startup-off', 'startup-registration', 'network-start', 'network-stop', 'system-proxy-start', 'quit')][string]$Name) {
+function Invoke-GuiScenario([ValidateSet('startup-off', 'startup-registration', 'network-start', 'network-stop', 'tunnel-start', 'tunnel-stop', 'system-proxy-start', 'quit')][string]$Name) {
     $observer = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'gui/observe.js'))
     $scenarioFile = if ($Name -ceq 'quit') { 'quit-with-state' } else { $Name }
     $scenarioCode = [IO.File]::ReadAllText((Join-Path $PSScriptRoot "gui/$scenarioFile.js"))
@@ -101,6 +103,48 @@ function Invoke-NativeNetworkProbe([ValidateSet('http', 'closed', 'system-http')
             }
         } elseif ($record.user_proxy_sha256 -cne $LaunchReceipt.user_proxy_before_sha256 -or -not $record.user_proxy_unchanged) {
             throw 'LocalProxy changed the original native user proxy'
+        }
+        return $record
+    } finally {
+        if ($process.HasExited) {
+            [IO.File]::WriteAllText((Join-Path $outputRoot "$Operation-probe-stdout.log"), $probeStdout.GetAwaiter().GetResult())
+            [IO.File]::WriteAllText((Join-Path $outputRoot "$Operation-probe-stderr.log"), $probeStderr.GetAwaiter().GetResult())
+        }
+        $process.Dispose()
+    }
+}
+function Invoke-NativeTunnelProbe([ValidateSet('tunnel-http', 'tunnel-closed')][string]$Operation, [string]$Installation, $LaunchReceipt) {
+    $start = [Diagnostics.ProcessStartInfo]::new($Launcher)
+    $start.UseShellExecute = $false
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    foreach ($argument in @('--installed-gui-tunnel-probe', $Operation, $Installation)) {
+        $start.ArgumentList.Add($argument)
+    }
+    $start.Environment['CFW_NATIVE_SERVICE_SOURCE'] = $Source
+    $start.Environment['CFW_NATIVE_SERVICE_RECEIPTS'] = $outputRoot
+    $process = [Diagnostics.Process]::Start($start)
+    $probeStdout = $process.StandardOutput.ReadToEndAsync()
+    $probeStderr = $process.StandardError.ReadToEndAsync()
+    try {
+        if (-not $process.WaitForExit(30000)) {
+            $process.Kill()
+            if (-not $process.WaitForExit(5000)) { throw 'Timed-out native GUI tunnel probe did not retire' }
+            throw "Native GUI $Operation probe exceeded its observation deadline"
+        }
+        if ($process.ExitCode -ne 0) { throw "Native GUI $Operation probe failed; see its retained stderr" }
+        $record = Get-Content -LiteralPath (Join-Path $outputRoot "$Operation-probe.json") -Raw | ConvertFrom-Json
+        $on = $Operation -ceq 'tunnel-http'
+        if ($record.document -cne 'cfw-installed-gui-tunnel-probe-v1' -or $record.source -cne $Source -or
+            $record.operation -cne $Operation -or $record.gui_process_id -ne $LaunchReceipt.process_id -or
+            $record.gui_process_creation_time -ne $LaunchReceipt.process_creation_time -or
+            -not $record.gui_same_user_session -or $record.installation_id -cne $Installation -or
+            $record.adapter_absent -eq $on -or $record.route_entered_tunnel -ne $on -or
+            $record.http_through_tunnel_verified -ne $on -or
+            ($on -and ($record.route_luid -ne $record.adapter_luid -or $record.local_address -cnotlike '198.18.64.1:*')) -or
+            -not $record.user_proxy_unchanged -or $record.user_proxy_sha256 -cne $LaunchReceipt.user_proxy_before_sha256 -or
+            $record.release_accepted) {
+            throw 'Native tunnel proof differs from the UI-owned TUN runtime and the original user proxy'
         }
         return $record
     } finally {
@@ -187,6 +231,45 @@ try {
         if ($http.user_proxy_sha256 -cne $closed.user_proxy_sha256) { throw 'User proxy options changed between GUI traffic and stop' }
         $receipt.engine_stopped = $true
         $receipt.listener_released = $true
+        $receipt.network_mode_exercised = $true
+    } elseif ($Scenario -ceq 'tunnel') {
+        $started = (Invoke-GuiScenario 'tunnel-start') | ConvertFrom-Json
+        $started | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'tunnel-start.json') -Encoding utf8NoBOM
+        if (-not $started.controller_verified -or -not $started.combined_mode_refused) {
+            throw 'TUN GUI did not verify its controller and the refused combined mode'
+        }
+        $receipt.controller_verified = $true
+        $receipt.combined_mode_refused = $true
+        $receipt.native_gui_exercised = $true
+        $receipt.imported_profile_id = $started.before.profiles.profiles[0].id
+        $receipt.active_runtime = $started.active.snapshot.state.runtime
+        $receipt.tunnel_runtime = $started.active.snapshot.state.runtime
+        $installation = [string]$started.active.snapshot.state.runtime.context.installation_id
+        $tunnelHttp = Invoke-NativeTunnelProbe 'tunnel-http' $installation $launch
+        $receipt.http_through_tunnel_verified = $true
+        $handover = (Invoke-GuiScenario 'tunnel-stop') | ConvertFrom-Json
+        $handover | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'tunnel-stop.json') -Encoding utf8NoBOM
+        $startedIdentity = $started.active.snapshot.state.runtime | ConvertTo-Json -Depth 20 -Compress
+        $handoverIdentity = $handover.before.snapshot.state.runtime | ConvertTo-Json -Depth 20 -Compress
+        if ($startedIdentity -cne $handoverIdentity -or $handover.local.snapshot.state.state -cne 'local_proxy_active' -or
+            $handover.local.snapshot.generation -le $started.active.snapshot.generation) {
+            throw 'TUN Mode off did not retire the runtime started by this scenario'
+        }
+        $receipt.core_preserved_after_tunnel = $true
+        $tunnelClosed = Invoke-NativeTunnelProbe 'tunnel-closed' $installation $launch
+        if ($tunnelClosed.adapter -cne $tunnelHttp.adapter -or $tunnelClosed.route_luid -eq $tunnelHttp.adapter_luid) {
+            throw 'The system route still enters the retired tunnel adapter'
+        }
+        $receipt.tunnel_adapter_retired = $true
+        $stopped = (Invoke-GuiScenario 'network-stop') | ConvertFrom-Json
+        $stopped | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'network-stop.json') -Encoding utf8NoBOM
+        $localIdentity = $handover.local.snapshot.state.runtime | ConvertTo-Json -Depth 20 -Compress
+        $stoppedIdentity = $stopped.before.snapshot.state.runtime | ConvertTo-Json -Depth 20 -Compress
+        if ($localIdentity -cne $stoppedIdentity -or $stopped.stopped.snapshot.state.state -cne 'off' -or
+            $stopped.stopped.snapshot.desired_mode -cne 'off') {
+            throw 'GUI stop did not retire the local core that replaced TUN Mode'
+        }
+        $receipt.engine_stopped = $true
         $receipt.network_mode_exercised = $true
     } else {
         $started = (Invoke-GuiScenario 'system-proxy-start') | ConvertFrom-Json

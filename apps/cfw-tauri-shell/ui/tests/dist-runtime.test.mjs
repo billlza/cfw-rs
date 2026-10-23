@@ -139,6 +139,7 @@ test("the generated dist bundle performs no controller or provider IPC while Eng
       capabilities: {
         system_proxy: true,
         tunnel: true,
+        tunnel_system_proxy: true,
         provider_management: false,
       },
       cutover_ready: false,

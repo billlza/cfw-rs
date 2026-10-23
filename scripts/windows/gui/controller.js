@@ -1,6 +1,6 @@
-// Observe the actual controller for either UI-started Windows proxy mode.
+// Observe the actual controller for any UI-started Windows network mode.
 (async (page, active, prefix) => {
-  if (!['local-proxy', 'system-proxy'].includes(prefix)) throw new Error('Unknown controller scenario');
+  if (!['local-proxy', 'system-proxy', 'tunnel'].includes(prefix)) throw new Error('Unknown controller scenario');
   await page.locator('#nav button[data-page="proxies"]').click();
   await page.locator('button[data-mode="Rule"]:enabled').waitFor({ timeout: 15000 });
   const controller = await page.evaluate(async () => {

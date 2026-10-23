@@ -871,5 +871,7 @@
   "System Proxy is unavailable in this Windows session.": "目前的 Windows 工作階段無法使用系統代理。",
   "TUN Mode is unavailable in this Windows build.": "目前的 Windows 版應用程式尚不支援 TUN 模式。",
   "TUN Mode routes device traffic through a Windows virtual network adapter.": "TUN 模式透過 Windows 虛擬網路介面卡轉送裝置流量。",
-  "TUN Mode uses a Windows virtual network adapter to route traffic. The switch is available only when Windows tunnel support is ready.": "TUN 模式使用 Windows 虛擬網路介面卡轉送流量。只有 Windows 通道功能就緒後，才能使用此開關。"
+  "TUN Mode uses a Windows virtual network adapter to route traffic. The switch is available only when Windows tunnel support is ready.": "TUN 模式使用 Windows 虛擬網路介面卡轉送流量。只有 Windows 通道功能就緒後，才能使用此開關。",
+  "TUN Mode and System Proxy cannot run together until both report capability.": "在兩者都回報能力之前，TUN 模式與系統代理無法同時執行。",
+  "TUN Mode and System Proxy cannot run together in this Windows build. Turn one off first.": "目前的 Windows 版應用程式中 TUN 模式與系統代理無法同時執行。請先關閉其中一項。"
 }

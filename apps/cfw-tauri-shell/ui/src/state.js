@@ -45,6 +45,7 @@ export const defaultEngineStatus = {
   systemProxyAvailable: false,
   localProxyAvailable: false,
   tunnelAvailable: false,
+  tunnelSystemProxyAvailable: false,
   providerManagementAvailable: false,
   availabilityReason: null,
   observationRecheckPending: false,

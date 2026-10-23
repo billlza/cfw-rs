@@ -1059,6 +1059,7 @@ fn engine_with_rights_bridge(bridge: Arc<RestorationRightsBridge>) -> super::Man
             local_proxy: true,
             system_proxy: true,
             tunnel: true,
+            tunnel_system_proxy: true,
             provider_management: true,
         },
         unavailable_reason: None,
@@ -1072,6 +1073,36 @@ fn engine_with_rights_bridge(bridge: Arc<RestorationRightsBridge>) -> super::Man
             EngineSettings::default(),
         ))),
     }
+}
+
+/// Each integration on its own does not admit their combination: Windows
+/// offers Tunnel and System Proxy separately while the combined mode is closed,
+/// and the UI reads the separate capability from the status payload.
+#[tokio::test]
+async fn combined_mode_requires_its_own_capability() {
+    let mut engine = engine_with_rights_bridge(Arc::new(RestorationRightsBridge::default()));
+    engine.capabilities.tunnel_system_proxy = false;
+    for mode in [
+        EngineMode::LocalProxy,
+        EngineMode::SystemProxy,
+        EngineMode::Tunnel,
+    ] {
+        assert_eq!(engine.require_capability(mode), Ok(()));
+    }
+    assert!(
+        engine
+            .require_capability(EngineMode::TunnelSystemProxy)
+            .is_err()
+    );
+    let payload = serde_json::to_value(engine.capabilities).unwrap();
+    assert_eq!(payload["tunnel"], true);
+    assert_eq!(payload["system_proxy"], true);
+    assert_eq!(payload["tunnel_system_proxy"], false);
+    engine.capabilities.tunnel_system_proxy = true;
+    assert_eq!(
+        engine.require_capability(EngineMode::TunnelSystemProxy),
+        Ok(())
+    );
 }
 
 /// "Recover background services" asks macOS for the rights to restore settings

@@ -3,7 +3,7 @@
 // resolves; use evaluate to await each real observation before deciding.
 (async (page, read, argument, { name, timeoutMs, pollingMs = 250 }) => {
   if (typeof name !== 'string' || !name.trim() || !Number.isInteger(timeoutMs) ||
-      timeoutMs < 1 || timeoutMs > 30000 || !Number.isInteger(pollingMs) || pollingMs < 1 || pollingMs > 1000) {
+      timeoutMs < 1 || timeoutMs > 75000 || !Number.isInteger(pollingMs) || pollingMs < 1 || pollingMs > 1000) {
     throw new Error('Invalid GUI observation bounds');
   }
   let stopped = false;

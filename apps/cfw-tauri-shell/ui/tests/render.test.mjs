@@ -151,7 +151,7 @@ const RUNNING_ENGINE = {
       },
     },
   },
-  capabilities: { system_proxy: true, tunnel: true, provider_management: false },
+  capabilities: { system_proxy: true, tunnel: true, tunnel_system_proxy: true, provider_management: false },
   cutover_ready: true,
   cutover_unavailable_reason: null,
   unavailable_reason: null,
@@ -159,7 +159,7 @@ const RUNNING_ENGINE = {
 
 const OFF_ENGINE = {
   snapshot: { desired_mode: "off", generation: 0, config_digest: null, state: { state: "off" } },
-  capabilities: { system_proxy: true, tunnel: true, provider_management: false },
+  capabilities: { system_proxy: true, tunnel: true, tunnel_system_proxy: true, provider_management: false },
   unavailable_reason: null,
 };
 
@@ -1706,6 +1706,102 @@ test("unavailable network capabilities block every enable path but never trap an
   }
 });
 
+test("a host without the combined mode refuses the second integration with its own reason", async () => {
+  const original = {
+    product: state.payload.product, platform: state.platform, engine: responses.engine_snapshot,
+    hadSystemProxy: Object.hasOwn(responses, "set_system_proxy_enabled"), systemProxy: responses.set_system_proxy_enabled,
+    hadTun: Object.hasOwn(responses, "set_tun_enabled"), tun: responses.set_tun_enabled,
+  };
+  // Windows offers each integration on its own; the backend refuses the
+  // combined mode, so the capability payload says so separately.
+  const capabilities = { local_proxy: true, system_proxy: true, tunnel: true, tunnel_system_proxy: false, provider_management: false };
+  const reason = "TUN Mode and System Proxy cannot run together in this Windows build. Turn one off first.";
+  const offEngine = { snapshot: { desired_mode: "off", generation: 50, config_digest: null, state: { state: "off" } }, capabilities, unavailable_reason: null };
+  const switchAttributes = (html, key) => {
+    const match = html.match(new RegExp(`<input type="checkbox" data-toggle="${key}"([^>]*)>`, "u"));
+    assert.ok(match, `${key} input must render`);
+    return match[1];
+  };
+  try {
+    state.payload.product = { ...original.product, name: "Clash for Windows", operating_system: "windows", architecture: "x64", minimum_os_version: null };
+    state.platform = WINDOWS_PLATFORM_DESIGN;
+    await setEngine(offEngine);
+    const off = await renderPage("general");
+    assert.doesNotMatch(switchAttributes(off, "systemProxy"), /disabled/u);
+    assert.doesNotMatch(switchAttributes(off, "tunMode"), /disabled/u);
+    assert.equal(off.includes(reason), false);
+    for (const scenario of [
+      { active: "systemProxy", activeCommand: "set_system_proxy_enabled", mode: "system_proxy", stateTag: "proxy_active",
+        owner: "windows_user_agent", blocked: "tunMode", blockedCommand: "set_tun_enabled" },
+      { active: "tunMode", activeCommand: "set_tun_enabled", mode: "tunnel", stateTag: "tunnel_active",
+        owner: "windows_tunnel_service", blocked: "systemProxy", blockedCommand: "set_system_proxy_enabled" },
+    ]) {
+      await setEngine({
+        snapshot: {
+          desired_mode: scenario.mode, generation: 51, config_digest: "digest",
+          state: { state: scenario.stateTag, runtime: { owner: scenario.owner, context: { installation_id: "i", config_epoch: 1, generation: 51 }, config_digest: "digest", ready: true } },
+        },
+        capabilities,
+        unavailable_reason: null,
+      });
+      const html = await renderPage("general");
+      assert.match(switchAttributes(html, scenario.blocked), /disabled/u, `${scenario.blocked} must be refused beside ${scenario.active}`);
+      assert.doesNotMatch(switchAttributes(html, scenario.blocked), /checked/u);
+      assert.match(switchAttributes(html, scenario.active), /checked/u);
+      assert.doesNotMatch(switchAttributes(html, scenario.active), /disabled/u, `${scenario.active} must stay switchable off`);
+      assert.ok(html.includes(reason), "the refusal names the combination, not a general failure");
+
+      const blocked = interactiveElement("input");
+      blocked.dataset.toggle = scenario.blocked;
+      querySelectorAllElements.set("[data-toggle]", [blocked]);
+      await renderPage("general");
+      invoked.length = 0;
+      invocationDetails.length = 0;
+      blocked.checked = true;
+      await blocked.trigger("change");
+      assert.equal(invoked.includes(scenario.blockedCommand), false, `${scenario.blocked} enable must issue zero IPC`);
+
+      // The requested integration is never trapped: turning it off still
+      // reaches native admission.
+      const active = interactiveElement("input");
+      active.dataset.toggle = scenario.active;
+      querySelectorAllElements.set("[data-toggle]", [active]);
+      await renderPage("general");
+      responses[scenario.activeCommand] = offEngine;
+      invoked.length = 0;
+      invocationDetails.length = 0;
+      active.checked = false;
+      await active.trigger("change");
+      const disable = invocationDetails.find((entry) => entry.command === scenario.activeCommand);
+      assert.ok(disable, `${scenario.active} disable must reach native admission`);
+      assert.equal(disable.args.enabled, false);
+      querySelectorAllElements.clear();
+    }
+    // A failed System Proxy request still holds the switch, and the TUN row
+    // explains the combination, not the unrelated startup failure.
+    await setEngine({
+      snapshot: { desired_mode: "system_proxy", generation: 52, config_digest: null, state: { state: "failed", target: "system_proxy", error: "Earlier startup failed" } },
+      capabilities,
+      unavailable_reason: null,
+    });
+    const failed = await renderPage("general");
+    assert.match(switchAttributes(failed, "tunMode"), /disabled/u);
+    assert.ok(failed.includes(`title="${reason}"`), "the TUN row names the combination");
+    assert.equal(failed.includes('title="Earlier startup failed"'), false);
+  } finally {
+    querySelectorAllElements.clear();
+    if (original.hadSystemProxy) responses.set_system_proxy_enabled = original.systemProxy;
+    else delete responses.set_system_proxy_enabled;
+    if (original.hadTun) responses.set_tun_enabled = original.tun;
+    else delete responses.set_tun_enabled;
+    state.payload.product = original.product;
+    state.platform = original.platform;
+    responses.engine_snapshot = original.engine;
+    await setEngine(original.engine);
+    await reloadButton.click();
+  }
+});
+
 test("normal mode switches call the existing backend without preparing or cleaning legacy data", async () => {
   const originalEngine = responses.engine_snapshot;
   const originalRetirement = state.retirement;
@@ -1735,7 +1831,7 @@ test("normal mode switches call the existing backend without preparing or cleani
       assert.doesNotMatch(html, /cfw-migration-banner|Start Migration|Prepare cutover|Finish setup/u);
       responses[command] = {
         snapshot: { desired_mode: desired, generation: 1, config_digest: null, state: { state: status, generation: 1 } },
-        capabilities: { system_proxy: true, tunnel: true },
+        capabilities: { system_proxy: true, tunnel: true, tunnel_system_proxy: true },
         unavailable_reason: null,
       };
       invocationDetails.length = 0;
@@ -4750,7 +4846,7 @@ test("network switches remain off while startup is pending or fails and cancella
       assert.match(starting, new RegExp(`data-toggle="${key}"\\s+disabled`, "u"));
       pending.resolve({
         snapshot: { desired_mode: mode, generation: 200, config_digest: null, state: { state: "failed", target: mode, error: "native startup failed" } },
-        capabilities: { system_proxy: true, tunnel: true },
+        capabilities: { system_proxy: true, tunnel: true, tunnel_system_proxy: true },
       });
       await operation;
       const failed = await renderPage("general");
@@ -4779,7 +4875,7 @@ test("engine status events do not discard a pending switch failure", async () =>
   const originalError = state.engineMutationError;
   const failure = {
     snapshot: { desired_mode: "system_proxy", generation: 201, config_digest: null, state: { state: "failed", target: "system_proxy", error: "Earlier startup failed" } },
-    capabilities: { system_proxy: true, tunnel: true },
+    capabilities: { system_proxy: true, tunnel: true, tunnel_system_proxy: true },
   };
   try {
     await setEngine(OFF_ENGINE);
@@ -4935,7 +5031,7 @@ test("startup recovery is asked for by the dashboard itself after an installatio
 test("the General page surfaces approval and capability reasons", async () => {
   await setEngine({
     snapshot: { desired_mode: "tunnel", generation: 1, config_digest: null, state: { state: "awaiting_approval", generation: 1 } },
-    capabilities: { system_proxy: true, tunnel: true },
+    capabilities: { system_proxy: true, tunnel: true, tunnel_system_proxy: true },
   });
   const awaitingApproval = await renderPage("general");
   assert.ok(awaitingApproval.includes("Needs approval"));
@@ -4957,7 +5053,7 @@ test("the General page surfaces approval and capability reasons", async () => {
       config_digest: "digest",
       state: { state: "failed", generation: 2, target: "system_proxy", error: "approval required" },
     },
-    capabilities: { system_proxy: true, tunnel: true },
+    capabilities: { system_proxy: true, tunnel: true, tunnel_system_proxy: true },
   });
   const failedProxy = await renderPage("general");
   assert.match(failedProxy, /data-action="retry-system-proxy">Retry/u);

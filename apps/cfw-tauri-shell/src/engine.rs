@@ -138,6 +138,8 @@ pub(crate) struct EngineCapabilities {
     local_proxy: bool,
     system_proxy: bool,
     tunnel: bool,
+    /// Both integrations in one run; never true unless each alone is.
+    tunnel_system_proxy: bool,
     provider_management: bool,
 }
 
@@ -371,9 +373,7 @@ impl ManagedEngine {
             EngineMode::LocalProxy => self.capabilities.local_proxy,
             EngineMode::SystemProxy => self.capabilities.system_proxy,
             EngineMode::Tunnel => self.capabilities.tunnel,
-            EngineMode::TunnelSystemProxy => {
-                self.capabilities.tunnel && self.capabilities.system_proxy
-            }
+            EngineMode::TunnelSystemProxy => self.capabilities.tunnel_system_proxy,
         };
         if available {
             Ok(())
@@ -403,6 +403,7 @@ impl ManagedEngine {
                 local_proxy: false,
                 system_proxy: false,
                 tunnel: false,
+                tunnel_system_proxy: false,
                 provider_management: true,
             }
         } else {
@@ -483,6 +484,9 @@ pub(crate) fn prepare_managed_engine(
             local_proxy: services.proxy_available,
             system_proxy: services.proxy_available,
             tunnel: services.tunnel_available,
+            tunnel_system_proxy: services.tunnel_system_proxy_available
+                && services.tunnel_available
+                && services.proxy_available,
             // Providers are application-owned resources (commands::providers).
             // The pinned sing-box 1.14.2 schema has no proxy or rule providers,
             // so the controller's provider methods stay fail-closed backstops

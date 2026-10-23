@@ -17,6 +17,10 @@ pub(crate) struct PlatformRuntime {
     pub(crate) legacy_preflight: Option<Arc<dyn CutoverPreflightBackend>>,
     pub(crate) proxy_available: bool,
     pub(crate) tunnel_available: bool,
+    /// Whether one run may carry both Tunnel and System Proxy. Windows routes
+    /// a Tunnel run through SYSTEM's adapter but does not yet own the combined
+    /// mode's user proxy settings, so it offers each mode only on its own.
+    pub(crate) tunnel_system_proxy_available: bool,
     pub(crate) unavailable_reason: Option<String>,
     generations: Result<Arc<dyn EngineGenerationStore>, String>,
     operation_timeout: std::time::Duration,
@@ -48,6 +52,7 @@ impl PlatformRuntime {
                 let reason = format!("authoritative engine lineage is unavailable: {error}");
                 self.proxy_available = false;
                 self.tunnel_available = false;
+                self.tunnel_system_proxy_available = false;
                 self.unavailable_reason = Some(reason.clone());
                 EngineModeCoordinator::spawn_journal_unavailable_with(
                     Arc::clone(&self.backend),
@@ -99,6 +104,7 @@ mod tests {
             legacy_preflight: Some(backend),
             proxy_available: true,
             tunnel_available: true,
+            tunnel_system_proxy_available: true,
             unavailable_reason: None,
             generations,
             operation_timeout: std::time::Duration::from_secs(1),
@@ -115,6 +121,7 @@ mod tests {
         ));
         assert!(prepared.services.proxy_available);
         assert!(prepared.services.tunnel_available);
+        assert!(prepared.services.tunnel_system_proxy_available);
         assert!(prepared.services.unavailable_reason.is_none());
         // Dropping an unadmitted task must remain possible outside a Tokio runtime.
         drop(prepared.task);
@@ -127,6 +134,7 @@ mod tests {
             .unwrap();
         assert!(!prepared.services.proxy_available);
         assert!(!prepared.services.tunnel_available);
+        assert!(!prepared.services.tunnel_system_proxy_available);
         assert!(
             prepared
                 .services
@@ -162,6 +170,7 @@ impl PlatformRuntime {
             legacy_preflight: Some(backend),
             proxy_available: available,
             tunnel_available: available,
+            tunnel_system_proxy_available: available,
             unavailable_reason,
             generations: KeychainEngineGenerationStore::new(app_home.join("engine"))
                 .map(|store| Arc::new(store) as Arc<dyn EngineGenerationStore>)
@@ -199,7 +208,10 @@ impl PlatformRuntime {
             // Absence is explicit; callers must reject before any migration.
             legacy_preflight: None,
             proxy_available: true,
-            tunnel_available: false,
+            // SYSTEM owns a Tunnel run's adapter, routes and resolvers; the
+            // backend refuses the combined mode, so it is not offered.
+            tunnel_available: true,
+            tunnel_system_proxy_available: false,
             unavailable_reason: None,
             operation_timeout: cfw_windows_engine::backend::OUTER_WATCHDOG,
         })

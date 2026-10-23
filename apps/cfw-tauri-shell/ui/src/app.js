@@ -1153,20 +1153,32 @@ function engineToggleCapability(key) {
       reason: state.engine.availabilityReason ?? t(platformPresentation(state.payload.product.operating_system).localProxyUnavailable),
     };
   }
+  // Turning one integration on while the other is requested asks for the
+  // combined mode, which has its own capability and its own reason; it is not
+  // the engine's general availability or an earlier failure.
+  const presentation = () => platformPresentation(state.payload.product.operating_system);
+  const combinationRefused = (alone, otherRequested) => alone && otherRequested
+    && state.engine.tunnelSystemProxyAvailable !== true;
   if (key === "systemProxy") {
+    const alone = state.engine.systemProxyAvailable === true;
+    const refused = combinationRefused(alone, modeHasTunnel(state.engine.desiredMode));
     return {
-      available: state.engine.systemProxyAvailable === true,
+      available: alone && !refused,
       get label() { return t("System Proxy"); },
-      reason: state.engine.availabilityReason
-        ?? t(platformPresentation(state.payload.product.operating_system).systemProxyUnavailable),
+      reason: refused
+        ? t(presentation().combinedUnavailable)
+        : state.engine.availabilityReason ?? t(presentation().systemProxyUnavailable),
     };
   }
   if (key === "tunMode") {
+    const alone = state.engine.tunnelAvailable === true;
+    const refused = combinationRefused(alone, modeHasSystemProxy(state.engine.desiredMode));
     return {
-      available: state.engine.tunnelAvailable === true,
+      available: alone && !refused,
       get label() { return t("TUN Mode"); },
-      reason: state.engine.availabilityReason
-        ?? t(platformPresentation(state.payload.product.operating_system).tunnelUnavailable),
+      reason: refused
+        ? t(presentation().combinedUnavailable)
+        : state.engine.availabilityReason ?? t(presentation().tunnelUnavailable),
     };
   }
   return null;

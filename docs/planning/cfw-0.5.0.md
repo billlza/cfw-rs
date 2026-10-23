@@ -2,8 +2,9 @@
 
 评估日期：2026-10-18；最近实施检查：2026-10-23。状态：已在托管 Windows
 普通输入桌面完成真实 MSI 安装、非管理员九页检查、两种代理的真实流量、
-停止／运行中退出恢复及卸载。产品 TUN 的 SYSTEM 适配器／UserAgent 引擎通路已实现，
-托管原生验证进行中，UI 尚未开放；组合模式、完整 UI 对齐、完整更新和发布验收仍开放。
+停止／运行中退出恢复及卸载。产品 TUN（SYSTEM 适配器／UserAgent 引擎）已在托管 Windows 的
+安装运行与安装 GUI 中验证（含 UserAgent 被终止后的恢复），UI 已开放 TUN；组合模式、完整 UI
+对齐、完整更新和发布验收仍开放。
 
 ## 当前验收状态
 
@@ -2854,7 +2855,7 @@ macOS `CI` 运行 39872592378 的结果：
   镜像版本。放宽该测试或固定 Xcode 选择会改变发布身份规则，保持为开放事项。跳过项
   仍是未安装固定 Tauri 签名器的 1 项，不计为通过。
 
-### 2026-10-23：产品 TUN——SYSTEM 适配器与 UserAgent 引擎（托管原生验证通过）
+### 2026-10-23：产品 TUN——SYSTEM 适配器与 UserAgent 引擎（托管原生与 GUI 验证通过）
 
 `9c7bf1a1` 让 Windows gVisor 投影在 Tunnel 模式加入 `route.auto_detect_interface`，
 Tunnel 数据面准入拒绝缺少该项的配置；macOS（system 栈）投影与摘要不变。依据：引擎
@@ -2977,7 +2978,21 @@ Windows 上没有需要批准的内容，General 页却会短暂显示 “Needs 
 198.18.64.1 发出、用户代理设置未变；产物 `76708f1dd52ca5db785fc32b8f8052b440da4e566d88bd96de0593285073bcc9`），
 随后在关闭 TUN 的步骤失败：页面内观察函数引用了只存在于 Node 侧的变量（`before is not defined`），
 属于夹具缺陷；同时收集到的 SYSTEM 诊断（`lease_ending`：连接关闭，自 Active）只反映失败后的会话
-拆除。后续提交把起始代次作为参数传入页面。
+拆除。`5bcc3efc` 把起始代次作为参数传入页面。
+
+`5bcc3efc` 的[共享／原生作业](https://github.com/billlza/cfw-rs/actions/runs/39894848609)与
+[桌面作业](https://github.com/billlza/cfw-rs/actions/runs/39894846573)七项全部通过，五个产物按 API 摘要下载核验：
+引擎 `bf68115811720b21783d9f36ca669d171a3817272845ad8fde01bb6fca4e5946`（506 个 Go 通过事件、19 项原生 Rust
+引擎测试、21 个安装运行用例含两个 Tunnel 用例、三档 MTU 转发）、Wintun
+`6a1cbadaf9f555a39551f071fb0f017cd8067d45ef2e1c69eb500d7e59b79515`（49 项数据包测试）、SCM
+`01cbb99ae980b890b0b7051e12d258956424f1da4d3864b9ead7cdfe32fc85a1`（36 项用例）、桌面
+`25f2aa7fbbf7b3e53d9cb7dcbba436497ee40503d571d2d049f042c56e2bd916`（373 项桌面测试与四次 GUI 会话）、更新包检查
+`96098c0d3df33c07373604750a260c08fce286d3fce033343a1bc0c916b9011c`；Windows 共享作业运行 785 项 Rust 与 331 项 UI
+测试。GUI TUN 会话（回执绑定 `5bcc3efc`）：可见开关启动 TUN（`windows_tunnel_service`，代次 3），系统代理
+开关显示组合模式被拒；原生探针看到适配器（GUID 与按安装身份计算的值一致）、路由进入适配器、
+HTTP 从 198.18.64.1 发出且用户代理设置未变；关闭 TUN 后交给更新代次的本地核心（代次 4），探针随后
+确认适配器消失、路由回到物理接口，核心停止后 GUI 正常退出。UserAgent 终止用例再次通过（期间观察到
+Authority 恢复中与 UserAgent 退出，随后 Off）。
 
 UI 能力：`67593409` 让 Windows 桌面报告 Tunnel 可用，并新增独立的 `tunnel_system_proxy`
 能力（Windows 为 false），协调器对组合模式只读该能力；General 页在已请求系统代理时打开

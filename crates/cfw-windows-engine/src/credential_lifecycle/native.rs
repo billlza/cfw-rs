@@ -220,7 +220,9 @@ impl WindowsCredentialLifecycle {
         request: CheckedStartConfiguration,
         deadline: Instant,
     ) -> Result<(AuthorityChannel, PreparedGrant, CheckedStartConfiguration)> {
-        if request.mode().has_tunnel() {
+        // A Tunnel run binds its credentials like a proxy run; the combined
+        // mode's user proxy settings are not owned on Windows.
+        if request.mode() == cfw_singbox_config::ProjectionMode::TunnelSystemProxy {
             return Err(Error::Unavailable);
         }
         self.locked(deadline, || {

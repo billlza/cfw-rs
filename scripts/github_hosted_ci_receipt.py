@@ -178,6 +178,8 @@ API_PATH_RE: Final = re.compile(
     r"|check-runs/[1-9][0-9]{0,19}/annotations"
     r"\?per_page=100&page=1"
     r"|contents/\.github/workflows/ci\.yml\?ref=[0-9a-f]{40}"
+    rf"|actions/workflows/{WORKFLOW_ID}/runs\?head_sha=[0-9a-f]{{40}}"
+    r"&event=pull_request&per_page=100&page=1"
     r")$"
 )
 
@@ -370,6 +372,15 @@ def _annotations_api_path(check_run_id: int) -> str:
     return (
         f"/repos/{REPOSITORY_FULL_NAME}/check-runs/{check_run_id}/annotations"
         "?per_page=100&page=1"
+    )
+
+
+def _commit_runs_api_path(commit: str) -> str:
+    if not COMMIT_RE.fullmatch(commit):
+        raise _error("release commit is malformed")
+    return (
+        f"/repos/{REPOSITORY_FULL_NAME}/actions/workflows/{WORKFLOW_ID}/runs"
+        f"?head_sha={commit}&event={EVENT}&per_page=100&page=1"
     )
 
 
@@ -1299,16 +1310,94 @@ def verify_receipt(
     return live
 
 
+def latest_commit_run(commit: str) -> int:
+    """Return the newest hosted run of ``commit`` once it has completed successfully.
+
+    The candidate is frozen only after this run passed (RELEASE.md), so a
+    still-running or failed newest run is an error, never a reason to fall
+    back to an older run of the same commit.
+    """
+
+    listing = _fetch_api_json(_commit_runs_api_path(commit))
+    if not isinstance(listing, dict) or not isinstance(listing.get("workflow_runs"), list):
+        raise _error("GitHub workflow run listing is malformed")
+    runs = [
+        run
+        for run in listing["workflow_runs"]
+        if isinstance(run, dict)
+        and run.get("head_sha") == commit
+        and run.get("event") == EVENT
+        and run.get("workflow_id") == WORKFLOW_ID
+    ]
+    if not runs:
+        raise _error(
+            f"hosted CI has no {EVENT} run for {commit}; push it as the head of the release pull request"
+        )
+    newest = max(runs, key=lambda run: _positive_int(run.get("id"), "workflow run id"))
+    run_id = _positive_int(newest.get("id"), "workflow run id")
+    if newest.get("status") != "completed":
+        raise _error(f"hosted CI run {run_id} for {commit} is still {newest.get('status')}")
+    if newest.get("conclusion") != "success":
+        raise _error(
+            f"hosted CI run {run_id} for {commit} concluded {newest.get('conclusion')}; "
+            "fix the failure before freezing anything"
+        )
+    return run_id
+
+
+def preflight_run(repository: Path, run_id: int | None = None) -> dict[str, Any]:
+    """Validate the hosted run of a clean, not yet frozen release checkout.
+
+    It applies every check of the receipt to the run: the exact commit, the
+    three fixed jobs with every required step, the workflow source and zero
+    annotations. The run must test the release commit itself.
+    """
+
+    try:
+        current = current_identity(repository.absolute(), require_clean=True)
+        workflow_bytes = _workflow_source_bytes(repository.absolute())
+    except (SourceIdentityError, OSError, PublicationError) as error:
+        raise _error("hosted CI preflight requires a clean release checkout") from error
+    source = {
+        "release_source_sha256": current["releaseSourceSha256"],
+        "repository_commit": current["repositoryCommit"],
+        "workflow_sha256": sha256_bytes(workflow_bytes),
+    }
+    selected = latest_commit_run(source["repository_commit"]) if run_id is None else run_id
+    receipt = _live_receipt(repository.absolute(), source, selected, workflow_bytes)
+    if receipt["tested_source"]["repository_commit"] != source["repository_commit"]:
+        raise _error("hosted CI tested another commit than the release commit")
+    return receipt
+
+
 def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     capture = commands.add_parser("capture")
     capture.add_argument("--run-id", required=True)
     commands.add_parser("verify")
+    preflight = commands.add_parser("preflight")
+    preflight.add_argument("--run-id")
     arguments = parser.parse_args(sys.argv[1:] if argv is None else argv)
-    if arguments.command == "capture" and not DECIMAL_RE.fullmatch(arguments.run_id):
+    run_id = getattr(arguments, "run_id", None)
+    if run_id is not None and not DECIMAL_RE.fullmatch(run_id):
         parser.error("--run-id must be one positive canonical decimal integer")
     return arguments
+
+
+def _preflight_main(arguments: argparse.Namespace) -> None:
+    repository = Path(__file__).resolve().parent.parent
+    try:
+        receipt = preflight_run(
+            repository, None if arguments.run_id is None else int(arguments.run_id, 10)
+        )
+    except (PublicationError, OSError, ValueError) as error:
+        raise SystemExit(f"error: hosted CI preflight: {error}") from error
+    print(
+        "hosted CI preflight passed: "
+        f"run={receipt['run']['id']} attempt={receipt['run']['run_attempt']} "
+        f"head={receipt['run']['head_sha']} jobs={len(receipt['jobs'])}"
+    )
 
 
 def main() -> None:
@@ -1328,6 +1417,9 @@ def main() -> None:
     except ReleasePythonRuntimeError as error:
         raise SystemExit(f"error: hosted CI receipt: {error}") from error
     arguments = _arguments()
+    if arguments.command == "preflight":
+        _preflight_main(arguments)
+        return
     try:
         sources = capture_frozen_release_sources(Path(__file__).resolve().parent.parent)
         repository = sources.artifact.repository

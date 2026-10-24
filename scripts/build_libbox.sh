@@ -189,7 +189,9 @@ cfw_run_release_python_script \
   --metadata "patchedDiffSha256=$SING_BOX_PATCHED_DIFF_SHA256" \
   --metadata "combinedDiffSha256=$SING_BOX_COMBINED_DIFF_SHA256" \
   --metadata "patchedGoModSha256=$SING_BOX_PATCHED_GO_MOD_SHA256" \
-  --metadata "patchedGoSumSha256=$SING_BOX_PATCHED_GO_SUM_SHA256"
+  --metadata "patchedGoSumSha256=$SING_BOX_PATCHED_GO_SUM_SHA256" \
+  --metadata "xcodeVersion=$XCODE_VERSION" \
+  --metadata "xcodeBuild=$XCODE_BUILD_VERSION"
 libbox_verify_xcframework_artifact \
   "$repo_root" \
   "$output_root" \

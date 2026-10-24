@@ -1365,9 +1365,18 @@ LIBBOX_VET_PACKAGES=(".")
             "combinedDiffSha256=$SING_BOX_COMBINED_DIFF_SHA256",
             "patchedGoModSha256=$SING_BOX_PATCHED_GO_MOD_SHA256",
             "patchedGoSumSha256=$SING_BOX_PATCHED_GO_SUM_SHA256",
+            "xcodeVersion=$XCODE_VERSION",
+            "xcodeBuild=$XCODE_BUILD_VERSION",
         ):
             with self.subTest(metadata=metadata):
                 self.assertIn(metadata, contract)
+        producer = (SCRIPTS / "build_libbox.sh").read_text(encoding="utf-8")
+        for metadata in (
+            '--metadata "xcodeVersion=$XCODE_VERSION"',
+            '--metadata "xcodeBuild=$XCODE_BUILD_VERSION"',
+        ):
+            with self.subTest(producer=metadata):
+                self.assertIn(metadata, producer)
 
         for relative in (
             "build_libbox.sh",
@@ -1393,7 +1402,9 @@ LIBBOX_VET_PACKAGES=(".")
             encoding="utf-8"
         )
         for fragment in (
-            "const LIBBOX_METADATA_KEYS: [&str; 26]",
+            "const LIBBOX_METADATA_KEYS: [&str; 28]",
+            'require_metadata(&manifest, "xcodeVersion", xcode_version)?;',
+            'require_metadata(&manifest, "xcodeBuild", xcode_build)?;',
             '"goToolchainTreeSha256"',
             '"goToolsTreeSha256"',
             '"goModuleCacheTreeSha256"',

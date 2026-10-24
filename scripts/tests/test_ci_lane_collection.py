@@ -770,6 +770,7 @@ class LibboxReproductionTests(unittest.TestCase):
             "go-release-tools": "b" * 64,
             "go-module-cache": "c" * 64,
         }
+        self.apple_identity = ci_lanes.selected_apple_identity(self.pins, {})
         self.write_manifest(self.authoritative)
         self.write_manifest(self.rebuilt)
 
@@ -778,7 +779,7 @@ class LibboxReproductionTests(unittest.TestCase):
             artifact, algorithm="sha256-tree-v1"
         )
         document["metadata"] = ci_lanes._libbox_manifest_metadata(
-            self.pins, self.toolchain_trees
+            self.pins, self.toolchain_trees, self.apple_identity
         )
         manifest = artifact.parent / (artifact.name + ".manifest.json")
         manifest.write_text(
@@ -798,6 +799,7 @@ class LibboxReproductionTests(unittest.TestCase):
             self.rebuilt,
             self.pins,
             self.toolchain_trees,
+            self.apple_identity,
         )
 
     def test_exact_rebuild_is_accepted(self) -> None:
@@ -830,6 +832,22 @@ class LibboxReproductionTests(unittest.TestCase):
         with self.assertRaisesRegex(PublicationError, "metadata drifted"):
             self.verify()
 
+    def test_a_libbox_built_by_another_xcode_is_rejected(self) -> None:
+        self.assertEqual(
+            self.apple_identity,
+            (self.pins["XCODE_VERSION"], self.pins["XCODE_BUILD_VERSION"]),
+        )
+        built_by = self.apple_identity
+        self.apple_identity = ("26.9", "17Z999")
+        with self.assertRaisesRegex(PublicationError, "metadata drifted"):
+            self.verify()
+        self.apple_identity = built_by
+        self.verify()
+        with self.assertRaisesRegex(PublicationError, "effective Xcode identity"):
+            ci_lanes._libbox_manifest_metadata(
+                self.pins, self.toolchain_trees, ("", self.apple_identity[1])
+            )
+
     def test_semantically_equal_but_reencoded_manifest_is_rejected(self) -> None:
         manifest = self.rebuilt.parent / (self.rebuilt.name + ".manifest.json")
         document = json.loads(manifest.read_text(encoding="utf-8"))
@@ -861,6 +879,7 @@ class LibboxReproductionTests(unittest.TestCase):
                 self.authoritative,
                 self.pins,
                 self.toolchain_trees,
+                self.apple_identity,
             )
 
 
@@ -881,6 +900,14 @@ class CollectionTests(unittest.TestCase):
 
     def collect(self, results=None, **overrides):
         injected_toolchain = overrides.pop("toolchain", (TOOLCHAIN, IDENTITY))
+        execution_environment = overrides.pop(
+            "execution_environment",
+            {
+                "HOME": "/Users/release",
+                "PATH": "/usr/bin:/bin",
+                "DEVELOPER_DIR": "/Applications/Xcode.app/Contents/Developer",
+            },
+        )
         source_identities = overrides.pop(
             "source_identities",
             [
@@ -898,7 +925,7 @@ class CollectionTests(unittest.TestCase):
             "runner": _runner(results or {}),
             "reproduction_verifier": overrides.pop(
                 "reproduction_verifier",
-                lambda _repository, _artifact, _pins, _trees: "f" * 64,
+                lambda _repository, _artifact, _pins, _trees, _apple_identity: "f" * 64,
             ),
             "report": lambda _message: None,
         }
@@ -913,11 +940,6 @@ class CollectionTests(unittest.TestCase):
             )
             if injected_toolchain is not None:
                 digest, identity = injected_toolchain
-                execution_environment = {
-                    "HOME": "/Users/release",
-                    "PATH": "/usr/bin:/bin",
-                    "DEVELOPER_DIR": "/Applications/Xcode.app/Contents/Developer",
-                }
                 stack.enter_context(
                     patch.object(
                         ci_lanes,
@@ -971,18 +993,46 @@ class CollectionTests(unittest.TestCase):
     def test_all_passing_lanes_reverify_the_libbox_reproduction(self) -> None:
         calls = []
 
-        def verify(repository, artifact, pins, toolchain_trees):
-            calls.append((repository, artifact, pins, toolchain_trees))
+        def verify(repository, artifact, pins, toolchain_trees, apple_identity):
+            calls.append((repository, artifact, pins, toolchain_trees, apple_identity))
             return "f" * 64
 
         self.collect(reproduction_verifier=verify)
 
         self.assertEqual(len(calls), 2)
-        repository, artifact, _pins, toolchain_trees = calls[0]
+        repository, artifact, pins, toolchain_trees, apple_identity = calls[0]
         self.assertEqual(repository, self.root)
         self.assertEqual(artifact, self.root / ci_lanes.DEFAULT_LIBBOX_OUTPUT)
         self.assertEqual(toolchain_trees, TOOLCHAIN_TREES)
+        # The Xcode that compiles Libbox: the pinned one, without a
+        # validation selection.
+        self.assertEqual(
+            apple_identity, (pins["XCODE_VERSION"], pins["XCODE_BUILD_VERSION"])
+        )
         self.assertEqual(calls[1], calls[0])
+
+    def test_the_libbox_reproduction_expects_the_selected_validation_xcode(self) -> None:
+        identities = []
+
+        def verify(_repository, _artifact, _pins, _trees, apple_identity):
+            identities.append(apple_identity)
+            return "f" * 64
+
+        # The unsigned-validation role builds Libbox with the Xcode it
+        # selected, which a hosted image may not share with the release pin.
+        self.collect(
+            reproduction_verifier=verify,
+            execution_environment={
+                "HOME": "/Users/release",
+                "PATH": "/usr/bin:/bin",
+                "DEVELOPER_DIR": "/Applications/Xcode.app/Contents/Developer",
+                "CFW_UNSIGNED_VALIDATION_PYTHON": "/usr/bin/python3",
+                "CFW_UNSIGNED_VALIDATION_XCODE_VERSION": "26.9",
+                "CFW_UNSIGNED_VALIDATION_XCODE_BUILD_VERSION": "17Z999",
+            },
+        )
+
+        self.assertEqual(identities, [("26.9", "17Z999")] * 2)
 
     def test_reproduction_failure_does_not_publish_lane_records_or_output(self) -> None:
         def reject(*_arguments):

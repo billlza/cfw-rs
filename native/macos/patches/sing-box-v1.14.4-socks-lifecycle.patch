@@ -1,10 +1,10 @@
 diff --git a/cmd/cfm-build-workspace/main.go b/cmd/cfm-build-workspace/main.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..ee6216ecc718dd7e900e1ae64e8fe829f5943aa6
+index 0000000000000000000000000000000000000000..505a9e4df2dff2da20967b6576baea586a805ef1
 --- /dev/null
 +++ b/cmd/cfm-build-workspace/main.go
 @@ -0,0 +1,188 @@
-+// Build an isolated workspace with the source-bound sing v0.9.6-0.20260922013354-87c33f17688f packet-address
++// Build an isolated workspace with the source-bound sing v0.9.7-0.20261023115459-5dc452e537bf packet-address
 +// correction. The original source and checksum-verified module cache stay intact.
 +package main
 +
@@ -61,7 +61,7 @@ index 0000000000000000000000000000000000000000..ee6216ecc718dd7e900e1ae64e8fe829
 +
 +func rewrite(patch sourcePatch, input []byte) ([]byte, error) {
 +	if fmt.Sprintf("%x", sha256.Sum256(input)) != patch.digest {
-+		return nil, fmt.Errorf("%s: sing v0.9.6-0.20260922013354-87c33f17688f source checksum mismatch", patch.path)
++		return nil, fmt.Errorf("%s: sing v0.9.7-0.20261023115459-5dc452e537bf source checksum mismatch", patch.path)
 +	}
 +	source := string(input)
 +	for _, edit := range patch.edits {
@@ -115,14 +115,14 @@ index 0000000000000000000000000000000000000000..ee6216ecc718dd7e900e1ae64e8fe829
 +		return "", errors.New("build workspace must be outside the real source directory")
 +	}
 +	realRoot, err := filepath.EvalSymlinks(moduleRoot)
-+	if err != nil || realRoot != filepath.Clean(moduleRoot) || filepath.Base(realRoot) != "sing@v0.9.6-0.20260922013354-87c33f17688f" {
-+		return "", errors.New("module source must be the real sing v0.9.6-0.20260922013354-87c33f17688f directory")
++	if err != nil || realRoot != filepath.Clean(moduleRoot) || filepath.Base(realRoot) != "sing@v0.9.7-0.20261023115459-5dc452e537bf" {
++		return "", errors.New("module source must be the real sing v0.9.7-0.20261023115459-5dc452e537bf directory")
 +	}
 +	if strings.HasPrefix(filepath.Clean(output)+string(os.PathSeparator), realRoot+string(os.PathSeparator)) {
 +		return "", errors.New("build workspace must be outside the verified module directory")
 +	}
 +	goMod, err := os.ReadFile(filepath.Join(realSource, "go.mod"))
-+	if err != nil || !strings.Contains(string(goMod), "\tgithub.com/sagernet/sing v0.9.6-0.20260922013354-87c33f17688f\n") || strings.Contains(string(goMod), "replace ") {
++	if err != nil || !strings.Contains(string(goMod), "\tgithub.com/sagernet/sing v0.9.7-0.20261023115459-5dc452e537bf\n") || strings.Contains(string(goMod), "replace ") {
 +		return "", errors.New("unexpected sing-box module declaration")
 +	}
 +	// Validate and rewrite both files before creating the isolated workspace.
@@ -165,7 +165,7 @@ index 0000000000000000000000000000000000000000..ee6216ecc718dd7e900e1ae64e8fe829
 +	}
 +	// A fixed relative replacement keeps ephemeral absolute paths out of module
 +	// build identities. Both trees, including the dependency license, are copied.
-+	goMod = append(goMod, []byte("\nreplace github.com/sagernet/sing v0.9.6-0.20260922013354-87c33f17688f => ./cfw-dependencies/sing\n")...)
++	goMod = append(goMod, []byte("\nreplace github.com/sagernet/sing v0.9.7-0.20261023115459-5dc452e537bf => ./cfw-dependencies/sing\n")...)
 +	if err := os.WriteFile(filepath.Join(output, "go.mod"), goMod, 0o600); err != nil {
 +		return "", err
 +	}
@@ -173,7 +173,7 @@ index 0000000000000000000000000000000000000000..ee6216ecc718dd7e900e1ae64e8fe829
 +}
 +
 +func main() {
-+	moduleRoot := flag.String("module-source", "", "verified sing v0.9.6-0.20260922013354-87c33f17688f module directory")
++	moduleRoot := flag.String("module-source", "", "verified sing v0.9.7-0.20261023115459-5dc452e537bf module directory")
 +	output := flag.String("output", "", "new private build workspace")
 +	flag.Parse()
 +	if flag.NArg() != 0 {
@@ -194,7 +194,7 @@ index 0000000000000000000000000000000000000000..ee6216ecc718dd7e900e1ae64e8fe829
 +}
 diff --git a/cmd/cfm-build-workspace/main_test.go b/cmd/cfm-build-workspace/main_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..8c202f5846b73a2086a83e1098d53f284bb11f49
+index 0000000000000000000000000000000000000000..38285c7d2745a2842aa3bd22e4c7cbf9988291ba
 --- /dev/null
 +++ b/cmd/cfm-build-workspace/main_test.go
 @@ -0,0 +1,102 @@
@@ -217,18 +217,18 @@ index 0000000000000000000000000000000000000000..8c202f5846b73a2086a83e1098d53f28
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	module := filepath.Join(parent, "sing@v0.9.6-0.20260922013354-87c33f17688f")
++	module := filepath.Join(parent, "sing@v0.9.7-0.20261023115459-5dc452e537bf")
 +	source := filepath.Join(parent, "source")
 +	if err = os.Mkdir(source, 0o700); err != nil {
 +		t.Fatal(err)
 +	}
-+	goMod := []byte("module github.com/sagernet/sing-box\n\nrequire (\n\tgithub.com/sagernet/sing v0.9.6-0.20260922013354-87c33f17688f\n)\n")
++	goMod := []byte("module github.com/sagernet/sing-box\n\nrequire (\n\tgithub.com/sagernet/sing v0.9.7-0.20261023115459-5dc452e537bf\n)\n")
 +	if err = os.WriteFile(filepath.Join(source, "go.mod"), goMod, 0o600); err != nil {
 +		t.Fatal(err)
 +	}
 +	original := make(map[string][]byte)
 +	for _, patch := range patches {
-+		input, err := os.ReadFile(filepath.Join(cache, "github.com/sagernet/sing@v0.9.6-0.20260922013354-87c33f17688f", patch.path))
++		input, err := os.ReadFile(filepath.Join(cache, "github.com/sagernet/sing@v0.9.7-0.20261023115459-5dc452e537bf", patch.path))
 +		if err != nil {
 +			t.Fatal(err)
 +		}
@@ -250,7 +250,7 @@ index 0000000000000000000000000000000000000000..8c202f5846b73a2086a83e1098d53f28
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	if !strings.HasSuffix(string(data), "\nreplace github.com/sagernet/sing v0.9.6-0.20260922013354-87c33f17688f => ./cfw-dependencies/sing\n") {
++	if !strings.HasSuffix(string(data), "\nreplace github.com/sagernet/sing v0.9.7-0.20261023115459-5dc452e537bf => ./cfw-dependencies/sing\n") {
 +		t.Fatalf("missing exact relative module replacement: %s", data)
 +	}
 +	unchanged, err := os.ReadFile(filepath.Join(source, "go.mod"))
@@ -629,10 +629,10 @@ index 344c798881eacbac2394e05a4d85f8e4c85e7d42..a0ff3b84092cc9b54310d573458ac4ad
 +		resolve: version == socks.Version4,
 diff --git a/protocol/socks/outbound_lifecycle_test.go b/protocol/socks/outbound_lifecycle_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..9e3ffc7ebde119ee02ea0963ad03a87818290e9d
+index 0000000000000000000000000000000000000000..c13d442b4d291d4e03eb9ee96fe5963f604e3691
 --- /dev/null
 +++ b/protocol/socks/outbound_lifecycle_test.go
-@@ -0,0 +1,749 @@
+@@ -0,0 +1,756 @@
 +package socks
 +
 +import (
@@ -1096,7 +1096,15 @@ index 0000000000000000000000000000000000000000..9e3ffc7ebde119ee02ea0963ad03a878
 +	f.start()
 +	outbound := fixtureOutbound(t, f, 150*time.Millisecond, context.Background(), "", "")
 +	transport := D.NewUDPRaw(log.NewNOPFactory().NewLogger("dns"), dns.NewTransportAdapter("udp", "dns", nil), outbound, M.ParseSocksaddr("9.9.9.9:53"))
-+	defer transport.Close()
++	scope := adapter.NewScope(context.Background(), log.NewNOPFactory().NewLogger("scope"))
++	defer func() {
++		if err := scope.Close(); err != nil {
++			t.Error(err)
++		}
++	}()
++	if err := transport.Start(adapter.StartStateStart, scope); err != nil {
++		t.Fatal(err)
++	}
 +	query := new(mdns.Msg)
 +	query.SetQuestion("fixture.invalid.", mdns.TypeA)
 +	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
@@ -1189,9 +1197,8 @@ index 0000000000000000000000000000000000000000..9e3ffc7ebde119ee02ea0963ad03a878
 +
 +type relayFixtureManager struct{ outbound *relayFixtureOutbound }
 +
-+func (*relayFixtureManager) Start(adapter.StartStage) error  { return nil }
-+func (*relayFixtureManager) Close() error                    { return nil }
-+func (m *relayFixtureManager) Outbounds() []adapter.Outbound { return []adapter.Outbound{m.outbound} }
++func (*relayFixtureManager) Start(adapter.StartStage, *adapter.Scope) error { return nil }
++func (m *relayFixtureManager) Outbounds() []adapter.Outbound                { return []adapter.Outbound{m.outbound} }
 +func (m *relayFixtureManager) Outbound(tag string) (adapter.Outbound, bool) {
 +	return m.outbound, tag == "fixture"
 +}

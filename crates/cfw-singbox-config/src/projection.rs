@@ -132,7 +132,7 @@ fn names_only(value: &Value, loadable: &BTreeSet<String>) -> bool {
 
 /// Whether `rule` reads a response: sing-box binds a `respond` rule, and a rule
 /// with `match_response` in its logical tree, to the latest anonymous evaluate
-/// before it, and refuses one with none (v1.14.2 `dns/router.go`).
+/// before it, and refuses one with none (v1.14.4 `dns/router.go`).
 fn reads_response(rule: &Value) -> bool {
     fn matches_response(rule: &Value) -> bool {
         rule["match_response"] == Value::Bool(true)

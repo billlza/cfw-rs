@@ -170,7 +170,7 @@ patch represents both resolver roles as strict primary/fallback pairs and
 permits one bounded fallback after a rejected response or transport error. It
 never falls back after cancellation and never attempts either server more than
 once. Building that exact patch into libbox and proving both paths by physical
-packet capture remain release gates; unpatched sing-box 1.14.2 does not
+packet capture remain release gates; unpatched sing-box 1.14.4 does not
 provide these semantics.
 
 Engine generation lineage is a canonical, bounded document in the host app's

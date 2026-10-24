@@ -272,6 +272,33 @@ tokio `1.53.1` to the fixed `1.53.3`, which changes no other locked package.
 That release deprecates those constructors; the workspace calls none of them,
 so the move adds no warning.
 
+`SING_BOX_VERSION` follows the newest upstream stable release, and its tag
+commit carries a verified upstream signature. The six patches were ported onto
+upstream's scoped component lifecycle, in which a component registers its
+cleanups when it starts instead of exposing `Close`: the DNS router closes its
+named policies in that scope, the controller and the mixed inbound still report
+an occupied port as an endpoint conflict, and a profile probe whose start fails
+still reports a failed cleanup beside the start failure. A component whose own
+start fails cleans up what it began and is not closed again, and closing an
+instance closes only the components that started. Upstream's box close now
+succeeds again once it ran, so the daemon's service instance closes once and
+reports `os.ErrClosed` after that: an instance whose close failed stays with its
+owner, and a later stop or reload reports it instead of releasing it as closed.
+Upstream now routes a group to its selected member rather than through the
+group, so the fallback and load-balancing groups, which choose a member for
+each connection, implement `adapter.ConnectionSelectingGroup` and the router
+keeps dialing through them; `RealTag` keeps a load-balancing group's own tag,
+under which its health history is kept. The dependency-security patch moves
+every third-party Go module that the patched tree requires directly to its
+newest release, while sing-box's own modules stay at the versions upstream
+released together; the set of modules linked into Libbox is unchanged. Its
+`golang.org/x/tools` requirement serves only the gomobile bind closure that
+module preparation resolves read-only, so `go mod tidy` alone would drop it.
+The SOCKS-lifecycle build workspace binds the `github.com/sagernet/sing`
+version the upstream release requires; the two files it corrects are
+byte-identical to the previous version's, so their recorded checksums are
+unchanged.
+
 ## Artifact identity
 
 `scripts/hash_artifact.py` generates path-independent SHA-256 tree manifests.

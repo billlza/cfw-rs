@@ -423,50 +423,10 @@
       "rules": [
         {
           "action": "route",
-          "mode": "and",
-          "rules": [
-            {
-              "query_type": [
-                "A",
-                "AAAA"
-              ]
-            },
-            {
-              "invert": true,
-              "mode": "or",
-              "rules": [
-                {
-                  "rule_set": [
-                    "cfw-geosite-cn"
-                  ]
-                }
-              ],
-              "type": "logical"
-            }
-          ],
-          "server": "cfw-fake-ip",
-          "type": "logical"
-        },
-        {
-          "action": "route",
           "domain_suffix": "example.org",
           "server": "cfw-policy-dns-0-0"
         },
         {
-          "action": "route",
-          "rule_set": [
-            "cfw-geosite-cn"
-          ],
-          "server": "cfw-policy-dns-1-0"
-        },
-        {
-          "action": "route",
-          "rule_set": [
-            "cfw-geosite-geolocation-!cn"
-          ],
-          "server": "cfw-fallback-dns-0"
-        },
-        {
           "action": "evaluate",
           "invert": true,
           "query_type": [
@@ -553,94 +513,6 @@
             "HTTPS"
           ],
           "server": "cfw-fallback-dns-0"
-        },
-        {
-          "action": "evaluate",
-          "domain_regex": ".*",
-          "response_filter": {
-            "mode": "and",
-            "rules": [
-              {
-                "ip_accept_any": true
-              },
-              {
-                "rule_set": [
-                  "cfw-geoip-cn"
-                ]
-              }
-            ],
-            "type": "logical"
-          },
-          "response_ip_accept_all": true,
-          "server": "cfw-profile-dns-0"
-        },
-        {
-          "action": "respond",
-          "mode": "and",
-          "rules": [
-            {
-              "domain_regex": ".*"
-            },
-            {
-              "mode": "or",
-              "rules": [
-                {
-                  "match_response": true,
-                  "response_rcode": "NOERROR"
-                },
-                {
-                  "match_response": true,
-                  "response_rcode": "NXDOMAIN"
-                }
-              ],
-              "type": "logical"
-            }
-          ],
-          "type": "logical"
-        },
-        {
-          "action": "evaluate",
-          "domain_regex": ".*",
-          "response_filter": {
-            "mode": "and",
-            "rules": [
-              {
-                "ip_accept_any": true
-              },
-              {
-                "rule_set": [
-                  "cfw-geoip-cn"
-                ]
-              }
-            ],
-            "type": "logical"
-          },
-          "response_ip_accept_all": true,
-          "server": "cfw-profile-dns-1"
-        },
-        {
-          "action": "respond",
-          "mode": "and",
-          "rules": [
-            {
-              "domain_regex": ".*"
-            },
-            {
-              "mode": "or",
-              "rules": [
-                {
-                  "match_response": true,
-                  "response_rcode": "NOERROR"
-                },
-                {
-                  "match_response": true,
-                  "response_rcode": "NXDOMAIN"
-                }
-              ],
-              "type": "logical"
-            }
-          ],
-          "type": "logical"
         }
       ],
       "servers": [

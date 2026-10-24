@@ -18,7 +18,7 @@ resolver = "2"
 edition = "2024"
 license = "GPL-3.0-or-later"
 authors = ["bill"]
-rust-version = "1.98"
+rust-version = "1.99"
 
 # Release profile tuned for aarch64-apple-darwin: maximum optimization, whole-
 # program LTO and a single codegen unit for the best runtime performance, with

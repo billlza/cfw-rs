@@ -295,13 +295,11 @@ fn enforce_common_guards(fields: &mut ProxyFields) -> Result<(), String> {
             fields.context()
         ));
     }
-    for (key, reason) in [("smux", "stream multiplexing")] {
-        if fields.take(key).is_some() {
-            return Err(format!(
-                "{} uses {reason} ({key}), which is not supported",
-                fields.context()
-            ));
-        }
+    if fields.take("smux").is_some() {
+        return Err(format!(
+            "{} uses stream multiplexing (smux), which is not supported",
+            fields.context()
+        ));
     }
     Ok(())
 }

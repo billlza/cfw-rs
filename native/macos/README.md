@@ -178,7 +178,9 @@ replies with a retryable timeout `ProxyAgentCallBudget.configurationCheckReply`
 after a check arrived, and `profileProbeReplyAllowance` past a probe's own
 timeout, in awake time; the call keeps running and keeps the next check or
 probe out until it returns; one that returned frees its slot before its
-reply. A call still inside libbox `abandonAfterReply` after its reply, or a
+reply. libbox times a probe's nodes from when the probe's instance has
+started, so building, starting and closing that instance fall in the
+allowance. A call still inside libbox `abandonAfterReply` after its reply, or a
 check or probe whose instance libbox could not close, retires the agent: it
 refuses checks, probes and starts, lets a running session stop as usual, and
 ends once it owns no start and no bound owner context. A spent agent refuses

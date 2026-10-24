@@ -16,6 +16,7 @@ from scripts.tests.release_app_verifier_fixture import (
     SEALED_NOTARIZATION_LINE,
     verifier_closing_lines,
 )
+from scripts.tests.test_ui_dependency_sealing import GRAPH_MODEL_MODULES
 
 
 GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
@@ -129,7 +130,7 @@ class ReleaseAppVerifierShellTests(unittest.TestCase):
         # A copy of the verifier and every file it loads, so its fixed GA
         # paths point into an empty temporary checkout. Under the hosted
         # runner's unsigned-validation Xcode selection, loading also runs
-        # apple_validation_policy.py, which imports these publication modules.
+        # apple_validation_policy.py, which imports the graph model's modules.
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
             (root / "scripts/publication").mkdir(parents=True)
@@ -137,9 +138,8 @@ class ReleaseAppVerifierShellTests(unittest.TestCase):
                 "verify_release_app.sh", "dependency_pins.env", "release_identity.env",
                 "libbox_source_contract.sh", "release_toolchain_contract.sh",
                 "release_python_launcher.sh", "apple_validation_policy.sh",
-                "apple_validation_policy.py", "publication/__init__.py",
-                "publication/graph_model.py", "publication/common.py",
-                "publication/bounded_process.py",
+                "apple_validation_policy.py",
+                *(f"publication/{module}" for module in GRAPH_MODEL_MODULES),
             ):
                 shutil.copyfile(REPOSITORY / "scripts" / name, root / "scripts" / name)
             ga_root = root / f"target/candidates/{PRODUCT_VERSION}/ga/{GA_BUILD}"

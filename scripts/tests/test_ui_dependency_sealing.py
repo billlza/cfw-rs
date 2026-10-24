@@ -22,14 +22,15 @@ HASH = SCRIPTS / "hash_artifact.py"
 PINS = SCRIPTS / "dependency_pins.env"
 CONTRACT = SCRIPTS / "ui_dependency_contract.sh"
 TOOLCHAIN_CONTRACT = SCRIPTS / "release_toolchain_contract.sh"
-# The publication modules a temporary checkout carries for
-# apple_validation_policy.py, which imports graph_model under the hosted
-# runner's unsigned-validation Xcode selection.
+# The publication modules the temporary checkouts here and in
+# test_verify_release_app_contexts carry for apple_validation_policy.py, which
+# imports graph_model under the hosted runner's unsigned-validation Xcode
+# selection.
 GRAPH_MODEL_MODULES = ("__init__.py", "graph_model.py", "common.py", "bounded_process.py")
 
 
-def publication_import_closure(module: str) -> tuple[set[str], set[str]]:
-    """The publication modules `module` loads, and any other release tool they import.
+def publication_import_closure(*roots: str) -> tuple[set[str], set[str]]:
+    """The publication modules `roots` load, and any other release tool they import.
 
     A package-relative import names a publication module; an import of the
     scripts package or of a script beside it names another release tool.
@@ -38,7 +39,7 @@ def publication_import_closure(module: str) -> tuple[set[str], set[str]]:
     scripts = {path.stem for path in SCRIPTS.glob("*.py")} | {"scripts", "publication"}
     modules: set[str] = set()
     release_tools: set[str] = set()
-    pending = [module]
+    pending = list(roots)
     while pending:
         name = pending.pop()
         if name in modules:
@@ -480,8 +481,9 @@ class UIDependencyConsumerTests(unittest.TestCase):
 class GraphModelClosureTests(unittest.TestCase):
     """The checkout copies stay complete in every role, not only on the hosted runner."""
 
-    def test_the_temporary_checkout_carries_the_whole_graph_model_closure(self) -> None:
-        modules, release_tools = publication_import_closure("graph_model")
+    def test_the_temporary_checkouts_carry_the_whole_graph_model_closure(self) -> None:
+        # Importing graph_model runs the package's __init__ first.
+        modules, release_tools = publication_import_closure("__init__", "graph_model")
         self.assertEqual(release_tools, set())
         self.assertLessEqual({f"{name}.py" for name in modules}, set(GRAPH_MODEL_MODULES))
 

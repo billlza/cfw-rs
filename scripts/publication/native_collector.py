@@ -9,7 +9,8 @@ from urllib.parse import quote
 
 from .cargo_collector import CollectorResult
 from .common import PublicationError
-from .graph_model import ComponentSeed, RELEASE_VERSION, run, run_json, seed
+from .graph_model import ComponentSeed, run, run_json, seed
+from .release_contract import RELEASE_VERSION
 from .release_environment import swift_toolchain_identity
 from .release_toolchains import verified_release_toolchain_trees
 if __package__ and __package__.startswith("scripts."):

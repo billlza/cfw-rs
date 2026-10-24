@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -21,6 +22,45 @@ HASH = SCRIPTS / "hash_artifact.py"
 PINS = SCRIPTS / "dependency_pins.env"
 CONTRACT = SCRIPTS / "ui_dependency_contract.sh"
 TOOLCHAIN_CONTRACT = SCRIPTS / "release_toolchain_contract.sh"
+# The publication modules a temporary checkout carries for
+# apple_validation_policy.py, which imports graph_model under the hosted
+# runner's unsigned-validation Xcode selection.
+GRAPH_MODEL_MODULES = ("__init__.py", "graph_model.py", "common.py", "bounded_process.py")
+
+
+def publication_import_closure(module: str) -> tuple[set[str], set[str]]:
+    """The publication modules `module` loads, and any other release tool they import.
+
+    A package-relative import names a publication module; an import of the
+    scripts package or of a script beside it names another release tool.
+    """
+
+    scripts = {path.stem for path in SCRIPTS.glob("*.py")} | {"scripts", "publication"}
+    modules: set[str] = set()
+    release_tools: set[str] = set()
+    pending = [module]
+    while pending:
+        name = pending.pop()
+        if name in modules:
+            continue
+        modules.add(name)
+        tree = ast.parse((SCRIPTS / "publication" / f"{name}.py").read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.level == 1:
+                if node.module is None:
+                    release_tools.update(f"publication.{alias.name}" for alias in node.names)
+                else:
+                    pending.append(node.module.split(".")[0])
+            elif isinstance(node, ast.ImportFrom) and node.level > 1:
+                release_tools.add("." * node.level + (node.module or ""))
+            elif isinstance(node, ast.ImportFrom) and node.module is not None:
+                if node.module.split(".")[0] in scripts:
+                    release_tools.add(node.module)
+            elif isinstance(node, ast.Import):
+                release_tools.update(
+                    alias.name for alias in node.names if alias.name.split(".")[0] in scripts
+                )
+    return modules, release_tools
 
 
 def _pins() -> dict[str, str]:
@@ -91,7 +131,7 @@ class PinnedNpmBoundaryFixture:
         ):
             shutil.copy2(SCRIPTS / relative, self.scripts / relative)
         (self.scripts / "publication").mkdir()
-        for relative in ("__init__.py", "graph_model.py", "common.py", "bounded_process.py"):
+        for relative in GRAPH_MODEL_MODULES:
             shutil.copy2(SCRIPTS / "publication" / relative, self.scripts / "publication" / relative)
         shutil.copy2(
             REPOSITORY / "apps/cfw-tauri-shell/package-lock.json",
@@ -435,6 +475,20 @@ class UIDependencyConsumerTests(unittest.TestCase):
             "--algorithm sha256-tree-v2",
         ):
             self.assertIn(required, text)
+
+
+class GraphModelClosureTests(unittest.TestCase):
+    """The checkout copies stay complete in every role, not only on the hosted runner."""
+
+    def test_the_temporary_checkout_carries_the_whole_graph_model_closure(self) -> None:
+        modules, release_tools = publication_import_closure("graph_model")
+        self.assertEqual(release_tools, set())
+        self.assertLessEqual({f"{name}.py" for name in modules}, set(GRAPH_MODEL_MODULES))
+
+    def test_the_closure_reports_package_and_release_tool_imports(self) -> None:
+        modules, release_tools = publication_import_closure("preparer")
+        self.assertLessEqual({"preparer", "graph_model", "release_contract", "common"}, modules)
+        self.assertIn("scripts.release_build_identity", release_tools)
 
 
 if __name__ == "__main__":

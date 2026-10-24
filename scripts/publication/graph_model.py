@@ -9,7 +9,6 @@ from typing import Any
 
 from .common import MAX_JSON_BYTES, PublicationError, canonical_json
 from .bounded_process import BoundedProcessError, run_bounded_process
-from .release_contract import RELEASE_VERSION
 
 
 MAX_COMMAND_BYTES = 256 * 1024 * 1024

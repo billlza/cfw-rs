@@ -17,12 +17,13 @@ from .common import (
     write_new,
 )
 from .graph_collectors import collect_all
-from .graph_model import CollectedGraphs, ComponentSeed, RELEASE_VERSION, load_pins, run
+from .graph_model import CollectedGraphs, ComponentSeed, load_pins, run
 from .license_resolution import resolve_license
 from .release_app_verifier import NotarizationCheck, verify_release_app
 from .release_environment import release_tool_environment
 from .release_contract import (
     PRODUCT_NAME,
+    RELEASE_VERSION,
     blocker_report,
     ensure_private_stage_inputs,
     evidence_root,

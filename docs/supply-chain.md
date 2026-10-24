@@ -308,7 +308,14 @@ builder convention.
 The signed/unsigned application manifests bind the canonical toolchain identity
 and every constituent release tree: Go, Go release tools, Go module cache,
 Node.js, the sealed UI dependencies, XcodeGen, and Tauri. The libbox manifest
-independently binds its Go inputs. These local manifests detect drift after a
+independently binds its Go inputs and the Xcode that compiled and linked its cgo
+code (`xcodeVersion`, `xcodeBuild`): the pinned Xcode in production, the observed
+one in the unsigned-validation role, exactly as the XcodeGen and Tauri CLI trees
+record theirs. After an Xcode change every existing XCFramework is therefore
+refused and must be rebuilt: move `target/native-dependencies/Libbox.xcframework`
+and its `.manifest.json` aside (never delete them; `build-libbox` refuses to
+overwrite an existing artifact), then run the `build-libbox` gate again.
+These local manifests detect drift after a
 clean bootstrap; they do not turn a same-user-compromised machine into a trusted
 builder, so release generation still requires a clean ephemeral runner whose
 downloads are observed against the repository pins.

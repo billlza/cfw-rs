@@ -61,6 +61,8 @@ class LibboxArtifactContractTests(unittest.TestCase):
             "combinedDiffSha256": self.pins["SING_BOX_COMBINED_DIFF_SHA256"],
             "patchedGoModSha256": self.pins["SING_BOX_PATCHED_GO_MOD_SHA256"],
             "patchedGoSumSha256": self.pins["SING_BOX_PATCHED_GO_SUM_SHA256"],
+            "xcodeVersion": self.pins["XCODE_VERSION"],
+            "xcodeBuild": self.pins["XCODE_BUILD_VERSION"],
         }
         self.write_manifest()
 
@@ -91,11 +93,18 @@ class LibboxArtifactContractTests(unittest.TestCase):
         toolchain_sha: str = TOOLCHAIN_SHA,
         tools_sha: str = TOOLS_SHA,
         module_cache_sha: str = MODULE_CACHE_SHA,
+        effective_xcode: str = "",
     ) -> subprocess.CompletedProcess[str]:
+        # `effective_xcode` stands for the shell settings
+        # cfw_apply_validation_apple_toolchain leaves in the unsigned-validation
+        # role: production keeps the pinned identity.
         script = r"""
 set -euo pipefail
 source "$1/scripts/dependency_pins.env"
 source "$1/scripts/libbox_source_contract.sh"
+"""
+        script += effective_xcode
+        script += r"""
 libbox_verify_xcframework_artifact "$1" "$2" "$3" "$4" "$5" "$6"
 """
         return subprocess.run(
@@ -176,6 +185,26 @@ libbox_verify_xcframework_artifact "$1" "$2" "$3" "$4" "$5" "$6"
             lambda document: document.__setitem__("algorithm", "sha256-tree-v2")
         )
         self.assertNotEqual(self.verify().returncode, 0)
+
+    def test_the_effective_xcode_identity_is_bound(self) -> None:
+        validation = (
+            'XCODE_VERSION="26.9"\nXCODE_BUILD_VERSION="17Z999"\n'
+        )
+        # A manifest of the pinned Xcode is refused under another effective
+        # identity, as one built by an older Xcode after an Xcode re-pin.
+        refused = self.verify(effective_xcode=validation)
+        self.assertNotEqual(refused.returncode, 0)
+        self.metadata["xcodeVersion"] = "26.9"
+        self.metadata["xcodeBuild"] = "17Z999"
+        self.write_manifest()
+        accepted = self.verify(effective_xcode=validation)
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        self.assertNotEqual(self.verify().returncode, 0)
+        for incomplete in ('XCODE_VERSION=""\n', 'XCODE_BUILD_VERSION=""\n'):
+            with self.subTest(incomplete=incomplete):
+                completed = self.verify(effective_xcode=validation + incomplete)
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn("Xcode identity", completed.stderr)
 
     def test_build_script_forces_zero_archive_dates_and_binds_the_policy(self) -> None:
         build_source = (SCRIPTS / "build_libbox.sh").read_text(encoding="utf-8")

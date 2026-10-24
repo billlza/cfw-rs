@@ -14,9 +14,6 @@
     "XCODEGEN_DEPENDENCY_PATCH_SHA256": "sha256",
     "XCODEGEN_AEXML_COMMIT": "git-commit",
     "XCODEGEN_AEXML_UPSTREAM_MANIFEST_SHA256": "sha256",
-    "XCODEGEN_AEXML_PATCH_PATH": "repository-path",
-    "XCODEGEN_AEXML_PATCH_SHA256": "sha256",
-    "XCODEGEN_AEXML_PATCHED_MANIFEST_SHA256": "sha256",
     "XCODEGEN_PATCH_PATH": "repository-path",
     "XCODEGEN_PATCH_SHA256": "sha256",
     "XCODEGEN_PATCHED_SETTINGS_BUILDER_SHA256": "sha256",
@@ -183,10 +180,12 @@
       "XcodeGenResourceProbe.xcodeproj/project.pbxproj",
       "$XCODEGEN_DEPENDENCY_PATCH_PATH",
       "$XCODEGEN_DEPENDENCY_PATCH_SHA256",
-      "cfw_patch_xcodegen_aexml \"$repo_root\" \"$build_root/checkouts\"",
+      "cfw_reject_swiftpm_warnings \"$resolve_log\" \"dependency resolution\"",
+      "cfw_verify_xcodegen_aexml \"$build_root/checkouts\"",
+      "cfw_reject_swiftpm_warnings \"$build_log\" build",
       "source \"$repo_root/scripts/xcodegen_dependency_contract.sh\"",
       "upstreamPackageResolvedSha256=$XCODEGEN_UPSTREAM_PACKAGE_RESOLVED_SHA256",
-      "aexmlPatchSha256=$XCODEGEN_AEXML_PATCH_SHA256"
+      "aexmlUpstreamManifestSha256=$XCODEGEN_AEXML_UPSTREAM_MANIFEST_SHA256"
     ]
   },
   "cargoDeny": {

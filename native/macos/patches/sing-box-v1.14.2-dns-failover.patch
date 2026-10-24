@@ -876,10 +876,10 @@ index 0000000000000000000000000000000000000000..4d537dddafcf10761daf507af2b46ee9
 +}
 diff --git a/dns/policy_test.go b/dns/policy_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..48048ac590035858909b9ae64f81a9e19fcd276f
+index 0000000000000000000000000000000000000000..9b97b0c40f357cc20dafabd490952ab383766a83
 --- /dev/null
 +++ b/dns/policy_test.go
-@@ -0,0 +1,192 @@
+@@ -0,0 +1,276 @@
 +package dns_test
 +
 +import (
@@ -889,6 +889,7 @@ index 0000000000000000000000000000000000000000..48048ac590035858909b9ae64f81a9e1
 +	"io"
 +	"net"
 +	"net/netip"
++	"strings"
 +	"sync"
 +	"testing"
 +	"time"
@@ -948,6 +949,89 @@ index 0000000000000000000000000000000000000000..48048ac590035858909b9ae64f81a9e1
 +	}
 +	if _, seen := mainQueries.Load("must-not-leak.example."); seen {
 +		t.Fatal("failed named policy leaked to the ordinary resolver")
++	}
++}
++
++func inlinePolicyRuleSet(tag string, rules ...any) map[string]any {
++	return map[string]any{"type": "inline", "tag": tag, "rules": rules}
++}
++
++// Each inline rule set checks its metadata while the route router registers
++// it, before the rule sets declared after it exist. A policy naming one of
++// those must still load and route by it, and later updates of it are checked.
++func TestNamedDNSPoliciesNameRuleSetsDeclaredAfterAnInlineOne(t *testing.T) {
++	ordinaryPort, _ := startPolicyTCPWithTTL(t, false, "203.0.113.10", 60)
++	policyPort, policyQueries := startPolicyTCPWithTTL(t, false, "203.0.113.30", 60)
++	router, _ := startPolicyBox(t, map[string]any{
++		"log": map[string]any{"disabled": true}, "outbounds": []any{map[string]any{"type": "direct", "tag": "direct"}},
++		"route": map[string]any{"rule_set": []any{
++			inlinePolicyRuleSet("first", map[string]any{"domain_suffix": []any{"first.example"}}),
++			inlinePolicyRuleSet("later", map[string]any{"domain_suffix": []any{"later.example"}}),
++			inlinePolicyRuleSet("addresses", map[string]any{"ip_cidr": []any{"203.0.113.0/24"}}),
++		}},
++		"dns": map[string]any{"servers": []any{policyTCP("ordinary", ordinaryPort), policyTCP("policy", policyPort)}, "final": "ordinary", "policies": []any{
++			map[string]any{"tag": "sites", "final": "ordinary", "rules": []any{map[string]any{"rule_set": []any{"later"}, "action": "route", "server": "policy"}}},
++			map[string]any{"tag": "filtered", "final": "ordinary", "rules": []any{
++				map[string]any{"action": "evaluate", "server": "policy", "response_ip_accept_all": true, "response_filter": map[string]any{"rule_set": []any{"addresses"}}},
++				map[string]any{"match_response": true, "action": "respond"},
++			}},
++		}},
++	})
++	validator := router.(adapter.DNSRuleSetUpdateValidator)
++	if err := validator.ValidateRuleSetMetadataUpdate("addresses", adapter.RuleSetMetadata{ContainsIPCIDRRule: true}); err != nil {
++		t.Fatal(err)
++	}
++	if err := validator.ValidateRuleSetMetadataUpdate("addresses", adapter.RuleSetMetadata{ContainsIPCIDRRule: true, ContainsNonIPCIDRRule: true}); err == nil || !strings.Contains(err.Error(), "DNS policy filtered") {
++		t.Fatalf("a filter's rule set took a non-IP update: %v", err)
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
++	defer cancel()
++	for name, address := range map[string]string{"site.later.example": "203.0.113.30", "site.first.example": "203.0.113.10"} {
++		addresses, err := router.Lookup(ctx, name, adapter.DNSQueryOptions{Policy: "sites", Strategy: C.DomainStrategyIPv4Only})
++		if err != nil || len(addresses) != 1 || addresses[0] != netip.MustParseAddr(address) {
++			t.Fatalf("%s: %v %v", name, addresses, err)
++		}
++	}
++	if _, seen := policyQueries.Load("site.first.example."); seen {
++		t.Fatal("the policy routed a name outside its rule set")
++	}
++}
++
++// Initialize checks every policy against all the rule sets, so the ones an
++// inline rule set's own check cannot see yet are still refused.
++func TestNamedDNSPoliciesStillRefuseUndeclaredAndUnfitRuleSets(t *testing.T) {
++	port, _ := startPolicyTCP(t, false, "203.0.113.10")
++	for _, item := range []struct {
++		name, refusal string
++		rules         []any
++	}{
++		{"undeclared", "rule-set not found: undeclared", []any{
++			map[string]any{"rule_set": []any{"undeclared"}, "action": "route", "server": "ordinary"},
++		}},
++		{"unfit filter", "response_filter requires a pure-IP rule_set: mixed", []any{
++			map[string]any{"action": "evaluate", "server": "ordinary", "response_ip_accept_all": true, "response_filter": map[string]any{"rule_set": []any{"mixed"}}},
++			map[string]any{"match_response": true, "action": "respond"},
++		}},
++	} {
++		t.Run(item.name, func(t *testing.T) {
++			_, instance, err := newPolicyBox(t, map[string]any{
++				"log": map[string]any{"disabled": true}, "outbounds": []any{map[string]any{"type": "direct", "tag": "direct"}},
++				"route": map[string]any{"rule_set": []any{
++					inlinePolicyRuleSet("first", map[string]any{"domain_suffix": []any{"first.example"}}),
++					inlinePolicyRuleSet("mixed", map[string]any{"domain_suffix": []any{"mixed.example"}}, map[string]any{"ip_cidr": []any{"203.0.113.0/24"}}),
++				}},
++				"dns": map[string]any{"servers": []any{policyTCP("ordinary", port)}, "final": "ordinary", "policies": []any{
++					map[string]any{"tag": "checked", "final": "ordinary", "rules": item.rules},
++				}},
++			})
++			if err == nil {
++				instance.Close()
++				t.Fatal("the policy was accepted")
++			}
++			if !strings.Contains(err.Error(), item.refusal) {
++				t.Fatal(err)
++			}
++		})
 +	}
 +}
 +
@@ -1309,7 +1393,7 @@ index 0000000000000000000000000000000000000000..8fe0381e2f3e87ba24ce98e7c975f0ad
 +}
 diff --git a/dns/response_filter_validation_test.go b/dns/response_filter_validation_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..c27a804081d0fc3c915c3ba4295090a31b7b9140
+index 0000000000000000000000000000000000000000..26316f75bf86fe5e7010b04b3ac91f2aa30c3e3c
 --- /dev/null
 +++ b/dns/response_filter_validation_test.go
 @@ -0,0 +1,23 @@
@@ -1328,7 +1412,7 @@ index 0000000000000000000000000000000000000000..c27a804081d0fc3c915c3ba4295090a3
 +		Action:          C.RuleActionTypeEvaluate,
 +		EvaluateOptions: option.DNSEvaluateActionOptions{Server: "primary", ResponseIPAcceptAll: true, ResponseFilter: &option.DNSResponseFilter{DNSRule: option.DNSRule{Type: C.RuleTypeDefault, DefaultOptions: option.DefaultDNSRule{RawDefaultDNSRule: option.RawDefaultDNSRule{RuleSet: []string{"country"}}}}}},
 +	}}}
-+	router := &Router{ctx: context.Background(), policyOptions: []option.DNSPolicy{{Tag: "private", Final: "primary", Rules: []option.DNSRule{source}}}}
++	router := &Router{ctx: context.Background(), initialized: true, policyOptions: []option.DNSPolicy{{Tag: "private", Final: "primary", Rules: []option.DNSRule{source}}}}
 +	if err := router.ValidateRuleSetMetadataUpdate("country", adapter.RuleSetMetadata{ContainsIPCIDRRule: true}); err != nil {
 +		t.Fatal(err)
 +	}
@@ -1722,21 +1806,25 @@ index 0000000000000000000000000000000000000000..3e37530b4884e48ec52aa1e79e88493b
 +	}
 +}
 diff --git a/dns/router.go b/dns/router.go
-index e7c0e96407919c9d354f944e500cbaae14eea752..b1c70ce0c4dec4427003dc986c7515100c683161 100644
+index e7c0e96407919c9d354f944e500cbaae14eea752..a73bab2eb1b90a0b71e19caaa30a4690eb332374 100644
 --- a/dns/router.go
 +++ b/dns/router.go
-@@ -38,0 +39,4 @@ type Router struct {
+@@ -38,0 +39,5 @@ type Router struct {
 +	systemHostsTag        string
 +	systemHosts           adapter.DNSTransport
 +	policyOptions         []option.DNSPolicy
 +	policies              map[string]dnsPolicy
-@@ -57,0 +62,2 @@ func NewRouter(ctx context.Context, logFactory log.Factory, options option.DNSOp
++	initialized           bool
+@@ -57,0 +63,2 @@ func NewRouter(ctx context.Context, logFactory log.Factory, options option.DNSOp
 +		systemHostsTag:        options.SystemHosts,
 +		policyOptions:         options.Policies,
-@@ -129 +135 @@ func (r *Router) Initialize(rules []option.DNSRule) error {
--	return nil
-+	return routerInitializePolicies(r, false)
-@@ -135,0 +142,10 @@ func (r *Router) Start(stage adapter.StartStage) error {
+@@ -128,0 +136,5 @@ func (r *Router) Initialize(rules []option.DNSRule) error {
++	err = routerInitializePolicies(r, false)
++	if err != nil {
++		return err
++	}
++	r.initialized = true
+@@ -135,0 +148,10 @@ func (r *Router) Start(stage adapter.StartStage) error {
 +		if err := routerInitializePolicies(r, true); err != nil {
 +			return err
 +		}
@@ -1747,35 +1835,35 @@ index e7c0e96407919c9d354f944e500cbaae14eea752..b1c70ce0c4dec4427003dc986c751510
 +			}
 +			r.systemHosts = transport
 +		}
-@@ -177 +193 @@ func (r *Router) Close() error {
+@@ -177 +199 @@ func (r *Router) Close() error {
 -	return nil
 +	return r.closePolicies()
-@@ -181 +197,5 @@ func (r *Router) buildRules(startRules bool) ([]adapter.DNSRule, bool, dnsRuleMo
+@@ -181 +203,5 @@ func (r *Router) buildRules(startRules bool) ([]adapter.DNSRule, bool, dnsRuleMo
 -	for i, ruleOptions := range r.rawRules {
 +	return r.buildRuleList(r.rawRules, startRules, false)
 +}
 +
 +func (r *Router) buildRuleList(rawRules []option.DNSRule, startRules bool, requireNative bool) ([]adapter.DNSRule, bool, dnsRuleModeFlags, error) {
 +	for i, ruleOptions := range rawRules {
-@@ -188 +208 @@ func (r *Router) buildRules(startRules bool) ([]adapter.DNSRule, bool, dnsRuleMo
+@@ -188 +214 @@ func (r *Router) buildRules(startRules bool) ([]adapter.DNSRule, bool, dnsRuleMo
 -	legacyDNSMode, modeFlags, err := resolveLegacyDNSMode(router, r.rawRules, nil)
 +	legacyDNSMode, modeFlags, err := resolveLegacyDNSMode(router, rawRules, nil)
-@@ -191,0 +212,3 @@ func (r *Router) buildRules(startRules bool) ([]adapter.DNSRule, bool, dnsRuleMo
+@@ -191,0 +218,3 @@ func (r *Router) buildRules(startRules bool) ([]adapter.DNSRule, bool, dnsRuleMo
 +	if requireNative && legacyDNSMode {
 +		return nil, false, dnsRuleModeFlags{}, E.New("named DNS policies require native evaluate/respond rules")
 +	}
-@@ -194 +217 @@ func (r *Router) buildRules(startRules bool) ([]adapter.DNSRule, bool, dnsRuleMo
+@@ -194 +223 @@ func (r *Router) buildRules(startRules bool) ([]adapter.DNSRule, bool, dnsRuleMo
 -		validationWarnings, err = validateLegacyDNSModeDisabledRules(router, r.rawRules, nil)
 +		validationWarnings, err = validateLegacyDNSModeDisabledRules(router, rawRules, nil)
-@@ -202 +225 @@ func (r *Router) buildRules(startRules bool) ([]adapter.DNSRule, bool, dnsRuleMo
+@@ -202 +231 @@ func (r *Router) buildRules(startRules bool) ([]adapter.DNSRule, bool, dnsRuleMo
 -	err = validateEvaluateFakeIPRules(r.rawRules, r.transport)
 +	err = validateEvaluateFakeIPRules(rawRules, r.transport)
-@@ -206,2 +229,2 @@ func (r *Router) buildRules(startRules bool) ([]adapter.DNSRule, bool, dnsRuleMo
+@@ -206,2 +235,2 @@ func (r *Router) buildRules(startRules bool) ([]adapter.DNSRule, bool, dnsRuleMo
 -	newRules := make([]adapter.DNSRule, 0, len(r.rawRules))
 -	for i, ruleOptions := range r.rawRules {
 +	newRules := make([]adapter.DNSRule, 0, len(rawRules))
 +	for i, ruleOptions := range rawRules {
-@@ -216,0 +240,9 @@ func (r *Router) buildRules(startRules bool) ([]adapter.DNSRule, bool, dnsRuleMo
+@@ -216,0 +246,9 @@ func (r *Router) buildRules(startRules bool) ([]adapter.DNSRule, bool, dnsRuleMo
 +		for i, source := range rawRules {
 +			server := dnsRuleActionServer(source)
 +			if server != "" {
@@ -1785,19 +1873,25 @@ index e7c0e96407919c9d354f944e500cbaae14eea752..b1c70ce0c4dec4427003dc986c751510
 +				}
 +			}
 +		}
-@@ -234,0 +267,6 @@ func (r *Router) ValidateRuleSetMetadataUpdate(tag string, metadata adapter.Rule
-+	policyRouter := service.FromContext[adapter.Router](r.ctx)
-+	for _, policy := range r.policyOptions {
-+		if _, err := validateLegacyDNSModeDisabledRules(policyRouter, policy.Rules, map[string]adapter.RuleSetMetadata{tag: metadata}); err != nil {
-+			return E.Cause(err, "DNS policy ", policy.Tag)
+@@ -234,0 +273,12 @@ func (r *Router) ValidateRuleSetMetadataUpdate(tag string, metadata adapter.Rule
++	// Before Initialize, the route router is still registering rule sets, and
++	// each inline one is checked while it is registered, when the rule sets
++	// declared after it do not exist yet. Initialize checks every policy
++	// against all of them, so policies are checked here once it has run.
++	if r.initialized {
++		policyRouter := service.FromContext[adapter.Router](r.ctx)
++		for _, policy := range r.policyOptions {
++			if _, err := validateLegacyDNSModeDisabledRules(policyRouter, policy.Rules, map[string]adapter.RuleSetMetadata{tag: metadata}); err != nil {
++				return E.Cause(err, "DNS policy ", policy.Tag)
++			}
 +		}
 +	}
-@@ -438,0 +477 @@ type dnsRuleWalkState struct {
+@@ -438,0 +489 @@ type dnsRuleWalkState struct {
 +	attemptErrors    []error
-@@ -508 +547 @@ type dnsWalkSuspension struct {
+@@ -508 +559 @@ type dnsWalkSuspension struct {
 -func (r *Router) launchDNSEvaluate(ctx context.Context, state *dnsRuleWalkState, tag string, transport adapter.DNSTransport, message *mDNS.Msg, options adapter.DNSQueryOptions) *dnsEvaluatedFuture {
 +func (r *Router) launchDNSEvaluate(ctx context.Context, state *dnsRuleWalkState, tag string, transport adapter.DNSTransport, message *mDNS.Msg, options adapter.DNSQueryOptions, responseChecker func(*mDNS.Msg) bool) *dnsEvaluatedFuture {
-@@ -521 +560,8 @@ func (r *Router) launchDNSEvaluate(ctx context.Context, state *dnsRuleWalkState,
+@@ -521 +572,8 @@ func (r *Router) launchDNSEvaluate(ctx context.Context, state *dnsRuleWalkState,
 -	r.client.ExchangeAsync(exchangeCtx, transport, message, r.finalizeExchangeOptions(options), nil, func(response *mDNS.Msg, err error) {
 +	if responseChecker != nil {
 +		// A rejected-response verdict must not outlive a changing policy/rule-set.
@@ -1807,55 +1901,55 @@ index e7c0e96407919c9d354f944e500cbaae14eea752..b1c70ce0c4dec4427003dc986c751510
 +		if err == nil && (response == nil || response.Rcode == mDNS.RcodeSuccess && len(response.Answer) == 0 && !isNODATAResponse(response)) {
 +			err = E.New("DNS evaluate returned an empty response without negative authority")
 +		}
-@@ -539,0 +586 @@ func (r *Router) settleDNSFutures(ctx context.Context, message *mDNS.Msg, state
+@@ -539,0 +598 @@ func (r *Router) settleDNSFutures(ctx context.Context, message *mDNS.Msg, state
 +			state.attemptErrors = append(state.attemptErrors, dnsAttemptError(future.transport, future.err))
-@@ -540,0 +588,4 @@ func (r *Router) settleDNSFutures(ctx context.Context, message *mDNS.Msg, state
+@@ -540,0 +600,4 @@ func (r *Router) settleDNSFutures(ctx context.Context, message *mDNS.Msg, state
 +		} else if !future.terminal {
 +			if err := exchangePoolError(future.response, nil); err != nil {
 +				state.attemptErrors = append(state.attemptErrors, dnsAttemptError(future.transport, err))
 +			}
-@@ -585,0 +637,3 @@ func (r *Router) walkDNSRules(ctx context.Context, rules []adapter.DNSRule, mess
+@@ -585,0 +649,3 @@ func (r *Router) walkDNSRules(ctx context.Context, rules []adapter.DNSRule, mess
 +		if err := ctx.Err(); err != nil {
 +			return exchangeWithRulesResult{err: E.Errors(append(state.attemptErrors, err)...)}, nil
 +		}
-@@ -662,0 +717,3 @@ func (r *Router) walkDNSRules(ctx context.Context, rules []adapter.DNSRule, mess
+@@ -662,0 +729,3 @@ func (r *Router) walkDNSRules(ctx context.Context, rules []adapter.DNSRule, mess
 +			if len(state.futures) >= maxDNSAttempts {
 +				return exchangeWithRulesResult{err: E.Errors(append(state.attemptErrors, E.New("DNS fallback attempt limit exceeded"))...)}, nil
 +			}
-@@ -676 +733 @@ func (r *Router) walkDNSRules(ctx context.Context, rules []adapter.DNSRule, mess
+@@ -676 +745 @@ func (r *Router) walkDNSRules(ctx context.Context, rules []adapter.DNSRule, mess
 -			future := r.launchDNSEvaluate(ctx, state, action.Tag, transport, message, queryOptions)
 +			future := r.launchDNSEvaluate(ctx, state, action.Tag, transport, message, queryOptions, evaluateResponseCheck(action, metadata))
-@@ -716,0 +774,3 @@ func (r *Router) walkDNSRules(ctx context.Context, rules []adapter.DNSRule, mess
+@@ -716,0 +786,3 @@ func (r *Router) walkDNSRules(ctx context.Context, rules []adapter.DNSRule, mess
 +			if len(state.futures) >= maxDNSAttempts && state.terminalFuture == nil {
 +				return exchangeWithRulesResult{err: E.Errors(append(state.attemptErrors, E.New("DNS fallback attempt limit exceeded"))...)}, nil
 +			}
-@@ -728 +788 @@ func (r *Router) walkDNSRules(ctx context.Context, rules []adapter.DNSRule, mess
+@@ -728 +800 @@ func (r *Router) walkDNSRules(ctx context.Context, rules []adapter.DNSRule, mess
 -					future := r.launchDNSEvaluate(ctx, state, "", transport, message, queryOptions)
 +					future := r.launchDNSEvaluate(ctx, state, "", transport, message, queryOptions, nil)
-@@ -766,0 +827,3 @@ func (r *Router) walkDNSRules(ctx context.Context, rules []adapter.DNSRule, mess
+@@ -766,0 +839,3 @@ func (r *Router) walkDNSRules(ctx context.Context, rules []adapter.DNSRule, mess
 +	if len(state.futures) >= maxDNSAttempts {
 +		return exchangeWithRulesResult{err: E.Errors(append(state.attemptErrors, E.New("DNS fallback attempt limit exceeded"))...)}, nil
 +	}
-@@ -833,0 +897 @@ func (r *Router) sweepArmedDNSRules(ctx context.Context, message *mDNS.Msg, stat
+@@ -833,0 +909 @@ func (r *Router) sweepArmedDNSRules(ctx context.Context, message *mDNS.Msg, stat
 +				metadata.DNSResponseAddressOverride = nil
-@@ -920,0 +985,3 @@ func (r *Router) finishPendingExchange(ctx context.Context, message *mDNS.Msg, s
+@@ -920,0 +997,3 @@ func (r *Router) finishPendingExchange(ctx context.Context, message *mDNS.Msg, s
 +	if err != nil {
 +		err = E.Errors(append(state.attemptErrors, dnsAttemptError(pending.transport, err))...)
 +	}
-@@ -939,0 +1007,3 @@ func (r *Router) exchangeWithRulesAsync(ctx context.Context, rules []adapter.DNS
+@@ -939,0 +1019,3 @@ func (r *Router) exchangeWithRulesAsync(ctx context.Context, rules []adapter.DNS
 +			if err != nil {
 +				err = E.Errors(append(state.attemptErrors, dnsAttemptError(pending.transport, err))...)
 +			}
-@@ -1058 +1128 @@ type dnsExchangeContext struct {
+@@ -1058 +1140 @@ type dnsExchangeContext struct {
 -func (r *Router) prepareExchange(ctx context.Context, message *mDNS.Msg) (*dnsExchangeContext, *mDNS.Msg, error) {
 +func (r *Router) prepareExchange(ctx context.Context, message *mDNS.Msg, options adapter.DNSQueryOptions) (*dnsExchangeContext, *mDNS.Msg, error) {
-@@ -1094,2 +1164 @@ func (r *Router) prepareExchange(ctx context.Context, message *mDNS.Msg) (*dnsEx
+@@ -1094,2 +1176 @@ func (r *Router) prepareExchange(ctx context.Context, message *mDNS.Msg) (*dnsEx
 -	rules := r.rules
 -	legacyDNSMode := r.legacyDNSMode
 +	rules, legacyDNSMode := r.policyRules(options.Policy)
-@@ -1101,0 +1171 @@ func (r *Router) prepareExchange(ctx context.Context, message *mDNS.Msg) (*dnsEx
+@@ -1101,0 +1183 @@ func (r *Router) prepareExchange(ctx context.Context, message *mDNS.Msg) (*dnsEx
 +	metadata.DNSResponseAddressOverride = nil
-@@ -1192 +1262,7 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
+@@ -1192 +1274,7 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
 -	exchangeCtx, earlyResponse, err := r.prepareExchange(ctx, message)
 +	if err := r.validatePolicy(options); err != nil {
 +		return nil, err
@@ -1864,7 +1958,7 @@ index e7c0e96407919c9d354f944e500cbaae14eea752..b1c70ce0c4dec4427003dc986c751510
 +		return nil, err
 +	}
 +	exchangeCtx, earlyResponse, err := r.prepareExchange(ctx, message, options)
-@@ -1200,0 +1277,12 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
+@@ -1200,0 +1289,12 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
 +	if r.systemHosts != nil && options.Transport != r.systemHosts && (message.Question[0].Qtype == mDNS.TypeA || message.Question[0].Qtype == mDNS.TypeAAAA) {
 +		hostOptions := r.finalizeExchangeOptions(options)
 +		hostOptions.DisableCache = true
@@ -1877,11 +1971,11 @@ index e7c0e96407919c9d354f944e500cbaae14eea752..b1c70ce0c4dec4427003dc986c751510
 +			return response, nil
 +		}
 +	}
-@@ -1202,2 +1290 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
+@@ -1202,2 +1302 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
 -		transport = options.Transport
 -		response, err = r.client.Exchange(ctx, transport, message, r.finalizeExchangeOptions(options), nil)
 +		response, transport, err = r.exchangeExplicitPool(ctx, message, options)
-@@ -1218 +1305,9 @@ func (r *Router) ExchangeAsync(ctx context.Context, message *mDNS.Msg, options a
+@@ -1218 +1317,9 @@ func (r *Router) ExchangeAsync(ctx context.Context, message *mDNS.Msg, options a
 -	exchangeCtx, earlyResponse, err := r.prepareExchange(ctx, message)
 +	if err := r.validatePolicy(options); err != nil {
 +		callback(nil, err)
@@ -1892,7 +1986,7 @@ index e7c0e96407919c9d354f944e500cbaae14eea752..b1c70ce0c4dec4427003dc986c751510
 +		return
 +	}
 +	exchangeCtx, earlyResponse, err := r.prepareExchange(ctx, message, options)
-@@ -1224,8 +1319,25 @@ func (r *Router) ExchangeAsync(ctx context.Context, message *mDNS.Msg, options a
+@@ -1224,8 +1331,25 @@ func (r *Router) ExchangeAsync(ctx context.Context, message *mDNS.Msg, options a
 -	if options.Transport != nil {
 -		transport := options.Transport
 -		r.client.ExchangeAsync(ctx, transport, message, r.finalizeExchangeOptions(options), nil, func(response *mDNS.Msg, exchangeErr error) {
@@ -1926,26 +2020,26 @@ index e7c0e96407919c9d354f944e500cbaae14eea752..b1c70ce0c4dec4427003dc986c751510
 +				return
 +			}
 +			r.finishExchangeAsync(message, r.systemHosts, response, err, callback)
-@@ -1234,4 +1346 @@ func (r *Router) ExchangeAsync(ctx context.Context, message *mDNS.Msg, options a
+@@ -1234,4 +1358 @@ func (r *Router) ExchangeAsync(ctx context.Context, message *mDNS.Msg, options a
 -		go func() {
 -			response, transport, exchangeErr := r.exchangeLegacy(ctx, exchangeCtx, message, options)
 -			r.finishExchangeAsync(message, transport, response, exchangeErr, callback)
 -		}()
 +		exchange()
-@@ -1250,0 +1360,6 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
+@@ -1250,0 +1372,6 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
 +	if err := r.validatePolicy(options); err != nil {
 +		return nil, err
 +	}
 +	if _, err := explicitDNSPool(options); err != nil {
 +		return nil, err
 +	}
-@@ -1256,2 +1371 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
+@@ -1256,2 +1383 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
 -	rules := r.rules
 -	legacyDNSMode := r.legacyDNSMode
 +	rules, legacyDNSMode := r.policyRules(options.Policy)
-@@ -1288,0 +1403 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
+@@ -1288,0 +1415 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
 +	metadata.DNSResponseAddressOverride = nil
-@@ -1291,4 +1406,6 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
+@@ -1291,4 +1418,6 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
 -	if options.Transport != nil {
 -		transport := options.Transport
 -		if options.Strategy == C.DomainStrategyAsIS {
@@ -1956,14 +2050,14 @@ index e7c0e96407919c9d354f944e500cbaae14eea752..b1c70ce0c4dec4427003dc986c751510
 +		responseAddrs, err = r.client.Lookup(ctx, r.systemHosts, domain, hostOptions, nil)
 +		if !onlyHostsMiss(err) {
 +			goto response
-@@ -1296 +1413,3 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
+@@ -1296 +1425,3 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
 -		responseAddrs, err = r.client.Lookup(ctx, transport, domain, options, nil)
 +	}
 +	if options.Transport != nil {
 +		responseAddrs, err = r.lookupExplicitPool(ctx, domain, options)
-@@ -1393,0 +1513 @@ func (r *Router) ResetNetwork() {
+@@ -1393,0 +1525 @@ func (r *Router) ResetNetwork() {
 +	r.ClearCache()
-@@ -1540,0 +1661,3 @@ func validateLegacyDNSModeDisabledRules(router adapter.Router, rules []option.DN
+@@ -1540,0 +1673,3 @@ func validateLegacyDNSModeDisabledRules(router adapter.Router, rules []option.DN
 +		if err := validateDNSResponseFilterMetadata(router, rule, metadataOverrides); err != nil {
 +			return nil, E.Cause(err, "dns rule[", i, "] response_filter")
 +		}
@@ -2605,10 +2699,10 @@ index 0000000000000000000000000000000000000000..d3b57c62fdbcf800909953d7fcc72c36
 +}
 diff --git a/dns/runtime_policy_test.go b/dns/runtime_policy_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..af4ec6be838249cbd3499e6070512393ad06f6dc
+index 0000000000000000000000000000000000000000..5d855cdc3cd2316488112528f66229143da25a55
 --- /dev/null
 +++ b/dns/runtime_policy_test.go
-@@ -0,0 +1,586 @@
+@@ -0,0 +1,593 @@
 +package dns_test
 +
 +import (
@@ -2644,16 +2738,7 @@ index 0000000000000000000000000000000000000000..af4ec6be838249cbd3499e6070512393
 +}
 +func startPolicyBoxContext(t *testing.T, config map[string]any) context.Context {
 +	t.Helper()
-+	ctx := service.ContextWithDefaultRegistry(include.Context(context.Background()))
-+	data, err := json.Marshal(config)
-+	if err != nil {
-+		t.Fatal(err)
-+	}
-+	var opts option.Options
-+	if err = SJSON.UnmarshalContext(ctx, data, &opts); err != nil {
-+		t.Fatal(err)
-+	}
-+	instance, err := box.New(box.Options{Options: opts, Context: ctx})
++	ctx, instance, err := newPolicyBox(t, config)
 +	if err != nil {
 +		t.Fatal(err)
 +	}
@@ -2667,6 +2752,22 @@ index 0000000000000000000000000000000000000000..af4ec6be838249cbd3499e6070512393
 +		}
 +	})
 +	return ctx
++}
++
++// newPolicyBox builds, but does not start, an instance of config.
++func newPolicyBox(t *testing.T, config map[string]any) (context.Context, *box.Box, error) {
++	t.Helper()
++	ctx := service.ContextWithDefaultRegistry(include.Context(context.Background()))
++	data, err := json.Marshal(config)
++	if err != nil {
++		t.Fatal(err)
++	}
++	var opts option.Options
++	if err = SJSON.UnmarshalContext(ctx, data, &opts); err != nil {
++		t.Fatal(err)
++	}
++	instance, err := box.New(box.Options{Options: opts, Context: ctx})
++	return ctx, instance, err
 +}
 +func evaluatedPolicyRules(condition map[string]any, server string) []any {
 +	evaluate := make(map[string]any, len(condition)+2)

@@ -40,6 +40,8 @@ pub(crate) use handoff_ticket::{
     parse_launch_arguments,
 };
 pub(crate) use journal::MigrationHandoffLease;
+#[cfg(test)]
+pub(crate) use journal::write_journal_governing_startup;
 
 pub use state_gate::LegacyRetirementGate;
 pub(crate) use state_gate::LegacyRetirementStatus;
@@ -116,6 +118,36 @@ pub(crate) fn load_replacement_engine_settings(
     Ok(journal.and_then(|journal| {
         (journal.phase != CutoverPhase::CleanupComplete).then_some(journal.replacement_settings)
     }))
+}
+
+/// Why runtime preferences cannot change now.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum RuntimePreferencesLocked {
+    /// A cutover journal governs startup until its legacy cleanup completes:
+    /// the cleanup verifies the running engine against the journal's
+    /// replacement settings, which the journal keeps immutable in that phase,
+    /// and a relaunch starts from them. A changed preference would block the
+    /// cleanup, and the next launch would revert it while the saved
+    /// preferences, and the settings page, still showed it.
+    #[error(
+        "settings cannot change until the legacy cleanup completes: the unfinished migration fixed the engine settings until then, so finish the legacy cleanup first"
+    )]
+    CutoverCleanupPending,
+    /// Whether a journal governs startup could not be read.
+    #[error("whether settings can change is unknown: {0}")]
+    JournalUnavailable(String),
+}
+
+/// Refuses a runtime preference change while a cutover journal governs
+/// startup ([`load_replacement_engine_settings`]).
+pub(crate) fn require_runtime_preferences_changeable(
+    app_home: &Path,
+) -> Result<(), RuntimePreferencesLocked> {
+    match load_replacement_engine_settings(app_home) {
+        Ok(None) => Ok(()),
+        Ok(Some(_)) => Err(RuntimePreferencesLocked::CutoverCleanupPending),
+        Err(error) => Err(RuntimePreferencesLocked::JournalUnavailable(error)),
+    }
 }
 
 #[tauri::command]

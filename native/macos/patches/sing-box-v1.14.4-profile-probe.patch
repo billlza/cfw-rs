@@ -438,10 +438,10 @@ index 0000000000000000000000000000000000000000..fe05d8b42796ba9c346b1fe00eadfed2
 +}
 diff --git a/experimental/libbox/config_check_test.go b/experimental/libbox/config_check_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..653cd7eb09cdfc496c1007f25f9a17f42313e0b6
+index 0000000000000000000000000000000000000000..613441621141f7b23deb99d56633acf6096b3400
 --- /dev/null
 +++ b/experimental/libbox/config_check_test.go
-@@ -0,0 +1,224 @@
+@@ -0,0 +1,225 @@
 +package libbox
 +
 +import (
@@ -450,6 +450,7 @@ index 0000000000000000000000000000000000000000..653cd7eb09cdfc496c1007f25f9a17f4
 +	"strings"
 +	"sync/atomic"
 +	"testing"
++	"time"
 +
 +	box "github.com/sagernet/sing-box"
 +	"github.com/sagernet/sing-box/adapter"
@@ -587,7 +588,7 @@ index 0000000000000000000000000000000000000000..653cd7eb09cdfc496c1007f25f9a17f4
 +	monitor := &scriptedInterfaceMonitor{}
 +	ctx, instance, cancel := scriptedProbe(t, monitor)
 +	monitor.onStart = cancel
-+	_, err := runProfileProbe(ctx, instance, []string{"node"})
++	_, err := runProfileProbe(ctx, instance, []string{"node"}, time.Second)
 +	if err == nil || !strings.Contains(err.Error(), "profile probe startup failed") {
 +		t.Fatalf("a failed start was not reported: %v", err)
 +	}
@@ -604,7 +605,7 @@ index 0000000000000000000000000000000000000000..653cd7eb09cdfc496c1007f25f9a17f4
 +func TestProfileProbeDoesNotCloseAComponentWhoseStartFailed(t *testing.T) {
 +	monitor := &scriptedInterfaceMonitor{startErr: errScriptedMonitor, closeErr: errScriptedMonitor}
 +	ctx, instance, _ := scriptedProbe(t, monitor)
-+	_, err := runProfileProbe(ctx, instance, []string{"node"})
++	_, err := runProfileProbe(ctx, instance, []string{"node"}, time.Second)
 +	if err == nil || !strings.Contains(err.Error(), "profile probe startup failed") || strings.Contains(err.Error(), "cleanup failed") {
 +		t.Fatalf("a failed component start was not reported alone: %v", err)
 +	}
@@ -617,7 +618,7 @@ index 0000000000000000000000000000000000000000..653cd7eb09cdfc496c1007f25f9a17f4
 +	monitor := &scriptedInterfaceMonitor{closeErr: errScriptedMonitor}
 +	ctx, instance, cancel := scriptedProbe(t, monitor)
 +	monitor.onStart = cancel
-+	_, err := runProfileProbe(ctx, instance, []string{"node"})
++	_, err := runProfileProbe(ctx, instance, []string{"node"}, time.Second)
 +	if err == nil || !strings.Contains(err.Error(), "profile probe startup failed") ||
 +		!strings.Contains(err.Error(), "profile probe cleanup failed") {
 +		t.Fatalf("a failed start and close were not both reported: %v", err)
@@ -630,7 +631,7 @@ index 0000000000000000000000000000000000000000..653cd7eb09cdfc496c1007f25f9a17f4
 +func TestProfileProbeReportsAFailedCloseAfterItsResults(t *testing.T) {
 +	monitor := &scriptedInterfaceMonitor{closeErr: errScriptedMonitor}
 +	ctx, instance, _ := scriptedProbe(t, monitor)
-+	response, err := runProfileProbe(ctx, instance, []string{"missing"})
++	response, err := runProfileProbe(ctx, instance, []string{"missing"}, time.Second)
 +	if err == nil || !strings.Contains(err.Error(), "profile probe cleanup failed") {
 +		t.Fatalf("a failed close was not reported: %v", err)
 +	}
@@ -645,7 +646,7 @@ index 0000000000000000000000000000000000000000..653cd7eb09cdfc496c1007f25f9a17f4
 +	monitor := &scriptedInterfaceMonitor{closePanics: true}
 +	ctx, instance, cancel := scriptedProbe(t, monitor)
 +	monitor.onStart = cancel
-+	_, err := runProfileProbe(ctx, instance, []string{"node"})
++	_, err := runProfileProbe(ctx, instance, []string{"node"}, time.Second)
 +	if err == nil || !strings.Contains(err.Error(), "profile probe startup failed") ||
 +		!strings.Contains(err.Error(), "profile probe cleanup failed") {
 +		t.Fatalf("a failed start and a panicking close were not both reported: %v", err)
@@ -658,7 +659,7 @@ index 0000000000000000000000000000000000000000..653cd7eb09cdfc496c1007f25f9a17f4
 +func TestProfileProbeReportsAPanickingCloseAfterItsResults(t *testing.T) {
 +	monitor := &scriptedInterfaceMonitor{closePanics: true}
 +	ctx, instance, _ := scriptedProbe(t, monitor)
-+	response, err := runProfileProbe(ctx, instance, []string{"missing"})
++	response, err := runProfileProbe(ctx, instance, []string{"missing"}, time.Second)
 +	if err == nil || !strings.Contains(err.Error(), "profile probe cleanup failed") {
 +		t.Fatalf("a panicking close was not reported: %v", err)
 +	}
@@ -668,10 +669,10 @@ index 0000000000000000000000000000000000000000..653cd7eb09cdfc496c1007f25f9a17f4
 +}
 diff --git a/experimental/libbox/profile_probe.go b/experimental/libbox/profile_probe.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..67ee4fe20cc75d64662f7595b0646000def18183
+index 0000000000000000000000000000000000000000..da081a36b10db17137e86fb5577a6afad42beb2d
 --- /dev/null
 +++ b/experimental/libbox/profile_probe.go
-@@ -0,0 +1,173 @@
+@@ -0,0 +1,185 @@
 +package libbox
 +
 +import (
@@ -693,6 +694,12 @@ index 0000000000000000000000000000000000000000..67ee4fe20cc75d64662f7595b0646000
 +// Profile probes originate application requests only: no inbounds, controller,
 +// system interface, routing policy, persistent cache, or background URL tests.
 +// One bounded batch may run per process. Its Box is always closed before reply.
++//
++// The caller's timeout bounds each node's URL test from when the Box has
++// started. Building, starting and closing the Box are local work outside it,
++// and the Box's context carries no deadline: sing-box checks that context
++// before it starts each component, so a deadline there would fail the whole
++// batch whenever the start outlasted the timeout, instead of timing out nodes.
 +var profileProbeSlot = make(chan struct{}, 1)
 +
 +type profileProbeResult struct {
@@ -712,6 +719,12 @@ index 0000000000000000000000000000000000000000..67ee4fe20cc75d64662f7595b0646000
 +}
 +
 +func TestProfileProxiesWithTarget(configuration, namesJSON string, timeoutMS int32, targetURL, expectedStatus string) (string, error) {
++	return probeProfileProxies(profileProbeContext(), configuration, namesJSON, timeoutMS, targetURL, expectedStatus)
++}
++
++// probeProfileProxies runs one batch on ctx, which holds the registries and
++// services the Box is built with.
++func probeProfileProxies(ctx context.Context, configuration, namesJSON string, timeoutMS int32, targetURL, expectedStatus string) (string, error) {
 +	if err := urltest.ValidateProbeTarget(targetURL); err != nil {
 +		return "", err
 +	}
@@ -738,8 +751,6 @@ index 0000000000000000000000000000000000000000..67ee4fe20cc75d64662f7595b0646000
 +		}
 +		seen[name] = true
 +	}
-+	ctx, cancel := context.WithTimeout(profileProbeContext(), time.Duration(timeoutMS)*time.Millisecond)
-+	defer cancel()
 +	options, err := profileProbeOptions(ctx, configuration)
 +	if err != nil {
 +		return "", err
@@ -748,7 +759,7 @@ index 0000000000000000000000000000000000000000..67ee4fe20cc75d64662f7595b0646000
 +	if err != nil {
 +		return "", errors.New("profile probe configuration rejected")
 +	}
-+	return runProfileProbeWithTarget(ctx, instance, names, targetURL, expectedStatus)
++	return runProfileProbeWithTarget(ctx, instance, names, time.Duration(timeoutMS)*time.Millisecond, targetURL, expectedStatus)
 +}
 +
 +func profileProbeOptions(ctx context.Context, configuration string) (option.Options, error) {
@@ -794,11 +805,11 @@ index 0000000000000000000000000000000000000000..67ee4fe20cc75d64662f7595b0646000
 +	return options, nil
 +}
 +
-+func runProfileProbe(ctx context.Context, instance *box.Box, names []string) (string, error) {
-+	return runProfileProbeWithTarget(ctx, instance, names, "", "")
++func runProfileProbe(ctx context.Context, instance *box.Box, names []string, timeout time.Duration) (string, error) {
++	return runProfileProbeWithTarget(ctx, instance, names, timeout, "", "")
 +}
 +
-+func runProfileProbeWithTarget(ctx context.Context, instance *box.Box, names []string, targetURL, expectedStatus string) (response string, err error) {
++func runProfileProbeWithTarget(ctx context.Context, instance *box.Box, names []string, timeout time.Duration, targetURL, expectedStatus string) (response string, err error) {
 +	defer func() {
 +		if closeErr := closeRecoveringPanic(instance); closeErr != nil {
 +			response = ""
@@ -810,6 +821,8 @@ index 0000000000000000000000000000000000000000..67ee4fe20cc75d64662f7595b0646000
 +	if startErr := instance.StartWithExternalCleanup(); startErr != nil {
 +		return "", errors.New("profile probe startup failed")
 +	}
++	urlTestContext, cancel := context.WithTimeout(ctx, timeout)
++	defer cancel()
 +	results := make([]profileProbeResult, len(names))
 +	var workers sync.WaitGroup
 +	for index, name := range names {
@@ -825,7 +838,7 @@ index 0000000000000000000000000000000000000000..67ee4fe20cc75d64662f7595b0646000
 +				kind := "not_found"
 +				result.ErrorKind = &kind
 +			} else {
-+				delay, probeErr := urltest.URLTestWithStatus(ctx, targetURL, expectedStatus, dialer)
++				delay, probeErr := urltest.URLTestWithStatus(urlTestContext, targetURL, expectedStatus, dialer)
 +				if probeErr != nil {
 +					kind := "probe_failed"
 +					var networkError net.Error
@@ -847,14 +860,13 @@ index 0000000000000000000000000000000000000000..67ee4fe20cc75d64662f7595b0646000
 +}
 diff --git a/experimental/libbox/profile_probe_test.go b/experimental/libbox/profile_probe_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..36dd0692760e355e7f9d1949cc9172c96c27d7c5
+index 0000000000000000000000000000000000000000..d2fe3654aa1e2501adb6b3c842e1220bf8bd258e
 --- /dev/null
 +++ b/experimental/libbox/profile_probe_test.go
-@@ -0,0 +1,240 @@
+@@ -0,0 +1,267 @@
 +package libbox
 +
 +import (
-+	"context"
 +	"crypto/ecdsa"
 +	"crypto/elliptic"
 +	"crypto/rand"
@@ -1003,6 +1015,36 @@ index 0000000000000000000000000000000000000000..36dd0692760e355e7f9d1949cc9172c9
 +	}
 +}
 +
++// The timeout bounds each node's test from when the instance has started, so
++// an instance that starts slower than the timeout still tests its nodes, each
++// for the whole timeout, instead of failing the batch.
++func TestProfileProbeTimeoutStartsOnceTheInstanceHasStarted(t *testing.T) {
++	var connects atomic.Int32
++	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.Method == http.MethodConnect {
++			connects.Add(1)
++		}
++		w.WriteHeader(http.StatusBadGateway)
++	}))
++	defer proxy.Close()
++	const timeout = 500 * time.Millisecond
++	// The network monitor starts with the instance and outlasts the timeout,
++	// so the instance finishes starting after the timeout would have run out.
++	monitor := &scriptedInterfaceMonitor{onStart: func() { time.Sleep(2 * timeout) }}
++	ctx := service.ContextWith[adapter.PlatformInterface](profileProbeContext(), scriptedPlatform{monitor: monitor})
++	response, err := probeProfileProxies(ctx, probeHTTPConfig(t, proxy.Listener.Addr().String()), `["node"]`, int32(timeout/time.Millisecond), "", "")
++	if err != nil {
++		t.Fatalf("an instance that started slower than the timeout failed the probe: %v", err)
++	}
++	results := decodeProbeResults(t, response)
++	if len(results) != 1 || results[0].ErrorKind == nil || *results[0].ErrorKind != "probe_failed" || connects.Load() != 1 {
++		t.Fatalf("the node was not tested once the instance had started: %+v, %d connects", results, connects.Load())
++	}
++	if monitor.starts.Load() != 1 || monitor.closes.Load() != 1 {
++		t.Fatalf("the probe started %d and closed %d monitors", monitor.starts.Load(), monitor.closes.Load())
++	}
++}
++
 +type probeCertificateStore struct{ pool *x509.CertPool }
 +
 +func (s probeCertificateStore) Name() string                                   { return "test certificate store" }
@@ -1071,9 +1113,7 @@ index 0000000000000000000000000000000000000000..36dd0692760e355e7f9d1949cc9172c9
 +		<-done
 +	}))
 +	defer proxy.Close()
-+	ctx, cancel := context.WithTimeout(profileProbeContext(), 2*time.Second)
-+	defer cancel()
-+	ctx = service.ContextWith[adapter.CertificateStore](ctx, probeCertificateStore{pool})
++	ctx := service.ContextWith[adapter.CertificateStore](profileProbeContext(), probeCertificateStore{pool})
 +	options, err := profileProbeOptions(ctx, probeHTTPConfig(t, proxy.Listener.Addr().String()))
 +	if err != nil {
 +		t.Fatal(err)
@@ -1082,7 +1122,7 @@ index 0000000000000000000000000000000000000000..36dd0692760e355e7f9d1949cc9172c9
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	response, err := runProfileProbe(ctx, instance, []string{"node"})
++	response, err := runProfileProbe(ctx, instance, []string{"node"}, 2*time.Second)
 +	if err != nil {
 +		t.Fatal(err)
 +	}

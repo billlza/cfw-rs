@@ -78,7 +78,7 @@ from scripts.tests.notary_fixture import (
     response,
     submit_response,
 )
-from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY, PRODUCT_VERSION
 
 
 GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
@@ -113,7 +113,7 @@ def prepackage_binding(
 def create_prepackage_stage(repository: Path) -> tuple[Path, dict[str, object]]:
     manifest = (
         repository
-        / f"target/candidates/0.5.0/ga/{GA_BUILD}/prepackage/manifest.json"
+        / f"target/candidates/{PRODUCT_VERSION}/ga/{GA_BUILD}/prepackage/manifest.json"
     )
     manifest.parent.mkdir(parents=True, mode=0o700)
     manifest.write_text(
@@ -125,7 +125,7 @@ def create_prepackage_stage(repository: Path) -> tuple[Path, dict[str, object]]:
 def create_signed_candidate(repository: Path, build_number: str = GA_BUILD) -> Path:
     app = (
         repository
-        / f"target/candidates/0.5.0/ga/{GA_BUILD}/signed/Clash for Mac.app"
+        / f"target/candidates/{PRODUCT_VERSION}/ga/{GA_BUILD}/signed/Clash for Mac.app"
     )
     executable = app / "Contents/MacOS/clash-for-mac"
     executable.parent.mkdir(parents=True)
@@ -140,7 +140,7 @@ def create_signed_candidate(repository: Path, build_number: str = GA_BUILD) -> P
         "releaseSourceSha256": SEALED_SOURCE_IDENTITY["release_source_sha256"],
         "repositoryCommit": SEALED_SOURCE_IDENTITY["repository_commit"],
         "teamID": "YKUPL7Z869",
-        "version": "0.5.0",
+        "version": PRODUCT_VERSION,
         **{name: "c" * 64 for name in TOOLCHAIN_METADATA_ORDER},
     }
     manifest = build_manifest(
@@ -741,7 +741,7 @@ class DmgFixture:
         self.temporary = tempfile.TemporaryDirectory()
         self.repository = Path(self.temporary.name).resolve()
         self.app = create_signed_candidate(self.repository)
-        self.ga_root = self.repository / f"target/candidates/0.5.0/ga/{GA_BUILD}"
+        self.ga_root = self.repository / f"target/candidates/{PRODUCT_VERSION}/ga/{GA_BUILD}"
         self.prepackage_manifest, self.prepackage = create_prepackage_stage(
             self.repository
         )
@@ -749,11 +749,11 @@ class DmgFixture:
         (self.package_root / "dmg").mkdir(parents=True)
         staging = self.package_root / "dmg/dmg-stage.fixture"
         staging.mkdir()
-        self.dmg = staging / "Clash.for.Mac_0.5.0_arm64.dmg"
+        self.dmg = staging / f"Clash.for.Mac_{PRODUCT_VERSION}_arm64.dmg"
         self.dmg.write_bytes(ARCHIVE_BYTES)
         self.context = DmgContext(
             repository=self.repository,
-            version="0.5.0",
+            version=PRODUCT_VERSION,
             build_number=GA_BUILD,
             notary_profile=NOTARY_PROFILE,
             source_identity=SOURCE_IDENTITY,
@@ -784,7 +784,7 @@ class DmgFixture:
         return verify_dmg_set(
             destination,
             repository=self.repository,
-            version="0.5.0",
+            version=PRODUCT_VERSION,
             packaged_app_manifest_reader=self.package_manifest,
             prepackage_stage_verifier=self.prepackage_stage,
         )
@@ -909,12 +909,12 @@ class DmgNotarizationTransactionTests(unittest.TestCase):
         self.assertEqual(
             self.fixture.context.final_root,
             self.fixture.repository
-            / f"target/candidates/0.5.0/ga/{GA_BUILD}/packages/dmg/v0.5.0",
+            / f"target/candidates/{PRODUCT_VERSION}/ga/{GA_BUILD}/packages/dmg/v{PRODUCT_VERSION}",
         )
         self.assertEqual(
             self.fixture.context.attempt_root,
             self.fixture.repository
-            / f"target/candidates/0.5.0/ga/{GA_BUILD}/transactions/dmg-notary/v0.5.0",
+            / f"target/candidates/{PRODUCT_VERSION}/ga/{GA_BUILD}/transactions/dmg-notary/v{PRODUCT_VERSION}",
         )
 
     def test_non_ga_build_is_rejected_before_any_remote_command(self) -> None:
@@ -1021,7 +1021,7 @@ class DmgNotarizationTransactionTests(unittest.TestCase):
             "--repository",
             str(self.fixture.repository),
             "--version",
-            "0.5.0",
+            PRODUCT_VERSION,
             "--build-number",
             GA_BUILD,
             "--notary-profile",
@@ -1040,7 +1040,7 @@ class DmgNotarizationTransactionTests(unittest.TestCase):
             seal_dmg_set(
                 self.fixture.dmg.parent,
                 repository=self.fixture.repository,
-                version="0.5.0",
+                version=PRODUCT_VERSION,
                 build_number=GA_BUILD,
                 pre_staple_sha256="a" * 64,
                 prepackage=self.fixture.prepackage,
@@ -1053,7 +1053,7 @@ class DmgNotarizationTransactionTests(unittest.TestCase):
             verify_dmg_set(
                 self.fixture.dmg.parent,
                 repository=self.fixture.repository,
-                version="0.5.0",
+                version=PRODUCT_VERSION,
                 require_version_directory=False,
                 prepackage_stage_verifier=self.fixture.prepackage_stage,
             )
@@ -1263,7 +1263,7 @@ class DmgNotarizationTransactionTests(unittest.TestCase):
 
     def test_partial_or_hardlinked_public_dmg_set_is_not_uploadable(self) -> None:
         destination = self.fixture.execute()
-        evidence = destination / "Clash.for.Mac_0.5.0_arm64.gatekeeper.json"
+        evidence = destination / f"Clash.for.Mac_{PRODUCT_VERSION}_arm64.gatekeeper.json"
         evidence.unlink()
         with self.assertRaisesRegex(ArtifactSetError, "partial"):
             self.fixture.verify(destination)
@@ -1612,14 +1612,14 @@ class UpdaterArtifactSetTests(unittest.TestCase):
             self.root
         )
         self.package_root = (
-            self.root / f"target/candidates/0.5.0/ga/{GA_BUILD}/packages"
+            self.root / f"target/candidates/{PRODUCT_VERSION}/ga/{GA_BUILD}/packages"
         )
         updater_root = self.package_root / "updater"
         updater_root.mkdir(parents=True, mode=0o700)
         self.staging = updater_root / "updater-stage.fixture"
         self.staging.mkdir(mode=0o700)
-        self.destination = updater_root / "v0.5.0"
-        self.archive_name = "Clash.for.Mac_0.5.0_aarch64.app.tar.gz"
+        self.destination = updater_root / f"v{PRODUCT_VERSION}"
+        self.archive_name = f"Clash.for.Mac_{PRODUCT_VERSION}_aarch64.app.tar.gz"
         self.archive = self.staging / self.archive_name
         self.signature = self.staging / f"{self.archive_name}.sig"
         self.latest = self.staging / "latest.json"
@@ -1641,19 +1641,19 @@ class UpdaterArtifactSetTests(unittest.TestCase):
         self.signature.write_text("fixture-signature\n", encoding="utf-8")
         signature = self.signature.read_text(encoding="utf-8").strip()
         url = (
-            "https://github.com/billlza/cfw-rs/releases/download/v0.5.0/"
+            f"https://github.com/billlza/cfw-rs/releases/download/v{PRODUCT_VERSION}/"
             + self.archive_name
         )
         self.latest.write_text(
             json.dumps(
                 {
-                    "notes": "Clash for Mac 0.5.0",
+                    "notes": f"Clash for Mac {PRODUCT_VERSION}",
                     "platforms": {
                         target: {"signature": signature, "url": url}
                         for target in ("darwin-aarch64", "darwin-arm64")
                     },
                     "pub_date": CLOCK,
-                    "version": "0.5.0",
+                    "version": PRODUCT_VERSION,
                 },
                 sort_keys=True,
             )
@@ -1683,7 +1683,7 @@ class UpdaterArtifactSetTests(unittest.TestCase):
             return seal_updater_set(
                 self.staging,
                 self.destination,
-                version="0.5.0",
+                version=PRODUCT_VERSION,
                 source_identity=SEALED_SOURCE_IDENTITY,
                 sealed_at=CLOCK,
                 repository=self.root,
@@ -1699,7 +1699,7 @@ class UpdaterArtifactSetTests(unittest.TestCase):
             return verify_updater_set(
                 directory or self.destination,
                 repository=self.root,
-                version="0.5.0",
+                version=PRODUCT_VERSION,
                 prepackage_stage_verifier=self.prepackage_stage,
             )
 
@@ -1713,7 +1713,7 @@ class UpdaterArtifactSetTests(unittest.TestCase):
         self.assertEqual(
             seal["official_url"],
             (
-                "https://github.com/billlza/cfw-rs/releases/download/v0.5.0/"
+                f"https://github.com/billlza/cfw-rs/releases/download/v{PRODUCT_VERSION}/"
                 + self.archive_name
             ),
         )
@@ -1734,7 +1734,7 @@ class UpdaterArtifactSetTests(unittest.TestCase):
             seal_updater_set(
                 self.staging,
                 self.destination,
-                version="0.5.0",
+                version=PRODUCT_VERSION,
                 source_identity=SEALED_SOURCE_IDENTITY,
                 sealed_at=CLOCK,
                 repository=self.root,
@@ -1779,7 +1779,7 @@ class UpdaterArtifactSetTests(unittest.TestCase):
             "--destination",
             str(self.destination),
             "--version",
-            "0.5.0",
+            PRODUCT_VERSION,
             "--repository",
             str(self.root),
         ]
@@ -1797,8 +1797,8 @@ class UpdaterArtifactSetTests(unittest.TestCase):
         with self.assertRaisesRegex(ArtifactSetError, "fixed GA package path"):
             seal_updater_set(
                 self.staging,
-                self.root / "caller-selected/v0.5.0",
-                version="0.5.0",
+                self.root / f"caller-selected/v{PRODUCT_VERSION}",
+                version=PRODUCT_VERSION,
                 source_identity=SEALED_SOURCE_IDENTITY,
                 sealed_at=CLOCK,
                 repository=self.root,
@@ -1811,7 +1811,7 @@ class UpdaterArtifactSetTests(unittest.TestCase):
             verify_updater_set(
                 caller_stage,
                 repository=self.root,
-                version="0.5.0",
+                version=PRODUCT_VERSION,
                 require_version_directory=False,
             )
 
@@ -2423,7 +2423,7 @@ class DistributionFixture:
         updater_set = self.updater.seal()
         destination_parent = self.dmg.package_root / "updater"
         destination_parent.mkdir()
-        os.rename(updater_set, destination_parent / "v0.5.0")
+        os.rename(updater_set, destination_parent / f"v{PRODUCT_VERSION}")
         publication = self.dmg.ga_root / "stage-inputs/publication"
         publication.mkdir(parents=True)
         self.raw_publication = publication
@@ -2431,7 +2431,7 @@ class DistributionFixture:
             "GPL-3.0-or-later fixture\n", encoding="utf-8"
         )
         (self.dmg.repository / "CHANGELOG.md").write_text(
-            "# 0.5.0 fixture modifications\n", encoding="utf-8"
+            f"# {PRODUCT_VERSION} fixture modifications\n", encoding="utf-8"
         )
         for name in (
             "corresponding-source.manifest.json",
@@ -2512,7 +2512,7 @@ class DistributionFixture:
         ), verified_cargo_fixture(self.verifier_build):
             return seal_distribution_set(
                 self.dmg.repository,
-                version="0.5.0",
+                version=PRODUCT_VERSION,
                 source_identity=SEALED_SOURCE_IDENTITY,
                 sealed_at=CLOCK,
                 publisher=publication_publisher,
@@ -2529,7 +2529,7 @@ class DistributionFixture:
         ), verified_cargo_fixture(self.verifier_build):
             return verify_release_sets(
                 self.dmg.repository,
-                version="0.5.0",
+                version=PRODUCT_VERSION,
                 expected_source_identity=SEALED_SOURCE_IDENTITY,
                 packaged_app_manifest_reader=self.dmg.package_manifest,
                 publication_semantic_verifier=self.publication_semantic_verifier,
@@ -2545,7 +2545,7 @@ class DistributionFixture:
             return verify_distribution_set(
                 destination,
                 repository=self.dmg.repository,
-                version="0.5.0",
+                version=PRODUCT_VERSION,
                 expected_source_identity=SEALED_SOURCE_IDENTITY,
                 packaged_app_manifest_reader=self.dmg.package_manifest,
                 publication_semantic_verifier=self.publication_semantic_verifier,
@@ -2575,11 +2575,11 @@ class DistributionArtifactSetTests(unittest.TestCase):
         self.assertIn(destination / DISTRIBUTION_SEAL_NAME, uploadable)
         private_gatekeeper = (
             self.fixture.dmg.package_root
-            / "dmg/v0.5.0/Clash.for.Mac_0.5.0_arm64.gatekeeper.json"
+            / f"dmg/v{PRODUCT_VERSION}/Clash.for.Mac_{PRODUCT_VERSION}_arm64.gatekeeper.json"
         )
         public_gatekeeper = (
             destination
-            / "Clash.for.Mac_0.5.0_arm64.gatekeeper.public.json"
+            / f"Clash.for.Mac_{PRODUCT_VERSION}_arm64.gatekeeper.public.json"
         )
         self.assertNotIn(private_gatekeeper, uploadable)
         self.assertIn(public_gatekeeper, uploadable)
@@ -2598,19 +2598,19 @@ class DistributionArtifactSetTests(unittest.TestCase):
         self.assertIs(public_evidence["primary_signature_context"], True)
         final_dmg = (
             self.fixture.dmg.package_root
-            / "dmg/v0.5.0/Clash.for.Mac_0.5.0_arm64.dmg"
+            / f"dmg/v{PRODUCT_VERSION}/Clash.for.Mac_{PRODUCT_VERSION}_arm64.dmg"
         )
         self.assertEqual(
             public_evidence["target_sha256"],
             hashlib.sha256(final_dmg.read_bytes()).hexdigest(),
         )
-        bundle = destination / "Clash.for.Mac_0.5.0_publication.tar.gz"
+        bundle = destination / f"Clash.for.Mac_{PRODUCT_VERSION}_publication.tar.gz"
         self.assertIn(bundle, uploadable)
         with tarfile.open(bundle, "r:gz") as archive:
             names = {member.name for member in archive}
             public_bundle_evidence = archive.extractfile(
-                "Clash.for.Mac_0.5.0_publication/verification/"
-                "Clash.for.Mac_0.5.0_arm64.gatekeeper.public.json"
+                f"Clash.for.Mac_{PRODUCT_VERSION}_publication/verification/"
+                f"Clash.for.Mac_{PRODUCT_VERSION}_arm64.gatekeeper.public.json"
             )
             self.assertIsNotNone(public_bundle_evidence)
             assert public_bundle_evidence is not None
@@ -2618,25 +2618,25 @@ class DistributionArtifactSetTests(unittest.TestCase):
         self.assertEqual(bundled_projection, public_bytes)
         self.assertNotIn(assessed_target, bundled_projection)
         self.assertNotIn(
-            "Clash.for.Mac_0.5.0_publication/verification/"
-            "Clash.for.Mac_0.5.0_arm64.gatekeeper.json",
+            f"Clash.for.Mac_{PRODUCT_VERSION}_publication/verification/"
+            f"Clash.for.Mac_{PRODUCT_VERSION}_arm64.gatekeeper.json",
             names,
         )
         self.assertIn(
-            "Clash.for.Mac_0.5.0_publication/publication/"
+            f"Clash.for.Mac_{PRODUCT_VERSION}_publication/publication/"
             "corresponding-source.tar.gz",
             names,
         )
         self.assertIn(
-            "Clash.for.Mac_0.5.0_publication/publication/sbom.spdx.json",
+            f"Clash.for.Mac_{PRODUCT_VERSION}_publication/publication/sbom.spdx.json",
             names,
         )
         self.assertIn(
-            "Clash.for.Mac_0.5.0_publication/publication/sbom.cyclonedx.json",
+            f"Clash.for.Mac_{PRODUCT_VERSION}_publication/publication/sbom.cyclonedx.json",
             names,
         )
         self.assertNotIn(
-            "Clash.for.Mac_0.5.0_publication/publication/legal-review.json",
+            f"Clash.for.Mac_{PRODUCT_VERSION}_publication/publication/legal-review.json",
             names,
         )
 
@@ -2673,7 +2673,7 @@ class DistributionArtifactSetTests(unittest.TestCase):
     def test_public_projection_requires_the_original_real_target_bytes(self) -> None:
         private_gatekeeper = (
             self.fixture.dmg.package_root
-            / "dmg/v0.5.0/Clash.for.Mac_0.5.0_arm64.gatekeeper.json"
+            / f"dmg/v{PRODUCT_VERSION}/Clash.for.Mac_{PRODUCT_VERSION}_arm64.gatekeeper.json"
         )
         assessed_target = Path(
             json.loads(private_gatekeeper.read_bytes())["assessed_target"]
@@ -2688,7 +2688,7 @@ class DistributionArtifactSetTests(unittest.TestCase):
         destination = self.fixture.seal()
         projection_path = (
             destination
-            / "Clash.for.Mac_0.5.0_arm64.gatekeeper.public.json"
+            / f"Clash.for.Mac_{PRODUCT_VERSION}_arm64.gatekeeper.public.json"
         )
         projection = json.loads(projection_path.read_bytes())
         projection["target_sha256"] = "0" * 64
@@ -2702,7 +2702,7 @@ class DistributionArtifactSetTests(unittest.TestCase):
     def test_private_gatekeeper_copy_cannot_enter_public_sources(self) -> None:
         private_gatekeeper = (
             self.fixture.dmg.package_root
-            / "dmg/v0.5.0/Clash.for.Mac_0.5.0_arm64.gatekeeper.json"
+            / f"dmg/v{PRODUCT_VERSION}/Clash.for.Mac_{PRODUCT_VERSION}_arm64.gatekeeper.json"
         )
         leaked = self.fixture.raw_publication / "renamed-gatekeeper-evidence.json"
         leaked.write_bytes(private_gatekeeper.read_bytes())
@@ -2795,7 +2795,7 @@ class DistributionArtifactSetTests(unittest.TestCase):
 
     def test_public_bundle_rejects_a_concatenated_gzip_member(self) -> None:
         destination = self.fixture.seal()
-        bundle = destination / "Clash.for.Mac_0.5.0_publication.tar.gz"
+        bundle = destination / f"Clash.for.Mac_{PRODUCT_VERSION}_publication.tar.gz"
         with bundle.open("ab") as stream:
             stream.write(gzip.compress(b"hidden-second-member", mtime=0))
         with self.assertRaisesRegex(
@@ -2849,7 +2849,7 @@ class DistributionArtifactSetTests(unittest.TestCase):
         with self.assertRaisesRegex(ArtifactSetError, "distribution release root"):
             verify_release_sets(
                 self.fixture.dmg.repository,
-                version="0.5.0",
+                version=PRODUCT_VERSION,
                 expected_source_identity=SEALED_SOURCE_IDENTITY,
                 packaged_app_manifest_reader=self.fixture.dmg.package_manifest,
                 publication_semantic_verifier=(
@@ -2876,7 +2876,7 @@ class DistributionArtifactSetTests(unittest.TestCase):
             ):
                 seal_distribution_set(
                     self.fixture.dmg.repository,
-                    version="0.5.0",
+                    version=PRODUCT_VERSION,
                     source_identity=SEALED_SOURCE_IDENTITY,
                     sealed_at=CLOCK,
                     publisher=publisher,
@@ -2896,7 +2896,7 @@ class ReleaseUploadGateTests(unittest.TestCase):
         try:
             fixture.seal()
             with self.assertRaisesRegex(ArtifactSetError, "unavailable"):
-                verify_release_sets(fixture.root, version="0.5.0")
+                verify_release_sets(fixture.root, version=PRODUCT_VERSION)
         finally:
             fixture.tearDown()
 
@@ -2904,12 +2904,12 @@ class ReleaseUploadGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             repository = Path(directory).resolve()
             package_root = (
-                repository / f"target/candidates/0.5.0/ga/{GA_BUILD}/packages"
+                repository / f"target/candidates/{PRODUCT_VERSION}/ga/{GA_BUILD}/packages"
             )
             package_root.mkdir(parents=True)
             (package_root / "latest.json").write_text("{}\n", encoding="utf-8")
             with self.assertRaisesRegex(ArtifactSetError, "legacy unsealed"):
-                verify_release_sets(repository, version="0.5.0")
+                verify_release_sets(repository, version=PRODUCT_VERSION)
 
 
 class PackagingEntrypointContractTests(unittest.TestCase):
@@ -2921,13 +2921,13 @@ class PackagingEntrypointContractTests(unittest.TestCase):
                 # The GA root is derived from the identity file; the allocation
                 # audit proves no packager names the build itself.
                 self.assertIn('source "$repo_root/scripts/release_identity.env"', source)
-                self.assertIn("target/candidates/0.5.0/ga/$CFW_GA_BUILD", source)
-                self.assertNotIn("target/candidates/0.5.0/ga/40037", source)
-                self.assertNotIn("target/candidates/0.5.0/ga/40038", source)
+                self.assertIn("target/candidates/$CFW_PRODUCT_VERSION/ga/$CFW_GA_BUILD", source)
+                # Neither the version nor the build is named literally.
+                self.assertNotIn(f"target/candidates/{PRODUCT_VERSION}", source)
                 self.assertIn("verify_release_prepackage_evidence", source)
                 self.assertNotIn("verify_release_" + "publication_evidence", source)
-                self.assertNotIn("target/candidates/0.5.0/" + "release", source)
-                self.assertNotIn("target/candidates/0.5.0/" + "signed", source)
+                self.assertNotIn("target/candidates/$CFW_PRODUCT_VERSION/" + "release", source)
+                self.assertNotIn("target/candidates/$CFW_PRODUCT_VERSION/" + "signed", source)
 
     def test_dmg_cli_has_no_caller_selected_output_roots(self) -> None:
         repository = Path(__file__).resolve().parents[2]

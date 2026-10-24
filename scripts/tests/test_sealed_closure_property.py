@@ -39,6 +39,7 @@ from scripts.publication.sealed_closure import (
     validate_sealed_closure,
 )
 from scripts.tests.release_property_snapshots import StrictReleasePropertySnapshots
+from scripts.release_build_identity import PRODUCT_VERSION
 
 REPOSITORY = Path(__file__).resolve().parent.parent.parent
 ACCEPT_CASES = 120
@@ -112,7 +113,7 @@ def _request(rng: random.Random, drop_physical: str | None = None) -> dict:
         pair = sorted((components[0]["id"], components[1]["id"]))
         relationships.append({"source": pair[0], "target": pair[1], "type": "DEPENDS_ON"})
     request = {
-        "product": {"name": "Clash for Mac", "version": "0.5.0", "build_number": "40000"},
+        "product": {"name": "Clash for Mac", "version": PRODUCT_VERSION, "build_number": "40000"},
         "commit": _sha(rng)[:40],
         "sbom": {
             "components": components,

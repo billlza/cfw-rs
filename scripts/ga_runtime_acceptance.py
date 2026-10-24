@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Seal and verify raw runtime evidence for the single v0.5.0 GA build.
+"""Seal and verify raw runtime evidence for the single active GA build.
 
 This module deliberately does not accept a caller-selected evidence path and it
 does not accept a list of boolean outcomes. Collection starts only after the

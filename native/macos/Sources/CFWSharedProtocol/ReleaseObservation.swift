@@ -158,18 +158,20 @@ public struct ReleaseObservationJournalDecision: Codable, Equatable, Sendable {
 }
 
 public struct ReleaseObservationCandidate: Codable, Equatable, Sendable {
-  static let releaseProductVersion = "0.5.0"
+  static let releaseProductVersion = "0.5.1"
+  /// Product versions whose observations stay admitted after their release.
+  static let historicalProductVersions: Set<String> = ["0.4.0", "0.5.0"]
 
   public let version: String
   public let buildNumber: String
 
   public init(version: String, buildNumber: String) throws {
-    // Preserve historical 0.4.0 observations and admit any canonical build of
-    // the current product version. Observation acceptance does not grant GA
+    // Preserve observations of historical product versions and admit any
+    // canonical build of them or of the current product version. Observation acceptance does not grant GA
     // eligibility: evidence consumers bind each observation to the frozen
     // candidate identity.
     guard
-      version == "0.4.0" || version == Self.releaseProductVersion,
+      Self.historicalProductVersions.contains(version) || version == Self.releaseProductVersion,
       !buildNumber.isEmpty, buildNumber.count <= 18,
       buildNumber.first != "0",
       buildNumber.utf8.allSatisfy({

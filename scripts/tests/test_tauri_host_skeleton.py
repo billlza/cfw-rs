@@ -15,7 +15,7 @@ from scripts.verify_candidate_bundle import (
     verify_macho,
     verify_unsigned_host_skeleton,
 )
-from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY, PRODUCT_VERSION
 from scripts.tests.release_identity_fixture import NEXT_GA_BUILD, retired_ga_builds
 
 
@@ -150,7 +150,7 @@ class TauriHostSkeletonRunnerTests(unittest.TestCase):
         )
 
     def test_unsigned_preview_mode_enables_real_components_and_refuses_wrong_build_before_tauri(self) -> None:
-        self.write_config({"version": "0.5.0", "bundle": {"macOS": {}}})
+        self.write_config({"version": PRODUCT_VERSION, "bundle": {"macOS": {}}})
         override = json.dumps({"bundle": {"macOS": {"bundleVersion": "50000"}}})
         good = self.run_contract(unsigned_preview=True, override=override,
                                  environment_updates={"CFW_BUILD_NUMBER": "50000"})
@@ -205,7 +205,7 @@ class TauriHostSkeletonRunnerTests(unittest.TestCase):
         self.assertNotIn("--no-sign", arguments)
 
     def test_release_build_is_explicit_and_does_not_enable_rejected_dashboard(self) -> None:
-        self.write_config({"version": "0.5.0", "bundle": {"macOS": {}}})
+        self.write_config({"version": PRODUCT_VERSION, "bundle": {"macOS": {}}})
         override = json.dumps({"bundle": {"macOS": {"bundleVersion": GA_BUILD}}})
         completed = self.run_contract(release=True, override=override, environment_updates={"CFW_BUILD_NUMBER": GA_BUILD})
         self.assertEqual(completed.returncode, 0, completed.stderr.decode())

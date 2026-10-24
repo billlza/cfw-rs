@@ -15,7 +15,7 @@ source "$repo_root/scripts/release_toolchain_contract.sh"
 readonly toolchain_root="${CFW_TOOLCHAIN_ROOT:-$repo_root/target/toolchains}"
 
 readonly expected_team_id="YKUPL7Z869"
-expected_version="0.5.0"
+expected_version="$CFW_PRODUCT_VERSION"
 readonly expected_app_id="com.bill.clashformac"
 readonly expected_extension_id="com.bill.clashformac.packet-tunnel"
 readonly expected_extension_wrapper="$expected_extension_id.systemextension"
@@ -369,10 +369,10 @@ configure_release_verification_context() {
   local app="$3"
   case "$context" in
     signing-attempt-work|signing-attempt-publish-ready|canonical-native-content)
-      expected_version="0.5.0"
+      expected_version="$CFW_PRODUCT_VERSION"
       expected_build_number="$CFW_GA_BUILD"
-      signing_preflight_manifest="$repo_root/target/candidates/0.5.0/ga/$CFW_GA_BUILD/profiles/signing-preflight.json"
-      pre_sign_native_products_root="$repo_root/target/candidates/0.5.0/ga/$CFW_GA_BUILD/native-products"
+      signing_preflight_manifest="$repo_root/target/candidates/$CFW_PRODUCT_VERSION/ga/$CFW_GA_BUILD/profiles/signing-preflight.json"
+      pre_sign_native_products_root="$repo_root/target/candidates/$CFW_PRODUCT_VERSION/ga/$CFW_GA_BUILD/native-products"
       ;;
     unsigned-host)
       die "release application verification rejects unsigned or pre-sign context"
@@ -390,7 +390,7 @@ configure_release_verification_context() {
       # evidence; never for a copy such as the DMG payload or another build.
       [[ "$context" == "canonical-native-content" ]] ||
         die "sealed notarization verification requires the canonical-native-content context"
-      [[ "$app" == "$repo_root/target/candidates/0.5.0/ga/$CFW_GA_BUILD/signed/Clash for Mac.app" ]] ||
+      [[ "$app" == "$repo_root/target/candidates/$CFW_PRODUCT_VERSION/ga/$CFW_GA_BUILD/signed/Clash for Mac.app" ]] ||
         die "sealed notarization verification is allowed only for the fixed GA signed app"
       ;;
     *)
@@ -842,7 +842,7 @@ app_version="$(plist_value "$app_path/Contents/Info.plist" CFBundleShortVersionS
 verify_bundle_security "$app_path" host "$expected_app_id"
 verify_bundle_security "$extension_path" packet-tunnel "$expected_extension_id"
 verify_bundle_security "$agent_path" proxy-agent "$expected_agent_id"
-# Every signed 0.5.0 release application carries the SwiftUI library.
+# Every signed release application carries the SwiftUI library.
 verify_native_ui_security "$app_path/Contents/Frameworks/libCFMNativeDashboard.dylib"
 
 macho_count=0

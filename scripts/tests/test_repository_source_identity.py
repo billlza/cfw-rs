@@ -502,14 +502,15 @@ class RepositorySourceIdentityTests(unittest.TestCase):
         # A tested CI head may differ from the frozen candidate in these
         # adapters, never in the GA identity, its ledgers or the predecessor
         # registry that decides which installation a GA build may replace.
+        # Every ledger in the tree, closed or active, is an allocation input.
+        ledgers = sorted(
+            path.relative_to(REPOSITORY).as_posix()
+            for path in (REPOSITORY / "docs/release").glob("build-allocations-v*.json")
+        )
+        self.assertTrue(ledgers)
         self.assertEqual(
-            ALLOCATION_INPUTS,
-            (
-                "scripts/release_identity.env",
-                "docs/release/build-allocations-v040.json",
-                "docs/release/build-allocations-v050.json",
-                "scripts/dormant_app_install.py",
-            ),
+            (ALLOCATION_INPUTS[0], sorted(ALLOCATION_INPUTS[1:-1]), ALLOCATION_INPUTS[-1]),
+            ("scripts/release_identity.env", ledgers, "scripts/dormant_app_install.py"),
         )
         self.assertEqual(
             frozenset(ALLOCATION_INPUTS) & source_identity.CI_VALIDATION_SOURCE_PATHS,

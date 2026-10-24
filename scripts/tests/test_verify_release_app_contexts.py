@@ -10,12 +10,13 @@ import sys
 import tempfile
 import unittest
 
-from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY, PRODUCT_VERSION
 from scripts.tests.release_app_verifier_fixture import (
     PRE_NOTARY_LINE,
     SEALED_NOTARIZATION_LINE,
     verifier_closing_lines,
 )
+from scripts.tests.test_ui_dependency_sealing import GRAPH_MODEL_MODULES
 
 
 GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
@@ -23,7 +24,7 @@ GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 VERIFIER = REPOSITORY / "scripts/verify_release_app.sh"
-GA_ROOT = REPOSITORY / f"target/candidates/0.5.0/ga/{GA_BUILD}"
+GA_ROOT = REPOSITORY / f"target/candidates/{PRODUCT_VERSION}/ga/{GA_BUILD}"
 FIXED_APP = GA_ROOT / "signed/Clash for Mac.app"
 NATIVE_PRODUCTS = GA_ROOT / "signing-output/signed-native-products"
 # Every call the stubbed tail makes, one line each, with bracketed arguments.
@@ -53,7 +54,7 @@ class ReleaseAppVerifierShellTests(unittest.TestCase):
         )
 
     def test_signed_contexts_select_the_fixed_ga_version_and_preflight_paths(self) -> None:
-        preflight = f"target/candidates/0.5.0/ga/{GA_BUILD}"
+        preflight = f"target/candidates/{PRODUCT_VERSION}/ga/{GA_BUILD}"
         for context in ("signing-attempt-work", "signing-attempt-publish-ready", "canonical-native-content"):
             with self.subTest(context=context):
                 result = self.run_function(
@@ -64,7 +65,7 @@ class ReleaseAppVerifierShellTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stdout.splitlines(), [
-                    "0.5.0", GA_BUILD, str(REPOSITORY / preflight / "profiles/signing-preflight.json"),
+                    PRODUCT_VERSION, GA_BUILD, str(REPOSITORY / preflight / "profiles/signing-preflight.json"),
                     str(REPOSITORY / preflight / "native-products"),
                 ])
 
@@ -101,7 +102,7 @@ class ReleaseAppVerifierShellTests(unittest.TestCase):
         for app in (
             # The DMG payload copy that make_dmg.sh verifies before imaging.
             str(GA_ROOT / "packages/dmg/dmg-stage.fixture/payload/Clash for Mac.app"),
-            str(REPOSITORY / f"target/candidates/0.5.0/ga/{other_build}/signed/Clash for Mac.app"),
+            str(REPOSITORY / f"target/candidates/{PRODUCT_VERSION}/ga/{other_build}/signed/Clash for Mac.app"),
             str(REPOSITORY / f"target/release-worktrees/{GA_BUILD}") + str(FIXED_APP)[len(str(REPOSITORY)):],
             str(GA_ROOT / "signed/../signed/Clash for Mac.app"),
             str(FIXED_APP) + "/",
@@ -129,7 +130,7 @@ class ReleaseAppVerifierShellTests(unittest.TestCase):
         # A copy of the verifier and every file it loads, so its fixed GA
         # paths point into an empty temporary checkout. Under the hosted
         # runner's unsigned-validation Xcode selection, loading also runs
-        # apple_validation_policy.py, which imports these publication modules.
+        # apple_validation_policy.py, which imports the graph model's modules.
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
             (root / "scripts/publication").mkdir(parents=True)
@@ -137,12 +138,11 @@ class ReleaseAppVerifierShellTests(unittest.TestCase):
                 "verify_release_app.sh", "dependency_pins.env", "release_identity.env",
                 "libbox_source_contract.sh", "release_toolchain_contract.sh",
                 "release_python_launcher.sh", "apple_validation_policy.sh",
-                "apple_validation_policy.py", "publication/__init__.py",
-                "publication/graph_model.py", "publication/common.py",
-                "publication/bounded_process.py",
+                "apple_validation_policy.py",
+                *(f"publication/{module}" for module in GRAPH_MODEL_MODULES),
             ):
                 shutil.copyfile(REPOSITORY / "scripts" / name, root / "scripts" / name)
-            ga_root = root / f"target/candidates/0.5.0/ga/{GA_BUILD}"
+            ga_root = root / f"target/candidates/{PRODUCT_VERSION}/ga/{GA_BUILD}"
             app = ga_root / "signed/Clash for Mac.app"
             native_products = ga_root / "signing-output/signed-native-products"
             for flags in ((), ("--pre-notary",), ("--sealed-notarization",)):

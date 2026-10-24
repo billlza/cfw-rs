@@ -1327,7 +1327,7 @@ class CurrentServiceTransactionTests(unittest.TestCase):
             # Earlier installs are no longer predecessors of any GA transaction.
             (CANDIDATE, install.AppIdentity("0.4.0", "40073", "a" * 64), "predecessor_unsupported"),
             # The GA build itself is never a predecessor.
-            (CANDIDATE, install.AppIdentity("0.5.0", GA_BUILD, "a" * 64), "predecessor_unsupported"),
+            (CANDIDATE, install.AppIdentity(install.VERSION, GA_BUILD, "a" * 64), "predecessor_unsupported"),
             (CANDIDATE, replace(PREVIOUS, tree_sha256="f" * 64), "predecessor_identity_mismatch"),
             (CANDIDATE, replace(PREVIOUS, version="0.4.0"), "install_identity_mismatch"),
             (

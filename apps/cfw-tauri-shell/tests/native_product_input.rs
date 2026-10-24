@@ -121,7 +121,8 @@ impl CandidateFixture {
     fn new() -> Self {
         let temporary = tempfile::tempdir().expect("create candidate fixture");
         let canonical_temporary = fs::canonicalize(temporary.path()).expect("resolve fixture root");
-        let candidate_root = canonical_temporary.join("target/candidates/0.5.0");
+        let candidate_root =
+            canonical_temporary.join(concat!("target/candidates/", env!("CARGO_PKG_VERSION")));
         for relative in [
             "unsigned/native-products".to_owned(),
             ga_pre_sign_relative(FIXTURE_BUILD),
@@ -306,7 +307,7 @@ fn a_ga_root_aliasing_another_build_is_rejected() {
 fn symlinked_candidate_component_is_rejected() {
     let temporary = tempfile::tempdir().expect("create symlink fixture");
     let root = fs::canonicalize(temporary.path()).expect("resolve fixture root");
-    let candidate_root = root.join("target/candidates/0.5.0");
+    let candidate_root = root.join(concat!("target/candidates/", env!("CARGO_PKG_VERSION")));
     let real_unsigned = root.join("real-unsigned/native-products");
     fs::create_dir_all(&candidate_root).expect("create candidate root");
     fs::create_dir_all(&real_unsigned).expect("create real output");

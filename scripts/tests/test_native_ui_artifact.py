@@ -287,7 +287,7 @@ class NativeUiArtifactTests(unittest.TestCase):
             library.chmod(0o755)
             resources(root / ui.RESOURCES)
             metadata = {key: "bound" for key in ui.METADATA_KEYS}
-            metadata.update(configuration="release", buildNumber=GA_BUILD, productVersion="0.5.0")
+            metadata.update(configuration="release", buildNumber=GA_BUILD, productVersion=identity.PRODUCT_VERSION)
             for name in (ui.LIBRARY, ui.RESOURCES):
                 manifest = root / (name + ".manifest.json")
                 manifest.write_text(json.dumps(build_manifest(root / name, metadata)))
@@ -312,7 +312,7 @@ class NativeUiArtifactTests(unittest.TestCase):
 
     def _release_metadata(self, signing: str) -> dict[str, str]:
         metadata = {key: "bound" for key in ui.METADATA_KEYS}
-        metadata.update(configuration="release", buildNumber=GA_BUILD, productVersion="0.5.0", signingMode=signing)
+        metadata.update(configuration="release", buildNumber=GA_BUILD, productVersion=identity.PRODUCT_VERSION, signingMode=signing)
         return metadata
 
     def _release_expected(self, metadata: dict[str, str]):

@@ -28,7 +28,7 @@ from scripts.tests.test_release_artifact_transaction import (
     publisher,
     verified_cargo_fixture,
 )
-from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY, PRODUCT_VERSION
 
 
 GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
@@ -63,7 +63,7 @@ class ReleaseVerifierCommandSessionTests(unittest.TestCase):
             "--repository",
             str(self.repository),
             "--version",
-            "0.5.0",
+            PRODUCT_VERSION,
         ]
         if command in {"verify-dmg", "verify-updater"}:
             arguments.extend(("--directory", str(self.repository / "set")))
@@ -315,7 +315,7 @@ class ReleaseVerifierCommandSessionTests(unittest.TestCase):
         arguments = [
             str(Path(dmg.__file__)), command,
             "--repository", str(self.repository),
-            "--version", "0.5.0", "--build-number", GA_BUILD,
+            "--version", PRODUCT_VERSION, "--build-number", GA_BUILD,
             "--notary-profile", NOTARY_PROFILE,
         ]
         if command == "start":
@@ -458,7 +458,7 @@ class ReleaseVerifierCommandSessionTests(unittest.TestCase):
 
     def test_dmg_preexisting_output_does_not_relabel_primary_failure(self) -> None:
         context = dmg.DmgContext(
-            repository=self.repository, version="0.5.0", build_number=GA_BUILD,
+            repository=self.repository, version=PRODUCT_VERSION, build_number=GA_BUILD,
             notary_profile=NOTARY_PROFILE, source_identity=SOURCE_IDENTITY,
         )
         context.final_root.mkdir(parents=True)
@@ -471,7 +471,7 @@ class ReleaseVerifierCommandSessionTests(unittest.TestCase):
 
     def test_dmg_unreadable_new_publication_state_preserves_unknown(self) -> None:
         context = dmg.DmgContext(
-            repository=self.repository, version="0.5.0", build_number=GA_BUILD,
+            repository=self.repository, version=PRODUCT_VERSION, build_number=GA_BUILD,
             notary_profile=NOTARY_PROFILE, source_identity=SOURCE_IDENTITY,
         )
         primary = artifacts.ArtifactSetError("post-publication verification failed")
@@ -524,7 +524,7 @@ class UpdaterProducerSessionTests(unittest.TestCase):
             with artifacts._updater_verification_session(fixture.root) as producer:
                 destination = artifacts.seal_updater_set(
                     fixture.staging, fixture.destination,
-                    version="0.5.0", source_identity=SEALED_SOURCE_IDENTITY,
+                    version=PRODUCT_VERSION, source_identity=SEALED_SOURCE_IDENTITY,
                     sealed_at=CLOCK, repository=fixture.root, publisher=publisher,
                     prepackage_stage_verifier=fixture.prepackage_stage,
                     updater_verification_producer=producer,
@@ -532,7 +532,7 @@ class UpdaterProducerSessionTests(unittest.TestCase):
                 self.assertEqual(invoke.call_count, 3)
                 artifacts.seal_updater_set(
                     fixture.staging, fixture.destination,
-                    version="0.5.0", source_identity=SEALED_SOURCE_IDENTITY,
+                    version=PRODUCT_VERSION, source_identity=SEALED_SOURCE_IDENTITY,
                     sealed_at=CLOCK, repository=fixture.root, publisher=publisher,
                     prepackage_stage_verifier=fixture.prepackage_stage,
                     updater_verification_producer=producer,

@@ -99,7 +99,7 @@ from scripts.tests.release_app_verifier_fixture import (
     complete_verifier_stderr,
     complete_verifier_stdout,
 )
-from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY, PRODUCT_VERSION
 
 
 GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
@@ -601,7 +601,7 @@ class PhysicalEvidenceFixture:
             else artifact_hash_manifest_sha256
         )
         self.candidate = {
-            "version": "0.5.0",
+            "version": PRODUCT_VERSION,
             "build_number": BUILD_NUMBER,
             "app_manifest_sha256": APP_MANIFEST,
             "signed_app_tree_sha256": signed_tree_sha256,
@@ -2327,7 +2327,7 @@ class PhysicalEvidenceFixture:
         identity_finished = identity_started + timedelta(seconds=1)
         identity_app = (
             "/fixture/repository/"
-            f"target/candidates/0.5.0/ga/{GA_BUILD}/signed/Clash for Mac.app"
+            f"target/candidates/{PRODUCT_VERSION}/ga/{GA_BUILD}/signed/Clash for Mac.app"
         )
         identity_stdout_bytes = complete_verifier_stdout(identity_app)
         identity_stderr_bytes = complete_verifier_stderr(identity_app)

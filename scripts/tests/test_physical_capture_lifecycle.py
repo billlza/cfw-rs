@@ -15,7 +15,7 @@ from scripts.physical_capture.session import (
     CaptureEvent,
     PhysicalCaptureSession,
 )
-from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY, PRODUCT_VERSION
 
 
 GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
@@ -85,7 +85,7 @@ class LifecycleCaptureBoundaryTests(unittest.TestCase):
             },
         }
         candidate = {
-            "version": "0.5.0",
+            "version": PRODUCT_VERSION,
             "build_number": GA_BUILD,
             "app_manifest_sha256": _sha256("app"),
             "signed_app_tree_sha256": _sha256("tree"),

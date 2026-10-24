@@ -6,7 +6,8 @@ from urllib.parse import quote
 
 from .cargo_collector import CollectorResult
 from .common import PublicationError, load_json
-from .graph_model import ComponentSeed, RELEASE_VERSION, merge_seed, seed
+from .graph_model import ComponentSeed, merge_seed, seed
+from .release_contract import RELEASE_VERSION
 
 
 def _package_name(input_path: str) -> str | None:

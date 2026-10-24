@@ -71,7 +71,7 @@ from scripts.dormant_app_install import (
     resolve_predecessor,
     select_active_predecessor,
 )
-from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY, PRODUCT_VERSION
 from scripts.tests.release_identity_fixture import next_patch
 
 
@@ -80,12 +80,16 @@ from scripts.tests.release_identity_fixture import next_patch
 # tree digest, so an invented digest would be rejected as a tampered bundle.
 GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
 # Append-only: the canonical-JSON digest of each registered preview-lineage
-# predecessor profile, so the frozen tree identities stay stated only in the
-# registry. The allocation audit keeps GA-role builds out of this file; their
-# profiles are checked against the installed signed tree at admission, which
-# fails closed before any mutation.
+# predecessor profile and of each profile of a closed product version, so the
+# frozen tree identities stay stated only in the registry. The allocation
+# audit keeps the active ledger's GA builds out of this file; their profiles
+# are checked against the installed signed tree at admission, which fails
+# closed before any mutation.
 RETAINED_PREDECESSOR_DIGESTS = {
     "50025": "5d21d6a9fd40e05a466d9a8fc9103c9fdabb6e7d84b7c5bd1ae1b80d56d8daa4",
+    "50028": "28a57f3a6d89cae9bfa7378e2be7b445b6a929a0acaf3e4158abc5b1898e9ff1",
+    "50029": "b86784f7d95d73a48735144e7377d9920c1acddbd60bea4612ed310005b9bc45",
+    "50030": "c3f3734fdcecaf13a8531945f765b7d9aa00c02a727a84966e0301f11728224a",
 }
 OLD = AppIdentity(
     ACTIVE_PREDECESSOR.product_version,
@@ -260,7 +264,7 @@ class DormantInstallFixture:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.repository = self.root / "repository"
-        self.candidate = self.repository / "target/candidates/0.5.0/signed" / TARGET_NAME
+        self.candidate = self.repository / f"target/candidates/{install.VERSION}/signed" / TARGET_NAME
         self.parent = self.root / "Applications"
         self.target = self.parent / TARGET_NAME
         self.candidate.mkdir(parents=True)
@@ -1210,13 +1214,13 @@ class DormantInstallValidationTests(unittest.TestCase):
         )
         self.assertTrue(
             str(paths.candidate_app).endswith(
-                f"/target/candidates/0.5.0/ga/{GA_BUILD}/signed/Clash for Mac.app"
+                f"/target/candidates/{PRODUCT_VERSION}/ga/{GA_BUILD}/signed/Clash for Mac.app"
             )
         )
         self.assertEqual(
             paths.profile.native_products_relative,
             Path(
-                f"target/candidates/0.5.0/ga/{GA_BUILD}/signing-output/signed-native-products"
+                f"target/candidates/{PRODUCT_VERSION}/ga/{GA_BUILD}/signing-output/signed-native-products"
             ),
         )
         self.assertEqual(paths.journal_name, JOURNAL_NAME)
@@ -1294,7 +1298,7 @@ class DormantInstallValidationTests(unittest.TestCase):
             # to its own product version; the active GA profile does not read it.
             validate_journal(document, historical)
             self.assertEqual(GA_INSTALL_PROFILE.product_version, install.VERSION)
-            for profile in (GA_INSTALL_PROFILE, replace(historical, product_version="0.5.0")):
+            for profile in (GA_INSTALL_PROFILE, replace(historical, product_version=install.VERSION)):
                 with self.subTest(profile=(profile.product_version, profile.build_number)):
                     with self.assertRaises(InstallError) as captured:
                         validate_journal(document, profile)
@@ -1440,7 +1444,7 @@ class DormantInstallValidationTests(unittest.TestCase):
         paths = InstallPaths.production()
         self.assertTrue(
             paths.candidate_app.as_posix().endswith(
-                f"/target/candidates/0.5.0/ga/{GA_BUILD}/signed/Clash for Mac.app"
+                f"/target/candidates/{PRODUCT_VERSION}/ga/{GA_BUILD}/signed/Clash for Mac.app"
             )
         )
 
@@ -1768,29 +1772,36 @@ class InstallPredecessorTests(unittest.TestCase):
         version = ACTIVE_RELEASE_IDENTITY.product_version
         self.assertIs(SUPPORTED_PREDECESSORS[ACTIVE_PREDECESSOR.build_number], ACTIVE_PREDECESSOR)
         self.assertEqual(
-            select_active_predecessor(
-                SUPPORTED_PREDECESSORS, version, ACTIVE_RELEASE_IDENTITY.ga_build
-            ),
+            select_active_predecessor(SUPPORTED_PREDECESSORS, ACTIVE_RELEASE_IDENTITY.ga_build),
             ACTIVE_PREDECESSOR,
         )
-        oldest, older, newer_other_version, numeric_not_lexical = (
+        # Builds increase across product versions: until one of its own GA
+        # builds is installed, a product version replaces the release of the
+        # previous one.
+        previous_release, oldest, older, numeric_not_lexical = (
+            PredecessorProfile("0.4.0", "40004", "4" * 64),
             PredecessorProfile(version, "70001", "1" * 64),
             PredecessorProfile(version, "70003", "3" * 64),
-            PredecessorProfile("0.4.0", "70004", "4" * 64),
             PredecessorProfile(version, "800", "8" * 64),
         )
         registry = MappingProxyType(
             {
                 profile.build_number: profile
-                for profile in (oldest, older, newer_other_version, numeric_not_lexical)
+                for profile in (previous_release, oldest, older, numeric_not_lexical)
             }
         )
-        for ga_build, expected in (("70005", older), ("70003", oldest), ("70002", oldest)):
+        for ga_build, expected in (
+            ("70005", older),
+            ("70003", oldest),
+            ("70002", oldest),
+            ("70001", previous_release),
+            ("40005", previous_release),
+        ):
             with self.subTest(ga_build=ga_build):
-                self.assertEqual(select_active_predecessor(registry, version, ga_build), expected)
-        self.assertEqual(select_active_predecessor(registry, version, "70001"), numeric_not_lexical)
+                self.assertEqual(select_active_predecessor(registry, ga_build), expected)
+        self.assertEqual(select_active_predecessor(registry, "40004"), numeric_not_lexical)
         with self.assertRaises(InstallError) as raised:
-            select_active_predecessor(registry, version, "800")
+            select_active_predecessor(registry, "800")
         self.assertEqual(raised.exception.code, "predecessor_registry_invalid")
 
     def test_active_predecessor_requires_its_retained_exact_signed_tree(self) -> None:
@@ -1902,9 +1913,7 @@ class InstallPredecessorTests(unittest.TestCase):
         ):
             with self.subTest(registry=registry):
                 with self.assertRaises(InstallError) as raised:
-                    select_active_predecessor(
-                        MappingProxyType(registry), version, "70005"
-                    )
+                    select_active_predecessor(MappingProxyType(registry), "70005")
                 self.assertEqual(raised.exception.code, "predecessor_registry_invalid")
 
     def test_service_event_contract_is_the_current_vocabulary_at_every_event(self) -> None:

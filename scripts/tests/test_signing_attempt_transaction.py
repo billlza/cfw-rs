@@ -15,6 +15,7 @@ from scripts.publication import durable_file
 from scripts.publication.common import PublicationError
 from scripts import signing_attempt_transaction as transaction
 from scripts import updater_key_possession_proof as possession
+from scripts.release_build_identity import PRODUCT_VERSION
 
 
 class SigningAttemptFixture:
@@ -23,7 +24,7 @@ class SigningAttemptFixture:
         self.repository = Path(self.temporary.name).resolve()
         build_number = transaction.ACTIVE_RELEASE_IDENTITY.ga_build
         self.root = (
-            self.repository / f"target/candidates/0.5.0/ga/{build_number}"
+            self.repository / f"target/candidates/{PRODUCT_VERSION}/ga/{build_number}"
         )
         self.root.mkdir(parents=True, mode=0o700)
         self.root.chmod(0o700)
@@ -35,7 +36,7 @@ class SigningAttemptFixture:
             root=self.root,
             intent_path=intent,
             intent_sha256="a" * 64,
-            product_version="0.5.0",
+            product_version=PRODUCT_VERSION,
             build_number=build_number,
             recovered=False,
         )

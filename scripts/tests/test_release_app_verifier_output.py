@@ -15,14 +15,14 @@ from scripts.tests.release_app_verifier_fixture import (
     pre_notary_verifier_stdout,
     sealed_verifier_stdout,
 )
-from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY, PRODUCT_VERSION
 
 
 GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
 
 
-APP = f"/private/tmp/release/target/candidates/0.5.0/ga/{GA_BUILD}/signed/Clash for Mac.app"
-APP_SUFFIX = f"/target/candidates/0.5.0/ga/{GA_BUILD}/signed/Clash for Mac.app"
+APP = f"/private/tmp/release/target/candidates/{PRODUCT_VERSION}/ga/{GA_BUILD}/signed/Clash for Mac.app"
+APP_SUFFIX = f"/target/candidates/{PRODUCT_VERSION}/ga/{GA_BUILD}/signed/Clash for Mac.app"
 FRAMEWORK_CURRENT = (
     APP + "/Contents/Frameworks/CFWNativeBridge.framework/Versions/Current/."
 )

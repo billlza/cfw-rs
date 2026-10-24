@@ -7,7 +7,6 @@ from .cargo_collector import collect_cargo
 from .common import PublicationError
 from .go_collector import collect_go
 from .graph_model import (
-    RELEASE_VERSION,
     CollectedGraphs,
     ComponentSeed,
     canonical_graph_bytes,
@@ -16,6 +15,7 @@ from .graph_model import (
 )
 from .native_collector import collect_native, collect_toolchains
 from .npm_collector import collect_npm
+from .release_contract import RELEASE_VERSION
 
 
 def collect_all(

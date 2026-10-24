@@ -264,8 +264,9 @@ build the four immutable native products in a candidate-specific directory:
 ./scripts/run_release_ci_gate.sh verify-xcode-project
 ./scripts/run_release_ci_gate.sh build-script-boundary
 
+source scripts/release_identity.env
 export CFW_BUILD_NUMBER=40000
-export CFW_NATIVE_PRODUCTS_OUTPUT="$PWD/target/candidates/0.5.0/native-validation/40000/native-products"
+export CFW_NATIVE_PRODUCTS_OUTPUT="$PWD/target/candidates/$CFW_PRODUCT_VERSION/native-validation/40000/native-products"
 ./scripts/run_release_ci_gate.sh build-native-products-unsigned
 ./scripts/run_release_ci_gate.sh xcode-unsigned-test
 ```

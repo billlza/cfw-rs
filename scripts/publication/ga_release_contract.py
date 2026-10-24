@@ -1,4 +1,4 @@
-"""Read-only three-stage release contract for the single v0.5.0 GA identity.
+"""Read-only three-stage release contract for the single active GA identity.
 
 The only production state transition is::
 

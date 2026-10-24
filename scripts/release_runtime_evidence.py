@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate physical-machine bounded recovery evidence for a 0.5.0 candidate."""
+"""Validate physical-machine bounded recovery evidence for an active-release candidate."""
 
 from __future__ import annotations
 
@@ -11,9 +11,9 @@ import re
 from typing import Any
 
 if __package__:
-    from .release_build_identity import canonical_build_version
+    from .release_build_identity import PRODUCT_VERSION, canonical_build_version
 else:
-    from release_build_identity import canonical_build_version
+    from release_build_identity import PRODUCT_VERSION, canonical_build_version
 
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -136,8 +136,8 @@ def validate_runtime_evidence(value: Any) -> dict[str, Any]:
     if type(document["schema_version"]) is not int or document["schema_version"] != 1:
         raise RuntimeEvidenceError("runtime evidence schema_version must be 1")
     product = _exact(document["product"], {"version", "build_number"}, "product")
-    if product["version"] != "0.5.0":
-        raise RuntimeEvidenceError("runtime evidence is not for version 0.5.0")
+    if product["version"] != PRODUCT_VERSION:
+        raise RuntimeEvidenceError(f"runtime evidence is not for version {PRODUCT_VERSION}")
     canonical_build_version(product["build_number"], "runtime evidence build_number")
     _sha256(document["app_manifest_sha256"], "app_manifest_sha256")
     _timestamp(document["captured_at"])
@@ -273,7 +273,7 @@ def main() -> None:
         raise SystemExit(f"error: runtime recovery evidence failed: {error}") from error
     print(
         "runtime recovery evidence verified: "
-        f"0.5.0 ({document['product']['build_number']}), {len(document['cases'])} cases"
+        f"{PRODUCT_VERSION} ({document['product']['build_number']}), {len(document['cases'])} cases"
     )
 
 

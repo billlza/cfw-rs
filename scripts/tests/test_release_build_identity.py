@@ -32,8 +32,9 @@ from scripts.release_build_identity import (
     ga_signed_root,
     ga_signed_native_products_root,
     ga_signing_attempt_output_root,
-    load_active_ga_build,
+    load_release_identity,
 )
+from scripts.release_git import run_release_git
 from scripts.tests.release_identity_fixture import (
     NEXT_GA_BUILD,
     noncanonical,
@@ -44,94 +45,173 @@ from scripts.tests.release_identity_fixture import (
 GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
 # The signed builder derives CFW_BUILD_NUMBER from the release identity
 # between these two lines, before it creates any candidate directory.
-SIGNED_BUILDER_DERIVATION_START = 'active_ga_build="$(PYTHONDONTWRITEBYTECODE=1 '
+SIGNED_BUILDER_DERIVATION_START = 'release_identity="$(PYTHONDONTWRITEBYTECODE=1 '
 SIGNED_BUILDER_DERIVATION_END = 'export CFW_BUILD_NUMBER="$active_ga_build"'
 
 
 class ReleaseIdentityFileTests(unittest.TestCase):
-    """The active GA build is read only from the byte-strict identity file."""
+    """The active product version and GA build are read only from the
+    byte-strict identity file."""
+
+    VERSION = b"CFW_PRODUCT_VERSION=7.0.1\n"
 
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.path = Path(temporary.name) / "release_identity.env"
 
-    def load(self, data: bytes) -> str:
+    def load(self, data: bytes) -> ReleaseIdentity:
         self.path.write_bytes(data)
-        return load_active_ga_build(self.path)
+        return load_release_identity(self.path)
 
-    def test_active_identity_is_the_identity_file_build(self) -> None:
+    def test_active_identity_is_the_identity_file_record(self) -> None:
         self.assertEqual(
             RELEASE_IDENTITY_PATH,
             Path(release_build_identity.__file__).resolve().parent / "release_identity.env",
         )
+        self.assertEqual(ACTIVE_RELEASE_IDENTITY, load_release_identity(RELEASE_IDENTITY_PATH))
+        self.assertEqual(PRODUCT_VERSION, ACTIVE_RELEASE_IDENTITY.product_version)
         self.assertEqual(
-            ACTIVE_RELEASE_IDENTITY,
-            ReleaseIdentity(PRODUCT_VERSION, load_active_ga_build(RELEASE_IDENTITY_PATH)),
-        )
-        self.assertEqual(
-            RELEASE_IDENTITY_PATH.read_bytes().splitlines()[-1],
-            f"CFW_GA_BUILD={GA_BUILD}".encode("ascii"),
+            RELEASE_IDENTITY_PATH.read_bytes().splitlines()[-2:],
+            [
+                f"CFW_PRODUCT_VERSION={PRODUCT_VERSION}".encode("ascii"),
+                f"CFW_GA_BUILD={GA_BUILD}".encode("ascii"),
+            ],
         )
 
-    def test_identity_file_admits_full_line_comments_and_one_assignment(self) -> None:
-        for data, build in (
-            (b"CFW_GA_BUILD=70001\n", "70001"),
-            (b"# comment\n#\nCFW_GA_BUILD=70001\n", "70001"),
-            (b"CFW_GA_BUILD=9223372036854775807\n", "9223372036854775807"),
+    def test_identity_file_admits_full_line_comments_and_one_record(self) -> None:
+        for data, identity in (
+            (self.VERSION + b"CFW_GA_BUILD=70001\n", ("7.0.1", "70001")),
+            (b"# comment\n#\n" + self.VERSION + b"CFW_GA_BUILD=70001\n", ("7.0.1", "70001")),
+            (b"CFW_PRODUCT_VERSION=0.0.0\nCFW_GA_BUILD=9223372036854775807\n",
+             ("0.0.0", "9223372036854775807")),
+            (b"CFW_PRODUCT_VERSION=999999999.999999999.999999999\nCFW_GA_BUILD=1\n",
+             ("999999999.999999999.999999999", "1")),
         ):
             with self.subTest(data=data):
-                self.assertEqual(self.load(data), build)
+                self.assertEqual(self.load(data), ReleaseIdentity(*identity))
 
     def test_identity_file_rejects_every_noncanonical_shape(self) -> None:
+        version = self.VERSION
         for data in (
             b"",
-            b"CFW_GA_BUILD=70001",
-            b"CFW_GA_BUILD=70001\r\n",
-            b"# comment\r\nCFW_GA_BUILD=70001\n",
-            b"CFW_GA_BUILD=70001\n\n",
-            b"\nCFW_GA_BUILD=70001\n",
-            b"CFW_GA_BUILD=70001\nCFW_GA_BUILD=70002\n",
-            b"CFW_GA_BUILD=70001\n# trailing comment\n",
-            b" CFW_GA_BUILD=70001\n",
-            b"CFW_GA_BUILD = 70001\n",
-            b"export CFW_GA_BUILD=70001\n",
-            b"CFW_GA_BUILD=\"70001\"\n",
-            b"CFW_GA_BUILD=070001\n",
-            b"CFW_GA_BUILD=0\n",
-            b"CFW_GA_BUILD=+70001\n",
-            b"CFW_GA_BUILD=70001 # active\n",
-            b"CFW_GA_BUILD=\n",
-            b"cfw_ga_build=70001\n",
-            "# caf\u00e9\nCFW_GA_BUILD=70001\n".encode("utf-8"),
-            b"#\tcomment\nCFW_GA_BUILD=70001\n",
-            b"CFW_GA_BUILD=12345678901234567890\n",
-            b"\xef\xbb\xbfCFW_GA_BUILD=70001\n",
+            version + b"CFW_GA_BUILD=70001",
+            version + b"CFW_GA_BUILD=70001\r\n",
+            b"# comment\r\n" + version + b"CFW_GA_BUILD=70001\n",
+            version + b"CFW_GA_BUILD=70001\n\n",
+            b"\n" + version + b"CFW_GA_BUILD=70001\n",
+            version + b"CFW_GA_BUILD=70001\nCFW_GA_BUILD=70002\n",
+            version + b"CFW_GA_BUILD=70001\n# trailing comment\n",
+            version + b" CFW_GA_BUILD=70001\n",
+            version + b"CFW_GA_BUILD = 70001\n",
+            version + b"export CFW_GA_BUILD=70001\n",
+            version + b"CFW_GA_BUILD=\"70001\"\n",
+            version + b"CFW_GA_BUILD=070001\n",
+            version + b"CFW_GA_BUILD=0\n",
+            version + b"CFW_GA_BUILD=+70001\n",
+            version + b"CFW_GA_BUILD=70001 # active\n",
+            version + b"CFW_GA_BUILD=\n",
+            version + b"cfw_ga_build=70001\n",
+            "# caf\u00e9\n".encode("utf-8") + version + b"CFW_GA_BUILD=70001\n",
+            b"#\tcomment\n" + version + b"CFW_GA_BUILD=70001\n",
+            version + b"CFW_GA_BUILD=12345678901234567890\n",
+            b"\xef\xbb\xbf" + version + b"CFW_GA_BUILD=70001\n",
             b"# only a comment\n",
+            # The product version line: present, first, once and exact.
+            b"CFW_GA_BUILD=70001\n",
+            version,
+            b"CFW_GA_BUILD=70001\n" + version,
+            version + version + b"CFW_GA_BUILD=70001\n",
+            version + b"# between\nCFW_GA_BUILD=70001\n",
+            b"CFW_PRODUCT_VERSION=7.0\nCFW_GA_BUILD=70001\n",
+            b"CFW_PRODUCT_VERSION=7.0.1.2\nCFW_GA_BUILD=70001\n",
+            b"CFW_PRODUCT_VERSION=v7.0.1\nCFW_GA_BUILD=70001\n",
+            b"CFW_PRODUCT_VERSION=7.0.1-beta\nCFW_GA_BUILD=70001\n",
+            b"CFW_PRODUCT_VERSION=7.0.1 \nCFW_GA_BUILD=70001\n",
+            b"CFW_PRODUCT_VERSION=\"7.0.1\"\nCFW_GA_BUILD=70001\n",
+            b"CFW_PRODUCT_VERSION=1234567890.0.0\nCFW_GA_BUILD=70001\n",
+            b"CFW_PRODUCT_VERSION=7..1\nCFW_GA_BUILD=70001\n",
+            b"cfw_product_version=7.0.1\nCFW_GA_BUILD=70001\n",
         ):
             with self.subTest(data=data), self.assertRaisesRegex(
                 BuildIdentityError,
-                f"not one canonical CFW_GA_BUILD record: {re.escape(str(self.path))}",
+                "not one canonical CFW_PRODUCT_VERSION and CFW_GA_BUILD record: "
+                f"{re.escape(str(self.path))}",
+            ):
+                self.load(data)
+        for data in (
+            b"CFW_PRODUCT_VERSION=07.0.1\nCFW_GA_BUILD=70001\n",
+            b"CFW_PRODUCT_VERSION=7.00.1\nCFW_GA_BUILD=70001\n",
+            b"CFW_PRODUCT_VERSION=7.0.01\nCFW_GA_BUILD=70001\n",
+        ):
+            with self.subTest(data=data), self.assertRaisesRegex(
+                BuildIdentityError,
+                f"CFW_PRODUCT_VERSION in {re.escape(str(self.path))} must be one "
+                "canonical MAJOR.MINOR.PATCH version",
             ):
                 self.load(data)
         with self.assertRaisesRegex(
             BuildIdentityError,
             f"CFW_GA_BUILD in {re.escape(str(self.path))} exceeds the signed 64-bit",
         ):
-            self.load(b"CFW_GA_BUILD=9223372036854775808\n")
+            self.load(version + b"CFW_GA_BUILD=9223372036854775808\n")
 
     def test_a_missing_identity_file_names_its_path(self) -> None:
         with self.assertRaisesRegex(
             BuildIdentityError, f"unavailable: {re.escape(str(self.path))}"
         ) as raised:
-            load_active_ga_build(self.path)
+            load_release_identity(self.path)
         self.assertIsInstance(raised.exception.__cause__, FileNotFoundError)
         self.path.mkdir()
         with self.assertRaisesRegex(
             BuildIdentityError, f"unavailable: {re.escape(str(self.path))}"
         ) as raised:
-            load_active_ga_build(self.path)
+            load_release_identity(self.path)
         self.assertIsInstance(raised.exception.__cause__, IsADirectoryError)
+
+
+# The release tools may name the active product version only in the identity
+# file, in the allocation ledger policies, which hold every product version's
+# history, and in the install-predecessor registry, whose profiles carry the
+# product version they were installed as.
+PRODUCT_VERSION_FILES = frozenset(
+    {
+        RELEASE_IDENTITY_PATH.relative_to(RELEASE_IDENTITY_PATH.parents[1]).as_posix(),
+        "scripts/verify_release_build_allocations.py",
+        "scripts/dormant_app_install.py",
+    }
+)
+# Third-party inputs: upstream patches and lock files, licenses and fixtures.
+THIRD_PARTY_PREFIXES = ("scripts/tests/fixtures/",)
+THIRD_PARTY_SUFFIXES = (".patch",)
+
+
+def release_tool_files_naming(version: str) -> list[str]:
+    """The tracked release-tool files that name `version` as a whole version."""
+
+    repository = RELEASE_IDENTITY_PATH.parents[1]
+    listing = run_release_git(
+        repository,
+        ["ls-files", "-z", "--cached", "--", "scripts", ".github"],
+        protected_roots=("scripts", ".github"),
+    )
+    pattern = re.compile(rb"(?<![0-9.])" + re.escape(version.encode("ascii")) + rb"(?![0-9])")
+    return sorted(
+        relative
+        for raw in filter(None, listing.split(b"\0"))
+        if not (relative := raw.decode("utf-8")).startswith(THIRD_PARTY_PREFIXES)
+        and not relative.endswith(THIRD_PARTY_SUFFIXES)
+        and pattern.search((repository / relative).read_bytes())
+    )
+
+
+class ProductVersionLiteralAuditTests(unittest.TestCase):
+    """A new product version changes the identity file, not the release tools."""
+
+    def test_no_release_tool_names_the_active_product_version(self) -> None:
+        named = release_tool_files_naming(PRODUCT_VERSION)
+        self.assertIn(RELEASE_IDENTITY_PATH.relative_to(RELEASE_IDENTITY_PATH.parents[1]).as_posix(), named)
+        self.assertEqual(sorted(set(named) - PRODUCT_VERSION_FILES), [])
 
 
 class ReleaseBuildIdentityTests(unittest.TestCase):
@@ -141,12 +221,14 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
             ReleaseIdentity(PRODUCT_VERSION, GA_BUILD),
         )
 
-    def test_release_identity_rejects_version_or_build_drift(self) -> None:
+    def test_release_identity_rejects_a_noncanonical_version_or_build(self) -> None:
         for identity in (
-            ("0.4.1", GA_BUILD),
+            (f"0{PRODUCT_VERSION}", GA_BUILD),
+            (PRODUCT_VERSION.rsplit(".", 1)[0], GA_BUILD),
+            (f"{PRODUCT_VERSION}.0", GA_BUILD),
+            (f"v{PRODUCT_VERSION}", GA_BUILD),
             (PRODUCT_VERSION, noncanonical(GA_BUILD)),
-            ("0.5.0", "040049"),
-            ("0.5.0", "0"),
+            (PRODUCT_VERSION, "0"),
         ):
             with self.subTest(identity=identity), self.assertRaises(
                 BuildIdentityError
@@ -168,7 +250,7 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
         root: Path,
         builds: tuple[str, str, str, str],
         *,
-        version: str = "0.5.0",
+        version: str = PRODUCT_VERSION,
     ) -> Path:
         app = root / "Clash for Mac.app"
         paths = self.identity_plists(app)
@@ -413,7 +495,7 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
                 replacement.write_bytes(
                     plistlib.dumps(
                         {
-                            "CFBundleShortVersionString": "0.5.0",
+                            "CFBundleShortVersionString": PRODUCT_VERSION,
                             "CFBundleVersion": "40002",
                         }
                     )
@@ -498,26 +580,26 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
         repository = Path("/repo")
         self.assertEqual(
             ga_preflight_root(repository),
-            Path(f"/repo/target/candidates/0.5.0/ga-preflight/{GA_BUILD}"),
+            Path(f"/repo/target/candidates/{PRODUCT_VERSION}/ga-preflight/{GA_BUILD}"),
         )
         self.assertEqual(
             ga_root(repository),
-            Path(f"/repo/target/candidates/0.5.0/ga/{GA_BUILD}"),
+            Path(f"/repo/target/candidates/{PRODUCT_VERSION}/ga/{GA_BUILD}"),
         )
         self.assertEqual(
             ga_pre_sign_native_products_root(repository),
             Path(
-                f"/repo/target/candidates/0.5.0/ga-preflight/{GA_BUILD}/native-products"
+                f"/repo/target/candidates/{PRODUCT_VERSION}/ga-preflight/{GA_BUILD}/native-products"
             ),
         )
         self.assertEqual(
             ga_signed_root(repository),
-            Path(f"/repo/target/candidates/0.5.0/ga/{GA_BUILD}/signed"),
+            Path(f"/repo/target/candidates/{PRODUCT_VERSION}/ga/{GA_BUILD}/signed"),
         )
         self.assertEqual(
             ga_signed_native_products_root(repository),
             Path(
-                f"/repo/target/candidates/0.5.0/ga/{GA_BUILD}/signing-output/signed-native-products"
+                f"/repo/target/candidates/{PRODUCT_VERSION}/ga/{GA_BUILD}/signing-output/signed-native-products"
             ),
         )
 
@@ -640,14 +722,17 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
             for name in ("release_build_identity.py", "release_regular_file.py"):
                 (scripts / name).write_bytes((repository / "scripts" / name).read_bytes())
             (scripts / "release_identity.env").write_bytes(
+                f"CFW_PRODUCT_VERSION={PRODUCT_VERSION}\n"
                 f"CFW_GA_BUILD={noncanonical(GA_BUILD)}\n".encode("ascii")
             )
             completed = self.run_signed_builder_derivation(None, identity_repository)
         self.assertEqual(completed.returncode, 1)
         self.assertEqual(completed.stdout, "")
-        self.assertIn("not one canonical CFW_GA_BUILD record", completed.stderr)
         self.assertIn(
-            "cannot read the active GA build from scripts/release_identity.env",
+            "not one canonical CFW_PRODUCT_VERSION and CFW_GA_BUILD record", completed.stderr
+        )
+        self.assertIn(
+            "cannot read the active release identity from scripts/release_identity.env",
             completed.stderr,
         )
 
@@ -714,7 +799,7 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
             accepted = (
                 (
                     UNSIGNED_VALIDATION_BUILD,
-                    repository / "target/candidates/0.5.0/unsigned/native-products",
+                    repository / f"target/candidates/{PRODUCT_VERSION}/unsigned/native-products",
                 ),
                 (
                     ACTIVE_RELEASE_IDENTITY.ga_build,
@@ -737,62 +822,62 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
                 (
                     GA_BUILD,
                     repository
-                    / f"target/candidates/0.5.0/validation/{GA_BUILD}/native-products",
+                    / f"target/candidates/{PRODUCT_VERSION}/validation/{GA_BUILD}/native-products",
                 ),
                 (
                     GA_BUILD,
                     repository
-                    / f"target/candidates/0.5.0/release-build/{GA_BUILD}/native-products",
+                    / f"target/candidates/{PRODUCT_VERSION}/release-build/{GA_BUILD}/native-products",
                 ),
                 (
                     "40030",
                     repository
-                    / "target/candidates/0.5.0/ga-preflight/40030/native-products",
+                    / f"target/candidates/{PRODUCT_VERSION}/ga-preflight/40030/native-products",
                 ),
                 (
                     "40031",
                     repository
-                    / "target/candidates/0.5.0/ga-preflight/40031/native-products",
+                    / f"target/candidates/{PRODUCT_VERSION}/ga-preflight/40031/native-products",
                 ),
                 (
                     "40032",
                     repository
-                    / "target/candidates/0.5.0/ga-preflight/40032/native-products",
+                    / f"target/candidates/{PRODUCT_VERSION}/ga-preflight/40032/native-products",
                 ),
                 (
                     "40033",
                     repository
-                    / "target/candidates/0.5.0/ga-preflight/40033/native-products",
+                    / f"target/candidates/{PRODUCT_VERSION}/ga-preflight/40033/native-products",
                 ),
                 (
                     "40034",
                     repository
-                    / "target/candidates/0.5.0/ga-preflight/40034/native-products",
+                    / f"target/candidates/{PRODUCT_VERSION}/ga-preflight/40034/native-products",
                 ),
                 (
                     "40035",
                     repository
-                    / "target/candidates/0.5.0/ga-preflight/40035/native-products",
+                    / f"target/candidates/{PRODUCT_VERSION}/ga-preflight/40035/native-products",
                 ),
                 (
                     "40036",
                     repository
-                    / "target/candidates/0.5.0/ga-preflight/40036/native-products",
+                    / f"target/candidates/{PRODUCT_VERSION}/ga-preflight/40036/native-products",
                 ),
                 (
                     "40037",
                     repository
-                    / "target/candidates/0.5.0/ga-preflight/40037/native-products",
+                    / f"target/candidates/{PRODUCT_VERSION}/ga-preflight/40037/native-products",
                 ),
                 (
                     "40038",
                     repository
-                    / "target/candidates/0.5.0/ga-preflight/40038/native-products",
+                    / f"target/candidates/{PRODUCT_VERSION}/ga-preflight/40038/native-products",
                 ),
                 (
                     GA_BUILD,
                     repository
-                    / "target/candidates/0.5.0/ga-preflight/../../../../tmp/escape/native-products",
+                    / f"target/candidates/{PRODUCT_VERSION}/ga-preflight/../../../../tmp/escape/native-products",
                 ),
             )
             for build, output in rejected:
@@ -806,7 +891,7 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
                 candidate_native_products_output(
                     repository,
                     str(repository)
-                    + f"/target/candidates/0.5.0/ga-preflight//{GA_BUILD}/native-products",
+                    + f"/target/candidates/{PRODUCT_VERSION}/ga-preflight//{GA_BUILD}/native-products",
                     GA_BUILD,
                 )
 
@@ -1071,7 +1156,7 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
             with (
                 patch(
                     "scripts.release_build_identity.bundle_build_identity",
-                    return_value=BundleBuildIdentity("0.5.0", GA_BUILD),
+                    return_value=BundleBuildIdentity(PRODUCT_VERSION, GA_BUILD),
                 ),
                 patch(
                     "scripts.release_build_identity.os.geteuid",

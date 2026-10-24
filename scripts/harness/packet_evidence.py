@@ -25,6 +25,7 @@ from types import MappingProxyType
 from typing import Any
 
 if __package__:
+    from ..release_build_identity import PRODUCT_VERSION
     from .physical_machine_identity import (
         PhysicalMachineIdentityError,
         validate_physical_hardware_model,
@@ -56,6 +57,8 @@ else:  # pragma: no cover - direct-script import path
     import sys
 
     sys.path.insert(0, str(Path(__file__).resolve().parent))
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from release_build_identity import PRODUCT_VERSION  # type: ignore
     from physical_machine_identity import (  # type: ignore
         PhysicalMachineIdentityError,
         validate_physical_hardware_model,
@@ -87,7 +90,6 @@ else:  # pragma: no cover - direct-script import path
 
 SCHEMA_VERSION = 4
 HARNESS_VERSION = "packet-evidence-v4"
-PRODUCT_VERSION = "0.5.0"
 MAX_REPORT_BYTES = 1 * 1024 * 1024
 TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$")
 PRODUCT_OBSERVATION_PREFIX = "cfw-release-observation-v1 "
@@ -2535,7 +2537,7 @@ def _validate(
         )
     proof = parse_proof_binding(document["proof"])
     if proof["candidate"]["version"] != PRODUCT_VERSION:
-        raise PacketEvidenceError("packet evidence is not for version 0.5.0")
+        raise PacketEvidenceError(f"packet evidence is not for version {PRODUCT_VERSION}")
     _platform(document["platform"])
     declared_start = timestamp_fraction(document["captured_at"])
 

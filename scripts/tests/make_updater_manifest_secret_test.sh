@@ -177,7 +177,7 @@ fi
 
 fixture_repo="$temporary_root/repository"
 fixture_artifact_repository="$fixture_repo/target/release-worktrees/$CFW_GA_BUILD"
-ga_root="$fixture_artifact_repository/target/candidates/0.5.0/ga/$CFW_GA_BUILD"
+ga_root="$fixture_artifact_repository/target/candidates/$CFW_PRODUCT_VERSION/ga/$CFW_GA_BUILD"
 app_path="$ga_root/signed/Clash for Mac.app"
 native_products="$ga_root/signing-output/signed-native-products"
 mkdir -p "$fixture_repo/scripts" "$fixture_artifact_repository/scripts" "$native_products" \
@@ -215,12 +215,12 @@ cfw_run_release_python_script() {
 }
 
 release_native_products_root_for_app() {
-  [[ "\$1" == "\$publication_artifact_repository/target/candidates/0.5.0/ga/$CFW_GA_BUILD/signed/Clash for Mac.app" ]]
-  printf '%s\n' "\$publication_artifact_repository/target/candidates/0.5.0/ga/$CFW_GA_BUILD/signing-output/signed-native-products"
+  [[ "\$1" == "\$publication_artifact_repository/target/candidates/$CFW_PRODUCT_VERSION/ga/$CFW_GA_BUILD/signed/Clash for Mac.app" ]]
+  printf '%s\n' "\$publication_artifact_repository/target/candidates/$CFW_PRODUCT_VERSION/ga/$CFW_GA_BUILD/signing-output/signed-native-products"
 }
 
 verify_release_prepackage_evidence() {
-  [[ "\$#" -eq 1 && "\$1" == "\$publication_artifact_repository/target/candidates/0.5.0/ga/$CFW_GA_BUILD/signed/Clash for Mac.app" ]]
+  [[ "\$#" -eq 1 && "\$1" == "\$publication_artifact_repository/target/candidates/$CFW_PRODUCT_VERSION/ga/$CFW_GA_BUILD/signed/Clash for Mac.app" ]]
   [[ "\$(declare -p LANG)" == 'declare -rx LANG="C"' ]]
   [[ "\$(declare -p LC_ALL)" == 'declare -rx LC_ALL="C"' ]]
 }
@@ -228,12 +228,13 @@ SH
 
 {
   printf '%s\n' '#!/bin/bash' 'set -euo pipefail'
+  printf 'fixture_product_version=%q\n' "$CFW_PRODUCT_VERSION"
   printf 'fixture_ga_build=%q\n' "$CFW_GA_BUILD"
   cat <<'SH'
 repo_root="${BASH_SOURCE[0]%/scripts/verify_release_app.sh}"
 [[ "$#" -eq 4 ]]
-[[ "$1" == "$repo_root/target/candidates/0.5.0/ga/$fixture_ga_build/signed/Clash for Mac.app" ]]
-[[ "$2" == "$repo_root/target/candidates/0.5.0/ga/$fixture_ga_build/signing-output/signed-native-products" ]]
+[[ "$1" == "$repo_root/target/candidates/$fixture_product_version/ga/$fixture_ga_build/signed/Clash for Mac.app" ]]
+[[ "$2" == "$repo_root/target/candidates/$fixture_product_version/ga/$fixture_ga_build/signing-output/signed-native-products" ]]
 [[ "$3" == "--context" ]]
 [[ "$4" == "canonical-native-content" ]]
 SH
@@ -327,7 +328,7 @@ cat >"$app_path/Contents/Info.plist" <<PLIST
 <plist version="1.0">
 <dict>
   <key>CFBundleShortVersionString</key>
-  <string>0.5.0</string>
+  <string>$CFW_PRODUCT_VERSION</string>
   <key>CFBundleVersion</key>
   <string>$CFW_GA_BUILD</string>
 </dict>
@@ -347,10 +348,10 @@ if ! run_fixture >"$positive_log" 2>&1; then
   echo "error: updater custody positive fixture failed" >&2
   exit 1
 fi
-final_set="$ga_root/packages/updater/v0.5.0"
+final_set="$ga_root/packages/updater/v$CFW_PRODUCT_VERSION"
 for required in \
-  "Clash.for.Mac_0.5.0_aarch64.app.tar.gz" \
-  "Clash.for.Mac_0.5.0_aarch64.app.tar.gz.sig" \
+  "Clash.for.Mac_${CFW_PRODUCT_VERSION}_aarch64.app.tar.gz" \
+  "Clash.for.Mac_${CFW_PRODUCT_VERSION}_aarch64.app.tar.gz.sig" \
   latest.json \
   updater-set.seal.json
 do

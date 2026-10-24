@@ -49,7 +49,7 @@ the release verifier's inputs record.
 | Apple provider reference | `SING_BOX_APPLE_REFERENCE_COMMIT` | Git commit identity; reference only |
 | deployment | `MACOS_DEPLOYMENT_TARGET`, arm64 | Cargo build guard, Tauri config, Xcode settings, artifact inspection |
 
-The pin file holds the active 0.5.0 development values;
+The pin file holds the active development values;
 frozen 0.4.0 source and candidate receipts retain their original sources and toolchain.
 Each signed application's own receipts remain authoritative. Earlier July and August reviews are historical records, not the
 current version inventory. The exact XcodeGen, sing-box, and gomobile tags resolve

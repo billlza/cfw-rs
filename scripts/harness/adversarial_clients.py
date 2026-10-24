@@ -19,6 +19,7 @@ import re
 from typing import Any, Final, Mapping
 
 if __package__:
+    from ..release_build_identity import PRODUCT_VERSION
     from .physical_machine_identity import (
         PhysicalMachineIdentityError,
         validate_physical_hardware_model,
@@ -38,6 +39,8 @@ else:  # pragma: no cover - direct-script import path
     import sys
 
     sys.path.insert(0, str(Path(__file__).resolve().parent))
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from release_build_identity import PRODUCT_VERSION  # type: ignore
     from physical_machine_identity import (  # type: ignore
         PhysicalMachineIdentityError,
         validate_physical_hardware_model,
@@ -57,7 +60,6 @@ else:  # pragma: no cover - direct-script import path
 
 SCHEMA_VERSION: Final = 3
 HARNESS_VERSION: Final = "adversarial-clients-v3"
-PRODUCT_VERSION: Final = "0.5.0"
 MAX_REPORT_BYTES: Final = 1 * 1024 * 1024
 MAX_OBSERVATION_BYTES: Final = 1 * 1024 * 1024
 MAX_SIGNATURE_BYTES: Final = 256 * 1024
@@ -1873,7 +1875,7 @@ def _validate(value: Any, artifacts: ArtifactReader) -> dict[str, Any]:
         )
     proof = parse_proof_binding(document["proof"])
     if proof["candidate"]["version"] != PRODUCT_VERSION:
-        raise AdversarialMatrixError("adversarial evidence is not for version 0.5.0")
+        raise AdversarialMatrixError(f"adversarial evidence is not for version {PRODUCT_VERSION}")
     _platform(document["platform"])
 
     entries: dict[str, dict[str, Any]] = {}

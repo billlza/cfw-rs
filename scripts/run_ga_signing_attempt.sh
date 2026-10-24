@@ -34,7 +34,7 @@ cfw_seal_release_tool_environment production
 [[ "$CFW_SIGNING_CERTIFICATE_SHA256" =~ ^[0-9A-F]{64}$ ]] ||
   die "frozen signing certificate SHA-256 is malformed"
 
-readonly frozen_root="$repo_root/target/candidates/0.5.0/ga/$CFW_GA_BUILD"
+readonly frozen_root="$repo_root/target/candidates/$CFW_PRODUCT_VERSION/ga/$CFW_GA_BUILD"
 readonly attempt_work="$CFW_SIGNING_ATTEMPT_WORK"
 [[ -d "$attempt_work" && ! -L "$attempt_work" ]] ||
   die "transaction work root is not a real directory"

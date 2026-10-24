@@ -772,8 +772,8 @@ the sealed publication evidence but remains fail closed until that evidence has
 been prepared, legally reviewed, and finalized for the exact signed app. It has
 no success override and accepts only:
 
-- `target/candidates/0.5.0/ga/$CFW_GA_BUILD/signed/Clash for Mac.app` as the signed binary root;
-- `target/candidates/0.5.0/ga/$CFW_GA_BUILD/stage-inputs/publication` as the final evidence root.
+- `target/candidates/$CFW_PRODUCT_VERSION/ga/$CFW_GA_BUILD/signed/Clash for Mac.app` as the signed binary root;
+- `target/candidates/$CFW_PRODUCT_VERSION/ga/$CFW_GA_BUILD/stage-inputs/publication` as the final evidence root.
 
 The gate sources `scripts/release_identity.env` and passes `CFW_GA_BUILD` to the
 pure path contract; no packaging script names a build.
@@ -824,7 +824,7 @@ all product inputs and outputs:
 source scripts/release_identity.env
 source scripts/dependency_pins.env
 publication_artifact_repository="$PWD/target/release-worktrees/$CFW_GA_BUILD"
-publication_ga="$publication_artifact_repository/target/candidates/0.5.0/ga/$CFW_GA_BUILD"
+publication_ga="$publication_artifact_repository/target/candidates/$CFW_PRODUCT_VERSION/ga/$CFW_GA_BUILD"
 publication_inputs="$publication_ga/stage-inputs"
 publication_libbox="$publication_artifact_repository/target/sources/sing-box-$SING_BOX_VERSION-patched"
 
@@ -860,25 +860,28 @@ pretend that the earlier reviewer saw a subsequently rebuilt source archive.
 
 ### Single-GA release sequence
 
-The canonical allocation ledger is
-[`docs/release/build-allocations-v050.json`](docs/release/build-allocations-v050.json);
-the closed v0.4.0 ledger
-[`docs/release/build-allocations-v040.json`](docs/release/build-allocations-v040.json)
-retains the earlier history and is only read. The build-boundary gate rejects
-any active validation/final pair or any change to an immutable retired prefix.
-Builds 40021 through 40029 retain their historical retirement records and
-artifacts; none may be relabelled, rebuilt, resubmitted, installed, or reused.
-Build 40030 is retired unbuilt by policy. The consumed 0.5.0 preview
-validation lineages 50001–50025 form the fixed prefix of the v0.5.0 ledger.
-Every retired GA build, in either ledger, keeps its cause, consumed lineage and
+Every product version has one allocation ledger,
+`docs/release/build-allocations-v<version>.json` with the dots of the version
+removed. The ledger of `CFW_PRODUCT_VERSION` is the active one. The ledgers of
+earlier product versions are closed: they retain the earlier history and are
+only read. `scripts/verify_release_build_allocations.py` fixes where each
+ledger starts and, for a closed product version, every record. The
+build-boundary gate rejects any active validation/final pair or any change to
+an immutable retired prefix. Builds 40021 through 40029 retain their
+historical retirement records and artifacts; none may be relabelled, rebuilt,
+resubmitted, installed, or reused. Build 40030 is retired unbuilt by policy.
+The consumed 0.5.0 preview validation lineages 50001–50025 form the fixed
+prefix of the v0.5.0 ledger, which closed with its published GA build 50030
+(status `published`). The v0.5.1 ledger starts at its first GA build, 51001.
+Every retired GA build, in any ledger, keeps its cause, consumed lineage and
 retained evidence in its own `docs/release/ga-build-<build>-retirement.md`;
 those notes, not this guide, are the per-build history. The original v0.5.0
 identity plan is recorded in
 [`docs/release/ga-identity-plan-v050.md`](docs/release/ga-identity-plan-v050.md).
 
-The sole `active_ga` identity is 0.5.0 build `CFW_GA_BUILD` of
-[`scripts/release_identity.env`](scripts/release_identity.env). Release tools
-read it from there: Python through the byte-strict loader in
+The sole `active_ga` identity is product version `CFW_PRODUCT_VERSION` build
+`CFW_GA_BUILD` of [`scripts/release_identity.env`](scripts/release_identity.env).
+Release tools read both values from there and nowhere else: Python through the byte-strict loader in
 `scripts/release_build_identity.py`, release shell entry points by sourcing the
 file next to `scripts/dependency_pins.env`. Load it into the operator shell
 before the commands below:
@@ -889,8 +892,11 @@ source scripts/release_identity.env
 
 The migration predecessor is the active predecessor: the newest
 `SUPPORTED_PREDECESSORS` profile in `scripts/dormant_app_install.py` whose
-build is below `CFW_GA_BUILD`. Install admission accepts only that profile,
-verified by product version, build number and installed signed-tree digest.
+build is below `CFW_GA_BUILD`, of any product version. Builds increase across
+product versions, so until one of its own GA builds has been installed, a
+product version's GA replaces the release the previous version published.
+Install admission accepts only that profile, verified by product version,
+build number and installed signed-tree digest.
 The SwiftUI dashboard library is signed as one more nested component. Local
 installation and smoke testing do not require the public-release evidence or
 claim GA acceptance.
@@ -903,9 +909,9 @@ table in
 and needs the release owner's approval. These are the allocation files:
 
 1. `scripts/release_identity.env`: `CFW_GA_BUILD=N+1`;
-2. `docs/release/build-allocations-v050.json`: give `N`'s record its exact
-   retired status, append `{"build":"N+1","role":"ga","status":"active_ga"}`
-   and set `active_ga` to `N+1`, keeping canonical JSON;
+2. the ledger of `CFW_PRODUCT_VERSION`: give `N`'s record its exact retired
+   status, append `{"build":"N+1","role":"ga","status":"active_ga"}` and set
+   `active_ga` to `N+1`, keeping canonical JSON;
 3. `docs/release/ga-build-N-retirement.md`: a new note whose classification
    sentence opens a line as ``GA build N is permanently classified as
    `<status>`.`` with that exact ledger status;
@@ -923,18 +929,54 @@ observations accept any canonical build of the product version and are bound
 to the frozen candidate by their consumers.
 
 `./scripts/run_release_ci_gate.sh build-script-boundary` then verifies the
-allocation: the ledger must end with the identity file's build as its one
-`active_ga`; every record between the fixed prefix and that tail must be a
-retired GA with its exact retirement note; no retirement note may exist for a
-build at or above the active GA; every installed retired GA must have a
-registry profile; and every 0.5.0 registry profile must be an allocated build
-below the active GA. Candidate
-freeze applies the same rules to the artifact repository, so a missing
-predecessor profile fails before signing. The release-tool tests derive every
-build from the identity file and the ledger, and an allocation audit rejects
-any other tracked file of the release source closure, apart from `docs/` and
-the top-level guides, that names a GA-role ledger build outside a digest or
-object-ID token, and any installed tree digest outside the registry.
+allocation: the ledger must start at its policy's first build, stay gap-free
+and end with the identity file's build as its one `active_ga`; every record
+between the fixed prefix and that tail must be a retired GA with its exact
+retirement note; no retirement note may exist for a build at or above the
+active GA; every installed retired GA, and the GA each closed product version
+published, must have a registry profile; and every registry profile of the
+active product version must be an allocated build below the active GA.
+Candidate freeze applies the same rules to the artifact repository, so a
+missing predecessor profile fails before signing. The release-tool tests
+derive every build from the identity file and the ledger, and an allocation
+audit rejects any other tracked file of the release source closure, apart
+from `docs/`, the top-level guides and the first build the ledger policy
+fixes, that names a GA-role ledger build outside a digest or object-ID token,
+and any installed tree digest outside the registry.
+
+#### Opening a product version
+
+The next product version opens after the active one is published, and its
+first GA build needs the release owner's approval. One commit changes:
+
+1. the ledger of the published version: its published GA record takes the
+   status `published` and `active_ga` becomes `null`, keeping canonical JSON;
+   the ledger is closed from then on;
+2. `scripts/verify_release_build_allocations.py`: the published version's
+   policy becomes closed and fixes its retired GA allocations and its
+   published GA; a new policy names the new version's ledger and first build;
+3. `docs/release/build-allocations-v<version>.json` for the new version, with
+   the first GA build as its one `active_ga` record;
+4. `scripts/release_identity.env`: the new `CFW_PRODUCT_VERSION` and its first
+   `CFW_GA_BUILD`;
+5. `scripts/dormant_app_install.py`: the published GA's `PredecessorProfile`
+   with the installed tree SHA-256 that its signed-app manifest, package seals
+   and completed install journals bind;
+6. the surfaces `scripts/verify_version_contract.py` checks: the eleven
+   product package versions in their `Cargo.toml` files and `Cargo.lock`,
+   `PRODUCT_VERSION` in `cfw-core`, `tauri.conf.json`, `MARKETING_VERSION` in
+   `native/macos/project.yml` and the project it generates, the runtime
+   admission `RELEASE_VERSION`, the native observation version with the
+   published version added to its `historicalProductVersions`, and a new first
+   changelog heading `## <version> - Unreleased`.
+
+No release tool names the active product version: a version audit in the
+release-tool tests rejects any tracked file under `scripts/` or `.github/`,
+apart from the identity file, the ledger policies, the predecessor registry
+and third-party fixtures and patches, that does. The new `Cargo.lock` needs
+its own `prepare-cargo-workspace-inputs` before the sealed gates; then
+`version-contract`, `verify-xcode-project`, `build-script-boundary` and
+`release-tool-tests` check the new identity.
 
 #### Running a release with the driver
 
@@ -1144,7 +1186,7 @@ never adopted.
    ```bash
    scripts/run_sealed_evidence_manifest.sh collect-ci-lanes \
      --artifact-repository "/absolute/operator/target/release-worktrees/$CFW_GA_BUILD" \
-     --output "/absolute/operator/target/release-worktrees/$CFW_GA_BUILD/target/candidates/0.5.0/ga/$CFW_GA_BUILD/stage-inputs/local-ci-lanes.json" \
+     --output "/absolute/operator/target/release-worktrees/$CFW_GA_BUILD/target/candidates/$CFW_PRODUCT_VERSION/ga/$CFW_GA_BUILD/stage-inputs/local-ci-lanes.json" \
      --journal "/absolute/private/history/local-ci-$CFW_GA_BUILD"
    ```
 
@@ -1192,7 +1234,7 @@ never adopted.
    `--sealed-notarization` instead: the deep code-signature check still runs
    and `Contents/CodeResources` must exist, but stapler and Gatekeeper are
    skipped. That flag is accepted only for the fixed signed app
-   `target/candidates/0.5.0/ga/$CFW_GA_BUILD/signed/Clash for Mac.app` in the
+   `target/candidates/$CFW_PRODUCT_VERSION/ga/$CFW_GA_BUILD/signed/Clash for Mac.app` in the
    canonical native-content context, and every reopen, live or sealed, hashes
    that app tree, stapled ticket included, against its sealed manifest before
    the check and again after it; a change made and undone entirely between
@@ -1627,7 +1669,7 @@ never adopted.
    System Extension and select Tunnel mode with IPv6 enabled in the installed
    active GA dashboard; the Packet Host baseline accepts only a ready Tunnel
    with IPv6 enabled. The system-extension check requires exactly one
-   `com.bill.clashformac.packet-tunnel (0.5.0/$CFW_GA_BUILD)` row in
+   `com.bill.clashformac.packet-tunnel ($CFW_PRODUCT_VERSION/$CFW_GA_BUILD)` row in
    `[activated enabled]`. macOS keeps each replaced version listed until the
    next reboot as `[terminated waiting to uninstall on reboot]`, with its
    enabled and active columns empty. Every other row for that bundle must be
@@ -1756,7 +1798,7 @@ never adopted.
 
    ```bash
    scripts/release_publication_gate.sh --seal-publication
-   scripts/release_publication_gate.sh --upload-assets 0.5.0
+   scripts/release_publication_gate.sh --upload-assets "$CFW_PRODUCT_VERSION"
    ```
 
    `--seal-publication` reopens prepackage and GA acceptance before sealing the
@@ -1967,10 +2009,10 @@ Tauri; neither the password nor a caller-selected key/signer path enters argv.
 Release assets do not become uploadable as independent files. The updater
 archive, signature, `latest.json`, and the verifier's embedded-public-key
 receipt are sealed and atomically published as
-`target/candidates/0.5.0/ga/$CFW_GA_BUILD/packages/updater/vVERSION/`. The DMG, accepted result,
+`target/candidates/$CFW_PRODUCT_VERSION/ga/$CFW_GA_BUILD/packages/updater/vVERSION/`. The DMG, accepted result,
 normalized log, private Gatekeeper evidence, submission receipt, and artifact
 manifest are sealed and atomically published for release operations as
-`target/candidates/0.5.0/ga/$CFW_GA_BUILD/packages/dmg/vVERSION/`. The canonical seals bind exact
+`target/candidates/$CFW_PRODUCT_VERSION/ga/$CFW_GA_BUILD/packages/dmg/vVERSION/`. The canonical seals bind exact
 names, sizes, SHA-256 values, version/build/source identity, official URL, and
 verification result. Each component seal also binds the exact
 `Clash for Mac.app.manifest.json` digest and signed-app tree SHA-256. The
@@ -1991,7 +2033,7 @@ distribution seal, then run the read-only upload-asset gate:
 
 ```bash
 scripts/release_publication_gate.sh --seal-publication
-scripts/release_publication_gate.sh --upload-assets 0.5.0
+scripts/release_publication_gate.sh --upload-assets "$CFW_PRODUCT_VERSION"
 ```
 
 The atomic
@@ -2017,7 +2059,7 @@ publication bundle, its canonical sidecar manifest, and the standalone public
 Gatekeeper projection. The bundle also contains that exact projection together
 with the corresponding-source archive and manifest, SPDX and CycloneDX SBOMs,
 publication inventory and evidence manifest, machine closure, the project GPL
-license, the 0.5.0 changelog as `MODIFICATIONS.md`, and every reviewed
+license, the changelog as `MODIFICATIONS.md`, and every reviewed
 third-party license/NOTICE file. The upload gate reopens every tar member and
 recomputes its path, mode, size, and digest before printing the bundle. The
 human `legal-review.json`, raw Gatekeeper evidence, final-candidate evidence,
@@ -2044,7 +2086,7 @@ assets have been uploaded to the public `vVERSION` GitHub release, run:
 
 ```bash
 ./scripts/run_verify_remote_release.sh \
-  --version 0.5.0 \
+  --version "$CFW_PRODUCT_VERSION" \
   --trusted-distribution-seal /path/on/offline-media/distribution-set.seal.json \
   --trusted-distribution-seal-sha256 '<64-lowercase-hex>'
 ```

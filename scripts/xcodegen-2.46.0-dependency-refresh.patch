@@ -31,6 +31,17 @@ diff --git a/Package.swift b/Package.swift
 diff --git a/Package.resolved b/Package.resolved
 --- a/Package.resolved
 +++ b/Package.resolved
+@@ -5,8 +5,8 @@
+       "kind" : "remoteSourceControl",
+       "location" : "https://github.com/tadija/AEXML.git",
+       "state" : {
+-        "revision" : "db806756c989760b35108146381535aec231092b",
+-        "version" : "4.7.0"
++        "revision" : "a72fbb7823386d9d123d973f2448a33ae0f1ace7",
++        "version" : "4.7.1"
+       }
+     },
+     {
 @@ -41,8 +41,8 @@
        "kind" : "remoteSourceControl",
        "location" : "https://github.com/onevcat/Rainbow.git",

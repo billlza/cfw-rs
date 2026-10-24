@@ -398,7 +398,9 @@ class ReleaseEnvironmentRoundTripTests(unittest.TestCase):
         )
 
         self.assertEqual(first, second)
-        self.assertEqual(first.version, "6.4")
+        # A hosted image's Xcode may carry a later patch release of the same
+        # Swift (6.4.2 under Xcode 27.2), so the patch component is optional.
+        self.assertRegex(first.version, r"\A6\.4(?:\.(?:0|[1-9][0-9]*))?\Z")
         document = json.loads(first.canonical)
         self.assertEqual(
             document["target"]["triple"],

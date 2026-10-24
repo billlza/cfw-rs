@@ -1366,7 +1366,7 @@ private final class HeldCallStart: @unchecked Sendable {
     let cache = root.appendingPathComponent("cache.db")
 
     // libbox cannot open a cache file that is a directory, so the start fails
-    // before the network starts and libbox closes a monitor that never ran.
+    // before the network starts, and nothing that started is left to close.
     let blockedCache = root.appendingPathComponent("blocked-cache.db", isDirectory: true)
     try FileManager.default.createDirectory(at: blockedCache, withIntermediateDirectories: false)
     let failed = try #require(
@@ -1533,14 +1533,20 @@ private final class HeldCallStart: @unchecked Sendable {
 
     // A start that fails on its own closes its instance itself. When that close
     // fails libbox keeps the instance and cannot close it again, so the runtime
-    // is spent rather than idle.
+    // is spent rather than idle. libbox closes only what started, so these
+    // starts fail once the network monitor runs: their rule set downloads
+    // through an outbound the configuration lacks, which fails before any
+    // connection to the stalled server.
+    let missingDetourSet = LinkedRuleSet(
+      tag: stalledSet.tag, url: stalledSet.url, format: stalledSet.format, detour: "missing")
     let failedSpent = try SourceBuiltLibboxServiceRuntime(
       role: .systemProxy, directories: directories,
       interfaceMonitorClose: { throw LinkedMonitorCloseFault() })
     let ownFailure = try #require(
       boundedStart(
         failedSpent,
-        try endpoints.configuration(ruleSets: [stalledSet], cacheFile: blockedCache),
+        try endpoints.configuration(
+          ruleSets: [missingDetourSet], cacheFile: root.appendingPathComponent("own-failure.db")),
         deadline: EngineStartDeadline(receivedAt: .now)),
       "a start that failed early and could not close never returned")
     stopIfStarted(failedSpent, ownFailure)
@@ -1570,7 +1576,8 @@ private final class HeldCallStart: @unchecked Sendable {
     let ownStalledStart = try #require(
       boundedStart(
         ownStalled,
-        try endpoints.configuration(ruleSets: [stalledSet], cacheFile: blockedCache),
+        try endpoints.configuration(
+          ruleSets: [missingDetourSet], cacheFile: root.appendingPathComponent("own-stall.db")),
         deadline: ownStallDeadline),
       "a start that failed early and whose close stalled was not abandoned")
     let ownStallLateness = ownStallDeadline.instant.duration(to: .now)

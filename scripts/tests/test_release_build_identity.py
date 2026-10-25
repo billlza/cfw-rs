@@ -33,10 +33,12 @@ from scripts.release_build_identity import (
     ga_signed_native_products_root,
     ga_signing_attempt_output_root,
     load_release_identity,
+    read_bundle_identity,
 )
 from scripts.release_git import run_release_git
 from scripts.tests.release_identity_fixture import (
     NEXT_GA_BUILD,
+    next_patch,
     noncanonical,
     retired_ga_builds,
 )
@@ -473,7 +475,7 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 BuildIdentityError,
-                "CFBundleShortVersionString is not the fixed product version",
+                "CFBundleShortVersionString must be one canonical MAJOR.MINOR.PATCH version",
             ) as raised:
                 bundle_build_identity(app)
 
@@ -558,6 +560,31 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(BuildIdentityError, "differ"):
                 bundle_build_identity(app)
+
+    def test_the_reader_returns_the_product_version_the_bundles_record(self) -> None:
+        # An installed predecessor records an earlier product version; only a
+        # candidate must record the active one.
+        other = next_patch(PRODUCT_VERSION)
+        with tempfile.TemporaryDirectory() as directory:
+            app = self.make_app(Path(directory), (GA_BUILD,) * 4, version=other)
+            self.assertEqual(read_bundle_identity(app), BundleBuildIdentity(other, GA_BUILD))
+            with self.assertRaisesRegex(
+                BuildIdentityError, "CFBundleShortVersionString is not the fixed product version"
+            ):
+                bundle_build_identity(app)
+
+    def test_mismatched_nested_product_version_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            app = self.make_app(Path(directory), (GA_BUILD,) * 4)
+            path = self.identity_plists(app)[3]
+            value = plistlib.loads(path.read_bytes())
+            value["CFBundleShortVersionString"] = next_patch(PRODUCT_VERSION)
+            path.write_bytes(plistlib.dumps(value))
+            path.chmod(0o644)
+            for read in (read_bundle_identity, bundle_build_identity):
+                with self.subTest(reader=read.__name__):
+                    with self.assertRaisesRegex(BuildIdentityError, "product versions differ"):
+                        read(app)
 
     def test_noncanonical_integer_fails_closed(self) -> None:
         for value in ("0", "01", "1.2", "-1", " 1", 1):

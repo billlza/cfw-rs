@@ -624,10 +624,10 @@ index e42ea17d03c3d8dd1e69e561191c469e49946caf..498546e4d593fa22d27c0a8a1b7af120
 +
 diff --git a/experimental/libbox/monitor_network_change_test.go b/experimental/libbox/monitor_network_change_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..65cfb33f7bcbf03f2e377facac42d864520b2806
+index 0000000000000000000000000000000000000000..0e0aa1105dc3d6a70a084c54e50c1472031d614b
 --- /dev/null
 +++ b/experimental/libbox/monitor_network_change_test.go
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,97 @@
 +package libbox
 +
 +import (
@@ -652,6 +652,12 @@ index 0000000000000000000000000000000000000000..65cfb33f7bcbf03f2e377facac42d864
 +}
 +
 +func (m *networkChangeFixture) InterfaceFinder() control.InterfaceFinder { return m.finder }
++
++// Every platform but Darwin reads an interface's DNS servers from the network
++// manager's interface list, so the fixture reports its one interface there.
++func (m *networkChangeFixture) NetworkInterfaces() []adapter.NetworkInterface {
++	return []adapter.NetworkInterface{{Interface: m.current}}
++}
 +
 +func TestSameWiFiInterfaceNotifiesOnHotspotSubnetChange(t *testing.T) {
 +	network := &networkChangeFixture{

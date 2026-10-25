@@ -62,6 +62,17 @@ class WindowsEngineContractTests(unittest.TestCase):
             self.assertNotIn("writesDone", text[:start])
             self.assertNotIn("writesDone", text[end:])
 
+    def test_unchanged_source_check_names_the_added_changed_and_missing_paths(self) -> None:
+        expected = {"daemon/a.go": "1", "daemon/b.go": "2", "gone.go": "3"}
+        actual = {"daemon/a.go": "1", "daemon/b.go": "9", "daemon/cache.db": "4"}
+        engine.require_unchanged(dict(expected), dict(expected), "unchanged")
+        with self.assertRaises(RuntimeError) as failure:
+            engine.require_unchanged(actual, expected, "build or tests changed engine source bytes")
+        self.assertEqual(
+            str(failure.exception),
+            "build or tests changed engine source bytes: daemon/b.go, daemon/cache.db, gone.go",
+        )
+
     def test_windows_fixture_overlay_rejects_a_production_file_change(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()

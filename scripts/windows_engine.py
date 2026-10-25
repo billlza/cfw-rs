@@ -60,6 +60,12 @@ def require(condition: bool, message: str) -> None:
         raise RuntimeError(message)
 
 
+def require_unchanged(actual: dict[str, str], expected: dict[str, str], message: str) -> None:
+    """Name the paths whose bytes or membership differ, so a stray test write is diagnosable."""
+    changed = sorted(name for name in expected.keys() | actual.keys() if expected.get(name) != actual.get(name))
+    require(not changed, f"{message}: {', '.join(changed[:16])}" + (" …" if len(changed) > 16 else ""))
+
+
 def read_pins(repository: Path) -> dict[str, str]:
     pins: dict[str, str] = {}
     for line in (repository / "scripts/dependency_pins.env").read_text(encoding="utf-8").splitlines():
@@ -344,7 +350,7 @@ def prepare_host_source(repository: Path, source: Path, destination: Path) -> di
 
 def apply_test_overlay(repository: Path, source: Path, expected: dict[str, str]) -> tuple[dict[str, str], dict[str, object]]:
     """Synchronize a Windows fixture without changing any GA production bytes."""
-    require(source_files(source) == expected, "host source changed before test overlay")
+    require_unchanged(source_files(source), expected, "host source changed before test overlay")
     patch = pinned_path(repository, WINDOWS_TEST_OVERLAY)
     # A separate temporary Git directory makes apply behave identically inside
     # and outside a product checkout. No Git metadata enters the source tree.
@@ -466,8 +472,8 @@ def build(repository: Path, work: Path, pins: dict[str, str]) -> None:
     modules = module_graph(command([str(go), "list", "-m", "-json", "all"], cwd=source, env=environment))
     (output / "module-graph.json").write_text(json.dumps(modules, indent=2) + "\n", encoding="utf-8")
     verify_source(repository, baseline_source, pins, patched=True)
-    require(source_files(baseline_source) == baseline_files, "GA baseline source bytes changed")
-    require(source_files(source) == expected_files, "module resolution changed engine source bytes")
+    require_unchanged(source_files(baseline_source), baseline_files, "GA baseline source bytes changed")
+    require_unchanged(source_files(source), expected_files, "module resolution changed engine source bytes")
     environment.update({"GOPROXY": "off", "GOSUMDB": "off"})
     command([str(go), "mod", "verify"], cwd=source, env=environment)
     executable = output / "cfw-engine.exe"
@@ -512,8 +518,8 @@ def build(repository: Path, work: Path, pins: dict[str, str]) -> None:
     require(stress_passed == 800 and not any(event.get("Action") in ("fail", "skip") for event in stress_events),
             "Windows DNS fixture stress did not execute all 200 complete cases")
     verify_source(repository, baseline_source, pins, patched=True)
-    require(source_files(baseline_source) == baseline_files, "GA baseline source bytes changed")
-    require(source_files(source) == expected_files, "build or tests changed engine source bytes")
+    require_unchanged(source_files(baseline_source), baseline_files, "GA baseline source bytes changed")
+    require_unchanged(source_files(source), expected_files, "build or tests changed engine source bytes")
     version = command([str(executable), "version"]).decode("utf-8")
     info = command([str(go), "version", "-m", str(executable)], env=environment).decode("utf-8")
     (output / "build-info.txt").write_text(info, encoding="utf-8")

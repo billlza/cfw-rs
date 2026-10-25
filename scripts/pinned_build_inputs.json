@@ -111,11 +111,11 @@
     "sourceFiles": [
       {
         "path": "tools/packet-evidence-endpoint/go.mod",
-        "sha256": "113b5f4cece6be5e745abd88d733077dce31350351d592050b3970e800693837"
+        "sha256": "c32652eab38e02d74034495aabab46d760384941999851e4bc6ebdbc1af63d56"
       },
       {
         "path": "tools/packet-evidence-endpoint/install-endpoint.sh",
-        "sha256": "331d82561cf88af651bf9bc854946b443655d5a2e6fa498f8f2925bcc767575a"
+        "sha256": "fb24d320372c327a033a839c8759fb58afe5c7ecf140d204c31bccb73de06cff"
       },
       {
         "path": "tools/packet-evidence-endpoint/main.go",
@@ -143,7 +143,7 @@
       },
       {
         "path": "scripts/physical_capture/packet_endpoints.json",
-        "sha256": "9b7e1e8d892bc87568bbd122e502e4c0f74a2d9579e398d9d2563372772be19a"
+        "sha256": "afa5339dea0b6369f45a6dac9005ad49314e5173b2b62d68b2271d6cfa490f14"
       },
       {
         "path": "scripts/physical_capture/packet_known_hosts",

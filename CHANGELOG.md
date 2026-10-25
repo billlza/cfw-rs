@@ -2,6 +2,13 @@
 
 ## 0.5.1 - Unreleased
 
+### Reliability
+
+- Give every node of a latency test its whole timeout. The engine a test
+  starts was held to the same deadline, so a large profile tested at a short
+  timeout on a busy Mac could fail as a whole while that engine was still
+  starting. The timeout now runs from when the engine has started.
+
 ### Supply chain
 
 - Build the network engine from sing-box 1.14.4 instead of 1.14.2. The Go

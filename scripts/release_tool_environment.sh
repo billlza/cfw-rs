@@ -135,10 +135,20 @@ cfw_seal_release_tool_environment() {
     python_bin_dir="$validation_python_dir"
     validation_python_input="$validation_python_launcher"
   fi
-  python_bin="$python_bin_dir/python3"
-  if [[ ! -L "$python_bin" || ! -x "$python_bin" ]]; then
-    echo "error: the pinned Python launcher is unavailable or is not a symlink" >&2
-    return 1
+  if [[ $use_validation_python -eq 0 ]]; then
+    # Homebrew installs python@3.x as an altinstall once a newer series owns
+    # its python3 alias, so the Cellar carries only the versioned launcher.
+    python_bin="$python_bin_dir/python$python_series"
+    if [[ -L "$python_bin" || ! -f "$python_bin" || ! -x "$python_bin" ]]; then
+      echo "error: the pinned Python launcher is unavailable or is not a regular executable" >&2
+      return 1
+    fi
+  else
+    python_bin="$python_bin_dir/python3"
+    if [[ ! -L "$python_bin" || ! -x "$python_bin" ]]; then
+      echo "error: the unsigned-validation Python launcher is unavailable or is not a symlink" >&2
+      return 1
+    fi
   fi
   python_executable="$("$python_bin" -I -S -B -c \
     'import os, sys; print(os.path.realpath(sys.executable))')" || {

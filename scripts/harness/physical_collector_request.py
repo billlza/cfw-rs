@@ -55,6 +55,7 @@ if __package__:
         require_sha256,
         utf8_size,
     )
+    from ..release_python_runtime import pinned_release_python_launcher
     from ..release_build_identity import (
         ACTIVE_RELEASE_IDENTITY,
         BuildIdentityError,
@@ -104,6 +105,7 @@ else:  # pragma: no cover - direct script entrypoint
         require_sha256,
         utf8_size,
     )
+    from release_python_runtime import pinned_release_python_launcher  # type: ignore
     from release_build_identity import (  # type: ignore
         ACTIVE_RELEASE_IDENTITY,
         BuildIdentityError,
@@ -126,7 +128,14 @@ SYSTEM_ENVIRONMENT = {
     "LC_ALL": "C",
     "LANG": "C",
 }
-FIXED_PYTHON_PROBE = Path("/opt/homebrew/bin/python3")
+REPOSITORY_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+def fixed_python_probe() -> Path:
+    """The only runtime the collector CLI accepts: the pinned release Python."""
+    return pinned_release_python_launcher(REPOSITORY_ROOT)
+
+
 PINNED_RUNS = {
     (entry["macos_version"], entry["macos_build"]): entry["os"]
     for entry in EVIDENCE_PROFILE["required_runs"]
@@ -271,7 +280,7 @@ def _format_timestamp(value: datetime) -> str:
 
 def _verify_cli_runtime() -> None:
     try:
-        expected = FIXED_PYTHON_PROBE.resolve(strict=True)
+        expected = fixed_python_probe().resolve(strict=True)
         current = Path(sys.executable).resolve(strict=True)
         metadata = current.stat()
     except (OSError, RuntimeError) as error:

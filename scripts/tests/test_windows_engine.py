@@ -49,6 +49,18 @@ class WindowsEngineContractTests(unittest.TestCase):
             self.assertIn("server failure did not reach the next configured resolver", text)
             self.assertIn("response write for %s: %v", text)
             self.assertIn("fixture writes did not complete", text)
+            # The overlay is a zero-context diff bound to line numbers, so a GA
+            # patch that grows the file would land its hunks outside the retry
+            # test, which the digest checks above cannot see: pin where they land.
+            start = text.index("func TestRuntimeDNSPoolRetriesSERVFAILButPreservesNegativeAnswers(")
+            end = text.index("\n\t\t})\n\t}\n}\n", start)
+            body = text[start:end]
+            self.assertLess(body.index("writesDone := make(chan uint16, 3)"), body.index("server := &mdns.Server{"))
+            self.assertIn("writesDone <- request.Question[0].Qtype", body)
+            self.assertLess(body.index("server failure did not reach the next configured resolver"),
+                            body.index("fixture writes did not complete"))
+            self.assertNotIn("writesDone", text[:start])
+            self.assertNotIn("writesDone", text[end:])
 
     def test_windows_fixture_overlay_rejects_a_production_file_change(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

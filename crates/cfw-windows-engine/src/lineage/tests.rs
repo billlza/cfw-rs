@@ -6,7 +6,7 @@ use windows_sys::Win32::Security::{ImpersonateSelf, RevertToSelf, SecurityImpers
 fn unavailable_store() -> WindowsEngineGenerationStore {
     let path = std::env::current_exe().unwrap();
     let hash = Sha256::digest(std::fs::read(&path).unwrap()).into();
-    let image = Arc::new(VerifiedExecutable::open(&path, hash, "0.5.0").unwrap());
+    let image = Arc::new(VerifiedExecutable::open(&path, hash, env!("CARGO_PKG_VERSION")).unwrap());
     WindowsEngineGenerationStore::new(format!("CFW-lineage-{}", uuid::Uuid::new_v4()), image)
 }
 

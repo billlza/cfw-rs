@@ -79,7 +79,7 @@ fn digest(path: &Path) -> Result<[u8; 32]> {
     Ok(Sha256::digest(std::fs::read(path).map_err(|e| e.to_string())?).into())
 }
 fn verified(path: &Path, expected: [u8; 32]) -> Result<VerifiedExecutable> {
-    VerifiedExecutable::open(path, expected, "0.5.0").map_err(|e| e.to_string())
+    VerifiedExecutable::open(path, expected, env!("CARGO_PKG_VERSION")).map_err(|e| e.to_string())
 }
 
 struct Sc(SC_HANDLE);

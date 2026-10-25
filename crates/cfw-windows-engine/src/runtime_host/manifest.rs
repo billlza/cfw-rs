@@ -80,7 +80,7 @@ fn canonical_guid(value: &str) -> bool {
 mod tests {
     use super::*;
     fn manifest() -> serde_json::Value {
-        serde_json::json!({"schema_version":2,"product_version":"0.5.0","build_number":1,
+        serde_json::json!({"schema_version":2,"product_version":env!("CARGO_PKG_VERSION"),"build_number":1,
             "msi_product_code":"{E66ACF84-7639-4707-BC01-0A370C9B2E3E}",
             "msi_package_code":"{E58D1FC6-A003-4849-900C-45D6861E75D9}",
             "architecture":"x86_64","engine_version":"1.14.2","runtime_sha256":"a1".repeat(32),"desktop_sha256":"b2".repeat(32),"engine_sha256":"c3".repeat(32)})
@@ -88,11 +88,13 @@ mod tests {
     #[test]
     fn update_observation_of_a_new_version_does_not_relax_runtime_host_admission() {
         let mut next = manifest();
-        next["product_version"] = serde_json::json!("0.5.1");
+        let (newer, later) = ("0.6.0", "0.6.1");
+        assert_ne!(env!("CARGO_PKG_VERSION"), newer);
+        next["product_version"] = serde_json::json!(newer);
         let bytes = serde_json::to_vec(&next).unwrap();
         assert!(Manifest::decode(&bytes).is_err());
-        Manifest::decode_for_version(&bytes, "0.5.1").unwrap();
-        assert!(Manifest::decode_for_version(&bytes, "0.5.2").is_err());
+        Manifest::decode_for_version(&bytes, newer).unwrap();
+        assert!(Manifest::decode_for_version(&bytes, later).is_err());
         for version in ["", "05.1", "0.5.01", "not-a-version"] {
             next["product_version"] = serde_json::json!(version);
             assert!(

@@ -66,7 +66,7 @@ try {
     Copy-Item -LiteralPath (Join-Path $driverStage 'payload/wintun.dll') -Destination $wintun -ErrorAction Stop
     foreach ($path in @($runtime, $desktop, $engine, $wintun)) { Protect-Package $path $false }
     $manifest = [ordered]@{
-        schema_version=2; product_version='0.5.0'; build_number=1
+        schema_version=2; product_version=(Get-Content -LiteralPath 'apps/cfw-tauri-shell/tauri.conf.json' -Raw | ConvertFrom-Json).version; build_number=1
         msi_product_code='{6D762E56-384D-4203-8520-A9B83D0F0652}'
         msi_package_code='{C1BB0951-CB20-43FC-8ECA-AC8AC63F0A12}'
         architecture='x86_64'; engine_version='1.14.2'

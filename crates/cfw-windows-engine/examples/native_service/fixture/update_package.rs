@@ -19,7 +19,7 @@ pub(super) fn observe() -> Result<serde_json::Value> {
         .map_err(|e| e.to_string())?;
     let release = installed.release();
     let original = installed.snapshot();
-    if release.version != "0.5.0" || release.build != 1 {
+    if release.version != env!("CARGO_PKG_VERSION") || release.build != 1 {
         return Err("unexpected protected installed release".into());
     }
     let image = std::env::current_exe().map_err(|e| e.to_string())?;

@@ -6,7 +6,7 @@ use std::time::Duration;
 fn executable() -> Arc<VerifiedExecutable> {
     let path = std::env::current_exe().unwrap();
     let digest = Sha256::digest(std::fs::read(&path).unwrap()).into();
-    Arc::new(VerifiedExecutable::open(&path, digest, "0.5.0").unwrap())
+    Arc::new(VerifiedExecutable::open(&path, digest, env!("CARGO_PKG_VERSION")).unwrap())
 }
 
 #[test]
@@ -47,7 +47,8 @@ fn inherited_launch_requires_the_exact_installed_parent_image() {
     let copy = directory.path().join("other-desktop.exe");
     std::fs::copy(&path, &copy).unwrap();
     let digest = Sha256::digest(std::fs::read(&copy).unwrap()).into();
-    let expected = Arc::new(VerifiedExecutable::open(&copy, digest, "0.5.0").unwrap());
+    let expected =
+        Arc::new(VerifiedExecutable::open(&copy, digest, env!("CARGO_PKG_VERSION")).unwrap());
     let (_sender, input) = LaunchSender::create().unwrap();
     assert!(matches!(
         LaunchReceiver::from_inherited(input, expected),

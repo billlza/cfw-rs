@@ -117,10 +117,13 @@ function Assert-RunningReceipt($Service, $Probe) {
 }
 try {
     Import-Module (Join-Path $PSScriptRoot 'windows_runtime_msi.psm1') -Force
+    # The runtime admits only a manifest that names its own product version,
+    # which the desktop configuration is the single source of.
+    $productVersion = (Get-Content -LiteralPath 'apps/cfw-tauri-shell/tauri.conf.json' -Raw | ConvertFrom-Json).version
     if (Test-Path -LiteralPath $msiEvidence) { throw 'MSI qualification evidence directory already exists' }
     New-Item -ItemType Directory -Path $msiEvidence | Out-Null
     $manifest = [ordered]@{
-        schema_version = 2; product_version = '0.5.0'; build_number = 1
+        schema_version = 2; product_version = $productVersion; build_number = 1
         msi_product_code = '{E66ACF84-7639-4707-BC01-0A370C9B2E3E}'
         msi_package_code = '{00000000-0000-0000-0000-000000000000}'
         architecture = 'x86_64'; engine_version = $EngineVersion
@@ -191,7 +194,7 @@ try {
     $check = & $runtimePath --check-installation $msi.manifest_sha256
     if ($LASTEXITCODE -ne 0 -or -not ($check | ConvertFrom-Json).installation_verified) { throw 'Protected package was not admitted' }
     $release = ($check | ConvertFrom-Json).release
-    if ($release.version -cne '0.5.0' -or $release.build -ne 1 -or
+    if ($release.version -cne $productVersion -or $release.build -ne 1 -or
         $release.product_code -cne $manifest.msi_product_code -or $release.package_code -cne $manifest.msi_package_code) {
         throw 'Installed release observation does not match the protected manifest'
     }

@@ -36,7 +36,7 @@ fn inspect(path: &Path, directory: &Path) -> Result<InspectedMsi, PackageError> 
 fn protected_installed_release_has_a_build_floor_and_distinct_msi_identities() {
     let installed = InstalledRuntime::open().unwrap();
     let release = installed.release();
-    assert_eq!(release.version, "0.5.0");
+    assert_eq!(release.version, env!("CARGO_PKG_VERSION"));
     assert_eq!(release.build, 1);
     assert_eq!(
         release.product_code,

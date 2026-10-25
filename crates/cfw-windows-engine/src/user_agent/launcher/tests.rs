@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 fn executable() -> VerifiedExecutable {
     let path = std::env::current_exe().unwrap();
     let hash = Sha256::digest(std::fs::read(&path).unwrap()).into();
-    VerifiedExecutable::open(&path, hash, "0.5.0").unwrap()
+    VerifiedExecutable::open(&path, hash, env!("CARGO_PKG_VERSION")).unwrap()
 }
 
 #[test]

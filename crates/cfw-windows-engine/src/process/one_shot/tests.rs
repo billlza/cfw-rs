@@ -9,7 +9,12 @@ fn fixture() -> VerifiedExecutable {
     );
     let path = PathBuf::from(std::env::var_os("CFW_NATIVE_PACKAGE_WORKER_FIXTURE").unwrap());
     let bytes = std::fs::read(&path).unwrap();
-    VerifiedExecutable::open(&path, Sha256::digest(bytes).into(), "0.5.0").unwrap()
+    VerifiedExecutable::open(
+        &path,
+        Sha256::digest(bytes).into(),
+        env!("CARGO_PKG_VERSION"),
+    )
+    .unwrap()
 }
 
 fn observed(path: &Path) -> Option<NativePeerProcess> {

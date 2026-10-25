@@ -45,6 +45,10 @@ function Set-MsiProperty([object]$Object, [string]$Name, [object[]]$Arguments) {
 function Release-Msi([object]$Object) {
     if ($null -ne $Object) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($Object) }
 }
+# The validation package carries this fixed identity of its own; it is not the
+# product's active version, and the release-mismatch cases derive another
+# version from it instead of naming any product version.
+$packageVersion = '0.5.0'
 function New-MinimalDatabase([string]$Path, [hashtable]$Overrides, [string]$Template = 'x64;1033', [string]$PackageCode = '{E58D1FC6-A003-4849-900C-45D6861E75D9}') {
     $properties = [ordered]@{
         CFW_PRODUCT_ID = 'com.bill.clashforwindows'
@@ -53,8 +57,8 @@ function New-MinimalDatabase([string]$Path, [hashtable]$Overrides, [string]$Temp
         ProductCode = '{E66ACF84-7639-4707-BC01-0A370C9B2E3E}'
         ALLUSERS = '1'
         MSIRESTARTMANAGERCONTROL = 'DisableShutdown'
-        ProductVersion = '0.5.0'
-        CFW_RELEASE_VERSION = '0.5.0'
+        ProductVersion = $script:packageVersion
+        CFW_RELEASE_VERSION = $script:packageVersion
         CFW_BUILD_NUMBER = '2'
         CFW_MINIMUM_WINDOWS_VERSION = '10.0.19041'
         CFW_RUNTIME_MANIFEST_SHA256 = ('ab' * 32)
@@ -318,14 +322,16 @@ try {
             Invoke-Msi $database 'Commit' @()
         } finally { Release-Msi $record; Release-Msi $view; Release-Msi $database; Release-Msi $installer }
     }
+    $parsedVersion = [Version]$script:packageVersion
+    $otherRelease = [Version]::new($parsedVersion.Major, $parsedVersion.Minor, $parsedVersion.Build + 1).ToString()
     foreach ($case in @(
         @('wrong-product.msi', @{CFW_PRODUCT_ID='com.bill.clashformac'}),
         @('wrong-name.msi', @{ProductName='Clash for Mac'}),
         @('wrong-upgrade.msi', @{UpgradeCode='{0A0B0C0D-0000-4000-8000-000000000001}'}),
         @('per-user.msi', @{ALLUSERS='2'}),
         @('automatic-shutdown.msi', @{MSIRESTARTMANAGERCONTROL='0'}),
-        @('wrong-release.msi', @{CFW_RELEASE_VERSION='0.5.1';ProductVersion='0.5.1'}),
-        @('wrong-msi-version.msi', @{ProductVersion='0.5.1'}),
+        @('wrong-release.msi', @{CFW_RELEASE_VERSION=$otherRelease;ProductVersion=$otherRelease}),
+        @('wrong-msi-version.msi', @{ProductVersion=$otherRelease}),
         @('wrong-product-code.msi', @{ProductCode='invalid'}),
         @('replayed-build.msi', @{CFW_BUILD_NUMBER='1'}),
         @('noncanonical-build.msi', @{CFW_BUILD_NUMBER='02'}),

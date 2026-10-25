@@ -481,6 +481,7 @@ fn credential_kind_discriminant(kind: CredentialKind) -> u8 {
         CredentialKind::Socks5Password => 11,
         CredentialKind::HttpProxyUsername => 14,
         CredentialKind::HttpProxyPassword => 15,
+        CredentialKind::TailscaleAuthKey => 16,
     }
 }
 

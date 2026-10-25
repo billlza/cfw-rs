@@ -389,6 +389,69 @@ fn imports_restricted_upstream_sing_box_node_list_json() {
 }
 
 #[test]
+fn imports_sing_box_tailscale_endpoints_with_vault_auth_keys() {
+    let document = json!({
+        "outbounds": [
+            {
+                "type": "shadowsocks", "tag": "SS", "server": "ss.example.com",
+                "server_port": 8388, "method": "aes-256-gcm", "password": "ss-secret"
+            }
+        ],
+        "endpoints": [
+            {
+                "type": "tailscale", "tag": "Office", "auth_key": "tskey-auth-kTEST1CNTRL-TopSecretValue",
+                "exit_node": "exit-mac", "control_url": "https://headscale.example.com",
+                "hostname": "office-mac", "accept_routes": true, "exit_node_allow_lan_access": true
+            }
+        ]
+    });
+    let imported =
+        import_subscription_document(&document.to_string()).expect("sing-box Tailscale endpoint");
+    let profile: Value =
+        serde_json::from_str(imported.profile.as_json()).expect("canonical source profile");
+    assert_eq!(profile["outbounds"].as_array().expect("outbounds").len(), 2);
+    let endpoint = &profile["outbounds"][1];
+    assert_eq!(endpoint["type"], "tailscale");
+    assert_eq!(endpoint["tag"], "Office");
+    assert_eq!(endpoint["exit_node"], "exit-mac");
+    assert_eq!(endpoint["control_server"], "https://headscale.example.com");
+    assert!(endpoint.get("control_url").is_none());
+    assert_eq!(endpoint["hostname"], "office-mac");
+    assert_eq!(endpoint["accept_routes"], true);
+    assert_eq!(endpoint["exit_node_allow_lan_access"], true);
+    assert_eq!(
+        endpoint["auth_key_credential_ref"]["kind"],
+        "tailscale_auth_key"
+    );
+    assert!(endpoint.get("auth_key").is_none());
+    assert_eq!(imported.credentials.len(), 2);
+    assert_eq!(
+        imported.credentials[1].reference.kind(),
+        CredentialKind::TailscaleAuthKey
+    );
+    assert_eq!(
+        imported.credentials[1].secret,
+        "tskey-auth-kTEST1CNTRL-TopSecretValue"
+    );
+    assert!(!imported.profile.as_json().contains("TopSecretValue"));
+    let projected = imported
+        .profile
+        .project(
+            SYNTHETIC_PROFILE_ID,
+            ProjectionMode::SystemProxy,
+            &EngineSettings::default(),
+        )
+        .expect("Tailscale projection");
+    let runtime: Value = serde_json::from_str(projected.as_json()).expect("runtime");
+    assert_eq!(runtime["endpoints"][0]["type"], "tailscale");
+    assert_eq!(runtime["endpoints"][0]["auth_key"], "");
+    assert_eq!(
+        projected.credential_slots()[1].json_pointer(),
+        "/endpoints/0/auth_key"
+    );
+}
+
+#[test]
 fn imports_sip008_json_with_vault_credentials_and_root_metadata() {
     let document = json!({
         "version": 1,
@@ -700,6 +763,31 @@ fn upstream_sing_box_json_rejects_full_configs_and_unsafe_semantics() {
             "TUIC 0-RTT",
             r#"{"outbounds":[{"type":"tuic","tag":"Q","server":"q.example","server_port":443,"uuid":"33333333-3333-4333-8333-333333333333","password":"TopSecretValue!","zero_rtt_handshake":true,"tls":{"enabled":true,"server_name":"q.example"}}]}"#,
             "0-RTT is unsupported",
+        ),
+        (
+            "Tailscale exit-node advertisement",
+            r#"{"outbounds":[],"endpoints":[{"type":"tailscale","tag":"T","auth_key":"TopSecretValue!","exit_node":"exit-mac","advertise_exit_node":true}]}"#,
+            "exit-node advertisement is unsupported",
+        ),
+        (
+            "Tailscale SSH server",
+            r#"{"outbounds":[],"endpoints":[{"type":"tailscale","tag":"T","auth_key":"TopSecretValue!","exit_node":"exit-mac","ssh_server":true}]}"#,
+            "unsupported Tailscale SSH server",
+        ),
+        (
+            "Tailscale without an auth key",
+            r#"{"outbounds":[],"endpoints":[{"type":"tailscale","tag":"T","exit_node":"exit-mac"}]}"#,
+            "requires auth_key",
+        ),
+        (
+            "Tailscale without an exit node",
+            r#"{"outbounds":[],"endpoints":[{"type":"tailscale","tag":"T","auth_key":"TopSecretValue!"}]}"#,
+            "requires exit_node",
+        ),
+        (
+            "WireGuard endpoint",
+            r#"{"outbounds":[],"endpoints":[{"type":"wireguard","tag":"W","private_key":"TopSecretValue!"}]}"#,
+            "supported node-list schema",
         ),
     ] {
         let error = import_subscription_document(document).expect_err(label);

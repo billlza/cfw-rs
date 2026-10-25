@@ -248,8 +248,8 @@ static NSError *CFWUnsupportedOperation(NSString *operation) {
 }
 
 - (NSString *)tailscaleHostname {
-  // An empty name explicitly requests the upstream system-hostname default.
-  // CFM's typed configuration does not currently admit Tailscale endpoints.
+  // An empty name explicitly requests the upstream system-hostname default;
+  // a profile that wants another name carries it in the endpoint's `hostname`.
   return @"";
 }
 

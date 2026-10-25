@@ -330,6 +330,54 @@
         "reason": "WireGuard uses a userspace stack with system=false so NetworkExtension remains the only owner of system tunnel interfaces."
       },
       {
+        "tag": "with_tailscale",
+        "reason": "The Tailscale endpoint projection needs the real tsnet node; include/tailscale_stub.go otherwise refuses every profile that names one."
+      },
+      {
+        "tag": "ts_omit_logtail",
+        "reason": "Compiles out the Tailscale client's log upload to log.tailscale.com; the engine sends no diagnostics off the Mac."
+      },
+      {
+        "tag": "ts_omit_ssh",
+        "reason": "No Tailscale SSH server: the node only uses an exit node."
+      },
+      {
+        "tag": "ts_omit_drive",
+        "reason": "No Taildrive file sharing from the node."
+      },
+      {
+        "tag": "ts_omit_taildrop",
+        "reason": "No Taildrop file transfer into the engine's working directory."
+      },
+      {
+        "tag": "ts_omit_webclient",
+        "reason": "No Tailscale web client served by the node."
+      },
+      {
+        "tag": "ts_omit_doctor",
+        "reason": "Drops the tailscale doctor diagnostics the product never runs."
+      },
+      {
+        "tag": "ts_omit_capture",
+        "reason": "Drops the packet capture service, so no tailnet peer can request captures from the engine."
+      },
+      {
+        "tag": "ts_omit_kube",
+        "reason": "Drops Kubernetes state storage, which the Mac never uses."
+      },
+      {
+        "tag": "ts_omit_aws",
+        "reason": "Drops AWS SSM state storage, which the Mac never uses."
+      },
+      {
+        "tag": "ts_omit_synology",
+        "reason": "Drops Synology platform support."
+      },
+      {
+        "tag": "ts_omit_bird",
+        "reason": "Drops the BIRD route-server integration."
+      },
+      {
         "tag": "with_quic",
         "reason": "QUIC-based outbounds (Hysteria2, TUIC, and QUIC transports) are product features."
       },
@@ -368,6 +416,13 @@
         "requiredWhenContains": "root.insert(\"experimental\".into(), clash_api.experimental_value());",
         "triggerRequired": true,
         "reason": "Every projected configuration carries the controller block, so every engine start needs the clash API server compiled in."
+      },
+      {
+        "tag": "with_tailscale",
+        "path": "crates/cfw-singbox-config/src/profile_projection.rs",
+        "requiredWhenContains": "base_outbound(\"tailscale\", tag)",
+        "triggerRequired": true,
+        "reason": "A profile's Tailscale node is projected as a sing-box tailscale endpoint, which only the endpoint registration compiled in by with_tailscale can start."
       }
     ]
   },

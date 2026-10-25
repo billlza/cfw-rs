@@ -57,6 +57,8 @@ enum ConfigurationCredentialSlots {
       outbound["uuid"] as? String
     case .hysteria2ObfsPassword:
       (outbound["obfs"] as? [String: Any])?["password"] as? String
+    case .tailscaleAuthKey:
+      outbound["type"] as? String == "tailscale" ? outbound["auth_key"] as? String : nil
     }
   }
 

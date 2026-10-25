@@ -201,7 +201,8 @@ fn fallback_groups_preserve_priority_and_do_not_become_lowest_latency_groups() {
                 "idle_timeout":"1800s", "interrupt_exist_connections":false
             })
         );
-        let probe: Value = serde_json::from_str(&projected.proxy_probe_json().unwrap()).unwrap();
+        let probe: Value =
+            serde_json::from_str(&projected.proxy_probe_template().unwrap().json).unwrap();
         assert_eq!(probe["outbounds"][2]["type"], "selector");
         assert!(probe["outbounds"][2].get("url").is_none());
     }
@@ -249,7 +250,8 @@ fn load_balance_strategy_and_continuous_probe_policy_survive_projection() {
                 .with_selected_outbound("automatic", "first")
                 .is_err()
         );
-        let probe: Value = serde_json::from_str(&projection.proxy_probe_json().unwrap()).unwrap();
+        let probe: Value =
+            serde_json::from_str(&projection.proxy_probe_template().unwrap().json).unwrap();
         assert_eq!(probe["outbounds"][2]["type"], "selector");
         source["outbounds"][2]["strategy"] = json!("random");
         assert!(ValidatedSingBoxProfile::parse(&source.to_string()).is_err());
@@ -490,4 +492,205 @@ fn required_hybrid_key_exchange_reaches_projection_without_classical_downgrade()
     preferred["curve_preferences"] = json!(["X25519MLKEM768", "X25519"]);
     ValidatedSingBoxProfile::parse(&tls_profile(preferred).to_string())
         .expect("explicit classical compatibility");
+}
+
+fn tailscale() -> Value {
+    json!({"type":"tailscale","tag":"ts","exit_node":"exit-mac",
+        "auth_key_credential_ref":{"id":"dddddddd-dddd-4ddd-8ddd-dddddddddddd","kind":"tailscale_auth_key"}})
+}
+
+#[test]
+fn tailscale_projects_an_exit_node_endpoint_with_its_vault_slot() {
+    let profile = ValidatedSingBoxProfile::parse(&json!({"outbounds":[tailscale()]}).to_string())
+        .expect("Tailscale");
+    assert!(profile.routes_through_remote());
+    let projected = profile
+        .project(
+            PROFILE_ID,
+            ProjectionMode::SystemProxy,
+            &EngineSettings::default(),
+        )
+        .expect("projection");
+    let runtime: Value = serde_json::from_str(projected.as_json()).expect("runtime");
+    assert_eq!(runtime["route"]["final"], "ts");
+    assert!(
+        runtime["outbounds"]
+            .as_array()
+            .expect("outbounds")
+            .iter()
+            .all(|outbound| outbound["type"] != "tailscale")
+    );
+    let endpoint = &runtime["endpoints"][0];
+    assert_eq!(endpoint["type"], "tailscale");
+    assert_eq!(endpoint["tag"], "ts");
+    assert_eq!(endpoint["auth_key"], "");
+    assert_eq!(endpoint["exit_node"], "exit-mac");
+    assert_eq!(
+        endpoint["state_directory"],
+        format!("tailscale/{PROFILE_ID}")
+    );
+    assert!(endpoint["domain_resolver"].is_object());
+    for absent in [
+        "control_url",
+        "control_server",
+        "hostname",
+        "accept_routes",
+        "exit_node_allow_lan_access",
+        "advertise_exit_node",
+        "advertise_routes",
+        "ephemeral",
+        "system_interface",
+    ] {
+        assert!(endpoint.get(absent).is_none(), "{absent}");
+    }
+    assert_eq!(projected.credential_slots().len(), 1);
+    assert_eq!(
+        projected.credential_slots()[0].json_pointer(),
+        "/endpoints/0/auth_key"
+    );
+    assert_eq!(
+        projected.credential_slots()[0].target(),
+        crate::CredentialTarget::TailscaleAuthKey
+    );
+
+    let mut tuned = tailscale();
+    tuned["control_server"] = json!("https://headscale.example.com");
+    tuned["hostname"] = json!("office-mac");
+    tuned["accept_routes"] = json!(true);
+    tuned["exit_node_allow_lan_access"] = json!(true);
+    let profile = ValidatedSingBoxProfile::parse(&json!({"outbounds":[tuned]}).to_string())
+        .expect("tuned Tailscale");
+    let projected = profile
+        .project(
+            PROFILE_ID,
+            ProjectionMode::Tunnel,
+            &EngineSettings::default(),
+        )
+        .expect("tunnel projection");
+    let runtime: Value = serde_json::from_str(projected.as_json()).expect("runtime");
+    let endpoint = &runtime["endpoints"][0];
+    assert_eq!(endpoint["control_url"], "https://headscale.example.com");
+    assert_eq!(endpoint["hostname"], "office-mac");
+    assert_eq!(endpoint["accept_routes"], true);
+    assert_eq!(endpoint["exit_node_allow_lan_access"], true);
+}
+
+#[test]
+fn tailscale_rejects_invalid_exit_nodes_urls_hostnames_and_credential_kinds() {
+    for (key, value) in [
+        ("exit_node", json!("")),
+        ("exit_node", json!("exit node")),
+        ("exit_node", json!("127.0.0.1")),
+        ("control_server", json!("http://headscale.example.com")),
+        (
+            "control_server",
+            json!("https://user:secret@headscale.example.com"),
+        ),
+        (
+            "control_server",
+            json!("https://headscale.example.com/?next=1"),
+        ),
+        (
+            "control_server",
+            json!("https://headscale.example.com/#login"),
+        ),
+        ("control_server", json!("headscale.example.com")),
+        ("control_url", json!("https://headscale.example.com")),
+        ("hostname", json!("")),
+        ("hostname", json!("-office")),
+        ("hostname", json!("office.mac")),
+        ("hostname", json!("x".repeat(64))),
+        (
+            "auth_key_credential_ref",
+            json!({"id":"dddddddd-dddd-4ddd-8ddd-dddddddddddd","kind":"trojan_password"}),
+        ),
+        ("advertise_exit_node", json!(true)),
+        ("advertise_routes", json!(["192.168.1.0/24"])),
+        ("ephemeral", json!(true)),
+        ("system_interface", json!(true)),
+        ("ssh_server", json!(true)),
+    ] {
+        let mut outbound = tailscale();
+        outbound[key] = value;
+        assert!(
+            ValidatedSingBoxProfile::parse(&json!({"outbounds":[outbound]}).to_string()).is_err(),
+            "admitted {key}"
+        );
+    }
+    crate::CredentialSecret::new("tskey-auth-kTEST1CNTRL-abcdefghijklmnopqrstuvwxyz0123456789")
+        .expect("auth key")
+        .validate_for_kind(crate::CredentialKind::TailscaleAuthKey)
+        .expect("printable token");
+    for invalid in ["tskey auth", "tskey-auth-\u{fc}", &"x".repeat(257)] {
+        assert!(
+            crate::CredentialSecret::new(invalid)
+                .and_then(|secret| secret.validate_for_kind(crate::CredentialKind::TailscaleAuthKey))
+                .is_err(),
+            "{invalid:?}"
+        );
+    }
+}
+
+#[test]
+fn latency_probe_leaves_tailscale_endpoints_to_the_running_core() {
+    let mixed = json!({"outbounds":[tailscale(), wireguard(),
+        {"type":"selector","tag":"auto","outbounds":["ts","wg"],"default":"ts"},
+        {"type":"selector","tag":"only-ts","outbounds":["ts"]},
+        {"type":"selector","tag":"nested","outbounds":["only-ts"]}],
+        "route":{"final":"auto"}});
+    let profile = ValidatedSingBoxProfile::parse(&mixed.to_string()).expect("mixed profile");
+    let projected = profile
+        .project(
+            PROFILE_ID,
+            ProjectionMode::SystemProxy,
+            &EngineSettings::default(),
+        )
+        .expect("projection");
+    assert_eq!(
+        projected.credential_slots()[0].json_pointer(),
+        "/endpoints/0/auth_key"
+    );
+    assert_eq!(
+        projected.credential_slots()[1].json_pointer(),
+        "/endpoints/1/private_key"
+    );
+    let probe = profile
+        .project_proxy_probe(
+            PROFILE_ID,
+            ProjectionMode::SystemProxy,
+            &EngineSettings::default(),
+        )
+        .expect("probe");
+    let template: Value = serde_json::from_str(probe.as_json()).expect("probe JSON");
+    let endpoints = template["endpoints"].as_array().expect("endpoints");
+    assert_eq!(endpoints.len(), 1);
+    assert_eq!(endpoints[0]["type"], "wireguard");
+    let outbounds = template["outbounds"].as_array().expect("outbounds");
+    let tags = outbounds
+        .iter()
+        .map(|outbound| outbound["tag"].as_str().expect("tag"))
+        .collect::<Vec<_>>();
+    assert!(
+        !tags.contains(&"only-ts") && !tags.contains(&"nested"),
+        "{tags:?}"
+    );
+    let auto = outbounds
+        .iter()
+        .find(|outbound| outbound["tag"] == "auto")
+        .expect("auto group");
+    assert_eq!(auto["outbounds"], json!(["wg"]));
+    assert!(auto.get("default").is_none());
+    assert_eq!(probe.excluded_tags(), ["nested", "only-ts", "ts"]);
+    let pointers = probe
+        .credential_slots()
+        .iter()
+        .map(|slot| slot.json_pointer())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        pointers,
+        [
+            "/endpoints/0/private_key",
+            "/endpoints/0/peers/0/pre_shared_key"
+        ]
+    );
 }

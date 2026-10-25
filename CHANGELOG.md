@@ -2,6 +2,19 @@
 
 ## 0.5.1 - Unreleased
 
+### Profiles
+
+- Add the `tailscale` node. The Mac joins a tailnet with an auth key kept in
+  the credential vault and sends the traffic routed to the node through one
+  exit node (`exit_node`), with optional `control_server` (an https URL, for
+  Headscale), `hostname`, `accept_routes` and `exit_node_allow_lan_access`.
+  The node never advertises routes or an exit node, runs no Tailscale SSH
+  server and takes no Taildrop, in the profile and at import; a sing-box node
+  list's `endpoints` entry imports with its `auth_key` moved into the vault.
+  Each runtime keeps the node's state under its own working directory, so use
+  a reusable auth key, and the latency test measures the node only while the
+  core runs its profile. Earlier releases reject profiles that carry the node.
+
 ### Reliability
 
 - Give every node of a latency test its whole timeout. The engine a test
@@ -15,6 +28,10 @@
   modules it requires directly move to their newest releases, among them
   `golang.org/x/crypto` 0.58.0, `golang.org/x/net` 0.61.0, gRPC 1.84.0 and
   uTLS 1.8.8; sing-box's own modules stay at the versions released with it.
+- Build the network engine with `with_tailscale` and the `ts_omit_*` tags of
+  the upstream Apple client, which leave out the Tailscale log upload, SSH
+  server, Taildrive, Taildrop, web client and platform integrations the Mac
+  never uses.
 
 ## 0.5.0 — 2026-10-17
 

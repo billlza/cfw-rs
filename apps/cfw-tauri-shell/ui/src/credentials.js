@@ -28,6 +28,7 @@ export const CREDENTIAL_KINDS = Object.freeze([
   "tuic_password",
   "wireguard_private_key",
   "wireguard_pre_shared_key",
+  "tailscale_auth_key",
 ]);
 
 const KINDS = new Set(CREDENTIAL_KINDS);
@@ -47,6 +48,7 @@ const CREDENTIAL_LABELS = Object.freeze({
   tuic_password: "TUIC Password",
   wireguard_private_key: "WireGuard Private Key",
   wireguard_pre_shared_key: "WireGuard Pre-shared Key",
+  tailscale_auth_key: "Tailscale Auth Key",
 });
 
 function isRecord(value) {
@@ -150,6 +152,9 @@ export function credentialProvisionBatch(requirements, secrets) {
       if (btoa(decoded) !== secret || [...decoded].every((character) => character.charCodeAt(0) === 0)) {
         throw new TypeError("WireGuard key must be a nonzero canonical base64 value");
       }
+    }
+    if (reference.kind === "tailscale_auth_key" && !/^[\x21-\x7e]{1,256}$/u.test(secret)) {
+      throw new TypeError("Tailscale auth key must be one token of up to 256 printable ASCII characters");
     }
     if (/[\u0000-\u001f\u007f-\u009f]/u.test(secret)) {
       throw new TypeError(`${credentialLabel(reference.kind)} contains control characters`);

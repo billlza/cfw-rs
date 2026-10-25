@@ -1,9 +1,10 @@
 //! Restricted adapter for upstream sing-box node-list JSON.
 //!
 //! This is deliberately not a full sing-box configuration loader. Only one
-//! root `outbounds` array is accepted, every source field is typed, inline
-//! secrets are extracted into the vault batch, and the result is revalidated
-//! as the application's closed secret-free profile.
+//! root `outbounds` array, with an optional `endpoints` array of Tailscale
+//! nodes, is accepted; every source field is typed, inline secrets are
+//! extracted into the vault batch, and the result is revalidated as the
+//! application's closed secret-free profile.
 
 use std::collections::BTreeMap;
 
@@ -25,6 +26,60 @@ use super::{
 #[serde(deny_unknown_fields)]
 struct SourceDocument {
     outbounds: Vec<SourceOutbound>,
+    #[serde(default)]
+    endpoints: Vec<SourceEndpoint>,
+}
+
+/// The upstream endpoint fields, each either carried into the closed profile
+/// or refused by name: this Mac only uses an exit node, so every field that
+/// would make it advertise, serve or own an interface is rejected rather
+/// than dropped.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum SourceEndpoint {
+    Tailscale {
+        tag: String,
+        #[serde(default)]
+        auth_key: String,
+        #[serde(default)]
+        exit_node: String,
+        #[serde(default)]
+        control_url: String,
+        #[serde(default)]
+        hostname: String,
+        #[serde(default)]
+        accept_routes: bool,
+        #[serde(default)]
+        exit_node_allow_lan_access: bool,
+        #[serde(default)]
+        ephemeral: bool,
+        #[serde(default)]
+        state_directory: Option<Value>,
+        #[serde(default)]
+        advertise_routes: Option<Value>,
+        #[serde(default)]
+        advertise_exit_node: bool,
+        #[serde(default)]
+        advertise_tags: Option<Value>,
+        #[serde(default)]
+        listen_port: Option<Value>,
+        #[serde(default)]
+        relay_server_port: Option<Value>,
+        #[serde(default)]
+        relay_server_static_endpoints: Option<Value>,
+        #[serde(default)]
+        system_interface: bool,
+        #[serde(default)]
+        system_interface_name: Option<Value>,
+        #[serde(default)]
+        system_interface_mtu: Option<Value>,
+        #[serde(default)]
+        udp_timeout: Option<Value>,
+        #[serde(default)]
+        ssh_server: Option<Value>,
+        #[serde(default)]
+        taildrop_directory: Option<Value>,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -331,10 +386,10 @@ pub(super) fn import_sing_box_document(
     let source: SourceDocument = serde_json::from_str(body).map_err(|_| {
         "sing-box source JSON does not match the supported node-list schema".to_owned()
     })?;
-    if source.outbounds.is_empty() {
+    if source.outbounds.is_empty() && source.endpoints.is_empty() {
         return Err("sing-box source JSON contains no outbounds".into());
     }
-    if source.outbounds.len() > cfw_singbox_config::MAX_OUTBOUNDS {
+    if source.outbounds.len() + source.endpoints.len() > cfw_singbox_config::MAX_OUTBOUNDS {
         return Err(format!(
             "sing-box source JSON has more than {} outbounds",
             cfw_singbox_config::MAX_OUTBOUNDS
@@ -344,7 +399,92 @@ pub(super) fn import_sing_box_document(
         let outbound = convert_outbound(&mut collector, outbound)?;
         collector.outbounds.push(outbound);
     }
+    for endpoint in source.endpoints {
+        let endpoint = convert_endpoint(&mut collector, endpoint)?;
+        collector.outbounds.push(endpoint);
+    }
     collector.into_subscription()
+}
+
+fn convert_endpoint(
+    collector: &mut OutboundCollector,
+    source: SourceEndpoint,
+) -> Result<Value, String> {
+    match source {
+        SourceEndpoint::Tailscale {
+            tag,
+            auth_key,
+            exit_node,
+            control_url,
+            hostname,
+            accept_routes,
+            exit_node_allow_lan_access,
+            ephemeral,
+            state_directory,
+            advertise_routes,
+            advertise_exit_node,
+            advertise_tags,
+            listen_port,
+            relay_server_port,
+            relay_server_static_endpoints,
+            system_interface,
+            system_interface_name,
+            system_interface_mtu,
+            udp_timeout,
+            ssh_server,
+            taildrop_directory,
+        } => {
+            reject_present(state_directory, "Tailscale state directory")?;
+            reject_present(advertise_routes, "Tailscale route advertisement")?;
+            reject_present(advertise_tags, "Tailscale tag advertisement")?;
+            reject_present(listen_port, "Tailscale listen port")?;
+            reject_present(relay_server_port, "Tailscale relay server")?;
+            reject_present(relay_server_static_endpoints, "Tailscale relay server")?;
+            reject_present(system_interface_name, "Tailscale system interface")?;
+            reject_present(system_interface_mtu, "Tailscale system interface")?;
+            reject_present(udp_timeout, "Tailscale UDP timeout")?;
+            reject_present(ssh_server, "Tailscale SSH server")?;
+            reject_present(taildrop_directory, "Taildrop")?;
+            if advertise_exit_node {
+                return Err("sing-box Tailscale exit-node advertisement is unsupported: this Mac only uses an exit node".into());
+            }
+            if system_interface {
+                return Err("sing-box Tailscale system interfaces are unsupported".into());
+            }
+            if ephemeral {
+                return Err("sing-box Tailscale ephemeral nodes are unsupported".into());
+            }
+            if auth_key.is_empty() {
+                return Err(
+                    "sing-box Tailscale import requires auth_key; interactive login is unsupported"
+                        .into(),
+                );
+            }
+            if exit_node.is_empty() {
+                return Err("sing-box Tailscale import requires exit_node".into());
+            }
+            let reference = collector.push_secret(CredentialKind::TailscaleAuthKey, auth_key);
+            let mut endpoint = json!({
+                "type": "tailscale",
+                "tag": collector.unique_tag(tag)?,
+                "auth_key_credential_ref": credential_ref_json(&reference),
+                "exit_node": exit_node,
+            });
+            if !control_url.is_empty() {
+                endpoint["control_server"] = Value::String(control_url);
+            }
+            if !hostname.is_empty() {
+                endpoint["hostname"] = Value::String(hostname);
+            }
+            if accept_routes {
+                endpoint["accept_routes"] = Value::Bool(true);
+            }
+            if exit_node_allow_lan_access {
+                endpoint["exit_node_allow_lan_access"] = Value::Bool(true);
+            }
+            Ok(endpoint)
+        }
+    }
 }
 
 fn convert_outbound(

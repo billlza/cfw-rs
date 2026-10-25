@@ -20,6 +20,47 @@ Existing profiles retain their canonical form when these fields are absent.
 Changing a profile document follows the normal profile/credential replacement
 transaction; saved node selections remain separate from that document.
 
+## Tailscale exit node
+
+A profile can carry `tailscale` nodes. Each joins the tailnet as this Mac and
+sends the traffic routed to it through one exit node, such as a machine at
+home or an exit host:
+
+```json
+{
+  "type": "tailscale",
+  "tag": "home",
+  "exit_node": "home-mac",
+  "auth_key_credential_ref": {
+    "id": "77777777-7777-4777-8777-777777777777",
+    "kind": "tailscale_auth_key"
+  },
+  "control_server": "https://headscale.example.com",
+  "hostname": "office-mac",
+  "accept_routes": false,
+  "exit_node_allow_lan_access": false
+}
+```
+
+`exit_node` is the exit node's machine name or tailnet address. The auth key
+is a credential like a WireGuard key: it is provisioned once through the
+credentials prompt, or extracted from an imported sing-box `endpoints` entry,
+and never stored in the profile. `control_server` (an https URL; sing-box's
+`control_url`), `hostname`,
+`accept_routes` and `exit_node_allow_lan_access` are optional; without them
+the node uses Tailscale's coordination server, the Mac's hostname, no
+advertised routes and no LAN access through the exit node.
+
+The node only uses an exit node. Advertising routes, offering this Mac as an
+exit node, Tailscale SSH, Taildrop, ephemeral registration and a system
+interface are refused, in the profile and at import. Use a reusable auth key:
+the proxy modes and TUN run the engine as different users, so each keeps its
+own registration under its working directory (`tailscale/<profile id>`), and
+a single-use key logs in only the first of them. Deleting the profile leaves
+that directory and the node's entry in the admin console. The latency test
+measures a Tailscale node only while the core runs its profile; with the core
+off it reports the node as unsupported.
+
 ## TLS 1.3 and hybrid key exchange
 
 Add the following to the existing TLS object of a compatible TLS-based node:

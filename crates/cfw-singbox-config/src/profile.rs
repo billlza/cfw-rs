@@ -101,6 +101,21 @@ pub(crate) enum ProfileOutbound {
         mtu: u16,
         persistent_keepalive_seconds: u16,
     },
+    /// A tailnet node that sends its traffic through one exit node. The Mac
+    /// never advertises routes or an exit node of its own.
+    Tailscale {
+        tag: String,
+        auth_key_credential_ref: CredentialRef,
+        exit_node: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        control_server: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hostname: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        accept_routes: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        exit_node_allow_lan_access: bool,
+    },
     Socks5 {
         tag: String,
         server: String,
@@ -586,7 +601,8 @@ impl ProfileOutbound {
             | Self::Selector { .. }
             | Self::UrlTest { .. }
             | Self::Fallback { .. }
-            | Self::LoadBalance { .. } => None,
+            | Self::LoadBalance { .. }
+            | Self::Tailscale { .. } => None,
             Self::WireGuard { server, .. }
             | Self::Socks5 { server, .. }
             | Self::Http { server, .. }
@@ -612,6 +628,12 @@ impl ProfileOutbound {
         )
     }
 
+    /// Whether the runtime places this outbound in sing-box's `endpoints`
+    /// array rather than `outbounds`.
+    pub(crate) fn is_endpoint(&self) -> bool {
+        matches!(self, Self::WireGuard { .. } | Self::Tailscale { .. })
+    }
+
     pub(crate) fn tag(&self) -> &str {
         match self {
             Self::Direct { tag }
@@ -621,6 +643,7 @@ impl ProfileOutbound {
             | Self::Fallback { tag, .. }
             | Self::LoadBalance { tag, .. }
             | Self::WireGuard { tag, .. }
+            | Self::Tailscale { tag, .. }
             | Self::Socks5 { tag, .. }
             | Self::Http { tag, .. }
             | Self::Shadowsocks { tag, .. }
@@ -642,6 +665,10 @@ impl ProfileOutbound {
             } => std::iter::once(private_key_credential_ref)
                 .chain(pre_shared_key_credential_ref.iter())
                 .collect(),
+            Self::Tailscale {
+                auth_key_credential_ref,
+                ..
+            } => vec![auth_key_credential_ref],
             Self::Direct { .. }
             | Self::Block { .. }
             | Self::Selector { .. }

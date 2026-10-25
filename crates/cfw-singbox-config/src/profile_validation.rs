@@ -197,6 +197,28 @@ impl ProfileOutbound {
                 }
                 Ok(())
             }
+            Self::Tailscale {
+                auth_key_credential_ref,
+                exit_node,
+                control_server,
+                hostname,
+                ..
+            } => {
+                validate_reference_kind_at(
+                    auth_key_credential_ref,
+                    CredentialKind::TailscaleAuthKey,
+                    path,
+                    "auth_key_credential_ref",
+                )?;
+                validate_server_name(exit_node, &format!("{path}.exit_node"))?;
+                if let Some(hostname) = hostname {
+                    validate_tailscale_hostname(hostname, &format!("{path}.hostname"))?;
+                }
+                if let Some(server) = control_server {
+                    validate_tailscale_control_server(server, &format!("{path}.control_server"))?;
+                }
+                Ok(())
+            }
             Self::Selector {
                 outbounds, default, ..
             } => {
@@ -556,6 +578,50 @@ pub(crate) fn validate_server_name(server: &str, path: &str) -> Result<(), Confi
             path,
             "server is not a bounded IP address or DNS name",
         ));
+    }
+    Ok(())
+}
+
+/// A Tailscale machine name is one DNS label; the coordination server derives
+/// the node's MagicDNS name from it.
+fn validate_tailscale_hostname(hostname: &str, path: &str) -> Result<(), ConfigError> {
+    if hostname.is_empty()
+        || hostname.len() > 63
+        || hostname.starts_with('-')
+        || hostname.ends_with('-')
+        || !hostname
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return Err(unsupported_shape(
+            path,
+            "Tailscale hostname must be one DNS label of up to 63 letters, digits and hyphens",
+        ));
+    }
+    Ok(())
+}
+
+/// The coordination server receives the node key, so only an https origin
+/// without credentials, query or fragment is admitted.
+fn validate_tailscale_control_server(value: &str, path: &str) -> Result<(), ConfigError> {
+    let invalid = || {
+        unsupported_shape(
+            path,
+            "Tailscale control_server must be an https URL with a host and no credentials, query or fragment",
+        )
+    };
+    if value.len() > MAX_PATH_BYTES || value.trim() != value {
+        return Err(invalid());
+    }
+    let parsed = url::Url::parse(value).map_err(|_| invalid())?;
+    if parsed.scheme() != "https"
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(invalid());
     }
     Ok(())
 }

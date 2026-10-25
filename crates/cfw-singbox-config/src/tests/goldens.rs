@@ -121,6 +121,13 @@ fn wireguard() -> Value {
         "route":{"final":"wg"}})
 }
 
+fn tailscale() -> Value {
+    json!({"outbounds":[{"type":"tailscale","tag":"ts","exit_node":"exit-mac",
+        "control_server":"https://headscale.example.com","hostname":"office-mac","accept_routes":true,
+        "auth_key_credential_ref":{"id":"77777777-7777-4777-8777-777777777777","kind":"tailscale_auth_key"}}],
+        "route":{"final":"ts"}})
+}
+
 fn lan_settings() -> EngineSettings {
     EngineSettings {
         lan_proxy: Some(LanProxySettings {
@@ -240,6 +247,12 @@ fn cases() -> Vec<Case> {
             ProjectionMode::SystemProxy,
             default(),
         ),
+        case(
+            "tailscale-system-proxy",
+            &tailscale(),
+            ProjectionMode::SystemProxy,
+            default(),
+        ),
     ];
     cases.sort_by_key(|case| case.name);
     cases
@@ -271,8 +284,8 @@ fn snapshot(case: &Case) -> String {
     let config: Value =
         serde_json::from_str(&projected.as_json().replace(secret, SECRET_PLACEHOLDER))
             .expect("projected JSON");
-    let probe: Value =
-        serde_json::from_str(&projected.proxy_probe_json().expect("probe")).expect("probe JSON");
+    let probe: Value = serde_json::from_str(&projected.proxy_probe_template().expect("probe").json)
+        .expect("probe JSON");
     let document = json!({
         "config": config,
         "credential_slots": projected.credential_slots(),

@@ -230,7 +230,7 @@ fn profile_probes_preserve_protocol_dns_and_credential_slots_without_network_int
         .expect("projection");
     let runtime: serde_json::Value = serde_json::from_str(projected.as_json()).expect("runtime");
     let probe: serde_json::Value =
-        serde_json::from_str(&projected.proxy_probe_json().expect("probe")).expect("JSON");
+        serde_json::from_str(&projected.proxy_probe_template().expect("probe").json).expect("JSON");
     assert_eq!(probe["outbounds"][0], runtime["outbounds"][0]);
     assert_eq!(probe["dns"], runtime["dns"]);
     assert_eq!(probe["outbounds"][1]["type"], "selector");

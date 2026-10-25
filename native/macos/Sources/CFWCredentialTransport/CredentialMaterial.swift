@@ -305,6 +305,12 @@ public enum CredentialInjector {
             throw CredentialMaterialError.nonEmptyPlaceholder(slot.jsonPointer)
           }
           outbound["uuid"] = secret
+        case .tailscaleAuthKey:
+          guard outbound["type"] as? String == "tailscale", outbound["auth_key"] as? String == ""
+          else {
+            throw CredentialMaterialError.nonEmptyPlaceholder(slot.jsonPointer)
+          }
+          outbound["auth_key"] = secret
         case .hysteria2ObfsPassword:
           guard var obfs = outbound["obfs"] as? [String: Any],
             obfs["password"] as? String == ""

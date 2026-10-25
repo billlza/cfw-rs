@@ -314,3 +314,37 @@ func nativeCredentialReceiptRejectsInvalidProfileDigests(_ digest: String) throw
     )
   }
 }
+
+@Test func tailscaleAuthKeyCredentialsKeepTheirKindPointerAndSyntax() throws {
+  let reference = CredentialReference(
+    id: UUID(uuidString: "77777777-7777-4777-8777-777777777777")!,
+    kind: .tailscaleAuthKey
+  )
+  #expect(CredentialKind.tailscaleAuthKey.rawValue == "tailscale_auth_key")
+  #expect(CredentialTarget.tailscaleAuthKey.rawValue == "tailscale_auth_key")
+  #expect(CredentialTarget.tailscaleAuthKey.configurationContainer == "endpoints")
+  let slot = try CredentialSlot(
+    reference: reference,
+    target: .tailscaleAuthKey,
+    outboundIndex: 0,
+    jsonPointer: "/endpoints/0/auth_key"
+  )
+  #expect(slot.jsonPointer == "/endpoints/0/auth_key")
+  #expect(throws: NativeBridgeProtocolError.invalidCredentialSlot) {
+    try CredentialSlot(
+      reference: reference,
+      target: .tailscaleAuthKey,
+      outboundIndex: 0,
+      jsonPointer: "/outbounds/0/auth_key"
+    )
+  }
+  #expect(
+    CredentialKind.tailscaleAuthKey.admitsSecretSyntax(
+      "tskey-auth-kTEST1CNTRL-abcdefghijklmnopqrstuvwxyz0123456789"))
+  #expect(
+    CredentialKind.tailscaleAuthKey.admitsSecretSyntax(
+      "0123456789abcdef0123456789abcdef0123456789abcdef"))
+  for rejected in ["", "tskey auth", "tskey-auth-\u{00FC}", String(repeating: "x", count: 257)] {
+    #expect(!CredentialKind.tailscaleAuthKey.admitsSecretSyntax(rejected))
+  }
+}

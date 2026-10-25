@@ -257,6 +257,11 @@ REQUIRED_ENGINE_START_PATH_BINDINGS = frozenset(
             "crates/cfw-singbox-config/src/projection.rs",
             'root.insert("experimental".into(), clash_api.experimental_value());',
         ),
+        (
+            "with_tailscale",
+            "crates/cfw-singbox-config/src/profile_projection.rs",
+            'base_outbound("tailscale", tag)',
+        ),
     }
 )
 REQUIRED_LIBBOX_BUILD_TAGS = frozenset(
@@ -266,6 +271,18 @@ REQUIRED_LIBBOX_BUILD_TAGS = frozenset(
         "with_quic",
         "with_utls",
         "with_clash_api",
+        "with_tailscale",
+        "ts_omit_logtail",
+        "ts_omit_ssh",
+        "ts_omit_drive",
+        "ts_omit_taildrop",
+        "ts_omit_webclient",
+        "ts_omit_doctor",
+        "ts_omit_capture",
+        "ts_omit_kube",
+        "ts_omit_aws",
+        "ts_omit_synology",
+        "ts_omit_bird",
         "badlinkname",
         "tfogo_checklinkname0",
         "grpcnotrace",

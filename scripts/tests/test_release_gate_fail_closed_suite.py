@@ -270,6 +270,7 @@ _PINNED_INPUTS = (
     # the projection that injects it require `with_clash_api` in the artifact.
     "crates/cfw-singbox-config/src/controller.rs",
     "crates/cfw-singbox-config/src/projection.rs",
+    "crates/cfw-singbox-config/src/profile_projection.rs",
 )
 _PINS_ENV = "scripts/dependency_pins.env"
 

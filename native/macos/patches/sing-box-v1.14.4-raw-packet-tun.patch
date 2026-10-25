@@ -1,26 +1,43 @@
+diff --git a/daemon/instance.go b/daemon/instance.go
+index bb6a340347af5dc37224cb2025cd624ce085b87d..7ae2ede11b37b5c1bf61b11990303d66ca8644cf 100644
+--- a/daemon/instance.go
++++ b/daemon/instance.go
+@@ -5,0 +6,2 @@ import (
++	"os"
++	"sync/atomic"
+@@ -39,0 +42 @@ type Instance struct {
++	closed                atomic.Bool
+@@ -168,0 +172,4 @@ func (i *Instance) Start() error {
++// Close closes the instance once and reports os.ErrClosed after that. A Box's
++// close succeeds again once it ran, so the owner of an instance whose close
++// failed, which keeps it, would otherwise take a later close for a clean one
++// while what the failed close left open still runs.
+@@ -169,0 +177,3 @@ func (i *Instance) Close() error {
++	if !i.closed.CompareAndSwap(false, true) {
++		return os.ErrClosed
++	}
 diff --git a/daemon/started_service.go b/daemon/started_service.go
-index 5e8c79987cfb09531537f24e2d38026085f300ca..5f14aba4edaaa394267da73426fd9db7fdae2005 100644
+index 41c9c926a0709981d42aac5a742ebf8b02b96c61..db89c27e007a8142df5cd9754c9bd40eb7cdb893 100644
 --- a/daemon/started_service.go
 +++ b/daemon/started_service.go
-@@ -23,0 +24 @@ import (
+@@ -24,0 +25 @@ import (
 +	E "github.com/sagernet/sing/common/exceptions"
-@@ -160 +161,3 @@ func (s *StartedService) interruptStart() {
+@@ -162 +163,3 @@ func (s *StartedService) interruptStart() {
 -	if s.serviceStatus.Status == ServiceStatus_STARTING && s.instance != nil {
 +	if s.serviceStatus.Status == ServiceStatus_STARTING {
 +		// A start still building its instance has nothing to cancel yet. It
 +		// checks this flag when it adopts the instance and then never runs it.
-@@ -162 +165,3 @@ func (s *StartedService) interruptStart() {
+@@ -164 +167,3 @@ func (s *StartedService) interruptStart() {
 -		s.instance.cancel()
 +		if s.instance != nil {
 +			s.instance.cancel()
 +		}
-@@ -259 +263,0 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
+@@ -261 +265,0 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
 -		s.instance = nil
-@@ -262,2 +266 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
+@@ -269 +273 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
 -		_ = oldInstance.Close()
--		runtimeDebug.FreeOSMemory()
 +		closeErr := oldInstance.Close()
-@@ -264,0 +268,7 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
+@@ -271,0 +276,7 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
 +		if closeErr != nil {
 +			err := E.Cause(closeErr, "close previous service")
 +			s.updateStatusError(err)
@@ -28,20 +45,20 @@ index 5e8c79987cfb09531537f24e2d38026085f300ca..5f14aba4edaaa394267da73426fd9db7
 +			return err
 +		}
 +		s.instance = nil
-@@ -282,0 +293 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
+@@ -291,0 +303 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
 +	interruptedWhileBuilding := s.startInterrupted
-@@ -284 +295,3 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
+@@ -293 +305,3 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
 -	err = instance.Start()
 +	if !interruptedWhileBuilding {
 +		err = instance.Start()
 +	}
-@@ -286 +299,2 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
+@@ -295 +309,2 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
 -	if s.startInterrupted {
 +	if s.startInterrupted || err != nil {
 +		interrupted := s.startInterrupted
-@@ -288 +301,0 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
+@@ -297 +311,0 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
 -		s.instance = nil
-@@ -290,7 +303,12 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
+@@ -299,7 +313,12 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
 -		_ = instance.Close()
 -		runtimeDebug.FreeOSMemory()
 -		return nil
@@ -61,24 +78,24 @@ index 5e8c79987cfb09531537f24e2d38026085f300ca..5f14aba4edaaa394267da73426fd9db7
 +			s.serviceAccess.Unlock()
 +			return err
 +		}
-@@ -298 +315,0 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
+@@ -307 +325,0 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
 -		_ = instance.Close()
-@@ -300 +317 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
+@@ -309 +327 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
 -		return err
 +		return nil
-@@ -319,0 +337,6 @@ func (s *StartedService) Close() {
+@@ -328,0 +347,6 @@ func (s *StartedService) Close() {
 +func (s *StartedService) RuntimeStatus() (ServiceStatus_Type, string) {
 +	s.serviceAccess.RLock()
 +	defer s.serviceAccess.RUnlock()
 +	return s.serviceStatus.Status, s.serviceStatus.ErrorMessage
 +}
 +
-@@ -326 +349 @@ func (s *StartedService) CloseService() error {
+@@ -335 +359 @@ func (s *StartedService) CloseService() error {
 -	if instance == nil && s.serviceStatus.Status != ServiceStatus_STARTING && s.serviceStatus.Status != ServiceStatus_STARTED {
 +	if instance == nil && s.serviceStatus.Status != ServiceStatus_STARTING && s.serviceStatus.Status != ServiceStatus_STARTED && s.serviceStatus.Status != ServiceStatus_FATAL {
-@@ -330 +352,0 @@ func (s *StartedService) CloseService() error {
+@@ -339 +362,0 @@ func (s *StartedService) CloseService() error {
 -	s.instance = nil
-@@ -334 +356,6 @@ func (s *StartedService) CloseService() error {
+@@ -343 +366,6 @@ func (s *StartedService) CloseService() error {
 -		_ = instance.Close()
 +		if err := instance.Close(); err != nil {
 +			s.serviceAccess.Lock()
@@ -86,20 +103,20 @@ index 5e8c79987cfb09531537f24e2d38026085f300ca..5f14aba4edaaa394267da73426fd9db7
 +			s.serviceAccess.Unlock()
 +			return err
 +		}
-@@ -336,0 +364 @@ func (s *StartedService) CloseService() error {
+@@ -345,0 +374 @@ func (s *StartedService) CloseService() error {
 +	s.instance = nil
-@@ -1494 +1522 @@ func (s *StartedService) StartNetworkQualityTest(
+@@ -1505 +1534 @@ func (s *StartedService) StartNetworkQualityTest(
 -	resolvedDialer := dialer.NewResolveDialer(boxService.ctx, outbound, true, "", adapter.DNSQueryOptions{}, 0)
 +	resolvedDialer := dialer.NewResolveDialer(boxService.ctx, outbound, true, "", nil, adapter.DNSQueryOptions{}, 0)
-@@ -1540 +1568 @@ func (s *StartedService) StartSTUNTest(
+@@ -1551 +1580 @@ func (s *StartedService) StartSTUNTest(
 -	resolvedDialer := dialer.NewResolveDialer(boxService.ctx, outbound, true, "", adapter.DNSQueryOptions{}, 0)
 +	resolvedDialer := dialer.NewResolveDialer(boxService.ctx, outbound, true, "", nil, adapter.DNSQueryOptions{}, 0)
 diff --git a/daemon/started_service_test.go b/daemon/started_service_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..773842fc5cb521722fc9a1bcbd3e3e32b5bc9842
+index 0000000000000000000000000000000000000000..6e9fde8a472790b2fc5b29b381a6747dfd75a020
 --- /dev/null
 +++ b/daemon/started_service_test.go
-@@ -0,0 +1,215 @@
+@@ -0,0 +1,331 @@
 +package daemon
 +
 +import (
@@ -108,11 +125,13 @@ index 0000000000000000000000000000000000000000..773842fc5cb521722fc9a1bcbd3e3e32
 +	"errors"
 +	"fmt"
 +	"net"
++	"os"
 +	"sync/atomic"
 +	"testing"
 +	"time"
 +
 +	box "github.com/sagernet/sing-box"
++	"github.com/sagernet/sing-box/adapter"
 +	"github.com/sagernet/sing-box/adapter/certificate"
 +	"github.com/sagernet/sing-box/adapter/endpoint"
 +	"github.com/sagernet/sing-box/adapter/inbound"
@@ -120,6 +139,7 @@ index 0000000000000000000000000000000000000000..773842fc5cb521722fc9a1bcbd3e3e32
 +	serviceRegistry "github.com/sagernet/sing-box/adapter/service"
 +	"github.com/sagernet/sing-box/dns"
 +	"github.com/sagernet/sing-box/dns/transport/local"
++	"github.com/sagernet/sing-box/log"
 +)
 +
 +func TestStartedServiceRuntimeStatusAndFatalCleanup(t *testing.T) {
@@ -151,14 +171,18 @@ index 0000000000000000000000000000000000000000..773842fc5cb521722fc9a1bcbd3e3e32
 +		Context: testServiceContext(),
 +	})
 +	defer startedService.Close()
-+	instance := newClosedTestInstance(t, startedService)
++	instance := newStartedFailingCleanupInstance(t, startedService)
 +	startedService.serviceAccess.Lock()
 +	startedService.instance = instance
 +	startedService.updateStatus(ServiceStatus_STARTED)
 +	startedService.serviceAccess.Unlock()
 +
-+	if err := startedService.CloseService(); err == nil {
-+		t.Fatal("expected cleanup failure")
++	if err := startedService.CloseService(); !errors.Is(err, errFailingCleanup) {
++		t.Fatalf("expected the cleanup failure, got %v", err)
++	}
++	// The instance closes once, so closing it again fails too.
++	if err := startedService.CloseService(); !errors.Is(err, os.ErrClosed) {
++		t.Fatalf("a retained instance whose close failed closed again: %v", err)
 +	}
 +	startedService.serviceAccess.RLock()
 +	defer startedService.serviceAccess.RUnlock()
@@ -172,19 +196,78 @@ index 0000000000000000000000000000000000000000..773842fc5cb521722fc9a1bcbd3e3e32
 +		Context: testServiceContext(),
 +	})
 +	defer startedService.Close()
-+	instance := newClosedTestInstance(t, startedService)
++	instance := newStartedFailingCleanupInstance(t, startedService)
 +	startedService.serviceAccess.Lock()
 +	startedService.instance = instance
 +	startedService.updateStatus(ServiceStatus_STARTED)
 +	startedService.serviceAccess.Unlock()
 +
-+	if err := startedService.StartOrReloadService(context.Background(), "{}", nil); err == nil {
-+		t.Fatal("expected previous-instance cleanup failure")
++	if err := startedService.StartOrReloadService(context.Background(), "{}", nil); !errors.Is(err, errFailingCleanup) {
++		t.Fatalf("expected the previous instance's cleanup failure, got %v", err)
++	}
++	if err := startedService.StartOrReloadService(context.Background(), "{}", nil); !errors.Is(err, os.ErrClosed) {
++		t.Fatalf("a retained previous instance whose close failed closed again: %v", err)
 +	}
 +	startedService.serviceAccess.RLock()
 +	defer startedService.serviceAccess.RUnlock()
 +	if startedService.instance != instance || startedService.serviceStatus.Status != ServiceStatus_FATAL {
 +		t.Fatal("failed replacement cleanup released previous instance ownership")
++	}
++}
++
++// A start interrupted by a close keeps its instance when closing it fails, and
++// the close that interrupted it then reports that the instance cannot be
++// closed again, as every later close does. Its owner therefore never takes the
++// service for idle while what the failed close left open still runs.
++func TestAnInterruptedStartWhoseCloseFailsKeepsItsInstanceUnclosable(t *testing.T) {
++	holding := make(chan struct{})
++	startedService := NewStartedService(ServiceOptions{
++		Context: testServiceContext(func(services *serviceRegistry.Registry) {
++			serviceRegistry.Register[struct{}](services, holdingStartServiceType,
++				func(_ context.Context, _ log.ContextLogger, tag string, _ struct{}) (adapter.Service, error) {
++					return holdingStartService{tag: tag, holding: holding}, nil
++				})
++		}),
++	})
++	defer startedService.Close()
++
++	started := make(chan error, 1)
++	go func() {
++		started <- startedService.StartOrReloadService(context.Background(),
++			`{"services":[{"type":"`+failingCleanupServiceType+`","tag":"failing"},{"type":"`+holdingStartServiceType+`","tag":"holding"}]}`, nil)
++	}()
++	select {
++	case <-holding:
++	case <-time.After(time.Minute):
++		t.Fatal("the start never reached the service holding it")
++	}
++	closed := make(chan error, 1)
++	go func() {
++		closed <- startedService.CloseService()
++	}()
++	select {
++	case err := <-started:
++		if !errors.Is(err, errFailingCleanup) {
++			t.Fatalf("the interrupted start did not report its failed close: %v", err)
++		}
++	case <-time.After(time.Minute):
++		t.Fatal("the close did not interrupt the start")
++	}
++	select {
++	case err := <-closed:
++		if !errors.Is(err, os.ErrClosed) {
++			t.Fatalf("the close after the interrupted start's failed close succeeded: %v", err)
++		}
++	case <-time.After(time.Minute):
++		t.Fatal("the close did not return after the interrupted start")
++	}
++	if err := startedService.CloseService(); !errors.Is(err, os.ErrClosed) {
++		t.Fatalf("a later close of the retained instance succeeded: %v", err)
++	}
++	startedService.serviceAccess.RLock()
++	defer startedService.serviceAccess.RUnlock()
++	if startedService.instance == nil || startedService.serviceStatus.Status != ServiceStatus_FATAL {
++		t.Fatal("the service released an instance it could not close or reported a false idle state")
 +	}
 +}
 +
@@ -297,29 +380,83 @@ index 0000000000000000000000000000000000000000..773842fc5cb521722fc9a1bcbd3e3e32
 +	}
 +}
 +
-+func newClosedTestInstance(t *testing.T, service *StartedService) *Instance {
++// failingCleanupServiceType names a test service whose started cleanup
++// fails, so closing an instance that runs it fails as a real cleanup would.
++const failingCleanupServiceType = "cfm-test-failing-cleanup"
++
++var errFailingCleanup = errors.New("scripted service cleanup failure")
++
++type failingCleanupService struct{ tag string }
++
++func (s failingCleanupService) Type() string { return failingCleanupServiceType }
++func (s failingCleanupService) Tag() string  { return s.tag }
++func (s failingCleanupService) Start(stage adapter.StartStage, scope *adapter.Scope) error {
++	if stage == adapter.StartStateStart {
++		scope.Add(func() error { return errFailingCleanup })
++	}
++	return nil
++}
++
++// holdingStartServiceType names a test service that holds its instance's
++// start, as a start stalled on the network does, until the instance is
++// cancelled. It closes holding once it holds the start.
++const holdingStartServiceType = "cfm-test-holding-start"
++
++type holdingStartService struct {
++	tag     string
++	holding chan struct{}
++}
++
++func (s holdingStartService) Type() string { return holdingStartServiceType }
++func (s holdingStartService) Tag() string  { return s.tag }
++func (s holdingStartService) Start(stage adapter.StartStage, scope *adapter.Scope) error {
++	if stage != adapter.StartStatePostStart {
++		return nil
++	}
++	close(s.holding)
++	<-scope.Context().Done()
++	return scope.Context().Err()
++}
++
++// newStartedFailingCleanupInstance starts an instance whose close fails.
++func newStartedFailingCleanupInstance(t *testing.T, service *StartedService) *Instance {
 +	t.Helper()
-+	instance, err := service.newInstance(context.Background(), "{}", nil)
++	instance, err := service.newInstance(context.Background(),
++		`{"services":[{"type":"`+failingCleanupServiceType+`","tag":"failing"}]}`, nil, false)
 +	if err != nil {
 +		t.Fatalf("create test instance: %v", err)
 +	}
-+	if err := instance.Close(); err != nil {
-+		t.Fatalf("close test instance: %v", err)
++	if err := instance.Start(); err != nil {
++		t.Fatalf("start test instance: %v", err)
 +	}
 +	return instance
 +}
 +
-+func testServiceContext() context.Context {
++// testServiceContext registers the failing-cleanup service and those a test
++// adds with register.
++func testServiceContext(register ...func(*serviceRegistry.Registry)) context.Context {
 +	dnsRegistry := dns.NewTransportRegistry()
 +	local.RegisterTransport(dnsRegistry)
++	services := serviceRegistry.NewRegistry()
++	serviceRegistry.Register[struct{}](services, failingCleanupServiceType,
++		func(_ context.Context, _ log.ContextLogger, tag string, _ struct{}) (adapter.Service, error) {
++			return failingCleanupService{tag: tag}, nil
++		})
++	for _, add := range register {
++		add(services)
++	}
 +	return box.Context(context.Background(), inbound.NewRegistry(), outbound.NewRegistry(),
-+		endpoint.NewRegistry(), dnsRegistry, serviceRegistry.NewRegistry(), certificate.NewRegistry())
++		endpoint.NewRegistry(), dnsRegistry, services, certificate.NewRegistry())
 +}
 diff --git a/experimental/libbox/command_server.go b/experimental/libbox/command_server.go
-index 5f62d03db24fa936cfb07f0b56986a9e18107eca..75df4e8fb0e9d93d89330f3cf34f22cc733d5364 100644
+index ec0af2adc8f809ff1ad5f25cfa9a02abc3d96ed3..ee2a16ad5702801179679200c69056673d1fde14 100644
 --- a/experimental/libbox/command_server.go
 +++ b/experimental/libbox/command_server.go
-@@ -214,4 +214,18 @@ type OverrideOptions struct {
+@@ -4,0 +5 @@ import (
++	"errors"
+@@ -8,0 +10 @@ import (
++	"syscall"
+@@ -197,4 +199,18 @@ type OverrideOptions struct {
 -func (s *CommandServer) StartOrReloadService(configContent string, options *OverrideOptions) error {
 -	saveConfigSnapshot(configContent)
 -	if s.powerManager.Recorder() != nil {
@@ -342,13 +479,13 @@ index 5f62d03db24fa936cfb07f0b56986a9e18107eca..75df4e8fb0e9d93d89330f3cf34f22cc
 +	return &RuntimeStatus{
 +		State:        int32(status),
 +		ErrorMessage: message,
-@@ -218,0 +233,5 @@ func (s *CommandServer) StartOrReloadService(configContent string, options *Over
+@@ -201,0 +218,5 @@ func (s *CommandServer) StartOrReloadService(configContent string, options *Over
 +}
 +
 +func (s *CommandServer) StartOrReloadService(configContent string, options *OverrideOptions) error {
 +	// CFM injects credentials only for this in-memory startup. Never persist
 +	// the runtime configuration in diagnostic or power-report snapshots.
-@@ -233,0 +253,46 @@ func (s *CommandServer) CloseService() error {
+@@ -216,0 +238,46 @@ func (s *CommandServer) CloseService() error {
 +const (
 +	RuntimeEndpointConflictMixed      int32 = int32(adapter.EndpointConflictMixed)
 +	RuntimeEndpointConflictController int32 = int32(adapter.EndpointConflictController)
@@ -425,34 +562,33 @@ index 3adca4ec6fd3c6a9feabbb72e8174235c6b14a4c..97136eb9541393e9d13e7700dfadc15d
 +// A nullable Go constructor must not override NSObject.init in the Swift 6.4 SDK.
 +func NewTaildropSendOptionsWithDefaults() *TaildropSendOptions {
 diff --git a/experimental/libbox/monitor.go b/experimental/libbox/monitor.go
-index 273b127565eee35a91a693dbde9d055433830f50..83facbdfcdad8398b48b4bf1a8375fac39c6720f 100644
+index e42ea17d03c3d8dd1e69e561191c469e49946caf..498546e4d593fa22d27c0a8a1b7af1201e0a75ba 100644
 --- a/experimental/libbox/monitor.go
 +++ b/experimental/libbox/monitor.go
-@@ -3,0 +4,4 @@ import (
+@@ -3,0 +4 @@ import (
 +	"net"
-+	"slices"
+@@ -5,0 +7 @@ import (
 +	"strings"
-+
-@@ -22,0 +27 @@ type platformDefaultInterfaceMonitor struct {
+@@ -32,0 +35 @@ type platformDefaultInterfaceMonitor struct {
 +	lastNetwork                 interfaceNetworkIdentity
-@@ -102,0 +108 @@ func (m *platformDefaultInterfaceMonitor) updateDefaultInterface(interfaceName s
+@@ -133,0 +137 @@ func (m *platformDefaultInterfaceMonitor) updateDefaultInterface(interfaceName s
 +	m.defaultInterfaceAccess.Lock()
-@@ -104,0 +111 @@ func (m *platformDefaultInterfaceMonitor) updateDefaultInterface(interfaceName s
+@@ -135,0 +140 @@ func (m *platformDefaultInterfaceMonitor) updateDefaultInterface(interfaceName s
 +	m.defaultInterfaceAccess.Unlock()
-@@ -110,0 +118,4 @@ func (m *platformDefaultInterfaceMonitor) updateDefaultInterface(interfaceName s
+@@ -141,0 +147,4 @@ func (m *platformDefaultInterfaceMonitor) updateDefaultInterface(interfaceName s
 +		if m.defaultInterfaceInitialized && m.defaultInterface == nil {
 +			m.defaultInterfaceAccess.Unlock()
 +			return
 +		}
-@@ -111,0 +123 @@ func (m *platformDefaultInterfaceMonitor) updateDefaultInterface(interfaceName s
+@@ -143,0 +153 @@ func (m *platformDefaultInterfaceMonitor) updateDefaultInterface(interfaceName s
 +		m.lastNetwork = interfaceNetworkIdentity{}
-@@ -128 +140,2 @@ func (m *platformDefaultInterfaceMonitor) updateDefaultInterface(interfaceName s
--	if m.defaultInterfaceInitialized && oldInterface != nil && oldInterface.Name == m.defaultInterface.Name && oldInterface.Index == m.defaultInterface.Index {
+@@ -162 +172,2 @@ func (m *platformDefaultInterfaceMonitor) updateDefaultInterface(interfaceName s
+-	if m.defaultInterfaceInitialized && oldInterface != nil && oldInterface.Name == m.defaultInterface.Name && oldInterface.Index == m.defaultInterface.Index && slices.Equal(oldDNSServers, m.defaultDNSServers) {
 +	network := networkIdentity(newInterface, isExpensive, isConstrained)
-+	if m.defaultInterfaceInitialized && oldInterface != nil && m.lastNetwork == network {
-@@ -132,0 +146 @@ func (m *platformDefaultInterfaceMonitor) updateDefaultInterface(interfaceName s
++	if m.defaultInterfaceInitialized && oldInterface != nil && m.lastNetwork == network && slices.Equal(oldDNSServers, m.defaultDNSServers) {
+@@ -166,0 +178 @@ func (m *platformDefaultInterfaceMonitor) updateDefaultInterface(interfaceName s
 +	m.lastNetwork = network
-@@ -139,0 +154,33 @@ func (m *platformDefaultInterfaceMonitor) updateDefaultInterface(interfaceName s
+@@ -208,0 +221,33 @@ func (m *platformDefaultInterfaceMonitor) readDNSServers(interfaceIndex int) []s
 +// Moving between Wi-Fi networks keeps the same interface name and index.
 +// Compare routing-relevant network state so DNS transports and connections are
 +// reset for a new subnet. IPv6 privacy-address rotation within one prefix does
@@ -593,7 +729,7 @@ index fcbe6f3a664624fd67c59390907c0178aef9229d..53b74bb5462adad26223ac3552cdb546
 +// A nullable Go constructor must not override NSObject.init in the Swift 6.4 SDK.
 +func NewNetworkQualityTestWithDefaults() *NetworkQualityTest {
 diff --git a/experimental/libbox/platform.go b/experimental/libbox/platform.go
-index 108cc20939c8ef958414f8b230bad64f65a0b52c..4c03abb91ad1427d0854fc59e2328e9a85d74e3f 100644
+index eb24d058cfc80b391c02d247c46bf64dd10bbcc6..2471ea85e476389e1e9fee6e0cd6c7ce24af7ed9 100644
 --- a/experimental/libbox/platform.go
 +++ b/experimental/libbox/platform.go
 @@ -8,0 +9,4 @@ type PlatformInterface interface {
@@ -1394,10 +1530,10 @@ index 0000000000000000000000000000000000000000..7acd788c1fefcb08af97392dd83d945a
 +	return nil, fmt.Errorf("%w", errRawPacketTunUnsupported)
 +}
 diff --git a/experimental/libbox/service.go b/experimental/libbox/service.go
-index 4cd6045a88760b834e52531c76bf16a753352ce2..7ef6a1f589923ce91e2e93409fcf28a9d3e1e6f9 100644
+index 2c1dbe380f9871e3d81eb3acc0b7892e6175ca82..f4ff0b358df27932eb682e8593ee9275101e68cc 100644
 --- a/experimental/libbox/service.go
 +++ b/experimental/libbox/service.go
-@@ -70 +70,17 @@ func (w *platformInterfaceWrapper) OpenInterface(options *tun.Options, platformO
+@@ -68 +68,17 @@ func (w *platformInterfaceWrapper) OpenInterface(options *tun.Options, platformO
 -	tunFd, err := w.iif.OpenTun(&tunOptions{options, routeRanges, platformOptions})
 +	platformTunOptions := &tunOptions{options, routeRanges, platformOptions}
 +	if w.iif.UseRawPacketTun() {
@@ -1416,9 +1552,9 @@ index 4cd6045a88760b834e52531c76bf16a753352ce2..7ef6a1f589923ce91e2e93409fcf28a9
 +		return rawTun, nil
 +	}
 +	tunFd, err := w.iif.OpenTun(platformTunOptions)
-@@ -135,0 +152 @@ func (w *platformInterfaceWrapper) NetworkInterfaces() ([]adapter.NetworkInterfa
+@@ -133,0 +150 @@ func (w *platformInterfaceWrapper) NetworkInterfaces() ([]adapter.NetworkInterfa
 +		isExpensive, isConstrained := w.isExpensive, w.isConstrained
-@@ -151,2 +168,2 @@ func (w *platformInterfaceWrapper) NetworkInterfaces() ([]adapter.NetworkInterfa
+@@ -149,2 +166,2 @@ func (w *platformInterfaceWrapper) NetworkInterfaces() ([]adapter.NetworkInterfa
 -			Expensive:   netInterface.Metered || isDefault && w.isExpensive,
 -			Constrained: isDefault && w.isConstrained,
 +			Expensive:   netInterface.Metered || isDefault && isExpensive,

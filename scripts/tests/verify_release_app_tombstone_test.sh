@@ -12,7 +12,7 @@ tombstone_test_root="$(mktemp -d "${TMPDIR:-/tmp}/cfw-tombstone-provenance.XXXXX
 tombstone_test_root="$(cd "$tombstone_test_root" && pwd -P)"
 trap '/bin/rm -rf "$tombstone_test_root"' EXIT
 fixture_repository="$tombstone_test_root/repository"
-fixture_ga_root="$fixture_repository/target/candidates/0.5.0/ga/$CFW_GA_BUILD"
+fixture_ga_root="$fixture_repository/target/candidates/$CFW_PRODUCT_VERSION/ga/$CFW_GA_BUILD"
 pre_sign_products="$fixture_ga_root/native-products"
 transactions_root="$fixture_ga_root/transactions"
 attempts_root="$transactions_root/signing-attempts"
@@ -47,14 +47,14 @@ done
   "$repo_root/crates/cfw-legacy-tombstone/Cargo.toml" \
   "$fixture_repository/crates/cfw-legacy-tombstone/Cargo.toml"
 /bin/cp "$repo_root/Cargo.lock" "$fixture_repository/Cargo.lock"
-"$python_bin" -I -S -B -W error - "$embedded_app" "$CFW_GA_BUILD" <<'PY'
+"$python_bin" -I -S -B -W error - "$embedded_app" "$CFW_GA_BUILD" "$CFW_PRODUCT_VERSION" <<'PY'
 import plistlib
 import sys
 from pathlib import Path
 
 app = Path(sys.argv[1])
 identity = {
-    "CFBundleShortVersionString": "0.5.0",
+    "CFBundleShortVersionString": sys.argv[3],
     "CFBundleVersion": sys.argv[2],
 }
 for relative in (

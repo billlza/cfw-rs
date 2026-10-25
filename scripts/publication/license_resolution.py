@@ -23,7 +23,7 @@ OPERATORS = {"AND", "OR", "WITH"}
 MAX_SPDX_BRANCHES = 128
 
 # Deliberately bounded, fail-closed subset of the SPDX License List 3.28.0
-# (2026-02-20) used by the fixed 0.5.0 closure and supported by _supports.
+# (2026-02-20) used by the publication closure and supported by _supports.
 # Source: https://github.com/spdx/license-list-data/tree/v3.28.0/json
 # licenses.json SHA-256:
 # f728c534d8bd1044fc515a2ddb2292be99559021d830bfa3281be0bcd36302ee
@@ -77,6 +77,9 @@ _CARGO_LICENSE_DONORS = {
     ),
 }
 _CARGO_VENDORED_VERSION_RE = re.compile(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?")
+# The reviewed donor texts, for consumers that must recognise a donor-resolved
+# license (scripts/publication/review_carryover.py).
+CARGO_LICENSE_DONOR_SHA256 = frozenset(digest for _crate, digest in _CARGO_LICENSE_DONORS.values())
 
 
 def _is_license_operand(token: str) -> bool:
@@ -168,6 +171,12 @@ def _license_ids(expression: str) -> set[str]:
     # Exception identifiers are intentionally included: a manual conclusion
     # must bind the exception text as well as every license text.
     return {token for token in SPDX_TOKEN_RE.findall(expression) if token.upper() not in OPERATORS}
+
+
+def license_identifiers(expression: str) -> set[str]:
+    """Every license and exception identifier a manual conclusion must bind text for."""
+
+    return _license_ids(expression)
 
 
 def _license_branches(expression: str) -> list[frozenset[str]]:

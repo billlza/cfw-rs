@@ -21,7 +21,7 @@ from scripts import release_signing_plan
 from scripts import release_signing_preflight
 from scripts import verify_release_build_allocations as allocations
 from scripts.dormant_app_install import SUPPORTED_PREDECESSORS, PredecessorProfile
-from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY, PRODUCT_VERSION
 from scripts.tests.metadata_change_fixture import change_only_ctime
 from scripts.tests.release_identity_fixture import NEXT_GA_BUILD, retired_ga_builds
 
@@ -58,9 +58,9 @@ class CandidateFreezeTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.repository = Path(self.temporary.name).resolve()
         self.preflight = (
-            self.repository / f"target/candidates/0.5.0/ga-preflight/{GA_BUILD}"
+            self.repository / f"target/candidates/{PRODUCT_VERSION}/ga-preflight/{GA_BUILD}"
         )
-        self.final = self.repository / f"target/candidates/0.5.0/ga/{GA_BUILD}"
+        self.final = self.repository / f"target/candidates/{PRODUCT_VERSION}/ga/{GA_BUILD}"
         ledger = self.repository / allocations.CONTRACT_RELATIVE_PATH
         ledger.parent.mkdir(parents=True)
         # The artifact repository carries the tracked ledger and the retirement
@@ -256,7 +256,7 @@ class CandidateFreezeTests(unittest.TestCase):
             _canonical_json(
                 {
                     "document": "cfm-ga-product-input-v1",
-                    "product": {"build_number": GA_BUILD, "version": "0.5.0"},
+                    "product": {"build_number": GA_BUILD, "version": PRODUCT_VERSION},
                     "schema_version": 1,
                     "source": {
                         "release_source_sha256": "b" * 64,
@@ -305,7 +305,7 @@ class CandidateFreezeTests(unittest.TestCase):
         self.assertEqual(
             candidate_freeze._fixed_roots(self.repository), (self.preflight, self.final)
         )
-        candidates = self.repository / "target/candidates/0.5.0"
+        candidates = self.repository / f"target/candidates/{PRODUCT_VERSION}"
         for helper, root in (
             ("ga_preflight_root", candidates / GA_BUILD),
             ("ga_root", candidates / GA_BUILD),
@@ -496,7 +496,7 @@ class CandidateFreezeTests(unittest.TestCase):
             _canonical_json(
                 {
                     "document": "cfm-ga-product-input-v1",
-                    "product": {"build_number": GA_BUILD, "version": "0.5.0"},
+                    "product": {"build_number": GA_BUILD, "version": PRODUCT_VERSION},
                     "schema_version": 1,
                     "source": {
                         "release_source_sha256": "b" * 64,
@@ -579,7 +579,7 @@ class CandidateFreezeTests(unittest.TestCase):
         self.assertFalse((self.preflight / "candidate-freeze/intent.json").exists())
 
     def test_allocation_ledger_unknown_field_is_rejected(self) -> None:
-        path = self.repository / "docs/release/build-allocations-v050.json"
+        path = self.repository / allocations.CONTRACT_RELATIVE_PATH
         value = json.loads(path.read_bytes())
         value["unexpected"] = True
         path.write_bytes(_canonical_json(value))
@@ -591,29 +591,40 @@ class CandidateFreezeTests(unittest.TestCase):
         self.assertFalse((self.preflight / "candidate-freeze/intent.json").exists())
 
     def test_retirement_notes_and_registry_bind_the_ledger_before_consumption(self) -> None:
+        # A retirement note naming the active GA contradicts the ledger.
         note = (
             self.repository
             / allocations.RETIREMENT_NOTES_RELATIVE
-            / f"ga-build-{retired_ga_builds()[-1]}-retirement.md"
+            / f"ga-build-{GA_BUILD}-retirement.md"
         )
-        original = note.read_bytes()
-        note.unlink()
+        note.write_text("stray note\n", encoding="utf-8")
         with self.assertRaises(candidate_freeze.CandidateFreezeError) as raised:
             self.freeze()
         self.assertEqual(raised.exception.code, "allocation_ledger_invalid")
         self.assertFalse(raised.exception.consumed)
-        note.write_bytes(original)
+        note.unlink()
         unallocated = {
             **SUPPORTED_PREDECESSORS,
             GA_BUILD: PredecessorProfile(
                 ACTIVE_RELEASE_IDENTITY.product_version, GA_BUILD, "a" * 64
             ),
         }
-        with patch.object(
-            candidate_freeze, "supported_predecessors", return_value=unallocated
-        ), self.assertRaises(candidate_freeze.CandidateFreezeError) as raised:
-            self.freeze()
-        self.assertEqual(raised.exception.code, "allocation_ledger_invalid")
+        published = {
+            policy.published[0]
+            for policy in allocations.POLICIES.values()
+            if policy.published is not None
+        }
+        unregistered = {
+            build: profile
+            for build, profile in SUPPORTED_PREDECESSORS.items()
+            if build not in published
+        }
+        for registry in (unallocated, unregistered):
+            with self.subTest(registry=sorted(registry)), patch.object(
+                candidate_freeze, "supported_predecessors", return_value=registry
+            ), self.assertRaises(candidate_freeze.CandidateFreezeError) as raised:
+                self.freeze()
+            self.assertEqual(raised.exception.code, "allocation_ledger_invalid")
         self.assertFalse((self.preflight / "candidate-freeze/intent.json").exists())
         self.assertFalse(self.final.exists())
         self.assertEqual(self.freeze().build_number, GA_BUILD)
@@ -635,7 +646,9 @@ class CandidateFreezeTests(unittest.TestCase):
             b'"order":["host"],"product":{"build_number":"'
             + GA_BUILD.encode("ascii")
             + b'",'
-            b'"version":"0.5.0"},"schema_version":1}\n'
+            b'"version":"'
+            + PRODUCT_VERSION.encode("ascii")
+            + b'"},"schema_version":1}\n'
         )
 
         with self.assertRaisesRegex(

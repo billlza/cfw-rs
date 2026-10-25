@@ -19,6 +19,7 @@ from scripts import release_artifact_set
 from scripts import release_artifact_set_cli
 from scripts.publication import ga_release_contract
 from scripts.publication import orchestrator
+from scripts.release_build_identity import PRODUCT_VERSION
 from scripts.release_python_runtime import ReleasePythonRuntimeError
 
 
@@ -356,7 +357,7 @@ class GAReleaseCompositionRootTests(unittest.TestCase):
                 "--directory",
                 "fixture",
                 "--version",
-                "0.5.0",
+                PRODUCT_VERSION,
                 "--repository",
                 "fixture",
                 "--prepackage-stage-verifier",
@@ -367,7 +368,7 @@ class GAReleaseCompositionRootTests(unittest.TestCase):
                 "--repository",
                 "fixture",
                 "--version",
-                "0.5.0",
+                PRODUCT_VERSION,
                 "--command-runner",
                 "fixture",
             ],

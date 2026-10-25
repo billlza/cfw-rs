@@ -21,7 +21,7 @@ from scripts.publication.durable_file import (
     DurabilityOutcomeUnknown,
     RootedDirectoryChanged,
 )
-from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY, PRODUCT_VERSION
 
 
 # The recorded predecessor is the active predecessor with its real frozen tree
@@ -917,7 +917,7 @@ class JournalExportSourceContractTests(unittest.TestCase):
         self.assertEqual(
             journal_export.MIGRATION_RELATIVE,
             Path(
-                f"target/candidates/0.5.0/ga/{ACTIVE_RELEASE_IDENTITY.ga_build}/stage-inputs/"
+                f"target/candidates/{PRODUCT_VERSION}/ga/{ACTIVE_RELEASE_IDENTITY.ga_build}/stage-inputs/"
                 "ga-acceptance/migration-journals"
             ),
         )

@@ -8,6 +8,8 @@ unset CDPATH
 repo_root="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # shellcheck source=scripts/dependency_pins.env
 source "$repo_root/scripts/dependency_pins.env"
+# shellcheck source=scripts/release_identity.env
+source "$repo_root/scripts/release_identity.env"
 # shellcheck source=scripts/release_tool_environment.sh
 source "$repo_root/scripts/release_tool_environment.sh"
 candidate_binding_arguments=(--repository "$repo_root")
@@ -54,9 +56,9 @@ toolchain_root="${CFW_TOOLCHAIN_ROOT:-$repo_root/target/toolchains}"
 node_root="$toolchain_root/node-$NODE_VERSION"
 node_bin="$node_root/bin/node"
 tauri_bin="$toolchain_root/tauri-cli-$TAURI_CLI_VERSION/bin/cargo-tauri"
-product_version="0.5.0"
+product_version="$CFW_PRODUCT_VERSION"
 build_version="40000"
-candidate_relative="target/candidates/0.5.0/unsigned"
+candidate_relative="target/candidates/$product_version/unsigned"
 bundle_context="unsigned-host"
 app_artifact_kind="unsigned-application-validation-v1"
 # Keep real required arguments in every command/metadata array: Bash 3.2
@@ -66,7 +68,7 @@ version_contract_command=(
 )
 if [[ $preview_validation -eq 1 ]]; then
   build_version="50000"
-  candidate_relative="target/candidates/0.5.0/unsigned/50000"
+  candidate_relative="target/candidates/$product_version/unsigned/50000"
   bundle_context="unsigned-preview-host"
   app_artifact_kind="unsigned-preview-application-validation-v1"
 fi
@@ -216,7 +218,7 @@ if preview == "1":
     })
 else:
     # The 40000 skeleton builds no native UI. The base configuration declares
-    # the library and resources every 0.5.0 application carries; the Tauri CLI
+    # the library and resources every application carries; the Tauri CLI
     # applies this override as a JSON merge patch, where null removes an entry.
     override["bundle"]["macOS"]["files"].update({
         "Frameworks/libCFMNativeDashboard.dylib": None,

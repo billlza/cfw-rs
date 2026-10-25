@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 if __package__:
+    from ..release_build_identity import PRODUCT_VERSION
     from .performance_ledger import (
         GA_BUILD,
         LEDGER_KIND,
@@ -41,6 +42,8 @@ else:  # pragma: no cover - direct-script import path
     import sys
 
     sys.path.insert(0, str(Path(__file__).resolve().parent))
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from release_build_identity import PRODUCT_VERSION  # type: ignore
     from performance_ledger import (  # type: ignore
         GA_BUILD,
         LEDGER_KIND,
@@ -65,7 +68,6 @@ else:  # pragma: no cover - direct-script import path
 
 SCHEMA_VERSION = 3
 HARNESS_VERSION = "performance-gates-v3"
-PRODUCT_VERSION = "0.5.0"
 MAX_REPORT_BYTES = 1 * 1024 * 1024
 
 RECOVERY_P95_MAX_MS = 10_000
@@ -320,7 +322,7 @@ def _validate(value: Any, artifacts: ArtifactReader) -> dict[str, Any]:
         or proof["candidate"]["build_number"] != GA_BUILD
     ):
         raise PerformanceGateError(
-            f"performance evidence is not GA 0.5.0 build {GA_BUILD}"
+            f"performance evidence is not GA {PRODUCT_VERSION} build {GA_BUILD}"
         )
     ledger_descriptor, ledger = _read_ledger(artifacts, document["ledger_artifact"])
     derived = validate_performance_ledger(ledger, artifacts=artifacts)

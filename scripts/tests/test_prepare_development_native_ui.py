@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from scripts import prepare_development_native_ui as dev
+from scripts.release_build_identity import PRODUCT_VERSION
 
 
 class DevelopmentNativeUiTests(unittest.TestCase):
@@ -100,7 +101,7 @@ class DevelopmentNativeUiTests(unittest.TestCase):
             outside = base / "outside"
             outside.mkdir()
             (repository / "target").symlink_to(outside, target_is_directory=True)
-            bad = [repository / "target", repository / "target/candidates/0.5.0", Path("/Applications/Clash for Mac.app")]
+            bad = [repository / "target", repository / f"target/candidates/{PRODUCT_VERSION}", Path("/Applications/Clash for Mac.app")]
             with patch.object(dev, "run_bounded_process") as run:
                 for target in bad:
                     with self.subTest(target=target), self.assertRaises(ValueError):

@@ -20,7 +20,7 @@ from scripts import repository_source_identity as source_identity
 from scripts import verify_ci_no_masking as ci_policy
 from scripts.tests.test_repository_source_identity import git, git_output
 from scripts.publication.common import PublicationError
-from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY, PRODUCT_VERSION
 from scripts.release_executor_source import ExecutorSource, FrozenReleaseSources
 
 
@@ -267,7 +267,7 @@ class HostedCIIdentityTests(unittest.TestCase):
         )
         self.assertEqual(
             hosted.RECEIPT_RELATIVE,
-            Path(f"target/candidates/0.5.0/ga/{hosted.GA_BUILD}/stage-inputs/hosted-ci.json"),
+            Path(f"target/candidates/{PRODUCT_VERSION}/ga/{hosted.GA_BUILD}/stage-inputs/hosted-ci.json"),
         )
 
 

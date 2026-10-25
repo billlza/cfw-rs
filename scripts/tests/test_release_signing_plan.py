@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 from scripts import release_signing_plan as plan
-from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY, PRODUCT_VERSION
 
 
 GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
@@ -29,7 +29,7 @@ class ReleaseSigningPlanTests(unittest.TestCase):
         source = self.repository / plan.SOURCE_PLAN_RELATIVE
         source.parent.mkdir(parents=True)
         source.write_text(json.dumps(SOURCE_PLAN), encoding="utf-8")
-        self.root = self.repository / f"target/candidates/0.5.0/ga-preflight/{GA_BUILD}"
+        self.root = self.repository / f"target/candidates/{PRODUCT_VERSION}/ga-preflight/{GA_BUILD}"
         (self.root / "profiles").mkdir(parents=True)
         (self.root / "entitlements").mkdir()
         (self.root / "entitlements/signing-order.json").write_bytes(source.read_bytes())

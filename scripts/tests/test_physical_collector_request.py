@@ -48,7 +48,7 @@ from scripts.harness.raw_artifacts import (
     RawArtifactError,
     canonical_json,
 )
-from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY, PRODUCT_VERSION
 
 
 GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
@@ -65,7 +65,7 @@ REQUEST_SCRIPT = (
 
 def _candidate() -> dict:
     return {
-        "version": "0.5.0",
+        "version": PRODUCT_VERSION,
         "build_number": GA_BUILD,
         "app_manifest_sha256": "a" * 64,
         "signed_app_tree_sha256": "b" * 64,

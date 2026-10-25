@@ -15,6 +15,7 @@ from scripts import release_build_identity as ids
 from scripts import verify_candidate_bundle as bundle
 from scripts.hash_artifact import build_manifest, write_new_manifest
 from scripts.promote_signed_native_manifest import promote_manifest
+from scripts.release_build_identity import PRODUCT_VERSION
 
 
 GA_BUILD = ids.ACTIVE_RELEASE_IDENTITY.ga_build
@@ -56,7 +57,7 @@ class CandidateFixture:
         repository.mkdir()
         self.context = context
         self.unsigned_preview = context is ids.CandidateBundleContext.UNSIGNED_PREVIEW_HOST
-        self.version = "0.5.0"
+        self.version = PRODUCT_VERSION
         self.build = GA_BUILD
         self.signing = "developer-id"
         private = []
@@ -73,7 +74,7 @@ class CandidateFixture:
             self.build = "40000"
             self.signing = "pre-sign"
             self.app = repository / "unsigned" / ids.SIGNED_APP_NAME
-            self.native = repository / "target/candidates/0.5.0/unsigned/native-products"
+            self.native = repository / f"target/candidates/{PRODUCT_VERSION}/unsigned/native-products"
         elif context is ids.CandidateBundleContext.CANONICAL_NATIVE_CONTENT:
             self.app = ids.ga_signed_root(repository) / ids.SIGNED_APP_NAME
             self.native = ids.ga_signed_native_products_root(repository)
@@ -84,7 +85,7 @@ class CandidateFixture:
             self.native = output / ids.SIGNED_NATIVE_PRODUCTS_NAME
             attempts = ids.ga_signing_attempts_root(repository)
             private = [attempts.parent, attempts, output.parent, output, self.app.parent, self.native]
-        # Every 0.5.0 GA application and the 50000 validation build carry the
+        # Every GA application and the 50000 validation build carry the
         # SwiftUI library; only the 40000 skeleton does not.
         self.native_ui = self.build != "40000"
         self.native.mkdir(parents=True)
@@ -365,12 +366,14 @@ class PreviewCandidateBundleTests(unittest.TestCase):
         write(config, b'{"version":"0.4.0"}')
         with self.assertRaisesRegex(bundle.CandidateError, "Tauri configuration version"):
             self.verify(fixture)
-        write(config, b'{"version":"0.5.0"}')
+        write(config, b'{"version":"' + PRODUCT_VERSION.encode("ascii") + b'"}')
         path = fixture.contents / "Library/LoginItems/CFWProxyAgent.app/Contents/Info.plist"
         value = plistlib.loads(path.read_bytes())
         value["CFBundleShortVersionString"] = "0.4.0"
         write_plist(path, value)
-        with self.assertRaisesRegex(bundle.CandidateError, "fixed product version"):
+        with self.assertRaisesRegex(
+            bundle.CandidateError, r"product versions differ: .*'proxy-agent': '0\.4\.0'"
+        ):
             self.verify(fixture)
 
     def test_missing_embedded_ui_library_or_resources_is_rejected(self) -> None:

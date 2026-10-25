@@ -354,14 +354,22 @@ def _strict_manifest_object(
 
 
 def _libbox_manifest_metadata(
-    pins: dict[str, str], toolchain_trees: dict[str, str]
+    pins: dict[str, str],
+    toolchain_trees: dict[str, str],
+    apple_identity: tuple[str, str],
 ) -> dict[str, str]:
+    """Every field build_libbox.sh records. ``apple_identity`` is the effective
+    Xcode (``selected_apple_identity``), which compiles and links Libbox."""
+
     def pin(name: str) -> str:
         value = pins.get(name)
         if not isinstance(value, str) or not value:
             raise PublicationError(f"Libbox metadata pin is unavailable: {name}")
         return value
 
+    xcode_version, xcode_build = apple_identity
+    if not xcode_version or not xcode_build:
+        raise PublicationError("Libbox metadata requires the effective Xcode identity")
     return {
         "sourceTag": pin("SING_BOX_VERSION"),
         "sourceCommit": pin("SING_BOX_COMMIT"),
@@ -399,6 +407,8 @@ def _libbox_manifest_metadata(
         "combinedDiffSha256": pin("SING_BOX_COMBINED_DIFF_SHA256"),
         "patchedGoModSha256": pin("SING_BOX_PATCHED_GO_MOD_SHA256"),
         "patchedGoSumSha256": pin("SING_BOX_PATCHED_GO_SUM_SHA256"),
+        "xcodeVersion": xcode_version,
+        "xcodeBuild": xcode_build,
     }
 
 
@@ -444,6 +454,7 @@ def verify_libbox_reproduction(
     rebuilt_artifact: Path,
     pins: dict[str, str],
     toolchain_trees: dict[str, str],
+    apple_identity: tuple[str, str],
 ) -> str:
     """Prove the fresh CI build is byte-identical to the consumed artifact."""
 
@@ -462,7 +473,7 @@ def verify_libbox_reproduction(
         raise PublicationError(
             "rebuilt Libbox artifact must be an independent canonical path"
         )
-    expected_metadata = _libbox_manifest_metadata(pins, toolchain_trees)
+    expected_metadata = _libbox_manifest_metadata(pins, toolchain_trees, apple_identity)
     authoritative_manifest = authoritative.parent / (
         authoritative.name + ".manifest.json"
     )
@@ -1683,7 +1694,7 @@ def assemble_document(
 
 Runner = Callable[[Path, Lane, dict[str, str]], tuple[bytes, int | None, bool, float]]
 LibboxReproductionVerifier = Callable[
-    [Path, Path, dict[str, str], dict[str, str]], str
+    [Path, Path, dict[str, str], dict[str, str], tuple[str, str]], str
 ]
 
 
@@ -1733,6 +1744,7 @@ def collect_ci_lanes(
     read_binding = derive_toolchain_binding if binding_reader is None else binding_reader
     pins = _pins(repository)
     execution_environment = release_tool_environment(repository, pins)
+    apple_identity = selected_apple_identity(pins, execution_environment)
     expected_source_identity = {"repositoryCommit": commit, "releaseSourceSha256": release_source_sha256}
     try:
         starting_source_identity = current_identity(repository, require_clean=True, environment=execution_environment)
@@ -1858,9 +1870,9 @@ def collect_ci_lanes(
             records = {identifier: item.record for identifier, item in selected.items()}
             phase = "reproduction"
             if set(records) == set(REQUIRED_CI_LANES) and all(record["status"] == PASSED for record in records.values()):
-                reproduction_digest = require_sha256(reproduction_verifier(repository, artifact, pins, ending_trees), "verified Libbox reproduction tree digest")
+                reproduction_digest = require_sha256(reproduction_verifier(repository, artifact, pins, ending_trees, apple_identity), "verified Libbox reproduction tree digest")
                 reproduction_observations.append(reproduction_digest)
-                repeated = require_sha256(reproduction_verifier(repository, artifact, pins, ending_trees), "repeated Libbox reproduction tree digest")
+                repeated = require_sha256(reproduction_verifier(repository, artifact, pins, ending_trees, apple_identity), "repeated Libbox reproduction tree digest")
                 reproduction_observations.append(repeated)
                 if repeated != reproduction_digest:
                     raise PublicationError("Libbox reproduction changed while CI evidence was being published")

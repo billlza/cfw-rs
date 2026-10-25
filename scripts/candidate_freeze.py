@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Durably freeze the one v0.5.0 GA candidate before any signing starts.
+"""Durably freeze the one active GA candidate before any signing starts.
 
 The builder owns the fixed ``ga-preflight`` tree.  This module validates and
 binds every signing input, commits one exclusive consumption intent, and then

@@ -139,19 +139,138 @@ impl fmt::Debug for ProjectedConfig {
     }
 }
 
+/// Every rule-set tag `value` names, through logical sub-rules and response
+/// filters included. The probe's rules name only tags by then
+/// ([`retain_loadable_rules`]).
+fn rule_set_names(value: &Value, names: &mut BTreeSet<String>) {
+    match value {
+        Value::Object(map) => {
+            for (key, nested) in map {
+                match (key.as_str(), nested) {
+                    ("rule_set", Value::Array(tags)) => {
+                        names.extend(tags.iter().filter_map(Value::as_str).map(str::to_owned));
+                    }
+                    _ => rule_set_names(nested, names),
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                rule_set_names(item, names);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Whether every rule set `value` names, through logical sub-rules and
+/// response filters included, is a tag in `loadable`. The projection names
+/// rule sets in arrays; any other form counts as not loadable.
+fn names_only(value: &Value, loadable: &BTreeSet<String>) -> bool {
+    match value {
+        Value::Object(map) => map
+            .iter()
+            .all(|(key, nested)| match (key.as_str(), nested) {
+                ("rule_set", Value::Array(tags)) => tags
+                    .iter()
+                    .all(|tag| tag.as_str().is_some_and(|tag| loadable.contains(tag))),
+                ("rule_set", _) => false,
+                _ => names_only(nested, loadable),
+            }),
+        Value::Array(items) => items.iter().all(|item| names_only(item, loadable)),
+        _ => true,
+    }
+}
+
+/// Whether `rule` reads a response: sing-box binds a `respond` rule, and a rule
+/// with `match_response` in its logical tree, to the latest anonymous evaluate
+/// before it, and refuses one with none (v1.14.4 `dns/router.go`).
+fn reads_response(rule: &Value) -> bool {
+    fn matches_response(rule: &Value) -> bool {
+        rule["match_response"] == Value::Bool(true)
+            || rule["rules"]
+                .as_array()
+                .is_some_and(|rules| rules.iter().any(matches_response))
+    }
+    rule["action"] == "respond" || matches_response(rule)
+}
+
+/// Keeps the rules of `rules` that name only rule sets in `loadable`. A reader
+/// of an evaluate that is left out goes with it: it would otherwise read an
+/// older, unrelated response, or none.
+fn retain_loadable_rules(rules: Option<&mut Value>, loadable: &BTreeSet<String>) {
+    if let Some(Value::Array(rules)) = rules {
+        let mut evaluate_kept = true;
+        rules.retain(|rule| {
+            let keep = names_only(rule, loadable) && (evaluate_kept || !reads_response(rule));
+            if rule["action"] == "evaluate" && rule.get("tag").is_none() {
+                evaluate_kept = keep;
+            }
+            keep
+        });
+    }
+}
+
 impl ProjectedConfig {
     /// A transient, outbound-only view for explicit node latency tests. The
     /// normal projection remains the source of protocol/DNS/credential policy;
     /// listeners, system routes, persistence and autonomous tests are excluded.
+    ///
+    /// The probe has no rule-set cache, so a remote dataset would be fetched
+    /// through the proxy under test before every measurement. DNS rules that
+    /// name any rule set other than an inline one are therefore left out of
+    /// `dns.rules` and of every DNS policy, together with the rules that read
+    /// the response of an evaluate left out, and queries they would match
+    /// fall through to the rules after them. The inline sets the remaining
+    /// rules name are kept: sing-box refuses a rule that names an undeclared
+    /// set.
     pub(crate) fn proxy_probe_json(&self) -> Result<String, ConfigError> {
         let mut root: Map<String, Value> = serde_json::from_str(&self.json)?;
         root.retain(|key, _| matches!(key.as_str(), "outbounds" | "endpoints" | "dns"));
         let mut original: Value = serde_json::from_str(&self.json)?;
+        let inline: Vec<Value> = original["route"]["rule_set"]
+            .as_array()
+            .map(|resources| {
+                resources
+                    .iter()
+                    .filter(|resource| resource["type"] == "inline")
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        let loadable: BTreeSet<String> = inline
+            .iter()
+            .filter_map(|resource| resource["tag"].as_str().map(str::to_owned))
+            .collect();
+        if let Some(dns) = root.get_mut("dns") {
+            retain_loadable_rules(dns.get_mut("rules"), &loadable);
+            if let Some(Value::Array(policies)) = dns.get_mut("policies") {
+                for policy in policies {
+                    retain_loadable_rules(policy.get_mut("rules"), &loadable);
+                }
+            }
+        }
+        let mut named = BTreeSet::new();
+        if let Some(dns) = root.get("dns") {
+            rule_set_names(dns, &mut named);
+        }
+        let kept: Vec<Value> = inline
+            .into_iter()
+            .filter(|resource| {
+                resource["tag"]
+                    .as_str()
+                    .is_some_and(|tag| named.contains(tag))
+            })
+            .collect();
+        let mut route = Map::new();
         if let Some(resolver) = original["route"].get_mut("default_domain_resolver") {
-            root.insert(
-                "route".into(),
-                json!({"default_domain_resolver": resolver.take()}),
-            );
+            route.insert("default_domain_resolver".into(), resolver.take());
+        }
+        if !kept.is_empty() {
+            route.insert("rule_set".into(), Value::Array(kept));
+        }
+        if !route.is_empty() {
+            root.insert("route".into(), Value::Object(route));
         }
         if let Some(Value::Array(outbounds)) = root.get_mut("outbounds") {
             for outbound in outbounds {

@@ -51,7 +51,7 @@ from scripts.tests.notary_fixture import (
     submit_response,
 )
 from scripts.verify_notary_log import validate_documents
-from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY, PRODUCT_VERSION
 
 
 GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
@@ -145,7 +145,7 @@ class Fixture:
     def __init__(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.repository = Path(self.temporary.name).resolve()
-        self.candidate = self.repository / "target/candidates/0.5.0"
+        self.candidate = self.repository / f"target/candidates/{PRODUCT_VERSION}"
         self.build = self.candidate / f"ga/{GA_BUILD}"
         self.signing_output = self.build / "signing-output"
         self.native = self.signing_output / "signed-native-products"
@@ -176,7 +176,7 @@ class Fixture:
             "normalized_app_tree_sha256": "9" * 64,
             "pre_sign_app_manifest_sha256": "a" * 64,
             "pre_sign_app_tree_sha256": "b" * 64,
-            "product": {"build_number": GA_BUILD, "version": "0.5.0"},
+            "product": {"build_number": GA_BUILD, "version": PRODUCT_VERSION},
             "profiles": {
                 "host": "c" * 64,
                 "packet_tunnel": "d" * 64,
@@ -282,7 +282,7 @@ class Fixture:
                     intent_sha256=self.signing_transformation_receipt[
                         "candidate_freeze_intent_sha256"
                     ],
-                    product_version="0.5.0",
+                    product_version=PRODUCT_VERSION,
                     build_number=GA_BUILD,
                     recovered=False,
                 )
@@ -1273,7 +1273,7 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
             root=self.fixture.build,
             intent_path=self.fixture.build / "candidate-freeze/intent.json",
             intent_sha256="f" * 64,
-            product_version="0.5.0",
+            product_version=PRODUCT_VERSION,
             build_number=GA_BUILD,
             recovered=False,
         )
@@ -2156,7 +2156,7 @@ class NotarizationRecoveryTests(unittest.TestCase):
         self.assertEqual(fixture.context.build_number, GA_BUILD)
         self.assertEqual(
             fixture.context.archive_name,
-            f"Clash.for.Mac_0.5.0_{GA_BUILD}_notary.zip",
+            f"Clash.for.Mac_{PRODUCT_VERSION}_{GA_BUILD}_notary.zip",
         )
         attempt_root = fixture.context.attempt_root
         original_event_paths = sorted(
@@ -8451,7 +8451,7 @@ die() {{
   exit 1
 }}
 repo_root=/release
-candidate_root=/release/target/candidates/0.5.0/ga/{GA_BUILD}
+candidate_root=/release/target/candidates/{PRODUCT_VERSION}/ga/{GA_BUILD}
 staged_app="$candidate_root/signing-output/signing-input/Clash for Mac.app"
 toolchain_root=/release/target/toolchains
 CFW_BUILD_NUMBER={GA_BUILD}
@@ -8508,7 +8508,7 @@ run_isolated_python_script() {{
             GA_BUILD,
             *mode,
             "--native-products",
-            f"/release/target/candidates/0.5.0/ga/{GA_BUILD}/signing-output/signed-native-products",
+            f"/release/target/candidates/{PRODUCT_VERSION}/ga/{GA_BUILD}/signing-output/signed-native-products",
             "--notary-profile",
             "clashformac-notary",
             "--repository-commit",
@@ -8540,7 +8540,7 @@ run_isolated_python_script() {{
     def test_build_and_signing_resume_keep_full_signing_verification(self) -> None:
         staged = (
             "--staged-app",
-            f"/release/target/candidates/0.5.0/ga/{GA_BUILD}/signing-output/"
+            f"/release/target/candidates/{PRODUCT_VERSION}/ga/{GA_BUILD}/signing-output/"
             "signing-input/Clash for Mac.app",
         )
         cases = (
@@ -9397,7 +9397,7 @@ class NotarizationCliTests(unittest.TestCase):
             toolchain_root.mkdir()
             final_app = (
                 artifact_repository
-                / f"target/candidates/0.5.0/ga/{GA_BUILD}/signed/Clash for Mac.app"
+                / f"target/candidates/{PRODUCT_VERSION}/ga/{GA_BUILD}/signed/Clash for Mac.app"
             )
             argv = [
                 str(Path(transaction_module.__file__).resolve()),
@@ -9421,7 +9421,7 @@ class NotarizationCliTests(unittest.TestCase):
             self.assertEqual(
                 context.staged_app,
                 artifact_repository
-                / f"target/candidates/0.5.0/ga/{GA_BUILD}/signing-output/signing-input/Clash for Mac.app",
+                / f"target/candidates/{PRODUCT_VERSION}/ga/{GA_BUILD}/signing-output/signing-input/Clash for Mac.app",
             )
             self.assertEqual(
                 execute.call_args.kwargs,
@@ -9555,7 +9555,7 @@ class NotarizationCliTests(unittest.TestCase):
             toolchain_root.mkdir()
             final_app = (
                 artifact_repository
-                / f"target/candidates/0.5.0/ga/{GA_BUILD}/signed/Clash for Mac.app"
+                / f"target/candidates/{PRODUCT_VERSION}/ga/{GA_BUILD}/signed/Clash for Mac.app"
             )
             argv = [
                 str(Path(transaction_module.__file__).resolve()),
@@ -9683,7 +9683,7 @@ class PublishedTransactionReceiptValidationTests(unittest.TestCase):
     def _write_frozen_metadata(fixture: Fixture) -> None:
         product = {
             "document": "cfm-ga-product-input-v1",
-            "product": {"build_number": GA_BUILD, "version": "0.5.0"},
+            "product": {"build_number": GA_BUILD, "version": PRODUCT_VERSION},
             "schema_version": 1,
             "source": {
                 "release_source_sha256": fixture.context.release_source_sha256,
@@ -9701,7 +9701,7 @@ class PublishedTransactionReceiptValidationTests(unittest.TestCase):
             consumption_state=freeze_module.CONSUMPTION_STATE,
             document=freeze_module.DOCUMENT,
             product_input_document_sha256=hashlib.sha256(product_raw).hexdigest(),
-            product_version="0.5.0",
+            product_version=PRODUCT_VERSION,
             release_source_sha256=fixture.context.release_source_sha256,
             repository_commit=fixture.context.repository_commit,
             schema_version=freeze_module.SCHEMA_VERSION,

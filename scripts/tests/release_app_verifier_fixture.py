@@ -1,7 +1,7 @@
 """Anonymized fixture matching the complete observed release verifier transcript.
 
 The line order follows the observed post-notarization transcript of the
-signed 0.5.0 Host (seven Mach-O objects; the SwiftUI library adds three
+signed Host (seven Mach-O objects; the SwiftUI library adds three
 prepared/validated pairs and two codesign result pairs). The sealed and
 pre-notary stdout shapes drop stapler's two lines and the Gatekeeper line and
 end with the script's fixed notarization line instead; stderr is the same.
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 
-from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY, PRODUCT_VERSION
 
 
 GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
@@ -37,7 +37,7 @@ def _structural_lines(app: str, build_number: str) -> list[str]:
             )
         ),
         f"candidate bundle verified: {app}",
-        f"identity: 0.5.0 ({build_number}) / arm64 / macOS 15.0+",
+        f"identity: {PRODUCT_VERSION} ({build_number}) / arm64 / macOS 15.0+",
         "Mach-O objects: 7",
         "legacy tombstone provenance verified: " + "a" * 64,
     ]

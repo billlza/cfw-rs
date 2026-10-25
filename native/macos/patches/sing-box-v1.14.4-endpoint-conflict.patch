@@ -104,13 +104,13 @@ index 0000000000000000000000000000000000000000..8685643aceb8cea919b3eeccd6910868
 +	}
 +}
 diff --git a/box.go b/box.go
-index 92cd1ecdd30048a1e510bbe9017295c14d8931cc..e85646632901c326344696a534c2c5e7e4e3951d 100644
+index 3654fb65d1fd42a117f99f76c7f59cd93a8b4b33..180794e6ff04440f018e88827ae3f2b97f0739bf 100644
 --- a/box.go
 +++ b/box.go
-@@ -512 +512 @@ func (s *Box) Start() error {
+@@ -502 +502 @@ func (s *Box) Start() error {
 -	err := s.start()
 +	err := s.StartWithExternalCleanup()
-@@ -525,0 +526,9 @@ func (s *Box) Start() error {
+@@ -506,0 +507,9 @@ func (s *Box) Start() error {
 +	return nil
 +}
 +
@@ -437,18 +437,18 @@ index 0000000000000000000000000000000000000000..accc3c2099cf9b6e2a606b0357b484d2
 +	return nil
 +}
 diff --git a/daemon/instance.go b/daemon/instance.go
-index 5e7502ce593de82bd1eefa23d4efe88bbb49ee4b..09b2713a97f19e9573ac252f75664ca1a32b175d 100644
+index 7ae2ede11b37b5c1bf61b11990303d66ca8644cf..e3cec094dcf03bc6ab8b9c3c6d39bed5d92144b6 100644
 --- a/daemon/instance.go
 +++ b/daemon/instance.go
-@@ -162 +162 @@ func (i *Instance) Start() error {
+@@ -169 +169 @@ func (i *Instance) Start() error {
 -	return i.instance.Start()
 +	return i.instance.StartWithExternalCleanup()
 diff --git a/experimental/clashapi/controller_listen.go b/experimental/clashapi/controller_listen.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..a5006eff13f705cf038d2fb3cfd093f78afcd24e
+index 0000000000000000000000000000000000000000..f16e8e7fc263c586acb505c8adfbeff971382eea
 --- /dev/null
 +++ b/experimental/clashapi/controller_listen.go
-@@ -0,0 +1,14 @@
+@@ -0,0 +1,16 @@
 +package clashapi
 +
 +import (
@@ -456,19 +456,21 @@ index 0000000000000000000000000000000000000000..a5006eff13f705cf038d2fb3cfd093f7
 +	"net"
 +
 +	"github.com/sagernet/sing-box/common/listener"
++	M "github.com/sagernet/sing/common/metadata"
++	N "github.com/sagernet/sing/common/network"
 +)
 +
 +// listenController applies the inbound loopback port sharing to the controller.
 +func listenController(ctx context.Context, address string) (net.Listener, error) {
 +	listenConfig := net.ListenConfig{Control: listener.ShareLoopbackPortAcrossUsers()}
-+	return listenConfig.Listen(ctx, "tcp", address)
++	return listenConfig.Listen(ctx, M.NetworkFromNetAddr(N.NetworkTCP, M.ParseSocksaddr(address).Addr), address)
 +}
 diff --git a/experimental/clashapi/endpoint_conflict_darwin_test.go b/experimental/clashapi/endpoint_conflict_darwin_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..c2c8127377573e72719f6593fdcded7d17f731b6
+index 0000000000000000000000000000000000000000..be937dc6193051f50e7cc82cf20d9d0abf358f2c
 --- /dev/null
 +++ b/experimental/clashapi/endpoint_conflict_darwin_test.go
-@@ -0,0 +1,127 @@
+@@ -0,0 +1,137 @@
 +package clashapi
 +
 +import (
@@ -557,10 +559,11 @@ index 0000000000000000000000000000000000000000..c2c8127377573e72719f6593fdcded7d
 +		default:
 +		}
 +	}
-+	if err = server.Start(adapter.StartStateStarted); err != nil {
++	scope := adapter.NewScope(context.Background(), log.NewNOPFactory().NewLogger("scope"))
++	defer closeScope(t, scope)
++	if err = server.Start(adapter.StartStateStarted, scope); err != nil {
 +		t.Fatal(err)
 +	}
-+	defer server.Close()
 +	client, err := net.Dial("tcp", address)
 +	if err != nil {
 +		t.Fatal(err)
@@ -589,11 +592,20 @@ index 0000000000000000000000000000000000000000..c2c8127377573e72719f6593fdcded7d
 +	port := uint16(first.Addr().(*net.TCPAddr).Port)
 +
 +	server := newControllerServer(first.Addr().String())
-+	err = server.Start(adapter.StartStateStarted)
-+	defer server.Close()
++	scope := adapter.NewScope(context.Background(), log.NewNOPFactory().NewLogger("scope"))
++	defer closeScope(t, scope)
++	err = server.Start(adapter.StartStateStarted, scope)
 +	role, conflictPort, ok := adapter.EndpointConflictFromError(err)
 +	if !ok || role != adapter.EndpointConflictController || conflictPort != port || !errors.Is(err, syscall.EADDRINUSE) {
 +		t.Fatalf("live shared controller did not conflict: role=%v port=%d ok=%v err=%v", role, conflictPort, ok, err)
++	}
++}
++
++// closeScope ends what a test's Start registered, as the box does on close.
++func closeScope(t *testing.T, scope *adapter.Scope) {
++	t.Helper()
++	if err := scope.Close(); err != nil {
++		t.Error(err)
 +	}
 +}
 diff --git a/experimental/clashapi/endpoint_conflict_test.go b/experimental/clashapi/endpoint_conflict_test.go
@@ -640,17 +652,20 @@ index 0000000000000000000000000000000000000000..fc4e119b199fd8c12f5dd1c5b13a758b
 +	}
 +}
 diff --git a/experimental/clashapi/server.go b/experimental/clashapi/server.go
-index b9222ad54403ec051e005c1f303e48c5cefe0c15..435e2cb89ff5bd6171bc602cd5ad56480de06250 100644
+index a8c99af36e4d3dcafe2e8c5fcf37d37e38ac8fa9..269a5d9435f64d3bc01ee0732bfb314812065d27 100644
 --- a/experimental/clashapi/server.go
 +++ b/experimental/clashapi/server.go
 @@ -10,0 +11 @@ import (
 +	"strconv"
-@@ -161 +162 @@ func (s *Server) Start(stage adapter.StartStage) error {
--			listener, err = net.Listen("tcp", s.httpServer.Addr)
+@@ -26,2 +26,0 @@ import (
+-	M "github.com/sagernet/sing/common/metadata"
+-	N "github.com/sagernet/sing/common/network"
+@@ -162 +161 @@ func (s *Server) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+-			listener, err = net.Listen(M.NetworkFromNetAddr(N.NetworkTCP, M.ParseSocksaddr(s.httpServer.Addr).Addr), s.httpServer.Addr)
 +			listener, err = listenController(s.ctx, s.httpServer.Addr)
-@@ -168,0 +170 @@ func (s *Server) Start(stage adapter.StartStage) error {
+@@ -169,0 +169 @@ func (s *Server) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 +			err = classifyControllerListenError(s.httpServer.Addr, err)
-@@ -181,0 +184,16 @@ func (s *Server) Start(stage adapter.StartStage) error {
+@@ -183,0 +184,16 @@ func (s *Server) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 +func classifyControllerListenError(address string, err error) error {
 +	if !errors.Is(err, syscall.EADDRINUSE) {
 +		return err
@@ -716,10 +731,10 @@ index 0000000000000000000000000000000000000000..34e4602ab060d563349c153be9cb942e
 +}
 diff --git a/protocol/mixed/endpoint_conflict_darwin_test.go b/protocol/mixed/endpoint_conflict_darwin_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..70db7b3a333a48cad275150df6afa2fb2b8b85b2
+index 0000000000000000000000000000000000000000..1399ed827ec86bb23a86c754567b822de985a71f
 --- /dev/null
 +++ b/protocol/mixed/endpoint_conflict_darwin_test.go
-@@ -0,0 +1,57 @@
+@@ -0,0 +1,61 @@
 +package mixed
 +
 +import (
@@ -749,7 +764,13 @@ index 0000000000000000000000000000000000000000..70db7b3a333a48cad275150df6afa2fb
 +		t.Fatal(err)
 +	}
 +	inbound := created.(*Inbound)
-+	return inbound, inbound.Start(adapter.StartStateStart)
++	scope := adapter.NewScope(context.Background(), log.NewNOPFactory().NewLogger("scope"))
++	t.Cleanup(func() {
++		if err := scope.Close(); err != nil {
++			t.Error(err)
++		}
++	})
++	return inbound, inbound.Start(adapter.StartStateStart, scope)
 +}
 +
 +func TestLiveSharedLoopbackMixedListenerStillConflicts(t *testing.T) {
@@ -757,7 +778,6 @@ index 0000000000000000000000000000000000000000..70db7b3a333a48cad275150df6afa2fb
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	defer first.Close()
 +	tcpListener := first.listener.TCPListener().(*net.TCPListener)
 +	shared, err := control.Conn0[int](tcpListener, func(fd uintptr) (int, error) {
 +		return unix.GetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSESHAREUID)
@@ -770,8 +790,7 @@ index 0000000000000000000000000000000000000000..70db7b3a333a48cad275150df6afa2fb
 +	}
 +	port := uint16(tcpListener.Addr().(*net.TCPAddr).Port)
 +
-+	second, err := startLoopbackMixedInbound(t, port)
-+	defer second.Close()
++	_, err = startLoopbackMixedInbound(t, port)
 +	role, conflictPort, ok := adapter.EndpointConflictFromError(err)
 +	if !ok || role != adapter.EndpointConflictMixed || conflictPort != port || !errors.Is(err, syscall.EADDRINUSE) {
 +		t.Fatalf("live shared listener did not conflict: role=%v port=%d ok=%v err=%v", role, conflictPort, ok, err)
@@ -819,23 +838,21 @@ index 0000000000000000000000000000000000000000..f74d12c5aeeb267e9e7f4669ab3a5972
 +	}
 +}
 diff --git a/protocol/mixed/inbound.go b/protocol/mixed/inbound.go
-index c6cd08cb6dc8c421c3c66fe1e3267820a8825768..65542e3982989f3cc62c91ea2f3308696dcb70dd 100644
+index 22c25f30fdca30e10657e515800730dc1f411745..7d0810561c385a776f3074716526be95363aee37 100644
 --- a/protocol/mixed/inbound.go
 +++ b/protocol/mixed/inbound.go
 @@ -5,0 +6 @@ import (
 +	"errors"
 @@ -6,0 +8 @@ import (
 +	"syscall"
-@@ -92 +94,11 @@ func (h *Inbound) Start(stage adapter.StartStage) error {
--	return h.listener.Start()
-+	return classifyMixedListenError(
-+		h.listener.ListenOptions().ListenPort,
-+		h.listener.Start(),
-+	)
-+}
-+
+@@ -95 +97 @@ func (h *Inbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+-		return err
++		return classifyMixedListenError(h.listener.ListenOptions().ListenPort, err)
+@@ -100,0 +103,7 @@ func (h *Inbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 +func classifyMixedListenError(port uint16, err error) error {
 +	if !errors.Is(err, syscall.EADDRINUSE) || port == 0 {
 +		return err
 +	}
 +	return adapter.NewEndpointConflictError(adapter.EndpointConflictMixed, port, err)
++}
++

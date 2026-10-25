@@ -9,7 +9,7 @@ import sys
 import tempfile
 import unittest
 
-from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY, PRODUCT_VERSION
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 SOURCE = Path(os.environ.get("CFW_SHELL_DISPATCH_SOURCE_ROOT", str(REPOSITORY))).resolve()
@@ -68,7 +68,7 @@ class PreviewShellOptionalArgumentsTests(unittest.TestCase):
         root = Path(temporary.name).resolve()
         scripts = root / "scripts"
         scripts.mkdir()
-        for name in ("build_native_ui.sh", "build_unsigned_candidate.sh"):
+        for name in ("build_native_ui.sh", "build_unsigned_candidate.sh", "release_identity.env"):
             shutil.copy2(SOURCE / "scripts" / name, scripts / name)
         (root / "record.py").write_text(RECORDER)
         (scripts / "release_tool_environment.sh").write_text(HELPERS)
@@ -173,9 +173,9 @@ class PreviewShellOptionalArgumentsTests(unittest.TestCase):
                 self.assertEqual(len(tauri[0]), 4 if preview else 3)
                 self.assertEqual(tauri[0][:2], [str(root / "apps/cfw-tauri-shell"), str(root / "target/toolchains/tauri-cli-2.11.4/bin/cargo-tauri")])
                 self.assertEqual(tauri[0][3:], ["--native-ui-unsigned-preview"] if preview else [])
-                version = "0.5.0"
+                version = PRODUCT_VERSION
                 build = "50000" if preview else "40000"
-                native = root / ("target/candidates/0.5.0/unsigned/50000/native-products" if preview else "target/candidates/0.5.0/unsigned/native-products")
+                native = root / (f"target/candidates/{version}/unsigned/50000/native-products" if preview else f"target/candidates/{version}/unsigned/native-products")
                 config = json.loads(tauri[0][2])["bundle"]["macOS"]
                 self.assertEqual(config["bundleVersion"], build)
                 self.assertEqual(len(config["files"]), 7)

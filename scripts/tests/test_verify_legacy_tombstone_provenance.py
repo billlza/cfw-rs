@@ -15,7 +15,7 @@ from unittest.mock import patch
 from scripts.hash_artifact import build_manifest
 from scripts.promote_signed_native_manifest import promote_manifest
 from scripts import verify_legacy_tombstone_provenance as provenance
-from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY, PRODUCT_VERSION
 
 
 GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
@@ -33,7 +33,7 @@ class LegacyTombstoneProvenanceTests(unittest.TestCase):
         (source_root / "src").mkdir(parents=True)
         (source_root / "src/main.rs").write_text("fn main() {}\n", encoding="utf-8")
         (source_root / "Cargo.toml").write_text(
-            '[package]\nname = "cfw-legacy-tombstone"\nversion = "0.5.0"\n',
+            f'[package]\nname = "cfw-legacy-tombstone"\nversion = "{PRODUCT_VERSION}"\n',
             encoding="utf-8",
         )
         (self.repository / "Cargo.lock").write_text(
@@ -42,7 +42,7 @@ class LegacyTombstoneProvenanceTests(unittest.TestCase):
 
         ga_root = (
             self.repository
-            / "target/candidates/0.5.0/ga"
+            / f"target/candidates/{PRODUCT_VERSION}/ga"
             / self.BUILD_NUMBER
         )
         self.pre_sign_root = ga_root / "native-products"
@@ -104,7 +104,7 @@ class LegacyTombstoneProvenanceTests(unittest.TestCase):
     def digest(self, relative: str) -> str:
         return hashlib.sha256((self.repository / relative).read_bytes()).hexdigest()
 
-    def write_bundle_identity(self, build_number: str, version: str = "0.5.0") -> None:
+    def write_bundle_identity(self, build_number: str, version: str = PRODUCT_VERSION) -> None:
         value = {
             "CFBundleShortVersionString": version,
             "CFBundleVersion": build_number,

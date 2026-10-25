@@ -22,7 +22,6 @@ if __package__:
         ACTIVE_RELEASE_IDENTITY,
         CandidateBundleContext,
         PRODUCT_VERSION,
-        PREVIEW_PRODUCT_VERSION,
         UNSIGNED_PREVIEW_VALIDATION_BUILD,
         candidate_bundle_verification_paths,
     )
@@ -38,7 +37,6 @@ else:
         ACTIVE_RELEASE_IDENTITY,
         CandidateBundleContext,
         PRODUCT_VERSION,
-        PREVIEW_PRODUCT_VERSION,
         UNSIGNED_PREVIEW_VALIDATION_BUILD,
         candidate_bundle_verification_paths,
     )
@@ -428,7 +426,7 @@ def verify_native_ui(
         build = UNSIGNED_PREVIEW_VALIDATION_BUILD
         ui_context = native_ui_artifact.NativeUiContext.UNSIGNED_PREVIEW_VALIDATION
     else:
-        # The 0.5.0 release carries the same SwiftUI library as its validation build.
+        # The release carries the same SwiftUI library as its validation build.
         signing = "pre-sign" if context is CandidateBundleContext.UNSIGNED_HOST else "developer-id"
         build = ACTIVE_RELEASE_IDENTITY.ga_build
         ui_context = native_ui_artifact.NativeUiContext.RELEASE
@@ -506,7 +504,6 @@ def verify_candidate(
     native_products = verification_paths.native_products
     build_identity = verification_paths.build_identity
     unsigned_preview = context is CandidateBundleContext.UNSIGNED_PREVIEW_HOST
-    expected_version = PREVIEW_PRODUCT_VERSION if unsigned_preview else EXPECTED_VERSION
     # The GA and the 50000 unsigned preview validation build carry the SwiftUI
     # library; only the 40000 unsigned skeleton does not.
     native_ui = unsigned_preview or build_identity.build_version == ACTIVE_RELEASE_IDENTITY.ga_build
@@ -517,8 +514,8 @@ def verify_candidate(
     tauri = json.loads(
         (repository / "apps/cfw-tauri-shell/tauri.conf.json").read_text(encoding="utf-8")
     )
-    if tauri.get("version") != expected_version:
-        raise CandidateError(f"Tauri configuration version differs from the {expected_version} contract")
+    if tauri.get("version") != EXPECTED_VERSION:
+        raise CandidateError(f"Tauri configuration version differs from the {EXPECTED_VERSION} contract")
 
     contents = app / "Contents"
     info_path = contents / "Info.plist"
@@ -580,7 +577,7 @@ def verify_candidate(
     ):
         require_plist_value(plist, "CFBundleIdentifier", identifier, path)
         require_plist_value(plist, "CFBundlePackageType", package_type, path)
-        require_plist_value(plist, "CFBundleShortVersionString", expected_version, path)
+        require_plist_value(plist, "CFBundleShortVersionString", EXPECTED_VERSION, path)
         require_plist_value(plist, "LSMinimumSystemVersion", EXPECTED_MINIMUM_SYSTEM, path)
 
     network_extension = extension_info.get("NetworkExtension")
@@ -730,7 +727,7 @@ def verify_candidate(
 
     print(f"candidate bundle verified: {app}")
     print(
-        f"identity: {expected_version} ({build_identity.build_version}) / "
+        f"identity: {EXPECTED_VERSION} ({build_identity.build_version}) / "
         f"arm64 / macOS {EXPECTED_MINIMUM_SYSTEM}+"
     )
     print(f"Mach-O objects: {len(macho_files)}")

@@ -49,7 +49,7 @@ the release verifier's inputs record.
 | Apple provider reference | `SING_BOX_APPLE_REFERENCE_COMMIT` | Git commit identity; reference only |
 | deployment | `MACOS_DEPLOYMENT_TARGET`, arm64 | Cargo build guard, Tauri config, Xcode settings, artifact inspection |
 
-The pin file holds the active 0.5.0 development values;
+The pin file holds the active development values;
 frozen 0.4.0 source and candidate receipts retain their original sources and toolchain.
 Each signed application's own receipts remain authoritative. Earlier July and August reviews are historical records, not the
 current version inventory. The exact XcodeGen, sing-box, and gomobile tags resolve
@@ -265,6 +265,40 @@ in the projection (`crates/cfw-singbox-config/src/controller.rs`) reachable.
 exactly the policy's required tags and fails closed if that block exists without
 the tag.
 
+The Rust target audit denies warning advisories as well as vulnerabilities.
+`RUSTSEC-2026-0386` (informational, unsound) reports that tokio's safe
+`AsyncFd` constructors violate I/O safety, so the shipped Rust graph moved from
+tokio `1.53.1` to the fixed `1.53.3`, which changes no other locked package.
+That release deprecates those constructors; the workspace calls none of them,
+so the move adds no warning.
+
+`SING_BOX_VERSION` follows the newest upstream stable release, and its tag
+commit carries a verified upstream signature. The six patches were ported onto
+upstream's scoped component lifecycle, in which a component registers its
+cleanups when it starts instead of exposing `Close`: the DNS router closes its
+named policies in that scope, the controller and the mixed inbound still report
+an occupied port as an endpoint conflict, and a profile probe whose start fails
+still reports a failed cleanup beside the start failure. A component whose own
+start fails cleans up what it began and is not closed again, and closing an
+instance closes only the components that started. Upstream's box close now
+succeeds again once it ran, so the daemon's service instance closes once and
+reports `os.ErrClosed` after that: an instance whose close failed stays with its
+owner, and a later stop or reload reports it instead of releasing it as closed.
+Upstream now routes a group to its selected member rather than through the
+group, so the fallback and load-balancing groups, which choose a member for
+each connection, implement `adapter.ConnectionSelectingGroup` and the router
+keeps dialing through them; `RealTag` keeps a load-balancing group's own tag,
+under which its health history is kept. The dependency-security patch moves
+every third-party Go module that the patched tree requires directly to its
+newest release, while sing-box's own modules stay at the versions upstream
+released together; the set of modules linked into Libbox is unchanged. Its
+`golang.org/x/tools` requirement serves only the gomobile bind closure that
+module preparation resolves read-only, so `go mod tidy` alone would drop it.
+The SOCKS-lifecycle build workspace binds the `github.com/sagernet/sing`
+version the upstream release requires; the two files it corrects are
+byte-identical to the previous version's, so their recorded checksums are
+unchanged.
+
 ## Artifact identity
 
 `scripts/hash_artifact.py` generates path-independent SHA-256 tree manifests.
@@ -301,7 +335,14 @@ builder convention.
 The signed/unsigned application manifests bind the canonical toolchain identity
 and every constituent release tree: Go, Go release tools, Go module cache,
 Node.js, the sealed UI dependencies, XcodeGen, and Tauri. The libbox manifest
-independently binds its Go inputs. These local manifests detect drift after a
+independently binds its Go inputs and the Xcode that compiled and linked its cgo
+code (`xcodeVersion`, `xcodeBuild`): the pinned Xcode in production, the observed
+one in the unsigned-validation role, exactly as the XcodeGen and Tauri CLI trees
+record theirs. After an Xcode change every existing XCFramework is therefore
+refused and must be rebuilt: move `target/native-dependencies/Libbox.xcframework`
+and its `.manifest.json` aside (never delete them; `build-libbox` refuses to
+overwrite an existing artifact), then run the `build-libbox` gate again.
+These local manifests detect drift after a
 clean bootstrap; they do not turn a same-user-compromised machine into a trusted
 builder, so release generation still requires a clean ephemeral runner whose
 downloads are observed against the repository pins.

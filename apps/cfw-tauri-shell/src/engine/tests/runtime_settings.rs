@@ -265,3 +265,47 @@ async fn a_start_whose_mainland_rule_sets_cannot_download_fails_and_leaves_no_ru
     assert_eq!(current.state.active_mode(), EngineMode::Off);
     coordinator.shutdown().await.unwrap();
 }
+
+/// While a cutover journal governs startup, its cleanup checks the running
+/// engine against the journal's settings and the next launch starts from
+/// them: a committed preference would block the cleanup and be reverted on
+/// relaunch while the saved preferences, and the settings page, still showed
+/// it. The commit is refused instead, and nothing changes.
+#[test]
+fn settings_are_not_committed_while_a_cutover_journal_governs_startup() {
+    let root = tempfile::tempdir().expect("temporary app home");
+    let store = SettingsStore::new(AppPaths::from_app_home(root.path()));
+    let journal_settings = EngineSettings::default();
+    crate::legacy::write_journal_governing_startup(
+        &store.paths().app_home,
+        journal_settings.clone(),
+    );
+    let previous = store.runtime_settings::<RuntimePreferences>().unwrap();
+    let endpoints = std::sync::RwLock::new(endpoint_binding(journal_settings.clone()));
+    let expected = endpoints.read().unwrap().clone();
+    let preferences = RuntimePreferences {
+        log_level: EngineLogLevel::Debug,
+        ..RuntimePreferences::default()
+    };
+    let replacement = endpoint_binding(EngineSettings {
+        log_level: EngineLogLevel::Debug,
+        ..journal_settings.clone()
+    });
+    let error = super::super::runtime_settings::commit_runtime_settings(
+        &endpoints,
+        &expected,
+        replacement,
+        &store,
+        &previous,
+        &preferences,
+    )
+    .expect_err("a preference cannot be committed while the journal governs startup");
+    assert!(error.contains("legacy cleanup"), "{error}");
+    let saved = store.runtime_settings::<RuntimePreferences>().unwrap();
+    assert_eq!(saved.revision, previous.revision);
+    assert_eq!(saved.settings, previous.settings);
+    assert_eq!(
+        endpoints.read().unwrap().controller.settings(),
+        &journal_settings
+    );
+}

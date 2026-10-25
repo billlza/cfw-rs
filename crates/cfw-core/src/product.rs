@@ -44,7 +44,7 @@ mod tests {
             serde_json::to_value(DesktopProductInfo::current()).unwrap(),
             serde_json::json!({
                 "name": "Clash for Mac",
-                "version": "0.5.0",
+                "version": env!("CARGO_PKG_VERSION"),
                 "license": "GPL-3.0-or-later",
                 "operating_system": "macos",
                 "minimum_os_version": "15.0",
@@ -59,7 +59,7 @@ mod tests {
         let value = serde_json::to_value(DesktopProductInfo::current()).unwrap();
         assert_eq!(value["name"], "Clash for Windows");
         assert_eq!(value["operating_system"], "windows");
-        assert_eq!(value["version"], "0.5.0");
+        assert_eq!(value["version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(value["license"], "GPL-3.0-or-later");
         assert!(value["minimum_os_version"].is_null());
         assert_eq!(value.as_object().unwrap().len(), 6);

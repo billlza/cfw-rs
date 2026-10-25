@@ -39,6 +39,9 @@ STATUSES: Final = frozenset(
         "retired_unbuilt_reserved_final_companion",
         "retired_superseded_by_next_product_version",
         "retired_preview_validation_consumed",
+        # The GA a closed product version published: official distribution
+        # exposed it (docs/release/candidate-identity-lifecycle.md).
+        "published",
     }
 )
 # GA retirements after the application was installed on the release Mac: each
@@ -46,6 +49,8 @@ STATUSES: Final = frozenset(
 INSTALLED_GA_STATUSES: Final = frozenset(
     status for status in STATUSES if "_after_install_" in status
 ) | {"retired_superseded_by_next_product_version"}
+# The fixed 0.4.0 history: the retired validation prefix, the build retired by
+# policy and the retired GA allocations.
 IMMUTABLE_RETIRED_PREFIX: Final = (
     ("40021", "validation", "retired_after_notarization_before_install"),
     (
@@ -301,42 +306,74 @@ PREVIEW_VALIDATION_PREFIX: Final = tuple(
     (str(build), "validation", "retired_preview_validation_consumed")
     for build in range(50001, 50025 + 1)
 )
+# The 0.5.0 GA allocations retired before 50030 was published.
+RETIRED_GA_ALLOCATIONS_V050: Final = (
+    ("50026", "ga", "retired_after_candidate_freeze_before_canonical_signing_output"),
+    ("50027", "ga", "retired_after_notarization_before_install"),
+    (
+        "50028",
+        "ga",
+        "retired_security_dependency_change_after_install_before_ga_runtime_acceptance",
+    ),
+    ("50029", "ga", "retired_product_change_after_install_before_ga_runtime_acceptance"),
+)
+PUBLISHED_GA_V050: Final = ("50030", "ga", "published")
 
 
 @dataclass(frozen=True)
 class LedgerPolicy:
     """The fixed allocation history of one product version.
 
-    A closed product version has no active GA: its whole history, including
-    every retired GA allocation, is fixed here and the ledger may only be
-    read. The active product version fixes only the history before its GA
-    allocations; the release identity file names its one active GA, and each
-    retired GA allocation is bound by its retirement note instead.
+    Every ledger starts at `first_build` and is gap-free from there. A closed
+    product version has no active GA: its whole history, including every
+    retired GA allocation and the GA it published, is fixed here and the
+    ledger may only be read. The active product version fixes only the
+    history before its GA allocations; the release identity file names its
+    one active GA, and each retired GA allocation is bound by its retirement
+    note instead.
     """
 
     product_version: str
     relative_path: Path
+    first_build: int
     immutable_prefix: tuple[tuple[str, str, str], ...]
     superseded: tuple[str, str, str] | None
     retired_ga: tuple[tuple[str, str, str], ...]
+    published: tuple[str, str, str] | None
     closed: bool
 
 
 POLICIES: Final = {
     "0.4.0": LedgerPolicy(
-        "0.4.0",
-        Path("docs/release/build-allocations-v040.json"),
-        IMMUTABLE_RETIRED_PREFIX,
-        POLICY_SUPERSEDED_ALLOCATION,
-        RETIRED_GA_ALLOCATIONS,
+        product_version="0.4.0",
+        relative_path=Path("docs/release/build-allocations-v040.json"),
+        first_build=40021,
+        immutable_prefix=IMMUTABLE_RETIRED_PREFIX,
+        superseded=POLICY_SUPERSEDED_ALLOCATION,
+        retired_ga=RETIRED_GA_ALLOCATIONS,
+        published=None,
         closed=True,
     ),
     "0.5.0": LedgerPolicy(
-        "0.5.0",
-        Path("docs/release/build-allocations-v050.json"),
-        PREVIEW_VALIDATION_PREFIX,
-        None,
-        (),
+        product_version="0.5.0",
+        relative_path=Path("docs/release/build-allocations-v050.json"),
+        first_build=50001,
+        immutable_prefix=PREVIEW_VALIDATION_PREFIX,
+        superseded=None,
+        retired_ga=RETIRED_GA_ALLOCATIONS_V050,
+        published=PUBLISHED_GA_V050,
+        closed=True,
+    ),
+    # Opened after 0.5.0 was published: its history starts with its first GA
+    # allocation, so a ledger that loses a leading record is not gap-free.
+    "0.5.1": LedgerPolicy(
+        product_version="0.5.1",
+        relative_path=Path("docs/release/build-allocations-v051.json"),
+        first_build=51001,
+        immutable_prefix=(),
+        superseded=None,
+        retired_ga=(),
+        published=None,
         closed=False,
     ),
 }
@@ -473,13 +510,20 @@ def _require_fixed_history(
     )
     if observed_retired_ga != policy.retired_ga:
         raise ReleaseBuildAllocationError("retired GA allocations changed")
-    return retired_ga_end
+    if policy.published is None:
+        return retired_ga_end
+    if retired_ga_end >= len(allocations):
+        raise ReleaseBuildAllocationError("published GA allocation is absent")
+    published = allocations[retired_ga_end]
+    if (published["build"], published["role"], published["status"]) != policy.published:
+        raise ReleaseBuildAllocationError(
+            f"published GA {policy.published[0]} allocation changed"
+        )
+    return retired_ga_end + 1
 
 
 def _require_gap_free(policy: LedgerPolicy, ordered_builds: list[int]) -> None:
-    expected_range = list(
-        range(int(policy.immutable_prefix[0][0]), ordered_builds[-1] + 1)
-    )
+    expected_range = list(range(policy.first_build, ordered_builds[-1] + 1))
     if ordered_builds != expected_range:
         raise ReleaseBuildAllocationError("allocation history must be ordered and gap-free")
 
@@ -691,6 +735,28 @@ def validate_predecessor_registry(
             )
 
 
+def validate_published_predecessors(
+    predecessors: Mapping[str, RegisteredPredecessor],
+) -> None:
+    """Requires the GA every closed product version published to be registered.
+
+    A published GA was installed on the release Mac, and the first GA install
+    of the next product version replaces it and archives its journals, so
+    opening that version without registering the profile fails here, before
+    anything is signed.
+    """
+    for policy in POLICIES.values():
+        if policy.published is None:
+            continue
+        build = policy.published[0]
+        profile = predecessors.get(build)
+        if profile is None or profile.product_version != policy.product_version:
+            raise ReleaseBuildAllocationError(
+                f"published GA build {build} is not a registered "
+                f"{policy.product_version} install predecessor"
+            )
+
+
 def validate_closed_contract(value: dict[str, object]) -> None:
     """Validates the read-only ledger of a closed product version."""
     policy, allocations, records, ordered_builds = _parse_allocations(value)
@@ -715,10 +781,14 @@ def verify_source_bindings(
     notes_directory: Path,
     predecessors: Mapping[str, RegisteredPredecessor],
 ) -> None:
-    """Binds the active ledger to the identity file, its notes and the registry."""
+    """Binds the active ledger to the identity file, its notes and the registry.
+
+    The registry must also hold the GA each closed product version published.
+    """
     ledger = validate_contract(value, expected_ga=ACTIVE_RELEASE_IDENTITY.ga_build)
     validate_retirement_notes(ledger, notes_directory)
     validate_predecessor_registry(ledger, predecessors)
+    validate_published_predecessors(predecessors)
 
 
 def verify_closed_ledgers() -> None:

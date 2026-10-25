@@ -624,6 +624,32 @@ fn sha256_digest(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+/// Test support: writes the journal a finished cutover leaves while its
+/// legacy cleanup is pending, `ReplacementActive` with `settings`, under
+/// `app_home`.
+#[cfg(test)]
+pub(crate) fn write_journal_governing_startup(app_home: &Path, settings: EngineSettings) {
+    let store = CutoverJournalStore::new(app_home);
+    let journal = CutoverJournal::prepared(
+        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "33".repeat(32),
+        &tests::request(),
+        settings,
+        LegacyRuntimePlanKind::FreshInstall,
+        LegacyNetworkJournalInput::default(),
+        None,
+    )
+    .expect("journal");
+    store.write_prepared(&journal).expect("write prepared");
+    for (expected, next) in [
+        (CutoverPhase::Prepared, CutoverPhase::NetworkRetiring),
+        (CutoverPhase::NetworkRetiring, CutoverPhase::LegacyRetired),
+        (CutoverPhase::LegacyRetired, CutoverPhase::ReplacementActive),
+    ] {
+        store.advance(expected, next).expect("advance");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -631,7 +657,7 @@ mod tests {
     use super::*;
     use cfw_engine_api::{DirectIpv4HostRoutes, EngineStartRequest, TunnelNetworkOptions};
 
-    fn request() -> CutoverPreflightRequest {
+    pub(super) fn request() -> CutoverPreflightRequest {
         request_with(9, "11".repeat(32), "22".repeat(32))
     }
 

@@ -1,5 +1,5 @@
 diff --git a/adapter/dns.go b/adapter/dns.go
-index 15df285de9f0bc78f3cebaea99da633f9bc9b2bb..abe35418b4a9cc380ca433cdb8256e2a0df1be9b 100644
+index 8119097e82f23e1ff5e68fa2ec728731f6437ae9..58c92456fcfbaf080d1b57cbe3adf4ed8bb8aeea 100644
 --- a/adapter/dns.go
 +++ b/adapter/dns.go
 @@ -10,0 +11 @@ import (
@@ -15,7 +15,7 @@ index 15df285de9f0bc78f3cebaea99da633f9bc9b2bb..abe35418b4a9cc380ca433cdb8256e2a
 +	FallbackTransports     []DNSTransport
 @@ -38,0 +47 @@ type DNSQueryOptions struct {
 +	DisableRDRC            bool
-@@ -94,0 +104,17 @@ type DNSTransportManager interface {
+@@ -93,0 +103,17 @@ type DNSTransportManager interface {
 +
 +// ResolveDNSFallbacks is shared by eager and deferred dialers. An unavailable
 +// explicit resolver is configuration failure, never implicit system DNS.
@@ -34,24 +34,24 @@ index 15df285de9f0bc78f3cebaea99da633f9bc9b2bb..abe35418b4a9cc380ca433cdb8256e2a
 +	return transports, nil
 +}
 diff --git a/adapter/inbound.go b/adapter/inbound.go
-index ae1067d9a2d5958b171bbfff03af02a5ef1ee6fb..9d4bbac6c82196ce1b1749638c20d28edba2dffc 100644
+index 3027f1eb12d026a0ed4d4344170b9fd7b526a75c..5dbbb5f365eea4fecff9ba6611317cd847d80164 100644
 --- a/adapter/inbound.go
 +++ b/adapter/inbound.go
 @@ -47,0 +48,3 @@ type InboundContext struct {
 +	// Internal DNS sockets already have an explicitly bootstrapped destination.
 +	// They use route selection, not inbound sniffing, resolution or DNS hijacking.
 +	InternalDNS bool
-@@ -93,0 +97 @@ type InboundContext struct {
+@@ -94,0 +98 @@ type InboundContext struct {
 +	DNSResponseAddressOverride          []netip.Addr
-@@ -134,0 +139,3 @@ func (c *InboundContext) DNSResponseAddressesForMatch() []netip.Addr {
+@@ -135,0 +140,3 @@ func (c *InboundContext) DNSResponseAddressesForMatch() []netip.Addr {
 +	if c.DNSResponseAddressOverride != nil {
 +		return c.DNSResponseAddressOverride
 +	}
 diff --git a/adapter/network.go b/adapter/network.go
-index c3ae515a54509b58cfade16cd9f771754ec71657..f5ae1f3e716d380908ba1ca0d6b4a112cff71239 100644
+index 2ef2c5d2dca05605e6f1aabad665a30a393a6f37..9f886e7038dff470a46850d46a73543895e73efc 100644
 --- a/adapter/network.go
 +++ b/adapter/network.go
-@@ -41,8 +41,9 @@ type NetworkOptions struct {
+@@ -42,8 +42,9 @@ type NetworkOptions struct {
 -	BindInterface        string
 -	RoutingMark          uint32
 -	DomainResolver       string
@@ -140,7 +140,7 @@ index 7c0b9b5ab0b7287c162623e969b15fe23938121a..d6439bd606aa7803382257321cf17f8b
 @@ -136,0 +173 @@ func domainResolveQueryOptions(domainResolver *option.DomainResolveOptions) adap
 +		Policy:                 domainResolver.Policy,
 diff --git a/common/dialer/resolve.go b/common/dialer/resolve.go
-index 21fe38d5cf9ba135abfa6bda053460ee7ccb15b8..66eaeaae2f4679a9f74bbeb3b9fb5674237e4ec3 100644
+index 8fa48f6b3e764c85a22d9ca7b27837ec32d05fcf..82e1a53c1b81fb935052dddd025ace7e4be4fb57 100644
 --- a/common/dialer/resolve.go
 +++ b/common/dialer/resolve.go
 @@ -35,9 +35,10 @@ type resolveDialer struct {
@@ -201,57 +201,43 @@ index 21fe38d5cf9ba135abfa6bda053460ee7ccb15b8..66eaeaae2f4679a9f74bbeb3b9fb5674
 @@ -91,0 +95 @@ func (d *resolveDialer) initServer() {
 +	d.queryOptions.FallbackTransports, d.initErr = adapter.ResolveDNSFallbacks(d.transport, d.fallbackServers)
 diff --git a/dns/client.go b/dns/client.go
-index 77fe1cbc59416b35bcbe11ea36c10af17cade6a3..5319d5f0dfbe2762dd1afa9a3dada10318f64365 100644
+index 51cedd60c85422f0308d7052599c462a57ffafdd..82890ead7b9144b092f18883db404d44b2a663ad 100644
 --- a/dns/client.go
 +++ b/dns/client.go
-@@ -104 +104,3 @@ func (k dnsCacheKey) persistentName() string {
+@@ -105 +105,3 @@ func (k dnsCacheKey) persistentName() string {
 -	name := k.transportTag
 +	// Earlier cache entries could already have address-family hints removed.
 +	// They cannot prove an original-response predicate and are not reusable here.
 +	name := "raw-response-v1:" + k.transportTag
-@@ -308,0 +311,4 @@ func (c *Client) beginExchange(ctx context.Context, transport adapter.DNSTranspo
-+				if (!isStale || !options.DisableOptimisticCache) && responseChecker != nil && !responseChecker(response) {
-+					operation.release()
-+					return nil, response, exchangeDone, ErrResponseRejectedCached
-+				}
-@@ -312,0 +319 @@ func (c *Client) beginExchange(ctx context.Context, transport adapter.DNSTranspo
-+					applyResponseOptions(question, response, options)
-@@ -317,0 +325 @@ func (c *Client) beginExchange(ctx context.Context, transport adapter.DNSTranspo
-+					applyResponseOptions(question, response, options)
-@@ -349 +357 @@ func (c *Client) beginExchange(ctx context.Context, transport adapter.DNSTranspo
+@@ -323,0 +326 @@ func (c *Client) beginExchange(ctx context.Context, transport adapter.DNSTranspo
++				applyResponseOptions(question, response, options)
+@@ -353 +356 @@ func (c *Client) beginExchange(ctx context.Context, transport adapter.DNSTranspo
 -	if !disableCache && responseChecker != nil && c.rdrc != nil {
 +	if !disableCache && !options.DisableRDRC && responseChecker != nil && c.rdrc != nil {
-@@ -359,0 +368,3 @@ func (c *Client) finishExchange(transport adapter.DNSTransport, operation *excha
+@@ -363,0 +367,3 @@ func (c *Client) finishExchange(transport adapter.DNSTransport, operation *excha
 +	if response == nil {
 +		return nil, E.New("DNS transport returned an empty response")
 +	}
-@@ -371 +382 @@ func (c *Client) finishExchange(transport adapter.DNSTransport, operation *excha
+@@ -375 +381 @@ func (c *Client) finishExchange(transport adapter.DNSTransport, operation *excha
 -			if !disableCache && c.rdrc != nil {
 +			if !disableCache && !operation.options.DisableRDRC && c.rdrc != nil {
-@@ -377,0 +389,4 @@ func (c *Client) finishExchange(transport adapter.DNSTransport, operation *excha
+@@ -381,0 +388,4 @@ func (c *Client) finishExchange(transport adapter.DNSTransport, operation *excha
 +	var cacheResponse *dns.Msg
 +	if !disableCache {
 +		cacheResponse = response.Copy()
 +	}
-@@ -382 +397,2 @@ func (c *Client) finishExchange(transport adapter.DNSTransport, operation *excha
+@@ -386 +396,2 @@ func (c *Client) finishExchange(transport adapter.DNSTransport, operation *excha
 -			c.storeCache(cacheKey, response, timeToLive)
 +			normalizeTTL(cacheResponse, timeToLive)
 +			c.storeCache(cacheKey, cacheResponse, timeToLive)
-@@ -564 +580,5 @@ func (c *Client) lookupToExchange(ctx context.Context, transport adapter.DNSTran
+@@ -568 +579,5 @@ func (c *Client) lookupToExchange(ctx context.Context, transport adapter.DNSTran
 -	return MessageToAddresses(response), nil
 +	addresses := MessageToAddresses(response)
 +	if len(addresses) == 0 && !isNODATAResponse(response) {
 +		return nil, E.New("DNS response contains no address or negative authority")
 +	}
 +	return addresses, nil
-@@ -573,0 +594,6 @@ func (c *Client) questionCache(ctx context.Context, transport adapter.DNSTranspo
-+	if isStale && options.DisableOptimisticCache {
-+		return nil, ErrNotCached
-+	}
-+	if responseChecker != nil && !responseChecker(response) {
-+		return nil, ErrResponseRejectedCached
-+	}
-@@ -584 +610,6 @@ func (c *Client) questionCache(ctx context.Context, transport adapter.DNSTranspo
+@@ -594 +609,6 @@ func (c *Client) questionCache(ctx context.Context, transport adapter.DNSTranspo
 -	return MessageToAddresses(response), nil
 +	applyResponseOptions(question, response, options)
 +	addresses := MessageToAddresses(response)
@@ -259,36 +245,36 @@ index 77fe1cbc59416b35bcbe11ea36c10af17cade6a3..5319d5f0dfbe2762dd1afa9a3dada103
 +		return nil, E.New("DNS response contains no address or negative authority")
 +	}
 +	return addresses, nil
-@@ -672,0 +704,5 @@ func (c *Client) backgroundRefreshDNS(transport adapter.DNSTransport, key dnsCac
+@@ -682,0 +703,5 @@ func (c *Client) backgroundRefreshDNS(transport adapter.DNSTransport, key dnsCac
 +	if options.DisableRDRC {
 +		// Policy filters are checked on every foreground read of the raw cache.
 +		// A refresh must not retain a request's rule resources beyond its lifetime.
 +		responseChecker = nil
 +	}
-@@ -704 +740 @@ func (c *Client) backgroundRefreshDNS(transport adapter.DNSTransport, key dnsCac
+@@ -714 +739 @@ func (c *Client) backgroundRefreshDNS(transport adapter.DNSTransport, key dnsCac
 -				if c.rdrc != nil {
 +				if !options.DisableRDRC && c.rdrc != nil {
-@@ -715,0 +752 @@ func (c *Client) backgroundRefreshDNS(transport adapter.DNSTransport, key dnsCac
+@@ -725,0 +751 @@ func (c *Client) backgroundRefreshDNS(transport adapter.DNSTransport, key dnsCac
 +		cacheResponse := response.Copy()
-@@ -717 +754,2 @@ func (c *Client) backgroundRefreshDNS(transport adapter.DNSTransport, key dnsCac
+@@ -727 +753,2 @@ func (c *Client) backgroundRefreshDNS(transport adapter.DNSTransport, key dnsCac
 -		c.storeCache(storeKey, response, timeToLive)
 +		normalizeTTL(cacheResponse, timeToLive)
 +		c.storeCache(storeKey, cacheResponse, timeToLive)
-@@ -750,0 +789,3 @@ func (c *Client) exchangeToTransport(ctx context.Context, transport adapter.DNST
+@@ -760,0 +788,3 @@ func (c *Client) exchangeToTransport(ctx context.Context, transport adapter.DNST
 +		if response == nil {
 +			return nil, E.New("DNS transport returned an empty response")
 +		}
-@@ -763,0 +805,4 @@ func (c *Client) exchangeToTransportAsync(ctx context.Context, transport adapter
+@@ -773,0 +804,4 @@ func (c *Client) exchangeToTransportAsync(ctx context.Context, transport adapter
 +			if response == nil {
 +				callback(nil, E.New("DNS transport returned an empty response"))
 +				return
 +			}
 diff --git a/dns/client_policy_dedup_test.go b/dns/client_policy_dedup_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..429e7203c5a28530cf3dbb8166cc2b988669ed2f
+index 0000000000000000000000000000000000000000..baa68eb6a7129055be6b4323119e347fd007561a
 --- /dev/null
 +++ b/dns/client_policy_dedup_test.go
-@@ -0,0 +1,176 @@
+@@ -0,0 +1,175 @@
 +package dns
 +
 +import (
@@ -314,10 +300,9 @@ index 0000000000000000000000000000000000000000..429e7203c5a28530cf3dbb8166cc2b98
 +	answer  mdns.RR
 +}
 +
-+func (*policyGatedTransport) Start(adapter.StartStage) error { return nil }
-+func (*policyGatedTransport) Close() error                   { return nil }
-+func (*policyGatedTransport) Reset()                         {}
-+func (p *policyGatedTransport) unblock()                     { p.once.Do(func() { close(p.release) }) }
++func (*policyGatedTransport) Start(adapter.StartStage, *adapter.Scope) error { return nil }
++func (*policyGatedTransport) Reset()                                         {}
++func (p *policyGatedTransport) unblock()                                     { p.once.Do(func() { close(p.release) }) }
 +func (p *policyGatedTransport) Exchange(ctx context.Context, query *mdns.Msg) (*mdns.Msg, error) {
 +	p.calls.Add(1)
 +	p.entered <- struct{}{}
@@ -876,10 +861,10 @@ index 0000000000000000000000000000000000000000..4d537dddafcf10761daf507af2b46ee9
 +}
 diff --git a/dns/policy_test.go b/dns/policy_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..48048ac590035858909b9ae64f81a9e19fcd276f
+index 0000000000000000000000000000000000000000..9b97b0c40f357cc20dafabd490952ab383766a83
 --- /dev/null
 +++ b/dns/policy_test.go
-@@ -0,0 +1,192 @@
+@@ -0,0 +1,276 @@
 +package dns_test
 +
 +import (
@@ -889,6 +874,7 @@ index 0000000000000000000000000000000000000000..48048ac590035858909b9ae64f81a9e1
 +	"io"
 +	"net"
 +	"net/netip"
++	"strings"
 +	"sync"
 +	"testing"
 +	"time"
@@ -948,6 +934,89 @@ index 0000000000000000000000000000000000000000..48048ac590035858909b9ae64f81a9e1
 +	}
 +	if _, seen := mainQueries.Load("must-not-leak.example."); seen {
 +		t.Fatal("failed named policy leaked to the ordinary resolver")
++	}
++}
++
++func inlinePolicyRuleSet(tag string, rules ...any) map[string]any {
++	return map[string]any{"type": "inline", "tag": tag, "rules": rules}
++}
++
++// Each inline rule set checks its metadata while the route router registers
++// it, before the rule sets declared after it exist. A policy naming one of
++// those must still load and route by it, and later updates of it are checked.
++func TestNamedDNSPoliciesNameRuleSetsDeclaredAfterAnInlineOne(t *testing.T) {
++	ordinaryPort, _ := startPolicyTCPWithTTL(t, false, "203.0.113.10", 60)
++	policyPort, policyQueries := startPolicyTCPWithTTL(t, false, "203.0.113.30", 60)
++	router, _ := startPolicyBox(t, map[string]any{
++		"log": map[string]any{"disabled": true}, "outbounds": []any{map[string]any{"type": "direct", "tag": "direct"}},
++		"route": map[string]any{"rule_set": []any{
++			inlinePolicyRuleSet("first", map[string]any{"domain_suffix": []any{"first.example"}}),
++			inlinePolicyRuleSet("later", map[string]any{"domain_suffix": []any{"later.example"}}),
++			inlinePolicyRuleSet("addresses", map[string]any{"ip_cidr": []any{"203.0.113.0/24"}}),
++		}},
++		"dns": map[string]any{"servers": []any{policyTCP("ordinary", ordinaryPort), policyTCP("policy", policyPort)}, "final": "ordinary", "policies": []any{
++			map[string]any{"tag": "sites", "final": "ordinary", "rules": []any{map[string]any{"rule_set": []any{"later"}, "action": "route", "server": "policy"}}},
++			map[string]any{"tag": "filtered", "final": "ordinary", "rules": []any{
++				map[string]any{"action": "evaluate", "server": "policy", "response_ip_accept_all": true, "response_filter": map[string]any{"rule_set": []any{"addresses"}}},
++				map[string]any{"match_response": true, "action": "respond"},
++			}},
++		}},
++	})
++	validator := router.(adapter.DNSRuleSetUpdateValidator)
++	if err := validator.ValidateRuleSetMetadataUpdate("addresses", adapter.RuleSetMetadata{ContainsIPCIDRRule: true}); err != nil {
++		t.Fatal(err)
++	}
++	if err := validator.ValidateRuleSetMetadataUpdate("addresses", adapter.RuleSetMetadata{ContainsIPCIDRRule: true, ContainsNonIPCIDRRule: true}); err == nil || !strings.Contains(err.Error(), "DNS policy filtered") {
++		t.Fatalf("a filter's rule set took a non-IP update: %v", err)
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
++	defer cancel()
++	for name, address := range map[string]string{"site.later.example": "203.0.113.30", "site.first.example": "203.0.113.10"} {
++		addresses, err := router.Lookup(ctx, name, adapter.DNSQueryOptions{Policy: "sites", Strategy: C.DomainStrategyIPv4Only})
++		if err != nil || len(addresses) != 1 || addresses[0] != netip.MustParseAddr(address) {
++			t.Fatalf("%s: %v %v", name, addresses, err)
++		}
++	}
++	if _, seen := policyQueries.Load("site.first.example."); seen {
++		t.Fatal("the policy routed a name outside its rule set")
++	}
++}
++
++// Initialize checks every policy against all the rule sets, so the ones an
++// inline rule set's own check cannot see yet are still refused.
++func TestNamedDNSPoliciesStillRefuseUndeclaredAndUnfitRuleSets(t *testing.T) {
++	port, _ := startPolicyTCP(t, false, "203.0.113.10")
++	for _, item := range []struct {
++		name, refusal string
++		rules         []any
++	}{
++		{"undeclared", "rule-set not found: undeclared", []any{
++			map[string]any{"rule_set": []any{"undeclared"}, "action": "route", "server": "ordinary"},
++		}},
++		{"unfit filter", "response_filter requires a pure-IP rule_set: mixed", []any{
++			map[string]any{"action": "evaluate", "server": "ordinary", "response_ip_accept_all": true, "response_filter": map[string]any{"rule_set": []any{"mixed"}}},
++			map[string]any{"match_response": true, "action": "respond"},
++		}},
++	} {
++		t.Run(item.name, func(t *testing.T) {
++			_, instance, err := newPolicyBox(t, map[string]any{
++				"log": map[string]any{"disabled": true}, "outbounds": []any{map[string]any{"type": "direct", "tag": "direct"}},
++				"route": map[string]any{"rule_set": []any{
++					inlinePolicyRuleSet("first", map[string]any{"domain_suffix": []any{"first.example"}}),
++					inlinePolicyRuleSet("mixed", map[string]any{"domain_suffix": []any{"mixed.example"}}, map[string]any{"ip_cidr": []any{"203.0.113.0/24"}}),
++				}},
++				"dns": map[string]any{"servers": []any{policyTCP("ordinary", port)}, "final": "ordinary", "policies": []any{
++					map[string]any{"tag": "checked", "final": "ordinary", "rules": item.rules},
++				}},
++			})
++			if err == nil {
++				instance.Close()
++				t.Fatal("the policy was accepted")
++			}
++			if !strings.Contains(err.Error(), item.refusal) {
++				t.Fatal(err)
++			}
++		})
 +	}
 +}
 +
@@ -1074,10 +1143,10 @@ index 0000000000000000000000000000000000000000..48048ac590035858909b9ae64f81a9e1
 +}
 diff --git a/dns/response_filter_test.go b/dns/response_filter_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..e0204105844e86632ad1ae48506398226c98b1a3
+index 0000000000000000000000000000000000000000..24bef423f07247e78c07d9def0051283bccf774e
 --- /dev/null
 +++ b/dns/response_filter_test.go
-@@ -0,0 +1,178 @@
+@@ -0,0 +1,175 @@
 +package dns
 +
 +import (
@@ -1100,9 +1169,8 @@ index 0000000000000000000000000000000000000000..e0204105844e86632ad1ae4850639822
 +	calls    atomic.Int32
 +}
 +
-+func (*responseFilterTransport) Start(adapter.StartStage) error { return nil }
-+func (*responseFilterTransport) Close() error                   { return nil }
-+func (*responseFilterTransport) Reset()                         {}
++func (*responseFilterTransport) Start(adapter.StartStage, *adapter.Scope) error { return nil }
++func (*responseFilterTransport) Reset()                                         {}
 +func (t *responseFilterTransport) Exchange(ctx context.Context, query *mdns.Msg) (*mdns.Msg, error) {
 +	if err := ctx.Err(); err != nil {
 +		return nil, err
@@ -1157,9 +1225,7 @@ index 0000000000000000000000000000000000000000..e0204105844e86632ad1ae4850639822
 +		router.rules = append(router.rules, rule)
 +	}
 +	t.Cleanup(func() {
-+		if err := router.Close(); err != nil {
-+			t.Error(err)
-+		}
++		closeRules(router.rules)
 +	})
 +	return router, primary, fallback
 +}
@@ -1309,7 +1375,7 @@ index 0000000000000000000000000000000000000000..8fe0381e2f3e87ba24ce98e7c975f0ad
 +}
 diff --git a/dns/response_filter_validation_test.go b/dns/response_filter_validation_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..c27a804081d0fc3c915c3ba4295090a31b7b9140
+index 0000000000000000000000000000000000000000..26316f75bf86fe5e7010b04b3ac91f2aa30c3e3c
 --- /dev/null
 +++ b/dns/response_filter_validation_test.go
 @@ -0,0 +1,23 @@
@@ -1328,7 +1394,7 @@ index 0000000000000000000000000000000000000000..c27a804081d0fc3c915c3ba4295090a3
 +		Action:          C.RuleActionTypeEvaluate,
 +		EvaluateOptions: option.DNSEvaluateActionOptions{Server: "primary", ResponseIPAcceptAll: true, ResponseFilter: &option.DNSResponseFilter{DNSRule: option.DNSRule{Type: C.RuleTypeDefault, DefaultOptions: option.DefaultDNSRule{RawDefaultDNSRule: option.RawDefaultDNSRule{RuleSet: []string{"country"}}}}}},
 +	}}}
-+	router := &Router{ctx: context.Background(), policyOptions: []option.DNSPolicy{{Tag: "private", Final: "primary", Rules: []option.DNSRule{source}}}}
++	router := &Router{ctx: context.Background(), initialized: true, policyOptions: []option.DNSPolicy{{Tag: "private", Final: "primary", Rules: []option.DNSRule{source}}}}
 +	if err := router.ValidateRuleSetMetadataUpdate("country", adapter.RuleSetMetadata{ContainsIPCIDRRule: true}); err != nil {
 +		t.Fatal(err)
 +	}
@@ -1722,21 +1788,28 @@ index 0000000000000000000000000000000000000000..3e37530b4884e48ec52aa1e79e88493b
 +	}
 +}
 diff --git a/dns/router.go b/dns/router.go
-index e7c0e96407919c9d354f944e500cbaae14eea752..b1c70ce0c4dec4427003dc986c7515100c683161 100644
+index 40107d9e0f5b09d411c92776c9f54bf3cd56ee4b..dd27c2f09620c7c7c58c376c0aa716bafbcd7058 100644
 --- a/dns/router.go
 +++ b/dns/router.go
-@@ -38,0 +39,4 @@ type Router struct {
+@@ -38,0 +39,5 @@ type Router struct {
 +	systemHostsTag        string
 +	systemHosts           adapter.DNSTransport
 +	policyOptions         []option.DNSPolicy
 +	policies              map[string]dnsPolicy
-@@ -57,0 +62,2 @@ func NewRouter(ctx context.Context, logFactory log.Factory, options option.DNSOp
++	initialized           bool
+@@ -57,0 +63,2 @@ func NewRouter(ctx context.Context, logFactory log.Factory, options option.DNSOp
 +		systemHostsTag:        options.SystemHosts,
 +		policyOptions:         options.Policies,
-@@ -129 +135 @@ func (r *Router) Initialize(rules []option.DNSRule) error {
--	return nil
-+	return routerInitializePolicies(r, false)
-@@ -135,0 +142,10 @@ func (r *Router) Start(stage adapter.StartStage) error {
+@@ -128,0 +136,5 @@ func (r *Router) Initialize(rules []option.DNSRule) error {
++	err = routerInitializePolicies(r, false)
++	if err != nil {
++		return err
++	}
++	r.initialized = true
+@@ -143 +155 @@ func (r *Router) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+-			return nil
++			return r.closePolicies()
+@@ -144,0 +157,10 @@ func (r *Router) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 +		if err := routerInitializePolicies(r, true); err != nil {
 +			return err
 +		}
@@ -1747,35 +1820,32 @@ index e7c0e96407919c9d354f944e500cbaae14eea752..b1c70ce0c4dec4427003dc986c751510
 +			}
 +			r.systemHosts = transport
 +		}
-@@ -177 +193 @@ func (r *Router) Close() error {
--	return nil
-+	return r.closePolicies()
-@@ -181 +197,5 @@ func (r *Router) buildRules(startRules bool) ([]adapter.DNSRule, bool, dnsRuleMo
+@@ -176 +198,5 @@ func (r *Router) buildRules(startRules bool) ([]adapter.DNSRule, bool, dnsRuleMo
 -	for i, ruleOptions := range r.rawRules {
 +	return r.buildRuleList(r.rawRules, startRules, false)
 +}
 +
 +func (r *Router) buildRuleList(rawRules []option.DNSRule, startRules bool, requireNative bool) ([]adapter.DNSRule, bool, dnsRuleModeFlags, error) {
 +	for i, ruleOptions := range rawRules {
-@@ -188 +208 @@ func (r *Router) buildRules(startRules bool) ([]adapter.DNSRule, bool, dnsRuleMo
+@@ -183 +209 @@ func (r *Router) buildRules(startRules bool) ([]adapter.DNSRule, bool, dnsRuleMo
 -	legacyDNSMode, modeFlags, err := resolveLegacyDNSMode(router, r.rawRules, nil)
 +	legacyDNSMode, modeFlags, err := resolveLegacyDNSMode(router, rawRules, nil)
-@@ -191,0 +212,3 @@ func (r *Router) buildRules(startRules bool) ([]adapter.DNSRule, bool, dnsRuleMo
+@@ -186,0 +213,3 @@ func (r *Router) buildRules(startRules bool) ([]adapter.DNSRule, bool, dnsRuleMo
 +	if requireNative && legacyDNSMode {
 +		return nil, false, dnsRuleModeFlags{}, E.New("named DNS policies require native evaluate/respond rules")
 +	}
-@@ -194 +217 @@ func (r *Router) buildRules(startRules bool) ([]adapter.DNSRule, bool, dnsRuleMo
+@@ -189 +218 @@ func (r *Router) buildRules(startRules bool) ([]adapter.DNSRule, bool, dnsRuleMo
 -		validationWarnings, err = validateLegacyDNSModeDisabledRules(router, r.rawRules, nil)
 +		validationWarnings, err = validateLegacyDNSModeDisabledRules(router, rawRules, nil)
-@@ -202 +225 @@ func (r *Router) buildRules(startRules bool) ([]adapter.DNSRule, bool, dnsRuleMo
+@@ -197 +226 @@ func (r *Router) buildRules(startRules bool) ([]adapter.DNSRule, bool, dnsRuleMo
 -	err = validateEvaluateFakeIPRules(r.rawRules, r.transport)
 +	err = validateEvaluateFakeIPRules(rawRules, r.transport)
-@@ -206,2 +229,2 @@ func (r *Router) buildRules(startRules bool) ([]adapter.DNSRule, bool, dnsRuleMo
+@@ -201,2 +230,2 @@ func (r *Router) buildRules(startRules bool) ([]adapter.DNSRule, bool, dnsRuleMo
 -	newRules := make([]adapter.DNSRule, 0, len(r.rawRules))
 -	for i, ruleOptions := range r.rawRules {
 +	newRules := make([]adapter.DNSRule, 0, len(rawRules))
 +	for i, ruleOptions := range rawRules {
-@@ -216,0 +240,9 @@ func (r *Router) buildRules(startRules bool) ([]adapter.DNSRule, bool, dnsRuleMo
+@@ -211,0 +241,9 @@ func (r *Router) buildRules(startRules bool) ([]adapter.DNSRule, bool, dnsRuleMo
 +		for i, source := range rawRules {
 +			server := dnsRuleActionServer(source)
 +			if server != "" {
@@ -1785,19 +1855,25 @@ index e7c0e96407919c9d354f944e500cbaae14eea752..b1c70ce0c4dec4427003dc986c751510
 +				}
 +			}
 +		}
-@@ -234,0 +267,6 @@ func (r *Router) ValidateRuleSetMetadataUpdate(tag string, metadata adapter.Rule
-+	policyRouter := service.FromContext[adapter.Router](r.ctx)
-+	for _, policy := range r.policyOptions {
-+		if _, err := validateLegacyDNSModeDisabledRules(policyRouter, policy.Rules, map[string]adapter.RuleSetMetadata{tag: metadata}); err != nil {
-+			return E.Cause(err, "DNS policy ", policy.Tag)
+@@ -229,0 +268,12 @@ func (r *Router) ValidateRuleSetMetadataUpdate(tag string, metadata adapter.Rule
++	// Before Initialize, the route router is still registering rule sets, and
++	// each inline one is checked while it is registered, when the rule sets
++	// declared after it do not exist yet. Initialize checks every policy
++	// against all of them, so policies are checked here once it has run.
++	if r.initialized {
++		policyRouter := service.FromContext[adapter.Router](r.ctx)
++		for _, policy := range r.policyOptions {
++			if _, err := validateLegacyDNSModeDisabledRules(policyRouter, policy.Rules, map[string]adapter.RuleSetMetadata{tag: metadata}); err != nil {
++				return E.Cause(err, "DNS policy ", policy.Tag)
++			}
 +		}
 +	}
-@@ -438,0 +477 @@ type dnsRuleWalkState struct {
+@@ -433,0 +484 @@ type dnsRuleWalkState struct {
 +	attemptErrors    []error
-@@ -508 +547 @@ type dnsWalkSuspension struct {
+@@ -503 +554 @@ type dnsWalkSuspension struct {
 -func (r *Router) launchDNSEvaluate(ctx context.Context, state *dnsRuleWalkState, tag string, transport adapter.DNSTransport, message *mDNS.Msg, options adapter.DNSQueryOptions) *dnsEvaluatedFuture {
 +func (r *Router) launchDNSEvaluate(ctx context.Context, state *dnsRuleWalkState, tag string, transport adapter.DNSTransport, message *mDNS.Msg, options adapter.DNSQueryOptions, responseChecker func(*mDNS.Msg) bool) *dnsEvaluatedFuture {
-@@ -521 +560,8 @@ func (r *Router) launchDNSEvaluate(ctx context.Context, state *dnsRuleWalkState,
+@@ -516 +567,8 @@ func (r *Router) launchDNSEvaluate(ctx context.Context, state *dnsRuleWalkState,
 -	r.client.ExchangeAsync(exchangeCtx, transport, message, r.finalizeExchangeOptions(options), nil, func(response *mDNS.Msg, err error) {
 +	if responseChecker != nil {
 +		// A rejected-response verdict must not outlive a changing policy/rule-set.
@@ -1807,55 +1883,55 @@ index e7c0e96407919c9d354f944e500cbaae14eea752..b1c70ce0c4dec4427003dc986c751510
 +		if err == nil && (response == nil || response.Rcode == mDNS.RcodeSuccess && len(response.Answer) == 0 && !isNODATAResponse(response)) {
 +			err = E.New("DNS evaluate returned an empty response without negative authority")
 +		}
-@@ -539,0 +586 @@ func (r *Router) settleDNSFutures(ctx context.Context, message *mDNS.Msg, state
+@@ -534,0 +593 @@ func (r *Router) settleDNSFutures(ctx context.Context, message *mDNS.Msg, state
 +			state.attemptErrors = append(state.attemptErrors, dnsAttemptError(future.transport, future.err))
-@@ -540,0 +588,4 @@ func (r *Router) settleDNSFutures(ctx context.Context, message *mDNS.Msg, state
+@@ -535,0 +595,4 @@ func (r *Router) settleDNSFutures(ctx context.Context, message *mDNS.Msg, state
 +		} else if !future.terminal {
 +			if err := exchangePoolError(future.response, nil); err != nil {
 +				state.attemptErrors = append(state.attemptErrors, dnsAttemptError(future.transport, err))
 +			}
-@@ -585,0 +637,3 @@ func (r *Router) walkDNSRules(ctx context.Context, rules []adapter.DNSRule, mess
+@@ -580,0 +644,3 @@ func (r *Router) walkDNSRules(ctx context.Context, rules []adapter.DNSRule, mess
 +		if err := ctx.Err(); err != nil {
 +			return exchangeWithRulesResult{err: E.Errors(append(state.attemptErrors, err)...)}, nil
 +		}
-@@ -662,0 +717,3 @@ func (r *Router) walkDNSRules(ctx context.Context, rules []adapter.DNSRule, mess
+@@ -657,0 +724,3 @@ func (r *Router) walkDNSRules(ctx context.Context, rules []adapter.DNSRule, mess
 +			if len(state.futures) >= maxDNSAttempts {
 +				return exchangeWithRulesResult{err: E.Errors(append(state.attemptErrors, E.New("DNS fallback attempt limit exceeded"))...)}, nil
 +			}
-@@ -676 +733 @@ func (r *Router) walkDNSRules(ctx context.Context, rules []adapter.DNSRule, mess
+@@ -671 +740 @@ func (r *Router) walkDNSRules(ctx context.Context, rules []adapter.DNSRule, mess
 -			future := r.launchDNSEvaluate(ctx, state, action.Tag, transport, message, queryOptions)
 +			future := r.launchDNSEvaluate(ctx, state, action.Tag, transport, message, queryOptions, evaluateResponseCheck(action, metadata))
-@@ -716,0 +774,3 @@ func (r *Router) walkDNSRules(ctx context.Context, rules []adapter.DNSRule, mess
+@@ -711,0 +781,3 @@ func (r *Router) walkDNSRules(ctx context.Context, rules []adapter.DNSRule, mess
 +			if len(state.futures) >= maxDNSAttempts && state.terminalFuture == nil {
 +				return exchangeWithRulesResult{err: E.Errors(append(state.attemptErrors, E.New("DNS fallback attempt limit exceeded"))...)}, nil
 +			}
-@@ -728 +788 @@ func (r *Router) walkDNSRules(ctx context.Context, rules []adapter.DNSRule, mess
+@@ -723 +795 @@ func (r *Router) walkDNSRules(ctx context.Context, rules []adapter.DNSRule, mess
 -					future := r.launchDNSEvaluate(ctx, state, "", transport, message, queryOptions)
 +					future := r.launchDNSEvaluate(ctx, state, "", transport, message, queryOptions, nil)
-@@ -766,0 +827,3 @@ func (r *Router) walkDNSRules(ctx context.Context, rules []adapter.DNSRule, mess
+@@ -761,0 +834,3 @@ func (r *Router) walkDNSRules(ctx context.Context, rules []adapter.DNSRule, mess
 +	if len(state.futures) >= maxDNSAttempts {
 +		return exchangeWithRulesResult{err: E.Errors(append(state.attemptErrors, E.New("DNS fallback attempt limit exceeded"))...)}, nil
 +	}
-@@ -833,0 +897 @@ func (r *Router) sweepArmedDNSRules(ctx context.Context, message *mDNS.Msg, stat
+@@ -828,0 +904 @@ func (r *Router) sweepArmedDNSRules(ctx context.Context, message *mDNS.Msg, stat
 +				metadata.DNSResponseAddressOverride = nil
-@@ -920,0 +985,3 @@ func (r *Router) finishPendingExchange(ctx context.Context, message *mDNS.Msg, s
+@@ -915,0 +992,3 @@ func (r *Router) finishPendingExchange(ctx context.Context, message *mDNS.Msg, s
 +	if err != nil {
 +		err = E.Errors(append(state.attemptErrors, dnsAttemptError(pending.transport, err))...)
 +	}
-@@ -939,0 +1007,3 @@ func (r *Router) exchangeWithRulesAsync(ctx context.Context, rules []adapter.DNS
+@@ -934,0 +1014,3 @@ func (r *Router) exchangeWithRulesAsync(ctx context.Context, rules []adapter.DNS
 +			if err != nil {
 +				err = E.Errors(append(state.attemptErrors, dnsAttemptError(pending.transport, err))...)
 +			}
-@@ -1058 +1128 @@ type dnsExchangeContext struct {
+@@ -1053 +1135 @@ type dnsExchangeContext struct {
 -func (r *Router) prepareExchange(ctx context.Context, message *mDNS.Msg) (*dnsExchangeContext, *mDNS.Msg, error) {
 +func (r *Router) prepareExchange(ctx context.Context, message *mDNS.Msg, options adapter.DNSQueryOptions) (*dnsExchangeContext, *mDNS.Msg, error) {
-@@ -1094,2 +1164 @@ func (r *Router) prepareExchange(ctx context.Context, message *mDNS.Msg) (*dnsEx
+@@ -1093,2 +1175 @@ func (r *Router) prepareExchange(ctx context.Context, message *mDNS.Msg) (*dnsEx
 -	rules := r.rules
 -	legacyDNSMode := r.legacyDNSMode
 +	rules, legacyDNSMode := r.policyRules(options.Policy)
-@@ -1101,0 +1171 @@ func (r *Router) prepareExchange(ctx context.Context, message *mDNS.Msg) (*dnsEx
+@@ -1100,0 +1182 @@ func (r *Router) prepareExchange(ctx context.Context, message *mDNS.Msg) (*dnsEx
 +	metadata.DNSResponseAddressOverride = nil
-@@ -1192 +1262,7 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
+@@ -1191 +1273,7 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
 -	exchangeCtx, earlyResponse, err := r.prepareExchange(ctx, message)
 +	if err := r.validatePolicy(options); err != nil {
 +		return nil, err
@@ -1864,7 +1940,7 @@ index e7c0e96407919c9d354f944e500cbaae14eea752..b1c70ce0c4dec4427003dc986c751510
 +		return nil, err
 +	}
 +	exchangeCtx, earlyResponse, err := r.prepareExchange(ctx, message, options)
-@@ -1200,0 +1277,12 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
+@@ -1199,0 +1288,12 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
 +	if r.systemHosts != nil && options.Transport != r.systemHosts && (message.Question[0].Qtype == mDNS.TypeA || message.Question[0].Qtype == mDNS.TypeAAAA) {
 +		hostOptions := r.finalizeExchangeOptions(options)
 +		hostOptions.DisableCache = true
@@ -1877,11 +1953,11 @@ index e7c0e96407919c9d354f944e500cbaae14eea752..b1c70ce0c4dec4427003dc986c751510
 +			return response, nil
 +		}
 +	}
-@@ -1202,2 +1290 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
+@@ -1201,2 +1301 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
 -		transport = options.Transport
 -		response, err = r.client.Exchange(ctx, transport, message, r.finalizeExchangeOptions(options), nil)
 +		response, transport, err = r.exchangeExplicitPool(ctx, message, options)
-@@ -1218 +1305,9 @@ func (r *Router) ExchangeAsync(ctx context.Context, message *mDNS.Msg, options a
+@@ -1217 +1316,9 @@ func (r *Router) ExchangeAsync(ctx context.Context, message *mDNS.Msg, options a
 -	exchangeCtx, earlyResponse, err := r.prepareExchange(ctx, message)
 +	if err := r.validatePolicy(options); err != nil {
 +		callback(nil, err)
@@ -1892,7 +1968,7 @@ index e7c0e96407919c9d354f944e500cbaae14eea752..b1c70ce0c4dec4427003dc986c751510
 +		return
 +	}
 +	exchangeCtx, earlyResponse, err := r.prepareExchange(ctx, message, options)
-@@ -1224,8 +1319,25 @@ func (r *Router) ExchangeAsync(ctx context.Context, message *mDNS.Msg, options a
+@@ -1223,8 +1330,25 @@ func (r *Router) ExchangeAsync(ctx context.Context, message *mDNS.Msg, options a
 -	if options.Transport != nil {
 -		transport := options.Transport
 -		r.client.ExchangeAsync(ctx, transport, message, r.finalizeExchangeOptions(options), nil, func(response *mDNS.Msg, exchangeErr error) {
@@ -1926,26 +2002,26 @@ index e7c0e96407919c9d354f944e500cbaae14eea752..b1c70ce0c4dec4427003dc986c751510
 +				return
 +			}
 +			r.finishExchangeAsync(message, r.systemHosts, response, err, callback)
-@@ -1234,4 +1346 @@ func (r *Router) ExchangeAsync(ctx context.Context, message *mDNS.Msg, options a
+@@ -1233,4 +1357 @@ func (r *Router) ExchangeAsync(ctx context.Context, message *mDNS.Msg, options a
 -		go func() {
 -			response, transport, exchangeErr := r.exchangeLegacy(ctx, exchangeCtx, message, options)
 -			r.finishExchangeAsync(message, transport, response, exchangeErr, callback)
 -		}()
 +		exchange()
-@@ -1250,0 +1360,6 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
+@@ -1249,0 +1371,6 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
 +	if err := r.validatePolicy(options); err != nil {
 +		return nil, err
 +	}
 +	if _, err := explicitDNSPool(options); err != nil {
 +		return nil, err
 +	}
-@@ -1256,2 +1371 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
+@@ -1255,2 +1382 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
 -	rules := r.rules
 -	legacyDNSMode := r.legacyDNSMode
 +	rules, legacyDNSMode := r.policyRules(options.Policy)
-@@ -1288,0 +1403 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
+@@ -1287,0 +1414 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
 +	metadata.DNSResponseAddressOverride = nil
-@@ -1291,4 +1406,6 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
+@@ -1290,4 +1417,6 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
 -	if options.Transport != nil {
 -		transport := options.Transport
 -		if options.Strategy == C.DomainStrategyAsIS {
@@ -1956,23 +2032,23 @@ index e7c0e96407919c9d354f944e500cbaae14eea752..b1c70ce0c4dec4427003dc986c751510
 +		responseAddrs, err = r.client.Lookup(ctx, r.systemHosts, domain, hostOptions, nil)
 +		if !onlyHostsMiss(err) {
 +			goto response
-@@ -1296 +1413,3 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
+@@ -1295 +1424,3 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
 -		responseAddrs, err = r.client.Lookup(ctx, transport, domain, options, nil)
 +	}
 +	if options.Transport != nil {
 +		responseAddrs, err = r.lookupExplicitPool(ctx, domain, options)
-@@ -1393,0 +1513 @@ func (r *Router) ResetNetwork() {
+@@ -1393,0 +1525 @@ func (r *Router) ResetNetwork() {
 +	r.ClearCache()
-@@ -1540,0 +1661,3 @@ func validateLegacyDNSModeDisabledRules(router adapter.Router, rules []option.DN
+@@ -1540,0 +1673,3 @@ func validateLegacyDNSModeDisabledRules(router adapter.Router, rules []option.DN
 +		if err := validateDNSResponseFilterMetadata(router, rule, metadataOverrides); err != nil {
 +			return nil, E.Cause(err, "dns rule[", i, "] response_filter")
 +		}
 diff --git a/dns/router_retry_test.go b/dns/router_retry_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..d3b57c62fdbcf800909953d7fcc72c362f76eef5
+index 0000000000000000000000000000000000000000..2c37d0d90d8b9446f655ebd814f8a242ee07c233
 --- /dev/null
 +++ b/dns/router_retry_test.go
-@@ -0,0 +1,630 @@
+@@ -0,0 +1,641 @@
 +package dns
 +
 +import (
@@ -2363,11 +2439,11 @@ index 0000000000000000000000000000000000000000..d3b57c62fdbcf800909953d7fcc72c36
 +			dependencies: []string{"primary", "secondary"},
 +			startOrder:   &startOrder,
 +		}
-+		manager := NewTransportManager(logger.NOP(), nil, nil, "")
++		manager := NewTransportManager(nil, nil, "")
 +		manager.transportByTag = map[string]adapter.DNSTransport{
 +			"primary": primary, "secondary": secondary, "dependent": dependent,
 +		}
-+		if err := manager.startTransports([]adapter.DNSTransport{dependent, secondary, primary}); err != nil {
++		if err := startTransportsScoped(t, manager, []adapter.DNSTransport{dependent, secondary, primary}); err != nil {
 +			t.Fatalf("start transports: %v", err)
 +		}
 +		dependentIndex := slices.Index(startOrder, "dependent")
@@ -2378,9 +2454,9 @@ index 0000000000000000000000000000000000000000..d3b57c62fdbcf800909953d7fcc72c36
 +
 +	t.Run("missing dependency fails", func(t *testing.T) {
 +		dependent := &fallbackDNSTransport{tag: "dependent", dependencies: []string{"missing"}}
-+		manager := NewTransportManager(logger.NOP(), nil, nil, "")
++		manager := NewTransportManager(nil, nil, "")
 +		manager.transportByTag["dependent"] = dependent
-+		err := manager.startTransports([]adapter.DNSTransport{dependent})
++		err := startTransportsScoped(t, manager, []adapter.DNSTransport{dependent})
 +		if err == nil || !strings.Contains(err.Error(), "dependency[missing] not found") {
 +			t.Fatalf("missing fallback dependency was not rejected: %v", err)
 +		}
@@ -2389,11 +2465,11 @@ index 0000000000000000000000000000000000000000..d3b57c62fdbcf800909953d7fcc72c36
 +	t.Run("dependency cycle fails", func(t *testing.T) {
 +		primary := &fallbackDNSTransport{tag: "primary", dependencies: []string{"secondary"}}
 +		secondary := &fallbackDNSTransport{tag: "secondary", dependencies: []string{"primary"}}
-+		manager := NewTransportManager(logger.NOP(), nil, nil, "")
++		manager := NewTransportManager(nil, nil, "")
 +		manager.transportByTag = map[string]adapter.DNSTransport{
 +			"primary": primary, "secondary": secondary,
 +		}
-+		err := manager.startTransports([]adapter.DNSTransport{primary, secondary})
++		err := startTransportsScoped(t, manager, []adapter.DNSTransport{primary, secondary})
 +		if err == nil || !strings.Contains(err.Error(), "circular server dependency") {
 +			t.Fatalf("fallback dependency cycle was not rejected: %v", err)
 +		}
@@ -2459,13 +2535,12 @@ index 0000000000000000000000000000000000000000..d3b57c62fdbcf800909953d7fcc72c36
 +	startOrder   *[]string
 +}
 +
-+func (t *fallbackDNSTransport) Start(adapter.StartStage) error {
++func (t *fallbackDNSTransport) Start(adapter.StartStage, *adapter.Scope) error {
 +	if t.startOrder != nil {
 +		*t.startOrder = append(*t.startOrder, t.tag)
 +	}
 +	return nil
 +}
-+func (*fallbackDNSTransport) Close() error             { return nil }
 +func (*fallbackDNSTransport) Type() string             { return "https" }
 +func (t *fallbackDNSTransport) Tag() string            { return t.tag }
 +func (t *fallbackDNSTransport) Dependencies() []string { return t.dependencies }
@@ -2483,8 +2558,7 @@ index 0000000000000000000000000000000000000000..d3b57c62fdbcf800909953d7fcc72c36
 +	secondary adapter.DNSTransport
 +}
 +
-+func (*fallbackTransportManager) Start(adapter.StartStage) error { return nil }
-+func (*fallbackTransportManager) Close() error                   { return nil }
++func (*fallbackTransportManager) Start(adapter.StartStage, *adapter.Scope) error { return nil }
 +func (m *fallbackTransportManager) Transports() []adapter.DNSTransport {
 +	return []adapter.DNSTransport{m.primary, m.secondary}
 +}
@@ -2603,12 +2677,25 @@ index 0000000000000000000000000000000000000000..d3b57c62fdbcf800909953d7fcc72c36
 +	message.SetQuestion("example.test.", questionType)
 +	return message
 +}
++
++// startTransportsScoped starts transports in a scope the test closes, as the
++// box closes the scope it started them in.
++func startTransportsScoped(t *testing.T, manager *TransportManager, transports []adapter.DNSTransport) error {
++	t.Helper()
++	scope := adapter.NewScope(context.Background(), logger.NOP())
++	t.Cleanup(func() {
++		if err := scope.Close(); err != nil {
++			t.Error(err)
++		}
++	})
++	return manager.startTransports(scope, transports)
++}
 diff --git a/dns/runtime_policy_test.go b/dns/runtime_policy_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..af4ec6be838249cbd3499e6070512393ad06f6dc
+index 0000000000000000000000000000000000000000..5d855cdc3cd2316488112528f66229143da25a55
 --- /dev/null
 +++ b/dns/runtime_policy_test.go
-@@ -0,0 +1,586 @@
+@@ -0,0 +1,593 @@
 +package dns_test
 +
 +import (
@@ -2644,16 +2731,7 @@ index 0000000000000000000000000000000000000000..af4ec6be838249cbd3499e6070512393
 +}
 +func startPolicyBoxContext(t *testing.T, config map[string]any) context.Context {
 +	t.Helper()
-+	ctx := service.ContextWithDefaultRegistry(include.Context(context.Background()))
-+	data, err := json.Marshal(config)
-+	if err != nil {
-+		t.Fatal(err)
-+	}
-+	var opts option.Options
-+	if err = SJSON.UnmarshalContext(ctx, data, &opts); err != nil {
-+		t.Fatal(err)
-+	}
-+	instance, err := box.New(box.Options{Options: opts, Context: ctx})
++	ctx, instance, err := newPolicyBox(t, config)
 +	if err != nil {
 +		t.Fatal(err)
 +	}
@@ -2667,6 +2745,22 @@ index 0000000000000000000000000000000000000000..af4ec6be838249cbd3499e6070512393
 +		}
 +	})
 +	return ctx
++}
++
++// newPolicyBox builds, but does not start, an instance of config.
++func newPolicyBox(t *testing.T, config map[string]any) (context.Context, *box.Box, error) {
++	t.Helper()
++	ctx := service.ContextWithDefaultRegistry(include.Context(context.Background()))
++	data, err := json.Marshal(config)
++	if err != nil {
++		t.Fatal(err)
++	}
++	var opts option.Options
++	if err = SJSON.UnmarshalContext(ctx, data, &opts); err != nil {
++		t.Fatal(err)
++	}
++	instance, err := box.New(box.Options{Options: opts, Context: ctx})
++	return ctx, instance, err
 +}
 +func evaluatedPolicyRules(condition map[string]any, server string) []any {
 +	evaluate := make(map[string]any, len(condition)+2)
@@ -3311,7 +3405,7 @@ index 0000000000000000000000000000000000000000..fad28979161e8fdd8fcb296a66257fc8
 +	}
 +}
 diff --git a/dns/transport/hosts/hosts.go b/dns/transport/hosts/hosts.go
-index 2ba47063fa230087de816a9e147e6cdae4668eb6..87631788d5ac217c0aabdcdaf1a89c46936b314b 100644
+index d0f8fbffb3c30582ac4c1f37bfaef018a507eff2..9c4dc1f3d9b8ec56e9876c671b3662f283b33818 100644
 --- a/dns/transport/hosts/hosts.go
 +++ b/dns/transport/hosts/hosts.go
 @@ -29,2 +29,4 @@ type Transport struct {
@@ -3327,7 +3421,7 @@ index 2ba47063fa230087de816a9e147e6cdae4668eb6..87631788d5ac217c0aabdcdaf1a89c46
 +		strict:           options.Strict, fallbackOnMissing: options.FallbackOnMissing,
 +		files:      files,
 +		predefined: predefined,
-@@ -92 +95,10 @@ func (t *Transport) Exchange(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg,
+@@ -88 +91,10 @@ func (t *Transport) Exchange(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg,
 -			addresses := file.Lookup(domain)
 +			var addresses []netip.Addr
 +			if t.strict {
@@ -3339,7 +3433,7 @@ index 2ba47063fa230087de816a9e147e6cdae4668eb6..87631788d5ac217c0aabdcdaf1a89c46
 +			} else {
 +				addresses = file.Lookup(domain)
 +			}
-@@ -97,0 +110,3 @@ func (t *Transport) Exchange(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg,
+@@ -93,0 +106,3 @@ func (t *Transport) Exchange(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg,
 +	if t.fallbackOnMissing {
 +		return nil, dns.ErrHostsNotFound
 +	}
@@ -3483,13 +3577,694 @@ index 5d5605b19a393a9a53715b2f39ff8fbf9870961b..fc3964671ebe4253c758ec7ab7d173d4
 +	}
 +	f.modTime, f.size, f.byName = stat.ModTime(), stat.Size(), byName
 +	return nil
+diff --git a/dns/transport/multiplexer.go b/dns/transport/multiplexer.go
+index 1b6e88c867e693558a0c004b13783c6f3334680d..d5ce542c80609b9e7bcc01eb4ec75123804c2592 100644
+--- a/dns/transport/multiplexer.go
++++ b/dns/transport/multiplexer.go
+@@ -31,0 +32,11 @@ const (
++var errQueryMultiplexerClosed = errors.New("DNS multiplexer lifecycle closed")
++
++// Preserve the caller's historical context.Err result. Only our private
++// instance-cancellation cause maps to net.ErrClosed.
++func queryMultiplexerContextError(ctx context.Context) error {
++	if context.Cause(ctx) == errQueryMultiplexerClosed {
++		return net.ErrClosed
++	}
++	return ctx.Err()
++}
++
+@@ -54,0 +66,31 @@ type queryMultiplexer struct {
++
++	lifecycleAccess  sync.Mutex
++	closed           atomic.Bool
++	lifecycleContext context.Context
++	cancelLifecycle  context.CancelCauseFunc
++	workers          sync.WaitGroup
++	closeDone        chan struct{}
++	closeErr         error
++	cleanupDone      chan struct{}
++	cleanupPhase     atomic.Uint32
++	cleanupErr       error
++}
++
++// Retain the single cleanup attempt through the returned failure, even when
++// the transport has been removed from its manager. Observing later cleanup
++// completion never changes the original Close result or reopens admission.
++type queryMultiplexerCloseTimeoutError struct {
++	cause error
++	owner *queryMultiplexer
++}
++
++func (e *queryMultiplexerCloseTimeoutError) Error() string                { return e.cause.Error() }
++func (e *queryMultiplexerCloseTimeoutError) Unwrap() error                { return e.cause }
++func (e *queryMultiplexerCloseTimeoutError) CleanupDone() <-chan struct{} { return e.owner.cleanupDone }
++func (e *queryMultiplexerCloseTimeoutError) CleanupResult() (complete bool, err error) {
++	select {
++	case <-e.owner.cleanupDone:
++		return true, e.owner.cleanupErr
++	default:
++		return false, e
++	}
+@@ -84,0 +127 @@ func newQueryMultiplexer(options queryMultiplexerOptions) *queryMultiplexer {
++	lifecycleContext, cancelLifecycle := context.WithCancelCause(context.Background())
+@@ -86,2 +129,6 @@ func newQueryMultiplexer(options queryMultiplexerOptions) *queryMultiplexer {
+-		options: options,
+-		queries: make(map[uint16]*pendingQuery),
++		options:          options,
++		lifecycleContext: lifecycleContext,
++		cancelLifecycle:  cancelLifecycle,
++		closeDone:        make(chan struct{}),
++		cleanupDone:      make(chan struct{}),
++		queries:          make(map[uint16]*pendingQuery),
+@@ -118 +165,89 @@ func (m *queryMultiplexer) Close() error {
+-	return m.connection.Close()
++	deadline := time.Now().Add(reuseProbeTimeout)
++	m.lifecycleAccess.Lock()
++	if m.closed.Load() {
++		m.lifecycleAccess.Unlock()
++		<-m.closeDone
++		return m.closeErr
++	}
++	m.closed.Store(true)
++	m.cancelLifecycle(errQueryMultiplexerClosed)
++	m.lifecycleAccess.Unlock()
++	m.probeAccess.Lock()
++	m.probeEpoch++
++	m.probeAccess.Unlock()
++
++	// One instance-owned cleanup attempt covers both pool Close (which may
++	// itself block in TLS close_notify) and already-admitted network workers.
++	// A timeout reports failure without pretending this attempt has finished.
++	timer := time.NewTimer(time.Until(deadline))
++	defer timer.Stop()
++	go func() {
++		m.cleanupPhase.Store(1) // closing pool sockets
++		m.cleanupErr = m.connection.Close()
++		m.cleanupPhase.Store(2) // draining admitted network work
++		m.workers.Wait()
++		m.cleanupPhase.Store(3)
++		close(m.cleanupDone)
++	}()
++	var closeErr error
++	select {
++	case <-m.cleanupDone:
++		closeErr = m.cleanupErr
++	case <-timer.C:
++		phase := "pool close"
++		switch m.cleanupPhase.Load() {
++		case 2:
++			phase = "network worker drain"
++		case 3:
++			phase = "completion observation"
++		}
++		closeErr = &queryMultiplexerCloseTimeoutError{owner: m, cause: E.New("DNS transport close exceeded ", reuseProbeTimeout, " during ", phase, "; completion was not observed within the deadline")}
++	}
++	m.closeErr = closeErr
++	close(m.closeDone)
++	return closeErr
++}
++
++// Admission is serialized with Close. Workers cover probe/single-query network
++// work and admitted dials; pool.Close separately closes pooled connections.
++// recvLoop goroutines and user callbacks are not part of the worker drain.
++// Callbacks execute after worker release, without locks, and may call Close.
++func (m *queryMultiplexer) beginWorker(ctx context.Context) (context.Context, func(), error) {
++	m.lifecycleAccess.Lock()
++	defer m.lifecycleAccess.Unlock()
++	if m.closed.Load() {
++		return nil, nil, net.ErrClosed
++	}
++	workerCtx, cancel := context.WithCancelCause(ctx)
++	stopLifecycle := context.AfterFunc(m.lifecycleContext, func() { cancel(errQueryMultiplexerClosed) })
++	m.workers.Add(1)
++	return workerCtx, func() {
++		stopLifecycle()
++		cancel(nil)
++		m.workers.Done()
++	}, nil
++}
++
++func (m *queryMultiplexer) dial(ctx context.Context) (net.Conn, error) {
++	dialCtx, finish, err := m.beginWorker(ctx)
++	if err != nil {
++		return nil, err
++	}
++	defer finish()
++	if err := queryMultiplexerContextError(dialCtx); err != nil {
++		return nil, err
++	}
++	conn, err := m.options.dial(dialCtx)
++	if cause := queryMultiplexerContextError(dialCtx); cause != nil {
++		if conn != nil {
++			conn.Close()
++		}
++		return nil, cause
++	}
++	if m.closed.Load() {
++		if conn != nil {
++			conn.Close()
++		}
++		return nil, net.ErrClosed
++	}
++	return conn, err
+@@ -123,0 +259,4 @@ func (m *queryMultiplexer) Reset() {
++		if m.closed.Load() {
++			m.probeAccess.Unlock()
++			return
++		}
+@@ -152,0 +292,4 @@ func (m *queryMultiplexer) dispatch(ctx context.Context, message *mDNS.Msg, call
++	if m.closed.Load() {
++		callback(nil, net.ErrClosed)
++		return
++	}
+@@ -155 +298,10 @@ func (m *queryMultiplexer) dispatch(ctx context.Context, message *mDNS.Msg, call
+-		go m.exchangeSingle(ctx, message, callback)
++		workerCtx, finish, err := m.beginWorker(ctx)
++		if err != nil {
++			callback(nil, err)
++			return
++		}
++		go func() {
++			response, err := m.exchangeSingle(workerCtx, message)
++			finish()
++			callback(response, err)
++		}()
+@@ -161,2 +313,2 @@ func (m *queryMultiplexer) dispatch(ctx context.Context, message *mDNS.Msg, call
+-func (m *queryMultiplexer) exchangeSingle(ctx context.Context, message *mDNS.Msg, callback func(response *mDNS.Msg, err error)) {
+-	conn, err := m.options.dial(ctx)
++func (m *queryMultiplexer) exchangeSingle(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error) {
++	conn, err := m.dial(ctx)
+@@ -164,2 +316 @@ func (m *queryMultiplexer) exchangeSingle(ctx context.Context, message *mDNS.Msg
+-		callback(nil, err)
+-		return
++		return nil, err
+@@ -174 +325 @@ func (m *queryMultiplexer) exchangeSingle(ctx context.Context, message *mDNS.Msg
+-		ctxErr := ctx.Err()
++		ctxErr := queryMultiplexerContextError(ctx)
+@@ -176,2 +327 @@ func (m *queryMultiplexer) exchangeSingle(ctx context.Context, message *mDNS.Msg
+-			callback(nil, ctxErr)
+-			return
++			return nil, ctxErr
+@@ -179,2 +329 @@ func (m *queryMultiplexer) exchangeSingle(ctx context.Context, message *mDNS.Msg
+-		callback(nil, E.Cause(err, "write request"))
+-		return
++		return nil, E.Cause(err, "write request")
+@@ -186 +335 @@ func (m *queryMultiplexer) exchangeSingle(ctx context.Context, message *mDNS.Msg
+-			ctxErr := ctx.Err()
++			ctxErr := queryMultiplexerContextError(ctx)
+@@ -188,2 +337 @@ func (m *queryMultiplexer) exchangeSingle(ctx context.Context, message *mDNS.Msg
+-				callback(nil, ctxErr)
+-				return
++				return nil, ctxErr
+@@ -191,2 +339 @@ func (m *queryMultiplexer) exchangeSingle(ctx context.Context, message *mDNS.Msg
+-			callback(nil, E.Cause(err, "read response"))
+-			return
++			return nil, E.Cause(err, "read response")
+@@ -198,2 +345 @@ func (m *queryMultiplexer) exchangeSingle(ctx context.Context, message *mDNS.Msg
+-		callback(response, nil)
+-		return
++		return response, nil
+@@ -207,0 +354,4 @@ func (m *queryMultiplexer) maybeStartProbe(ctx context.Context, message *mDNS.Ms
++	if m.closed.Load() {
++		m.probeAccess.Unlock()
++		return
++	}
+@@ -215,0 +366,5 @@ func (m *queryMultiplexer) maybeStartProbe(ctx context.Context, message *mDNS.Ms
++	probeCtx, finish, err := m.beginWorker(context.WithoutCancel(ctx))
++	if err != nil {
++		m.probeAccess.Unlock()
++		return
++	}
+@@ -220 +375 @@ func (m *queryMultiplexer) maybeStartProbe(ctx context.Context, message *mDNS.Ms
+-	go m.runReuseProbe(context.WithoutCancel(ctx), message.Question[0].Name, epoch)
++	go func(questionName string) { defer finish(); m.runReuseProbe(probeCtx, questionName, epoch) }(message.Question[0].Name)
+@@ -227 +382 @@ func (m *queryMultiplexer) runReuseProbe(ctx context.Context, questionName strin
+-	if m.probeEpoch != epoch {
++	if m.closed.Load() || m.probeEpoch != epoch {
+@@ -244 +399 @@ func (m *queryMultiplexer) executeReuseProbe(ctx context.Context, questionName s
+-	conn, err := m.options.dial(probeCtx)
++	conn, err := m.dial(probeCtx)
+@@ -285 +440 @@ func (m *queryMultiplexer) recordConnDeath(conn *multiplexConn) {
+-	if !m.options.probeReuse || m.reuseState.Load() != reuseStateSupported {
++	if m.closed.Load() || !m.options.probeReuse || m.reuseState.Load() != reuseStateSupported {
+@@ -306,0 +462,4 @@ func (m *queryMultiplexer) recordConnDeath(conn *multiplexConn) {
++	if m.closed.Load() {
++		m.probeAccess.Unlock()
++		return
++	}
+@@ -350 +509 @@ func (m *queryMultiplexer) dialConn(ctx context.Context) (*multiplexConn, error)
+-	conn, err := m.options.dial(ctx)
++	conn, err := m.dial(ctx)
+diff --git a/dns/transport/multiplexer_lifecycle_test.go b/dns/transport/multiplexer_lifecycle_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..9af536b7a084adcf37d84148f77778f5bd2f7cb0
+--- /dev/null
++++ b/dns/transport/multiplexer_lifecycle_test.go
+@@ -0,0 +1,437 @@
++package transport
++
++import (
++	"context"
++	"errors"
++	"net"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	mDNS "github.com/miekg/dns"
++	"github.com/sagernet/sing-box/route"
++)
++
++func lifecycleAwait(t *testing.T, done <-chan struct{}, what string) {
++	t.Helper()
++	select {
++	case <-done:
++	case <-time.After(7 * time.Second):
++		t.Fatal("bounded wait expired: ", what)
++	}
++}
++
++func lifecycleQuery() *mDNS.Msg {
++	m := new(mDNS.Msg)
++	m.SetQuestion("lifecycle.test.", mDNS.TypeA)
++	return m
++}
++
++func TestMultiplexerLifecycleCloseRejectsNewDial(t *testing.T) {
++	var dials atomic.Int32
++	m := newQueryMultiplexer(queryMultiplexerOptions{
++		probeReuse: true,
++		dial: func(context.Context) (net.Conn, error) {
++			dials.Add(1)
++			return nil, errors.New("unexpected dial")
++		},
++	})
++	if err := m.Close(); err != nil {
++		t.Fatal(err)
++	}
++	_, err := m.Exchange(context.Background(), lifecycleQuery())
++	if !errors.Is(err, net.ErrClosed) {
++		t.Errorf("closed Exchange returned %v, want net.ErrClosed", err)
++	}
++	// This is the already-queued probe entry, not a new public API.
++	m.runReuseProbe(context.Background(), "lifecycle.test.", 0)
++	if got := dials.Load(); got != 0 {
++		t.Errorf("closed instance admitted %d dials", got)
++	}
++}
++
++func TestMultiplexerLifecycleCloseOwnsBlockedProbe(t *testing.T) {
++	for _, managerFirst := range []bool{false, true} {
++		t.Run(map[bool]string{false: "transport-first", true: "connection-manager-first"}[managerFirst], func(t *testing.T) {
++			client, server := net.Pipe()
++			defer client.Close()
++			defer server.Close()
++			manager := route.NewConnectionManager(context.Background(), nil)
++			entered, readDone := make(chan struct{}), make(chan struct{})
++			m := newQueryMultiplexer(queryMultiplexerOptions{
++				probeReuse: true,
++				dial:       func(context.Context) (net.Conn, error) { return manager.TrackConn(client), nil },
++				write:      func(net.Conn, *mDNS.Msg, uint16) error { return nil },
++				readNext: func(c net.Conn) (*mDNS.Msg, error) {
++					close(entered)
++					var data [1]byte
++					_, err := c.Read(data[:])
++					close(readDone)
++					return nil, err
++				},
++			})
++			m.maybeStartProbe(context.Background(), lifecycleQuery())
++			lifecycleAwait(t, entered, "probe entered Read")
++			if managerFirst {
++				manager.CloseAll()
++			}
++			if err := m.Close(); err != nil {
++				t.Error(err)
++			}
++			select {
++			case <-readDone:
++			default:
++				t.Error("Close returned success before owned probe Read ended")
++			}
++			client.Close()
++			lifecycleAwait(t, readDone, "test cleanup ended Read")
++		})
++	}
++}
++
++func TestMultiplexerLifecycleLateProbeCannotPublishOrReset(t *testing.T) {
++	client, server := net.Pipe()
++	defer client.Close()
++	defer server.Close()
++	entered, release, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
++	var reads int
++	m := newQueryMultiplexer(queryMultiplexerOptions{
++		probeReuse: true,
++		dial:       func(context.Context) (net.Conn, error) { return client, nil },
++		write:      func(net.Conn, *mDNS.Msg, uint16) error { return nil },
++		readNext: func(net.Conn) (*mDNS.Msg, error) {
++			reads++
++			if reads == 1 {
++				close(entered)
++				<-release
++			}
++			return &mDNS.Msg{MsgHdr: mDNS.MsgHdr{Id: uint16(reads)}}, nil
++		},
++	})
++	m.reuseState.Store(reuseStateProbing)
++	// Gate the actual completion method so even a peer completion racing Close
++	// cannot publish success after the closed epoch.
++	go func() { m.runReuseProbe(context.Background(), "lifecycle.test.", 0); close(finished) }()
++	lifecycleAwait(t, entered, "late result entered")
++	if err := m.Close(); err != nil {
++		t.Fatal(err)
++	}
++	before := m.reuseState.Load()
++	close(release)
++	lifecycleAwait(t, finished, "late result finished")
++	if got := m.reuseState.Load(); got != before {
++		t.Errorf("late probe published state %d after Close, before=%d", got, before)
++	}
++	m.Reset()
++	if got := m.reuseState.Load(); got != before {
++		t.Errorf("Reset changed closed state %d to %d", before, got)
++	}
++}
++
++func TestMultiplexerLifecycleCloseCancelsDialAndKeepsValues(t *testing.T) {
++	type key struct{}
++	entered, cancelled, release, finished := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
++	client, server := net.Pipe()
++	defer client.Close()
++	defer server.Close()
++	var valueOK atomic.Bool
++	m := newQueryMultiplexer(queryMultiplexerOptions{
++		probeReuse: true,
++		dial: func(ctx context.Context) (net.Conn, error) {
++			valueOK.Store(ctx.Value(key{}) == "request-value")
++			close(entered)
++			<-ctx.Done()
++			close(cancelled)
++			<-release
++			return client, nil
++		},
++		write: func(net.Conn, *mDNS.Msg, uint16) error { return errors.New("must not write late connection") },
++	})
++	m.maybeStartProbe(context.WithValue(context.Background(), key{}, "request-value"), lifecycleQuery())
++	lifecycleAwait(t, entered, "probe dial entered")
++	var closeErr error
++	go func() { closeErr = m.Close(); close(finished) }()
++	select {
++	case <-finished:
++		t.Error("Close returned before admitted dial was cancelled and drained")
++	case <-cancelled:
++	case <-time.After(6 * time.Second):
++		t.Error("probe dial was not cancelled")
++	}
++	close(release)
++	lifecycleAwait(t, cancelled, "dial cancellation, including old 5s timeout")
++	lifecycleAwait(t, finished, "Close after releasing dial")
++	if closeErr != nil {
++		t.Error(closeErr)
++	}
++	if !valueOK.Load() {
++		t.Error("request context value was lost")
++	}
++	server.SetWriteDeadline(time.Now().Add(time.Second))
++	if _, err := server.Write([]byte{1}); err == nil {
++		t.Error("late dial connection survived Close")
++	}
++}
++
++func TestMultiplexerLifecycleSingleCallbackCanClose(t *testing.T) {
++	client, server := net.Pipe()
++	defer client.Close()
++	defer server.Close()
++	completed := make(chan struct{})
++	m := newQueryMultiplexer(queryMultiplexerOptions{
++		probeReuse: true,
++		dial:       func(context.Context) (net.Conn, error) { return client, nil },
++		write:      func(net.Conn, *mDNS.Msg, uint16) error { return nil },
++		readNext:   func(net.Conn) (*mDNS.Msg, error) { return new(mDNS.Msg), nil },
++	})
++	// No question suppresses the optional probe, but exercises exchangeSingle.
++	m.ExchangeAsync(context.Background(), new(mDNS.Msg), func(_ *mDNS.Msg, err error) {
++		if err != nil {
++			t.Error(err)
++		}
++		if err := m.Close(); err != nil {
++			t.Error(err)
++		}
++		close(completed)
++	})
++	lifecycleAwait(t, completed, "callback re-entered Close")
++}
++
++func TestMultiplexerLifecycleConcurrentCloseWaitsSameResult(t *testing.T) {
++	entered, release := make(chan struct{}), make(chan struct{})
++	m := newQueryMultiplexer(queryMultiplexerOptions{
++		probeReuse: true,
++		dial: func(context.Context) (net.Conn, error) {
++			close(entered)
++			<-release
++			return nil, errors.New("dial released")
++		},
++	})
++	m.maybeStartProbe(context.Background(), lifecycleQuery())
++	lifecycleAwait(t, entered, "uncooperative dial entered")
++	results := make(chan error, 2)
++	var start sync.WaitGroup
++	start.Add(2)
++	for range 2 {
++		go func() { start.Done(); start.Wait(); results <- m.Close() }()
++	}
++	first, second := <-results, <-results
++	if first == nil || second == nil {
++		t.Error("Close reported success with a still-running dial")
++	}
++	if first != second {
++		t.Errorf("concurrent Close results differ: %v / %v", first, second)
++	}
++	close(release)
++	lifecycleAwait(t, m.cleanupDone, "late dial cleanup completion after retained timeout")
++	if later := m.Close(); later != first {
++		t.Errorf("idempotent Close result changed: %v / %v", first, later)
++	}
++}
++
++func TestMultiplexerLifecycleRealTCPNormalClose(t *testing.T) {
++	listener, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer listener.Close()
++	ready, serverDone := make(chan struct{}), make(chan struct{})
++	go func() {
++		defer close(serverDone)
++		conn, err := listener.Accept()
++		if err != nil {
++			t.Error(err)
++			return
++		}
++		defer conn.Close()
++		conn.SetDeadline(time.Now().Add(7 * time.Second))
++		for range 2 {
++			if _, err := ReadMessage(conn); err != nil {
++				t.Error(err)
++				return
++			}
++		}
++		close(ready)
++		if _, err := ReadMessage(conn); err == nil {
++			t.Error("unexpected third probe query")
++		}
++	}()
++	transport := newTestTCPTransport(t, listener)
++	transport.multiplexer.maybeStartProbe(context.Background(), lifecycleQuery())
++	lifecycleAwait(t, ready, "real TCP probe sent both questions")
++	started := time.Now()
++	if err := transport.multiplexer.Close(); err != nil {
++		t.Error(err)
++	}
++	t.Logf("real_tcp_close_elapsed=%s", time.Since(started))
++	lifecycleAwait(t, serverDone, "real TCP peer saw close")
++}
++
++func TestMultiplexerLifecycleSingleRetainsCallerDeadline(t *testing.T) {
++	client, server := net.Pipe()
++	defer client.Close()
++	defer server.Close()
++	type valueKey struct{}
++	ctx, cancel := context.WithTimeout(context.WithValue(context.Background(), valueKey{}, "retained"), 50*time.Millisecond)
++	defer cancel()
++	deadline, _ := ctx.Deadline()
++	m := newQueryMultiplexer(queryMultiplexerOptions{
++		probeReuse: true,
++		dial: func(actual context.Context) (net.Conn, error) {
++			got, ok := actual.Deadline()
++			if !ok || !got.Equal(deadline) || actual.Value(valueKey{}) != "retained" {
++				t.Error("caller deadline/values changed")
++			}
++			return client, nil
++		},
++		write:    func(net.Conn, *mDNS.Msg, uint16) error { return nil },
++		readNext: func(c net.Conn) (*mDNS.Msg, error) { var b [1]byte; _, err := c.Read(b[:]); return nil, err },
++	})
++	_, err := m.Exchange(ctx, new(mDNS.Msg))
++	if !errors.Is(err, context.DeadlineExceeded) {
++		t.Errorf("caller timeout became %v", err)
++	}
++	if err := m.Close(); err != nil {
++		t.Fatal(err)
++	}
++}
++
++func TestMultiplexerLifecycleLateConnDeathCannotDemote(t *testing.T) {
++	m := newQueryMultiplexer(queryMultiplexerOptions{probeReuse: true})
++	conn := new(multiplexConn)
++	conn.readEpoch.Store(1)
++	m.reuseState.Store(reuseStateSupported)
++	m.demoteFailures.Store(reuseDemoteFailureLimit - 1)
++	m.queries[1] = &pendingQuery{conn: conn}
++	if err := m.Close(); err != nil {
++		t.Fatal(err)
++	}
++	m.recordConnDeath(conn)
++	if got := m.reuseState.Load(); got != reuseStateSupported {
++		t.Errorf("closed state demoted to %d", got)
++	}
++	if got := m.demoteFailures.Load(); got != reuseDemoteFailureLimit-1 {
++		t.Errorf("closed failure count changed to %d", got)
++	}
++}
++
++func TestMultiplexerLifecycleRetainsCallerCancellation(t *testing.T) {
++	ctx, cancel := context.WithCancelCause(context.Background())
++	cancel(errors.New("caller-specific cancellation reason"))
++	m := newQueryMultiplexer(queryMultiplexerOptions{
++		probeReuse: true,
++		dial:       func(actual context.Context) (net.Conn, error) { return nil, actual.Err() },
++	})
++	_, err := m.Exchange(ctx, new(mDNS.Msg))
++	if !errors.Is(err, context.Canceled) {
++		t.Errorf("normal caller cancellation changed to %v", err)
++	}
++	if err := m.Close(); err != nil {
++		t.Fatal(err)
++	}
++}
++
++type lifecyclePoolCloseGate struct {
++	net.Conn
++	entered chan struct{}
++	release chan struct{}
++	once    sync.Once
++}
++
++func (c *lifecyclePoolCloseGate) Close() error {
++	c.once.Do(func() { close(c.entered) })
++	<-c.release
++	return c.Conn.Close()
++}
++
++func TestMultiplexerLifecyclePoolCloseBudget(t *testing.T) {
++	client, server := net.Pipe()
++	defer client.Close()
++	defer server.Close()
++	gate := &lifecyclePoolCloseGate{Conn: client, entered: make(chan struct{}), release: make(chan struct{})}
++	m := newQueryMultiplexer(queryMultiplexerOptions{})
++	if _, _, _, err := m.connection.AcquireShared(context.Background(), func(context.Context) (*multiplexConn, error) {
++		return &multiplexConn{Conn: gate}, nil
++	}); err != nil {
++		t.Fatal(err)
++	}
++	results := make(chan error, 2)
++	started := time.Now()
++	go func() { results <- m.Close() }()
++	lifecycleAwait(t, gate.entered, "pool Close entered blocking net.Conn.Close")
++	go func() { results <- m.Close() }()
++	observed := make([]error, 0, 2)
++	deadline := time.NewTimer(6 * time.Second)
++	defer deadline.Stop()
++	for len(observed) < 2 {
++		select {
++		case err := <-results:
++			observed = append(observed, err)
++			if err == nil {
++				t.Error("Close reported success while pool socket Close remained blocked")
++			}
++		case <-deadline.C:
++			t.Error("pool Close escaped the shared five-second result budget")
++			goto release
++		}
++	}
++	if observed[0] != observed[1] {
++		t.Error("concurrent Close returned different timeout results")
++	}
++	t.Logf("pool_close_timeout_elapsed=%s", time.Since(started))
++release:
++	var timeoutEvidence interface {
++		CleanupDone() <-chan struct{}
++		CleanupResult() (bool, error)
++	}
++	if len(observed) == 2 {
++		var ok bool
++		timeoutEvidence, ok = observed[0].(interface {
++			CleanupDone() <-chan struct{}
++			CleanupResult() (bool, error)
++		})
++		if !ok {
++			t.Error("timeout result lost the pending cleanup evidence")
++		} else {
++			if complete, err := timeoutEvidence.CleanupResult(); complete || err != observed[0] {
++				t.Error("pending cleanup result appeared successful")
++			}
++			if timeoutEvidence.CleanupDone() != m.cleanupDone {
++				t.Error("timeout evidence refers to a different cleanup")
++			}
++		}
++		select {
++		case <-m.cleanupDone:
++			t.Error("blocked cleanup was marked complete")
++		default:
++		}
++		if phase := m.cleanupPhase.Load(); phase != 1 {
++			t.Errorf("expected pending pool-close phase, got %d", phase)
++		}
++	}
++	close(gate.release)
++	for len(observed) < 2 {
++		select {
++		case err := <-results:
++			observed = append(observed, err)
++		case <-time.After(time.Second):
++			t.Fatal("Close did not finish after releasing the pool socket")
++		}
++	}
++	lifecycleAwait(t, m.cleanupDone, "released pool cleanup completion")
++	if phase := m.cleanupPhase.Load(); phase != 3 {
++		t.Errorf("late cleanup did not record completion: %d", phase)
++	}
++	if m.cleanupErr != nil {
++		t.Errorf("late pool cleanup error: %v", m.cleanupErr)
++	}
++	if timeoutEvidence != nil {
++		if complete, err := timeoutEvidence.CleanupResult(); !complete || err != nil {
++			t.Errorf("late cleanup result not retained: complete=%v err=%v", complete, err)
++		}
++	}
++	if later := m.Close(); later != observed[0] {
++		t.Error("late cleanup changed the first Close result")
++	}
++}
 diff --git a/dns/transport_adapter.go b/dns/transport_adapter.go
-index 1e6620f25d45934ca4e2fb0c90d3e88411ac3fe3..84502c5964049674718162cbd9eac067d94819fa 100644
+index 7d2ebfa7e7b833792e266a235f79382041c5395e..6876a9d394003f890e19f541e2a62446c63b9bc2 100644
 --- a/dns/transport_adapter.go
 +++ b/dns/transport_adapter.go
-@@ -24,0 +25 @@ func NewTransportAdapterWithLocalOptions(transportType string, transportTag stri
+@@ -25,0 +26 @@ func NewTransportAdapterWithLocalOptions(transportType string, transportTag stri
 +		dependencies = append(dependencies, localOptions.DomainResolver.FallbackTags()...)
-@@ -36,0 +38 @@ func NewTransportAdapterWithRemoteOptions(transportType string, transportTag str
+@@ -42,0 +44 @@ func NewTransportAdapterWithRemoteOptions(transportType string, transportTag str
 +		dependencies = append(dependencies, remoteOptions.DomainResolver.FallbackTags()...)
 diff --git a/dns/transport_dialer.go b/dns/transport_dialer.go
 index 971002ac403d212feb764dde492c5ed19abb8720..48b9bc18ab02d3ac092f2508b254b1dc92f210ad 100644
@@ -3500,7 +4275,7 @@ index 971002ac403d212feb764dde492c5ed19abb8720..48b9bc18ab02d3ac092f2508b254b1dc
 +		return newRoutedDialer(ctx, options)
 +	}
 diff --git a/option/dns.go b/option/dns.go
-index 1180a6227a75022f5ab11ea7b29ee96f82cd5ebe..2405b65de75506c36fea500f3444a657d67b7207 100644
+index 299c734c7c71547596f6ba1b3d7e1fcb86287a4b..1e1c3e180fa94e44d99f227396d8130050989a33 100644
 --- a/option/dns.go
 +++ b/option/dns.go
 @@ -18,0 +19,2 @@ type RawDNSOptions struct {
@@ -3746,7 +4521,7 @@ index 0000000000000000000000000000000000000000..e0497c3eb969d7008adedec40570dbfc
 +	}
 +}
 diff --git a/option/outbound.go b/option/outbound.go
-index 4590b48d0bb2b7a62e2abfde1c24761af856ef82..b22e45b6b59709e7e13f906eb74119cc159d7a3d 100644
+index 5780929aa65b7e7e11c91ee108b8726eba25677d..c12351c9c134ef18e07fde35ba7e5c23c02c820f 100644
 --- a/option/outbound.go
 +++ b/option/outbound.go
 @@ -115 +115,4 @@ type _DomainResolveOptions struct {
@@ -3798,10 +4573,10 @@ index 4590b48d0bb2b7a62e2abfde1c24761af856ef82..b22e45b6b59709e7e13f906eb74119cc
 +		seen[server] = true
 +	}
 diff --git a/option/rule_action.go b/option/rule_action.go
-index ae05200430bfaca77a436ef28f38316f149006b7..e68e54ad021ffb4a21e9f4e83b9f7d4a1049a861 100644
+index 33ddd2bdc823d8a3ea9a1954e9e51f723ae6447b..b096924fc8005926d7cd10e85843d4208a6c2474 100644
 --- a/option/rule_action.go
 +++ b/option/rule_action.go
-@@ -170,0 +171,12 @@ func (r *DNSRuleAction) UnmarshalJSONContext(ctx context.Context, data []byte) e
+@@ -156,0 +157,12 @@ func (r *DNSRuleAction) UnmarshalJSONContext(ctx context.Context, data []byte) e
 +	if r.Action == C.RuleActionTypeEvaluate {
 +		hasFilter, err := hasAnyJSONKey(ctx, data, "response_filter")
 +		if err != nil {
@@ -3814,7 +4589,7 @@ index ae05200430bfaca77a436ef28f38316f149006b7..e68e54ad021ffb4a21e9f4e83b9f7d4a
 +			return r.EvaluateOptions.ResponseFilter.Validate()
 +		}
 +	}
-@@ -220,3 +232,5 @@ type DNSEvaluateActionOptions struct {
+@@ -206,3 +218,5 @@ type DNSEvaluateActionOptions struct {
 -	Server      string `json:"server,omitempty" reference:"dns_server"`
 -	Tag         string `json:"tag,omitempty"`
 -	Speculative bool   `json:"speculative,omitempty"`
@@ -3823,7 +4598,7 @@ index ae05200430bfaca77a436ef28f38316f149006b7..e68e54ad021ffb4a21e9f4e83b9f7d4a
 +	Speculative         bool               `json:"speculative,omitempty"`
 +	ResponseFilter      *DNSResponseFilter `json:"response_filter,omitempty"`
 +	ResponseIPAcceptAll bool               `json:"response_ip_accept_all,omitempty"`
-@@ -330,0 +345 @@ type RouteActionResolve struct {
+@@ -274,0 +289 @@ type RouteActionResolve struct {
 +	Policy                 string                `json:"policy,omitempty"`
 diff --git a/option/rule_dns.go b/option/rule_dns.go
 index 9124a587e2b44fbaa0277edfc9105c91c2a17f0e..ac6a4495bca514394058dbd87623edc8911ab7e0 100644
@@ -3845,13 +4620,13 @@ index 9124a587e2b44fbaa0277edfc9105c91c2a17f0e..ac6a4495bca514394058dbd87623edc8
 +		}
 +	}
 diff --git a/protocol/tailscale/dns_transport.go b/protocol/tailscale/dns_transport.go
-index b48aa82316597835c507cc538b2e61202ce5917a..38ec89ead409a256ff88174823bc6cd5cc2af9b4 100644
+index cd6b2964cc8bf13089eca98d9ff6647e838c6465..594547d8111df0b57bdb7de7df7056e96cde02a6 100644
 --- a/protocol/tailscale/dns_transport.go
 +++ b/protocol/tailscale/dns_transport.go
-@@ -184 +184 @@ func (t *DNSTransport) createResolver(directDialer func() N.Dialer, resolver *dn
+@@ -198 +198 @@ func (t *DNSTransport) createResolver(resolverScope *adapter.Scope, directDialer
 -		myDialer = dialer.NewResolveDialer(t.ctx, myDialer, false, "", adapter.DNSQueryOptions{Transport: bootstrapTransport}, 0)
 +		myDialer = dialer.NewResolveDialer(t.ctx, myDialer, false, "", nil, adapter.DNSQueryOptions{Transport: bootstrapTransport}, 0)
-@@ -186 +186 @@ func (t *DNSTransport) createResolver(directDialer func() N.Dialer, resolver *dn
+@@ -200 +200 @@ func (t *DNSTransport) createResolver(resolverScope *adapter.Scope, directDialer
 -		myDialer = dialer.NewResolveDialer(t.ctx, myDialer, false, "", t.endpoint.queryOptions, 0)
 +		myDialer = dialer.NewResolveDialer(t.ctx, myDialer, false, "", nil, t.endpoint.queryOptions, 0)
 diff --git a/route/dns_dialer.go b/route/dns_dialer.go
@@ -3933,10 +4708,10 @@ index 0000000000000000000000000000000000000000..5c773c40b077c17c696b90784aade964
 +	return outbound.ListenPacket(ctx, destination)
 +}
 diff --git a/route/network.go b/route/network.go
-index 68d1cd2efbb61d09a2007efeddc13721918cdd8c..b764af4880689011d4d9265e9e100d915a002478 100644
+index 1ff6e49e185e4e260746fac8f29b0e14968096a5..3c66d2dbc4ea2cd3664fa5134cc3542ba81ff08b 100644
 --- a/route/network.go
 +++ b/route/network.go
-@@ -91,3 +91,4 @@ func NewNetworkManager(ctx context.Context, logger logger.ContextLogger, options
+@@ -88,3 +88,4 @@ func NewNetworkManager(ctx context.Context, logger logger.ContextLogger, options
 -			BindInterface:  options.DefaultInterface,
 -			RoutingMark:    uint32(options.DefaultMark),
 -			DomainResolver: defaultDomainResolver.Server,
@@ -3944,65 +4719,83 @@ index 68d1cd2efbb61d09a2007efeddc13721918cdd8c..b764af4880689011d4d9265e9e100d91
 +			RoutingMark:             uint32(options.DefaultMark),
 +			DomainResolver:          defaultDomainResolver.Server,
 +			DomainResolverFallbacks: defaultDomainResolver.FallbackTags(),
-@@ -94,0 +96 @@ func NewNetworkManager(ctx context.Context, logger logger.ContextLogger, options
+@@ -91,0 +93 @@ func NewNetworkManager(ctx context.Context, logger logger.ContextLogger, options
 +				Policy:                 defaultDomainResolver.Policy,
 diff --git a/route/route.go b/route/route.go
-index 62f1c8650b4daa38eb8d4b97f3504abba053518f..7764d73b9645d9f0a9033d7b1557d4fa0d8f4358 100644
+index bf25baeee0d7441dd8bb01e34b24f140c8554202..bc431df1dad18e948abd2bbe2affe14152bff2a3 100644
 --- a/route/route.go
 +++ b/route/route.go
-@@ -8,0 +9 @@ import (
+@@ -9,0 +10 @@ import (
 +	"sync"
-@@ -398,0 +400,3 @@ func (r *Router) PreMatch(metadata adapter.InboundContext, firstPacket []byte) a
+@@ -429,0 +431,3 @@ func (r *Router) PreMatch(metadata adapter.InboundContext, firstPacket []byte) a
 +			if result.Action == adapter.PreMatchReject || result.Action == adapter.PreMatchDrop {
 +				return result
 +			}
-@@ -462,0 +467 @@ func (r *Router) preMatchFlow(ctx context.Context, metadata *adapter.InboundCont
+@@ -494,2 +498,27 @@ func (r *Router) preMatchFlow(ctx context.Context, metadata *adapter.InboundCont
+-	chain, err := resolveOutbound(outbound, metadata.Network)
+-	if err != nil {
++	chain := []adapter.Outbound{outbound}
 +	var flowCommits []func()
-@@ -463,0 +469,11 @@ func (r *Router) preMatchFlow(ctx context.Context, metadata *adapter.InboundCont
++	for range 8 {
 +		if group, ok := outbound.(adapter.FlowOutboundGroup); ok {
 +			selected, commit, err := group.SelectFlowOutbound(ctx, *metadata)
 +			if err != nil || selected == nil {
 +				return adapter.PreMatchResult{Action: adapter.PreMatchReject}
 +			}
 +			outbound = selected
++			chain = append(chain, outbound)
 +			if commit != nil {
 +				flowCommits = append(flowCommits, commit)
 +			}
 +			continue
 +		}
-@@ -526,0 +543 @@ func (r *Router) preMatchFlow(ctx context.Context, metadata *adapter.InboundCont
++		group, isGroup := outbound.(adapter.OutboundGroup)
++		if !isGroup {
++			break
++		}
++		selectedOutbound := group.Selected(metadata.Network)
++		if selectedOutbound == nil {
++			return continueResult
++		}
++		outbound = selectedOutbound
++		chain = append(chain, outbound)
++	}
++	if !common.Contains(outbound.Network(), metadata.Network) {
+@@ -498 +526,0 @@ func (r *Router) preMatchFlow(ctx context.Context, metadata *adapter.InboundCont
+-	outbound = chain[len(chain)-1]
+@@ -549,0 +578 @@ func (r *Router) preMatchFlow(ctx context.Context, metadata *adapter.InboundCont
 +	var commitOnce sync.Once
-@@ -527,0 +545,5 @@ func (r *Router) preMatchFlow(ctx context.Context, metadata *adapter.InboundCont
+@@ -550,0 +580,5 @@ func (r *Router) preMatchFlow(ctx context.Context, metadata *adapter.InboundCont
 +		commitOnce.Do(func() {
 +			for _, commit := range flowCommits {
 +				commit()
 +			}
 +		})
-@@ -546 +568,3 @@ func (r *Router) prepareMatchMetadata(ctx context.Context, metadata *adapter.Inb
+@@ -573 +607,3 @@ func (r *Router) prepareMatchMetadata(ctx context.Context, metadata *adapter.Inb
 -	r.searchProcessInfo(ctx, metadata)
 +	if !metadata.InternalDNS {
 +		r.searchProcessInfo(ctx, metadata)
 +	}
-@@ -606,0 +631,6 @@ match:
+@@ -633,0 +670,6 @@ match:
 +		if metadata.InternalDNS {
 +			switch currentRule.Action().Type() {
 +			case C.RuleActionTypeSniff, C.RuleActionTypeResolve, C.RuleActionTypeHijackDNS:
 +				continue
 +			}
 +		}
-@@ -908,0 +939 @@ func (r *Router) actionResolve(ctx context.Context, metadata *adapter.InboundCon
+@@ -934,0 +977 @@ func (r *Router) actionResolve(ctx context.Context, metadata *adapter.InboundCon
 +			Policy:                 action.Policy,
 diff --git a/route/rule/rule_action.go b/route/rule/rule_action.go
-index cb6561181b2da67dbb33790af47065c79b05e0aa..c4d4ede8ab398f3a56f1472c44c68eb27e9e3777 100644
+index 6fd1707accd9fa9f07d959a0f3fa0aa8a3e7a5cc..0dc7a690ec075288cb6a91d904aa81a6d5115891 100644
 --- a/route/rule/rule_action.go
 +++ b/route/rule/rule_action.go
-@@ -112,0 +113,3 @@ func NewRuleAction(ctx context.Context, logger logger.ContextLogger, action opti
+@@ -88,0 +89,3 @@ func NewRuleAction(logger logger.ContextLogger, action option.RuleAction) (adapt
 +		if action.ResolveOptions.Policy != "" && action.ResolveOptions.Server != "" {
 +			return nil, E.New("resolve policy cannot be combined with an explicit server")
 +		}
-@@ -113,0 +117 @@ func NewRuleAction(ctx context.Context, logger logger.ContextLogger, action opti
+@@ -89,0 +93 @@ func NewRuleAction(logger logger.ContextLogger, action option.RuleAction) (adapt
 +			Policy:                 action.ResolveOptions.Policy,
-@@ -147,3 +151,4 @@ func NewDNSRuleAction(logger logger.ContextLogger, action option.DNSRuleAction)
+@@ -123,3 +127,4 @@ func NewDNSRuleAction(logger logger.ContextLogger, action option.DNSRuleAction)
 -			Server:      action.EvaluateOptions.Server,
 -			Tag:         action.EvaluateOptions.Tag,
 -			Speculative: action.EvaluateOptions.Speculative,
@@ -4010,7 +4803,7 @@ index cb6561181b2da67dbb33790af47065c79b05e0aa..c4d4ede8ab398f3a56f1472c44c68eb2
 +			Tag:                 action.EvaluateOptions.Tag,
 +			Speculative:         action.EvaluateOptions.Speculative,
 +			ResponseIPAcceptAll: action.EvaluateOptions.ResponseIPAcceptAll,
-@@ -310,3 +315,5 @@ type RuleActionEvaluate struct {
+@@ -286,3 +291,5 @@ type RuleActionEvaluate struct {
 -	Server      string
 -	Tag         string
 -	Speculative bool
@@ -4019,9 +4812,9 @@ index cb6561181b2da67dbb33790af47065c79b05e0aa..c4d4ede8ab398f3a56f1472c44c68eb2
 +	Speculative         bool
 +	ResponseFilter      adapter.DNSRule
 +	ResponseIPAcceptAll bool
-@@ -568,0 +576 @@ type RuleActionResolve struct {
+@@ -531,0 +539 @@ type RuleActionResolve struct {
 +	Policy                 string
-@@ -583,0 +592,3 @@ func (r *RuleActionResolve) String() string {
+@@ -546,0 +555,3 @@ func (r *RuleActionResolve) String() string {
 +	if r.Policy != "" {
 +		options = append(options, "policy="+r.Policy)
 +	}
@@ -4100,687 +4893,4 @@ index 0000000000000000000000000000000000000000..30f89e5e1a9f0f4f1765fcab4828ee4b
 +
 +func (r *responseFilteredDNSRule) Close() error {
 +	return E.Errors(r.DNSRule.Close(), r.filter.Close())
-+}
-diff --git a/dns/transport/multiplexer.go b/dns/transport/multiplexer.go
-index 6b275ae9d6db2593fc8df1752b5f4be16fd1406b..1590db6be85ba864e8ab108ee005e43886cfba2f 100644
---- a/dns/transport/multiplexer.go
-+++ b/dns/transport/multiplexer.go
-@@ -31,0 +32,11 @@ const (
-+var errQueryMultiplexerClosed = errors.New("DNS multiplexer lifecycle closed")
-+
-+// Preserve the caller's historical context.Err result. Only our private
-+// instance-cancellation cause maps to net.ErrClosed.
-+func queryMultiplexerContextError(ctx context.Context) error {
-+	if context.Cause(ctx) == errQueryMultiplexerClosed {
-+		return net.ErrClosed
-+	}
-+	return ctx.Err()
-+}
-+
-@@ -53,0 +65,31 @@ type queryMultiplexer struct {
-+
-+	lifecycleAccess  sync.Mutex
-+	closed           atomic.Bool
-+	lifecycleContext context.Context
-+	cancelLifecycle  context.CancelCauseFunc
-+	workers          sync.WaitGroup
-+	closeDone        chan struct{}
-+	closeErr         error
-+	cleanupDone      chan struct{}
-+	cleanupPhase     atomic.Uint32
-+	cleanupErr       error
-+}
-+
-+// Retain the single cleanup attempt through the returned failure, even when
-+// the transport has been removed from its manager. Observing later cleanup
-+// completion never changes the original Close result or reopens admission.
-+type queryMultiplexerCloseTimeoutError struct {
-+	cause error
-+	owner *queryMultiplexer
-+}
-+
-+func (e *queryMultiplexerCloseTimeoutError) Error() string                { return e.cause.Error() }
-+func (e *queryMultiplexerCloseTimeoutError) Unwrap() error                { return e.cause }
-+func (e *queryMultiplexerCloseTimeoutError) CleanupDone() <-chan struct{} { return e.owner.cleanupDone }
-+func (e *queryMultiplexerCloseTimeoutError) CleanupResult() (complete bool, err error) {
-+	select {
-+	case <-e.owner.cleanupDone:
-+		return true, e.owner.cleanupErr
-+	default:
-+		return false, e
-+	}
-@@ -83,0 +126 @@ func newQueryMultiplexer(options queryMultiplexerOptions) *queryMultiplexer {
-+	lifecycleContext, cancelLifecycle := context.WithCancelCause(context.Background())
-@@ -85,2 +128,6 @@ func newQueryMultiplexer(options queryMultiplexerOptions) *queryMultiplexer {
--		options: options,
--		queries: make(map[uint16]*pendingQuery),
-+		options:          options,
-+		lifecycleContext: lifecycleContext,
-+		cancelLifecycle:  cancelLifecycle,
-+		closeDone:        make(chan struct{}),
-+		cleanupDone:      make(chan struct{}),
-+		queries:          make(map[uint16]*pendingQuery),
-@@ -100 +147,89 @@ func (m *queryMultiplexer) Close() error {
--	return m.connection.Close()
-+	deadline := time.Now().Add(reuseProbeTimeout)
-+	m.lifecycleAccess.Lock()
-+	if m.closed.Load() {
-+		m.lifecycleAccess.Unlock()
-+		<-m.closeDone
-+		return m.closeErr
-+	}
-+	m.closed.Store(true)
-+	m.cancelLifecycle(errQueryMultiplexerClosed)
-+	m.lifecycleAccess.Unlock()
-+	m.probeAccess.Lock()
-+	m.probeEpoch++
-+	m.probeAccess.Unlock()
-+
-+	// One instance-owned cleanup attempt covers both pool Close (which may
-+	// itself block in TLS close_notify) and already-admitted network workers.
-+	// A timeout reports failure without pretending this attempt has finished.
-+	timer := time.NewTimer(time.Until(deadline))
-+	defer timer.Stop()
-+	go func() {
-+		m.cleanupPhase.Store(1) // closing pool sockets
-+		m.cleanupErr = m.connection.Close()
-+		m.cleanupPhase.Store(2) // draining admitted network work
-+		m.workers.Wait()
-+		m.cleanupPhase.Store(3)
-+		close(m.cleanupDone)
-+	}()
-+	var closeErr error
-+	select {
-+	case <-m.cleanupDone:
-+		closeErr = m.cleanupErr
-+	case <-timer.C:
-+		phase := "pool close"
-+		switch m.cleanupPhase.Load() {
-+		case 2:
-+			phase = "network worker drain"
-+		case 3:
-+			phase = "completion observation"
-+		}
-+		closeErr = &queryMultiplexerCloseTimeoutError{owner: m, cause: E.New("DNS transport close exceeded ", reuseProbeTimeout, " during ", phase, "; completion was not observed within the deadline")}
-+	}
-+	m.closeErr = closeErr
-+	close(m.closeDone)
-+	return closeErr
-+}
-+
-+// Admission is serialized with Close. Workers cover probe/single-query network
-+// work and admitted dials; pool.Close separately closes pooled connections.
-+// recvLoop goroutines and user callbacks are not part of the worker drain.
-+// Callbacks execute after worker release, without locks, and may call Close.
-+func (m *queryMultiplexer) beginWorker(ctx context.Context) (context.Context, func(), error) {
-+	m.lifecycleAccess.Lock()
-+	defer m.lifecycleAccess.Unlock()
-+	if m.closed.Load() {
-+		return nil, nil, net.ErrClosed
-+	}
-+	workerCtx, cancel := context.WithCancelCause(ctx)
-+	stopLifecycle := context.AfterFunc(m.lifecycleContext, func() { cancel(errQueryMultiplexerClosed) })
-+	m.workers.Add(1)
-+	return workerCtx, func() {
-+		stopLifecycle()
-+		cancel(nil)
-+		m.workers.Done()
-+	}, nil
-+}
-+
-+func (m *queryMultiplexer) dial(ctx context.Context) (net.Conn, error) {
-+	dialCtx, finish, err := m.beginWorker(ctx)
-+	if err != nil {
-+		return nil, err
-+	}
-+	defer finish()
-+	if err := queryMultiplexerContextError(dialCtx); err != nil {
-+		return nil, err
-+	}
-+	conn, err := m.options.dial(dialCtx)
-+	if cause := queryMultiplexerContextError(dialCtx); cause != nil {
-+		if conn != nil {
-+			conn.Close()
-+		}
-+		return nil, cause
-+	}
-+	if m.closed.Load() {
-+		if conn != nil {
-+			conn.Close()
-+		}
-+		return nil, net.ErrClosed
-+	}
-+	return conn, err
-@@ -105,0 +241,4 @@ func (m *queryMultiplexer) Reset() {
-+		if m.closed.Load() {
-+			m.probeAccess.Unlock()
-+			return
-+		}
-@@ -134,0 +274,4 @@ func (m *queryMultiplexer) dispatch(ctx context.Context, message *mDNS.Msg, call
-+	if m.closed.Load() {
-+		callback(nil, net.ErrClosed)
-+		return
-+	}
-@@ -137 +280,10 @@ func (m *queryMultiplexer) dispatch(ctx context.Context, message *mDNS.Msg, call
--		go m.exchangeSingle(ctx, message, callback)
-+		workerCtx, finish, err := m.beginWorker(ctx)
-+		if err != nil {
-+			callback(nil, err)
-+			return
-+		}
-+		go func() {
-+			response, err := m.exchangeSingle(workerCtx, message)
-+			finish()
-+			callback(response, err)
-+		}()
-@@ -143,2 +295,2 @@ func (m *queryMultiplexer) dispatch(ctx context.Context, message *mDNS.Msg, call
--func (m *queryMultiplexer) exchangeSingle(ctx context.Context, message *mDNS.Msg, callback func(response *mDNS.Msg, err error)) {
--	conn, err := m.options.dial(ctx)
-+func (m *queryMultiplexer) exchangeSingle(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error) {
-+	conn, err := m.dial(ctx)
-@@ -146,2 +298 @@ func (m *queryMultiplexer) exchangeSingle(ctx context.Context, message *mDNS.Msg
--		callback(nil, err)
--		return
-+		return nil, err
-@@ -156 +307 @@ func (m *queryMultiplexer) exchangeSingle(ctx context.Context, message *mDNS.Msg
--		ctxErr := ctx.Err()
-+		ctxErr := queryMultiplexerContextError(ctx)
-@@ -158,2 +309 @@ func (m *queryMultiplexer) exchangeSingle(ctx context.Context, message *mDNS.Msg
--			callback(nil, ctxErr)
--			return
-+			return nil, ctxErr
-@@ -161,2 +311 @@ func (m *queryMultiplexer) exchangeSingle(ctx context.Context, message *mDNS.Msg
--		callback(nil, E.Cause(err, "write request"))
--		return
-+		return nil, E.Cause(err, "write request")
-@@ -168 +317 @@ func (m *queryMultiplexer) exchangeSingle(ctx context.Context, message *mDNS.Msg
--			ctxErr := ctx.Err()
-+			ctxErr := queryMultiplexerContextError(ctx)
-@@ -170,2 +319 @@ func (m *queryMultiplexer) exchangeSingle(ctx context.Context, message *mDNS.Msg
--				callback(nil, ctxErr)
--				return
-+				return nil, ctxErr
-@@ -173,2 +321 @@ func (m *queryMultiplexer) exchangeSingle(ctx context.Context, message *mDNS.Msg
--			callback(nil, E.Cause(err, "read response"))
--			return
-+			return nil, E.Cause(err, "read response")
-@@ -180,2 +327 @@ func (m *queryMultiplexer) exchangeSingle(ctx context.Context, message *mDNS.Msg
--		callback(response, nil)
--		return
-+		return response, nil
-@@ -189,0 +336,4 @@ func (m *queryMultiplexer) maybeStartProbe(ctx context.Context, message *mDNS.Ms
-+	if m.closed.Load() {
-+		m.probeAccess.Unlock()
-+		return
-+	}
-@@ -197,0 +348,5 @@ func (m *queryMultiplexer) maybeStartProbe(ctx context.Context, message *mDNS.Ms
-+	probeCtx, finish, err := m.beginWorker(context.WithoutCancel(ctx))
-+	if err != nil {
-+		m.probeAccess.Unlock()
-+		return
-+	}
-@@ -202 +357 @@ func (m *queryMultiplexer) maybeStartProbe(ctx context.Context, message *mDNS.Ms
--	go m.runReuseProbe(context.WithoutCancel(ctx), message.Question[0].Name, epoch)
-+	go func(questionName string) { defer finish(); m.runReuseProbe(probeCtx, questionName, epoch) }(message.Question[0].Name)
-@@ -209 +364 @@ func (m *queryMultiplexer) runReuseProbe(ctx context.Context, questionName strin
--	if m.probeEpoch != epoch {
-+	if m.closed.Load() || m.probeEpoch != epoch {
-@@ -226 +381 @@ func (m *queryMultiplexer) executeReuseProbe(ctx context.Context, questionName s
--	conn, err := m.options.dial(probeCtx)
-+	conn, err := m.dial(probeCtx)
-@@ -267 +422 @@ func (m *queryMultiplexer) recordConnDeath(conn *multiplexConn) {
--	if !m.options.probeReuse || m.reuseState.Load() != reuseStateSupported {
-+	if m.closed.Load() || !m.options.probeReuse || m.reuseState.Load() != reuseStateSupported {
-@@ -288,0 +444,4 @@ func (m *queryMultiplexer) recordConnDeath(conn *multiplexConn) {
-+	if m.closed.Load() {
-+		m.probeAccess.Unlock()
-+		return
-+	}
-@@ -331 +490 @@ func (m *queryMultiplexer) dialConn(ctx context.Context) (*multiplexConn, error)
--	conn, err := m.options.dial(ctx)
-+	conn, err := m.dial(ctx)
-diff --git a/dns/transport/multiplexer_lifecycle_test.go b/dns/transport/multiplexer_lifecycle_test.go
-new file mode 100644
-index 0000000000000000000000000000000000000000..e68ae4d0f89170c422fbc0564286c9200129ed69
---- /dev/null
-+++ b/dns/transport/multiplexer_lifecycle_test.go
-@@ -0,0 +1,439 @@
-+package transport
-+
-+import (
-+	"context"
-+	"errors"
-+	"net"
-+	"sync"
-+	"sync/atomic"
-+	"testing"
-+	"time"
-+
-+	mDNS "github.com/miekg/dns"
-+	"github.com/sagernet/sing-box/route"
-+)
-+
-+func lifecycleAwait(t *testing.T, done <-chan struct{}, what string) {
-+	t.Helper()
-+	select {
-+	case <-done:
-+	case <-time.After(7 * time.Second):
-+		t.Fatal("bounded wait expired: ", what)
-+	}
-+}
-+
-+func lifecycleQuery() *mDNS.Msg {
-+	m := new(mDNS.Msg)
-+	m.SetQuestion("lifecycle.test.", mDNS.TypeA)
-+	return m
-+}
-+
-+func TestMultiplexerLifecycleCloseRejectsNewDial(t *testing.T) {
-+	var dials atomic.Int32
-+	m := newQueryMultiplexer(queryMultiplexerOptions{
-+		probeReuse: true,
-+		dial: func(context.Context) (net.Conn, error) {
-+			dials.Add(1)
-+			return nil, errors.New("unexpected dial")
-+		},
-+	})
-+	if err := m.Close(); err != nil {
-+		t.Fatal(err)
-+	}
-+	_, err := m.Exchange(context.Background(), lifecycleQuery())
-+	if !errors.Is(err, net.ErrClosed) {
-+		t.Errorf("closed Exchange returned %v, want net.ErrClosed", err)
-+	}
-+	// This is the already-queued probe entry, not a new public API.
-+	m.runReuseProbe(context.Background(), "lifecycle.test.", 0)
-+	if got := dials.Load(); got != 0 {
-+		t.Errorf("closed instance admitted %d dials", got)
-+	}
-+}
-+
-+func TestMultiplexerLifecycleCloseOwnsBlockedProbe(t *testing.T) {
-+	for _, managerFirst := range []bool{false, true} {
-+		t.Run(map[bool]string{false: "transport-first", true: "connection-manager-first"}[managerFirst], func(t *testing.T) {
-+			client, server := net.Pipe()
-+			defer client.Close()
-+			defer server.Close()
-+			manager := route.NewConnectionManager(nil)
-+			entered, readDone := make(chan struct{}), make(chan struct{})
-+			m := newQueryMultiplexer(queryMultiplexerOptions{
-+				probeReuse: true,
-+				dial:       func(context.Context) (net.Conn, error) { return manager.TrackConn(client), nil },
-+				write:      func(net.Conn, *mDNS.Msg, uint16) error { return nil },
-+				readNext: func(c net.Conn) (*mDNS.Msg, error) {
-+					close(entered)
-+					var data [1]byte
-+					_, err := c.Read(data[:])
-+					close(readDone)
-+					return nil, err
-+				},
-+			})
-+			m.maybeStartProbe(context.Background(), lifecycleQuery())
-+			lifecycleAwait(t, entered, "probe entered Read")
-+			if managerFirst {
-+				if err := manager.Close(); err != nil {
-+					t.Fatal(err)
-+				}
-+			}
-+			if err := m.Close(); err != nil {
-+				t.Error(err)
-+			}
-+			select {
-+			case <-readDone:
-+			default:
-+				t.Error("Close returned success before owned probe Read ended")
-+			}
-+			client.Close()
-+			lifecycleAwait(t, readDone, "test cleanup ended Read")
-+		})
-+	}
-+}
-+
-+func TestMultiplexerLifecycleLateProbeCannotPublishOrReset(t *testing.T) {
-+	client, server := net.Pipe()
-+	defer client.Close()
-+	defer server.Close()
-+	entered, release, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
-+	var reads int
-+	m := newQueryMultiplexer(queryMultiplexerOptions{
-+		probeReuse: true,
-+		dial:       func(context.Context) (net.Conn, error) { return client, nil },
-+		write:      func(net.Conn, *mDNS.Msg, uint16) error { return nil },
-+		readNext: func(net.Conn) (*mDNS.Msg, error) {
-+			reads++
-+			if reads == 1 {
-+				close(entered)
-+				<-release
-+			}
-+			return &mDNS.Msg{MsgHdr: mDNS.MsgHdr{Id: uint16(reads)}}, nil
-+		},
-+	})
-+	m.reuseState.Store(reuseStateProbing)
-+	// Gate the actual completion method so even a peer completion racing Close
-+	// cannot publish success after the closed epoch.
-+	go func() { m.runReuseProbe(context.Background(), "lifecycle.test.", 0); close(finished) }()
-+	lifecycleAwait(t, entered, "late result entered")
-+	if err := m.Close(); err != nil {
-+		t.Fatal(err)
-+	}
-+	before := m.reuseState.Load()
-+	close(release)
-+	lifecycleAwait(t, finished, "late result finished")
-+	if got := m.reuseState.Load(); got != before {
-+		t.Errorf("late probe published state %d after Close, before=%d", got, before)
-+	}
-+	m.Reset()
-+	if got := m.reuseState.Load(); got != before {
-+		t.Errorf("Reset changed closed state %d to %d", before, got)
-+	}
-+}
-+
-+func TestMultiplexerLifecycleCloseCancelsDialAndKeepsValues(t *testing.T) {
-+	type key struct{}
-+	entered, cancelled, release, finished := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
-+	client, server := net.Pipe()
-+	defer client.Close()
-+	defer server.Close()
-+	var valueOK atomic.Bool
-+	m := newQueryMultiplexer(queryMultiplexerOptions{
-+		probeReuse: true,
-+		dial: func(ctx context.Context) (net.Conn, error) {
-+			valueOK.Store(ctx.Value(key{}) == "request-value")
-+			close(entered)
-+			<-ctx.Done()
-+			close(cancelled)
-+			<-release
-+			return client, nil
-+		},
-+		write: func(net.Conn, *mDNS.Msg, uint16) error { return errors.New("must not write late connection") },
-+	})
-+	m.maybeStartProbe(context.WithValue(context.Background(), key{}, "request-value"), lifecycleQuery())
-+	lifecycleAwait(t, entered, "probe dial entered")
-+	var closeErr error
-+	go func() { closeErr = m.Close(); close(finished) }()
-+	select {
-+	case <-finished:
-+		t.Error("Close returned before admitted dial was cancelled and drained")
-+	case <-cancelled:
-+	case <-time.After(6 * time.Second):
-+		t.Error("probe dial was not cancelled")
-+	}
-+	close(release)
-+	lifecycleAwait(t, cancelled, "dial cancellation, including old 5s timeout")
-+	lifecycleAwait(t, finished, "Close after releasing dial")
-+	if closeErr != nil {
-+		t.Error(closeErr)
-+	}
-+	if !valueOK.Load() {
-+		t.Error("request context value was lost")
-+	}
-+	server.SetWriteDeadline(time.Now().Add(time.Second))
-+	if _, err := server.Write([]byte{1}); err == nil {
-+		t.Error("late dial connection survived Close")
-+	}
-+}
-+
-+func TestMultiplexerLifecycleSingleCallbackCanClose(t *testing.T) {
-+	client, server := net.Pipe()
-+	defer client.Close()
-+	defer server.Close()
-+	completed := make(chan struct{})
-+	m := newQueryMultiplexer(queryMultiplexerOptions{
-+		probeReuse: true,
-+		dial:       func(context.Context) (net.Conn, error) { return client, nil },
-+		write:      func(net.Conn, *mDNS.Msg, uint16) error { return nil },
-+		readNext:   func(net.Conn) (*mDNS.Msg, error) { return new(mDNS.Msg), nil },
-+	})
-+	// No question suppresses the optional probe, but exercises exchangeSingle.
-+	m.ExchangeAsync(context.Background(), new(mDNS.Msg), func(_ *mDNS.Msg, err error) {
-+		if err != nil {
-+			t.Error(err)
-+		}
-+		if err := m.Close(); err != nil {
-+			t.Error(err)
-+		}
-+		close(completed)
-+	})
-+	lifecycleAwait(t, completed, "callback re-entered Close")
-+}
-+
-+func TestMultiplexerLifecycleConcurrentCloseWaitsSameResult(t *testing.T) {
-+	entered, release := make(chan struct{}), make(chan struct{})
-+	m := newQueryMultiplexer(queryMultiplexerOptions{
-+		probeReuse: true,
-+		dial: func(context.Context) (net.Conn, error) {
-+			close(entered)
-+			<-release
-+			return nil, errors.New("dial released")
-+		},
-+	})
-+	m.maybeStartProbe(context.Background(), lifecycleQuery())
-+	lifecycleAwait(t, entered, "uncooperative dial entered")
-+	results := make(chan error, 2)
-+	var start sync.WaitGroup
-+	start.Add(2)
-+	for range 2 {
-+		go func() { start.Done(); start.Wait(); results <- m.Close() }()
-+	}
-+	first, second := <-results, <-results
-+	if first == nil || second == nil {
-+		t.Error("Close reported success with a still-running dial")
-+	}
-+	if first != second {
-+		t.Errorf("concurrent Close results differ: %v / %v", first, second)
-+	}
-+	close(release)
-+	lifecycleAwait(t, m.cleanupDone, "late dial cleanup completion after retained timeout")
-+	if later := m.Close(); later != first {
-+		t.Errorf("idempotent Close result changed: %v / %v", first, later)
-+	}
-+}
-+
-+func TestMultiplexerLifecycleRealTCPNormalClose(t *testing.T) {
-+	listener, err := net.Listen("tcp", "127.0.0.1:0")
-+	if err != nil {
-+		t.Fatal(err)
-+	}
-+	defer listener.Close()
-+	ready, serverDone := make(chan struct{}), make(chan struct{})
-+	go func() {
-+		defer close(serverDone)
-+		conn, err := listener.Accept()
-+		if err != nil {
-+			t.Error(err)
-+			return
-+		}
-+		defer conn.Close()
-+		conn.SetDeadline(time.Now().Add(7 * time.Second))
-+		for range 2 {
-+			if _, err := ReadMessage(conn); err != nil {
-+				t.Error(err)
-+				return
-+			}
-+		}
-+		close(ready)
-+		if _, err := ReadMessage(conn); err == nil {
-+			t.Error("unexpected third probe query")
-+		}
-+	}()
-+	transport := newTestTCPTransport(t, listener)
-+	transport.multiplexer.maybeStartProbe(context.Background(), lifecycleQuery())
-+	lifecycleAwait(t, ready, "real TCP probe sent both questions")
-+	started := time.Now()
-+	if err := transport.Close(); err != nil {
-+		t.Error(err)
-+	}
-+	t.Logf("real_tcp_close_elapsed=%s", time.Since(started))
-+	lifecycleAwait(t, serverDone, "real TCP peer saw close")
-+}
-+
-+func TestMultiplexerLifecycleSingleRetainsCallerDeadline(t *testing.T) {
-+	client, server := net.Pipe()
-+	defer client.Close()
-+	defer server.Close()
-+	type valueKey struct{}
-+	ctx, cancel := context.WithTimeout(context.WithValue(context.Background(), valueKey{}, "retained"), 50*time.Millisecond)
-+	defer cancel()
-+	deadline, _ := ctx.Deadline()
-+	m := newQueryMultiplexer(queryMultiplexerOptions{
-+		probeReuse: true,
-+		dial: func(actual context.Context) (net.Conn, error) {
-+			got, ok := actual.Deadline()
-+			if !ok || !got.Equal(deadline) || actual.Value(valueKey{}) != "retained" {
-+				t.Error("caller deadline/values changed")
-+			}
-+			return client, nil
-+		},
-+		write:    func(net.Conn, *mDNS.Msg, uint16) error { return nil },
-+		readNext: func(c net.Conn) (*mDNS.Msg, error) { var b [1]byte; _, err := c.Read(b[:]); return nil, err },
-+	})
-+	_, err := m.Exchange(ctx, new(mDNS.Msg))
-+	if !errors.Is(err, context.DeadlineExceeded) {
-+		t.Errorf("caller timeout became %v", err)
-+	}
-+	if err := m.Close(); err != nil {
-+		t.Fatal(err)
-+	}
-+}
-+
-+func TestMultiplexerLifecycleLateConnDeathCannotDemote(t *testing.T) {
-+	m := newQueryMultiplexer(queryMultiplexerOptions{probeReuse: true})
-+	conn := new(multiplexConn)
-+	conn.readEpoch.Store(1)
-+	m.reuseState.Store(reuseStateSupported)
-+	m.demoteFailures.Store(reuseDemoteFailureLimit - 1)
-+	m.queries[1] = &pendingQuery{conn: conn}
-+	if err := m.Close(); err != nil {
-+		t.Fatal(err)
-+	}
-+	m.recordConnDeath(conn)
-+	if got := m.reuseState.Load(); got != reuseStateSupported {
-+		t.Errorf("closed state demoted to %d", got)
-+	}
-+	if got := m.demoteFailures.Load(); got != reuseDemoteFailureLimit-1 {
-+		t.Errorf("closed failure count changed to %d", got)
-+	}
-+}
-+
-+func TestMultiplexerLifecycleRetainsCallerCancellation(t *testing.T) {
-+	ctx, cancel := context.WithCancelCause(context.Background())
-+	cancel(errors.New("caller-specific cancellation reason"))
-+	m := newQueryMultiplexer(queryMultiplexerOptions{
-+		probeReuse: true,
-+		dial:       func(actual context.Context) (net.Conn, error) { return nil, actual.Err() },
-+	})
-+	_, err := m.Exchange(ctx, new(mDNS.Msg))
-+	if !errors.Is(err, context.Canceled) {
-+		t.Errorf("normal caller cancellation changed to %v", err)
-+	}
-+	if err := m.Close(); err != nil {
-+		t.Fatal(err)
-+	}
-+}
-+
-+type lifecyclePoolCloseGate struct {
-+	net.Conn
-+	entered chan struct{}
-+	release chan struct{}
-+	once    sync.Once
-+}
-+
-+func (c *lifecyclePoolCloseGate) Close() error {
-+	c.once.Do(func() { close(c.entered) })
-+	<-c.release
-+	return c.Conn.Close()
-+}
-+
-+func TestMultiplexerLifecyclePoolCloseBudget(t *testing.T) {
-+	client, server := net.Pipe()
-+	defer client.Close()
-+	defer server.Close()
-+	gate := &lifecyclePoolCloseGate{Conn: client, entered: make(chan struct{}), release: make(chan struct{})}
-+	m := newQueryMultiplexer(queryMultiplexerOptions{})
-+	if _, _, _, err := m.connection.AcquireShared(context.Background(), func(context.Context) (*multiplexConn, error) {
-+		return &multiplexConn{Conn: gate}, nil
-+	}); err != nil {
-+		t.Fatal(err)
-+	}
-+	results := make(chan error, 2)
-+	started := time.Now()
-+	go func() { results <- m.Close() }()
-+	lifecycleAwait(t, gate.entered, "pool Close entered blocking net.Conn.Close")
-+	go func() { results <- m.Close() }()
-+	observed := make([]error, 0, 2)
-+	deadline := time.NewTimer(6 * time.Second)
-+	defer deadline.Stop()
-+	for len(observed) < 2 {
-+		select {
-+		case err := <-results:
-+			observed = append(observed, err)
-+			if err == nil {
-+				t.Error("Close reported success while pool socket Close remained blocked")
-+			}
-+		case <-deadline.C:
-+			t.Error("pool Close escaped the shared five-second result budget")
-+			goto release
-+		}
-+	}
-+	if observed[0] != observed[1] {
-+		t.Error("concurrent Close returned different timeout results")
-+	}
-+	t.Logf("pool_close_timeout_elapsed=%s", time.Since(started))
-+release:
-+	var timeoutEvidence interface {
-+		CleanupDone() <-chan struct{}
-+		CleanupResult() (bool, error)
-+	}
-+	if len(observed) == 2 {
-+		var ok bool
-+		timeoutEvidence, ok = observed[0].(interface {
-+			CleanupDone() <-chan struct{}
-+			CleanupResult() (bool, error)
-+		})
-+		if !ok {
-+			t.Error("timeout result lost the pending cleanup evidence")
-+		} else {
-+			if complete, err := timeoutEvidence.CleanupResult(); complete || err != observed[0] {
-+				t.Error("pending cleanup result appeared successful")
-+			}
-+			if timeoutEvidence.CleanupDone() != m.cleanupDone {
-+				t.Error("timeout evidence refers to a different cleanup")
-+			}
-+		}
-+		select {
-+		case <-m.cleanupDone:
-+			t.Error("blocked cleanup was marked complete")
-+		default:
-+		}
-+		if phase := m.cleanupPhase.Load(); phase != 1 {
-+			t.Errorf("expected pending pool-close phase, got %d", phase)
-+		}
-+	}
-+	close(gate.release)
-+	for len(observed) < 2 {
-+		select {
-+		case err := <-results:
-+			observed = append(observed, err)
-+		case <-time.After(time.Second):
-+			t.Fatal("Close did not finish after releasing the pool socket")
-+		}
-+	}
-+	lifecycleAwait(t, m.cleanupDone, "released pool cleanup completion")
-+	if phase := m.cleanupPhase.Load(); phase != 3 {
-+		t.Errorf("late cleanup did not record completion: %d", phase)
-+	}
-+	if m.cleanupErr != nil {
-+		t.Errorf("late pool cleanup error: %v", m.cleanupErr)
-+	}
-+	if timeoutEvidence != nil {
-+		if complete, err := timeoutEvidence.CleanupResult(); !complete || err != nil {
-+			t.Errorf("late cleanup result not retained: complete=%v err=%v", complete, err)
-+		}
-+	}
-+	if later := m.Close(); later != observed[0] {
-+		t.Error("late cleanup changed the first Close result")
-+	}
 +}

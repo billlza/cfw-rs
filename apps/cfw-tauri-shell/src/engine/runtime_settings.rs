@@ -36,6 +36,11 @@ pub(crate) async fn change_runtime_preferences(
         .begin_current_mode_change()
         .await
         .map_err(|error| error.to_string())?;
+    let store = settings_store()?;
+    // Refused before the engine restarts with the new settings; the commit
+    // refuses again in case a journal appeared meanwhile.
+    crate::legacy::require_runtime_preferences_changeable(&store.paths().app_home)
+        .map_err(|error| error.to_string())?;
     if mode != EngineMode::Off {
         crate::platform_maintenance::require_start_allowed(retirement)?;
         engine.require_capability(mode)?;
@@ -44,7 +49,6 @@ pub(crate) async fn change_runtime_preferences(
     let endpoints = engine.endpoints.clone();
     let authorization = engine.system_proxy_authorization.clone();
     let repository = profiles.repository().clone();
-    let store = settings_store()?;
     let (result, lease) = lease
         .run_to_completion(async move {
             let preparation_endpoints = endpoints.clone();
@@ -188,6 +192,8 @@ pub(super) fn commit_runtime_settings(
     if current.controller != expected.controller || current.cursor != expected.cursor {
         return Err("runtime settings changed before the transaction committed".into());
     }
+    crate::legacy::require_runtime_preferences_changeable(&store.paths().app_home)
+        .map_err(|error| error.to_string())?;
     commit_preferences(store, previous, preferences)?;
     let active = current.active.clone();
     *current = EngineEndpointBinding {

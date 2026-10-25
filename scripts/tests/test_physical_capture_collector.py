@@ -60,7 +60,7 @@ from scripts.publication.common import tree_digest
 from scripts.tests.performance_evidence_fixture import (
     _command as performance_command,
 )
-from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY, PRODUCT_VERSION
 
 
 GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
@@ -184,7 +184,7 @@ class PhysicalCaptureCollectorTests(unittest.TestCase):
                 canonical_json(EVIDENCE_PROFILE)
             ).hexdigest(),
             "candidate": {
-                "version": "0.5.0",
+                "version": PRODUCT_VERSION,
                 "build_number": GA_BUILD,
                 "app_manifest_sha256": digest("app-manifest"),
                 "signed_app_tree_sha256": digest("signed-app-tree"),

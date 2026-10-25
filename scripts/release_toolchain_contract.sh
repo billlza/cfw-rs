@@ -113,7 +113,7 @@ cfw_verify_xcodegen_toolchain_tree() {
     "$contract_repository" \
     "$contract_toolchain_root/xcodegen-$XCODEGEN_VERSION" \
     "$contract_toolchain_root/xcodegen-$XCODEGEN_VERSION.manifest.json" \
-    "artifactKind=pinned-xcodegen-toolchain-v3" \
+    "artifactKind=pinned-xcodegen-toolchain-v4" \
     "buildPolicy=isolated-resolved-swiftpm-v1" \
     "macosDeploymentTarget=$MACOS_DEPLOYMENT_TARGET" \
     "packageResolvedSha256=$XCODEGEN_PACKAGE_RESOLVED_SHA256" \
@@ -121,8 +121,6 @@ cfw_verify_xcodegen_toolchain_tree() {
     "dependencyPatchSha256=$XCODEGEN_DEPENDENCY_PATCH_SHA256" \
     "aexmlCommit=$XCODEGEN_AEXML_COMMIT" \
     "aexmlUpstreamManifestSha256=$XCODEGEN_AEXML_UPSTREAM_MANIFEST_SHA256" \
-    "aexmlPatchSha256=$XCODEGEN_AEXML_PATCH_SHA256" \
-    "aexmlPatchedManifestSha256=$XCODEGEN_AEXML_PATCHED_MANIFEST_SHA256" \
     "patchSha256=$XCODEGEN_PATCH_SHA256" \
     "patchedSettingsBuilderSha256=$XCODEGEN_PATCHED_SETTINGS_BUILDER_SHA256" \
     "platform=darwin-arm64" \

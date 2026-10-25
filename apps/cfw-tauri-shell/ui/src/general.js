@@ -21,7 +21,7 @@ export function createGeneralView({ state, escapeHtml, engineStateLabel, engineT
   const lan = settingsView?.settings.allow_lan ? settingsView.settings.lan_proxy : null;
   const bind = lan ? `${lan.listen}:${lan.port}` : t("Off");
   const logLevel = settingsView?.effective.log_level ?? projection.logLevel ?? state.logLevel ?? "info";
-  // The running engine names itself in its version string ("sing-box 1.14.2").
+  // The running engine names itself in its version string ("sing-box 1.14.4").
   const engineLabel = state.controllerVersion?.version ?? `sing-box · ${engineStateLabel(engine)}`;
   const tunnelCapability = engineToggleCapability("tunMode");
   const proxyCapability = engineToggleCapability("systemProxy");

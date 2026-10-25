@@ -17,12 +17,13 @@ from .common import (
     write_new,
 )
 from .graph_collectors import collect_all
-from .graph_model import CollectedGraphs, ComponentSeed, RELEASE_VERSION, load_pins, run
+from .graph_model import CollectedGraphs, ComponentSeed, load_pins, run
 from .license_resolution import resolve_license
 from .release_app_verifier import NotarizationCheck, verify_release_app
 from .release_environment import release_tool_environment
 from .release_contract import (
     PRODUCT_NAME,
+    RELEASE_VERSION,
     blocker_report,
     ensure_private_stage_inputs,
     evidence_root,
@@ -67,7 +68,7 @@ def expected_blocker_report(repository: Path) -> Path:
 def require_fixed_signed_app(repository: Path, app: Path) -> Path:
     expected = signed_app(repository)
     if app.is_symlink() or not app.is_dir():
-        raise PublicationError("0.5.0 signed app is absent or is a symlink")
+        raise PublicationError(f"{RELEASE_VERSION} signed app is absent or is a symlink")
     require_fixed_path(app, expected, "signed app", repository=repository)
     return app.resolve(strict=True)
 
@@ -185,7 +186,7 @@ def _review_records(path: Path, seeds: dict[str, ComponentSeed]) -> dict[str, di
             "version": RELEASE_VERSION,
         }
     ):
-        raise PublicationError("reviewed component input is not for the fixed 0.5.0 product")
+        raise PublicationError(f"reviewed component input is not for the fixed {RELEASE_VERSION} product")
     raw_records = document["components"]
     if not isinstance(raw_records, list):
         raise PublicationError("reviewed component input is not an array")

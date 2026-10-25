@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.5.1 - Unreleased
+
+### Reliability
+
+- Give every node of a latency test its whole timeout. The engine a test
+  starts was held to the same deadline, so a large profile tested at a short
+  timeout on a busy Mac could fail as a whole while that engine was still
+  starting. The timeout now runs from when the engine has started.
+
+### Supply chain
+
+- Build the network engine from sing-box 1.14.4 instead of 1.14.2. The Go
+  modules it requires directly move to their newest releases, among them
+  `golang.org/x/crypto` 0.58.0, `golang.org/x/net` 0.61.0, gRPC 1.84.0 and
+  uTLS 1.8.8; sing-box's own modules stay at the versions released with it.
+
 ## 0.5.0 — 2026-10-17
 
 ### Interface

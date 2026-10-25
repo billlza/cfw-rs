@@ -16,6 +16,7 @@ from scripts.publication.sealed_closure import (
     derive_supply_chain,
     validate_sealed_closure,
 )
+from scripts.release_build_identity import PRODUCT_VERSION
 
 REPOSITORY = Path(__file__).resolve().parent.parent.parent
 
@@ -110,7 +111,7 @@ def _artifact_manifest() -> dict:
 
 def _request(**overrides) -> dict:
     request = {
-        "product": {"name": "Clash for Mac", "version": "0.5.0", "build_number": "40000"},
+        "product": {"name": "Clash for Mac", "version": PRODUCT_VERSION, "build_number": "40000"},
         "commit": _sha("commit")[:40],
         "sbom": _sbom_graph(),
         "ccs": {"sha256": _sha("ccs-tree"), "archive_sha256": _sha("ccs-archive")},
@@ -308,7 +309,7 @@ class SealedClosureRejectionTests(unittest.TestCase):
 
 class CrossConsistentGraphTests(unittest.TestCase):
     def test_dependency_graph_must_cover_every_component(self) -> None:
-        product = {"name": "Clash for Mac", "version": "0.5.0", "build_number": "40000"}
+        product = {"name": "Clash for Mac", "version": PRODUCT_VERSION, "build_number": "40000"}
         graph = _sbom_graph()
         from scripts.publication.sealed_closure import _sbom_graph as normalize
 

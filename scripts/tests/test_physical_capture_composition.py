@@ -42,7 +42,7 @@ from scripts.physical_capture.composition import (
     publish_physical_evidence,
 )
 from scripts.physical_capture.policy import PhysicalCapturePolicyError
-from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY, PRODUCT_VERSION
 
 
 GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
@@ -126,7 +126,7 @@ def _raw_artifacts() -> list[dict[str, object]]:
 
 def _candidate() -> dict[str, object]:
     return {
-        "version": "0.5.0",
+        "version": PRODUCT_VERSION,
         "build_number": GA_BUILD,
         "app_manifest_sha256": _sha("app-manifest"),
         "signed_app_tree_sha256": _sha("signed-app-tree"),
@@ -302,7 +302,7 @@ def _two_run_records() -> list[dict[str, object]]:
 
 def _prepare_repository(root: Path) -> None:
     assurance_candidate = (
-        root / "target/candidates/0.5.0/assurance/physical-candidate"
+        root / f"target/candidates/{PRODUCT_VERSION}/assurance/physical-candidate"
     )
     assurance_candidate.mkdir(parents=True, mode=0o700)
     os.chmod(assurance_candidate, 0o700)

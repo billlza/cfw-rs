@@ -69,6 +69,7 @@ if __package__:
         canonical_build_version,
         ga_signed_native_products_root,
         ga_signed_root,
+        read_bundle_identity,
     )
     from .release_executor_source import (
         ExecutorSourceError,
@@ -109,6 +110,7 @@ else:
         canonical_build_version,
         ga_signed_native_products_root,
         ga_signed_root,
+        read_bundle_identity,
     )
     from release_executor_source import (
         ExecutorSourceError,
@@ -243,7 +245,7 @@ INSTALLED_50025_PREDECESSOR: Final = PredecessorProfile(
 # Exact installed notarized 0.5.0 GA build 50028, retired before GA runtime
 # acceptance. Its stapled tree is bound by the signed-app manifest, both
 # package seals and the `candidate` of the completed 50025 -> 50028 install
-# and service journals; the next GA install replaces it.
+# and service journals; the 50029 GA install replaced it.
 INSTALLED_50028_PREDECESSOR: Final = PredecessorProfile(
     product_version="0.5.0",
     build_number="50028",
@@ -252,17 +254,27 @@ INSTALLED_50028_PREDECESSOR: Final = PredecessorProfile(
 # Exact installed notarized 0.5.0 GA build 50029, retired before GA runtime
 # acceptance. Its stapled tree is bound by the signed-app manifest, both
 # package seals and the `candidate` of the completed 50028 -> 50029 install
-# and service journals; the next GA install replaces it.
+# and service journals; the 50030 GA install replaced it.
 INSTALLED_50029_PREDECESSOR: Final = PredecessorProfile(
     product_version="0.5.0",
     build_number="50029",
     tree_sha256="aa67685e1cea4c77a90ded3d9a70264912f8e3711b8e7c1d83ebdb9442339483",
+)
+# Exact installed notarized 0.5.0 GA build 50030, the published 0.5.0 release.
+# Its stapled tree is bound by the signed-app manifest, both package seals and
+# the `candidate` of the completed 50029 -> 50030 install and service journals;
+# the first GA install of the next product version replaces it.
+INSTALLED_50030_PREDECESSOR: Final = PredecessorProfile(
+    product_version="0.5.0",
+    build_number="50030",
+    tree_sha256="078b0ab7c044a79be83595c68419e908d5c94d442faffa59ec2d5c2e0f7260f3",
 )
 SUPPORTED_PREDECESSORS: Final = MappingProxyType(
     {
         INSTALLED_50025_PREDECESSOR.build_number: INSTALLED_50025_PREDECESSOR,
         INSTALLED_50028_PREDECESSOR.build_number: INSTALLED_50028_PREDECESSOR,
         INSTALLED_50029_PREDECESSOR.build_number: INSTALLED_50029_PREDECESSOR,
+        INSTALLED_50030_PREDECESSOR.build_number: INSTALLED_50030_PREDECESSOR,
     }
 )
 SERVICE_DECOMMISSION_PHASES: Final = (
@@ -321,33 +333,32 @@ def require_predecessor_registry(registry: Mapping[str, PredecessorProfile]) -> 
 
 def select_active_predecessor(
     registry: Mapping[str, PredecessorProfile],
-    product_version: str,
     ga_build: str,
 ) -> PredecessorProfile:
-    """The newest registered installation of this product below the GA.
+    """The newest registered installation below the GA build.
 
-    It is the only installation a GA install may replace. Older registry
-    entries stay readable as the recorded predecessors of completed journals.
+    It is the only installation a GA install may replace. Builds increase
+    across product versions, so until one of its own GA builds has been
+    installed, a product version's GA replaces the release the previous
+    product version published. Older registry entries stay readable as the
+    recorded predecessors of completed journals.
     """
 
     require_predecessor_registry(registry)
     eligible = [
         profile
         for profile in registry.values()
-        if profile.product_version == product_version
-        and int(profile.build_number) < int(ga_build)
+        if int(profile.build_number) < int(ga_build)
     ]
     if not eligible:
         raise InstallError(
             "predecessor_registry_invalid",
-            f"no registered {product_version} install predecessor precedes GA build {ga_build}",
+            f"no registered install predecessor precedes GA build {ga_build}",
         )
     return max(eligible, key=lambda profile: int(profile.build_number))
 
 
-ACTIVE_PREDECESSOR: Final = select_active_predecessor(
-    SUPPORTED_PREDECESSORS, VERSION, BUILD_NUMBER
-)
+ACTIVE_PREDECESSOR: Final = select_active_predecessor(SUPPORTED_PREDECESSORS, BUILD_NUMBER)
 
 
 @dataclass(frozen=True)
@@ -642,10 +653,26 @@ def _tree_sha256(path: Path, label: str) -> str:
 
 
 def read_app_identity(path: Path) -> AppIdentity:
+    """The identity of an installed or newly installed application.
+
+    The installed application may be a predecessor of an earlier product
+    version, so the reader admits the active product version or the exact
+    version and build of a registered predecessor; admission then decides
+    which installation may be replaced.
+    """
+
     try:
-        identity = bundle_build_identity(path)
+        identity = read_bundle_identity(path)
     except (OSError, BuildIdentityError, ValueError) as error:
         raise InstallError("app_identity_invalid", f"invalid application identity: {path}") from error
+    if identity.product_version != VERSION:
+        predecessor = SUPPORTED_PREDECESSORS.get(identity.build_version)
+        if predecessor is None or predecessor.product_version != identity.product_version:
+            raise InstallError(
+                "app_identity_invalid",
+                f"application identity is neither the active product version nor a "
+                f"registered predecessor: {path}",
+            )
     return AppIdentity(
         version=identity.product_version,
         build_number=identity.build_version,
@@ -4054,7 +4081,8 @@ def main() -> None:
         raise SystemExit(f"error: {code}: {error}") from error
     print(
         f"dormant install transaction {result['phase']}: "
-        f"0.5.0 ({result['candidate']['build_number']}); application was not launched"
+        f"{ACTIVE_RELEASE_IDENTITY.product_version} ({result['candidate']['build_number']}); "
+        "application was not launched"
     )
 
 

@@ -477,7 +477,7 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
 name = "cfw-apple-network"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "cfw-engine-api",
  "core-foundation",
@@ -495,7 +495,7 @@ dependencies = [
 
 [[package]]
 name = "cfw-application"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "cfw-controller",
  "cfw-engine-api",
@@ -507,7 +507,7 @@ dependencies = [
 
 [[package]]
 name = "cfw-controller"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "futures-util",
  "reqwest",
@@ -521,7 +521,7 @@ dependencies = [
 
 [[package]]
 name = "cfw-core"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "cfw-windows-storage",
  "libc",
@@ -537,7 +537,7 @@ dependencies = [
 
 [[package]]
 name = "cfw-engine-api"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "cfw-singbox-config",
  "serde",
@@ -548,11 +548,11 @@ dependencies = [
 
 [[package]]
 name = "cfw-legacy-tombstone"
-version = "0.5.0"
+version = "0.5.1"
 
 [[package]]
 name = "cfw-platform"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "libc",
@@ -572,7 +572,7 @@ dependencies = [
 
 [[package]]
 name = "cfw-profiles"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "cfw-singbox-config",
  "cfw-windows-storage",
@@ -585,7 +585,7 @@ dependencies = [
 
 [[package]]
 name = "cfw-release-verifier"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "base64 0.23.1",
  "minisign-verify",
@@ -595,7 +595,7 @@ dependencies = [
 
 [[package]]
 name = "cfw-singbox-config"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "base64 0.23.1",
  "regex",
@@ -609,7 +609,7 @@ dependencies = [
 
 [[package]]
 name = "cfw-tauri-shell"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "base64 0.23.1",
  "cc",
@@ -4363,9 +4363,9 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 
 [[package]]
 name = "tokio"
-version = "1.53.1"
+version = "1.53.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
+checksum = "ce3335fa71841cda333a58d7615b03901380ecf09d59b3296d21f8bbac0dde4e"
 dependencies = [
  "bytes",
  "libc",

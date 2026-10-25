@@ -24,8 +24,9 @@ use super::process_cleanup::{
 };
 use super::state_gate::{LegacyCleanupAction, LegacyRetirementGate, LegacyRetirementStatus};
 use super::{
-    require_explicit_cutover_confirmation, require_network_start_with, require_normal_start_phase,
-    require_replacement_active, spawn_supervised_app_result,
+    RuntimePreferencesLocked, require_explicit_cutover_confirmation, require_network_start_with,
+    require_normal_start_phase, require_replacement_active, require_runtime_preferences_changeable,
+    spawn_supervised_app_result,
 };
 
 #[test]
@@ -92,6 +93,40 @@ fn normal_start_rejects_corrupt_journal_before_runtime_observation() {
     })
     .expect_err("journal is authoritative even when its bytes are invalid");
     assert!(error.contains("journal"));
+    assert_eq!(
+        fs::read(journal).expect("unchanged journal"),
+        b"broken journal"
+    );
+}
+
+#[test]
+fn runtime_preferences_change_only_while_no_cutover_journal_governs_startup() {
+    use super::journal::{CutoverJournalStore, CutoverPhase, write_journal_governing_startup};
+    let root = tempfile::tempdir().expect("temporary app home");
+    assert_eq!(require_runtime_preferences_changeable(root.path()), Ok(()));
+    write_journal_governing_startup(root.path(), cfw_singbox_config::EngineSettings::default());
+    assert_eq!(
+        require_runtime_preferences_changeable(root.path()),
+        Err(RuntimePreferencesLocked::CutoverCleanupPending)
+    );
+    CutoverJournalStore::new(root.path())
+        .advance(
+            CutoverPhase::ReplacementActive,
+            CutoverPhase::CleanupComplete,
+        )
+        .expect("cleanup complete");
+    assert_eq!(require_runtime_preferences_changeable(root.path()), Ok(()));
+
+    let corrupt = tempfile::tempdir().expect("temporary app home");
+    let journal = corrupt.path().join("legacy-cutover-journal-v1.json");
+    fs::write(&journal, b"broken journal").expect("corrupt journal");
+    assert!(
+        matches!(
+            require_runtime_preferences_changeable(corrupt.path()),
+            Err(RuntimePreferencesLocked::JournalUnavailable(_))
+        ),
+        "an unreadable journal refuses the change instead of allowing it"
+    );
     assert_eq!(
         fs::read(journal).expect("unchanged journal"),
         b"broken journal"

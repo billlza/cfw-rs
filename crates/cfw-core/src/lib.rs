@@ -36,4 +36,4 @@ pub use settings::{
 pub const PRODUCT_NAME: &str = "Clash for Mac";
 #[cfg(windows)]
 pub const PRODUCT_NAME: &str = "Clash for Windows";
-pub const PRODUCT_VERSION: &str = "0.5.0";
+pub const PRODUCT_VERSION: &str = "0.5.1";

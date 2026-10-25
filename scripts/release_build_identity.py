@@ -24,12 +24,17 @@ else:
     )
 
 
-PRODUCT_VERSION = "0.5.0"
-# The one release-owned record of the active GA build. A GA allocation edits
-# this file together with the allocation ledger; nothing else restates it.
+# The one release-owned record of the active product version and its GA build.
+# A GA allocation edits this file together with the allocation ledger; nothing
+# else restates either value.
 RELEASE_IDENTITY_PATH: Final = Path(__file__).resolve().parent / "release_identity.env"
 RELEASE_IDENTITY_RE: Final = re.compile(
-    rb"\A(?:#[ -~]*\n)*CFW_GA_BUILD=([1-9][0-9]{0,18})\n\Z"
+    rb"\A(?:#[ -~]*\n)*"
+    rb"CFW_PRODUCT_VERSION=([0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9})\n"
+    rb"CFW_GA_BUILD=([1-9][0-9]{0,18})\n\Z"
+)
+PRODUCT_VERSION_RE: Final = re.compile(
+    r"(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})"
 )
 POSITIVE_INTEGER_RE = re.compile(r"^[1-9][0-9]*$")
 MAX_BUILD_VERSION = 9_223_372_036_854_775_807
@@ -58,6 +63,16 @@ def canonical_build_version(value: Any, label: str = "CFBundleVersion") -> str:
     return value
 
 
+def canonical_product_version(
+    value: Any, label: str = "CFBundleShortVersionString"
+) -> str:
+    if not isinstance(value, str) or not PRODUCT_VERSION_RE.fullmatch(value):
+        raise BuildIdentityError(
+            f"{label} must be one canonical MAJOR.MINOR.PATCH version"
+        )
+    return value
+
+
 @dataclass(frozen=True)
 class ReleaseIdentity:
     """The one application identity eligible for the active product release."""
@@ -66,18 +81,16 @@ class ReleaseIdentity:
     ga_build: str
 
     def __post_init__(self) -> None:
-        if self.product_version != PRODUCT_VERSION:
-            raise BuildIdentityError(
-                "active release identity product version differs from policy"
-            )
+        canonical_product_version(self.product_version, "active product version")
         canonical_build_version(self.ga_build, "active GA build")
 
 
-def load_active_ga_build(path: Path) -> str:
-    """Read the active GA build from the byte-strict release identity file.
+def load_release_identity(path: Path) -> ReleaseIdentity:
+    """Read the active release identity from the byte-strict identity file.
 
     The file is printable ASCII with LF line endings: full-line ``#``
-    comments followed by exactly one ``CFW_GA_BUILD=<canonical build>`` line.
+    comments followed by exactly ``CFW_PRODUCT_VERSION=<MAJOR.MINOR.PATCH>``
+    and ``CFW_GA_BUILD=<canonical build>``, in that order.
     """
 
     try:
@@ -89,17 +102,23 @@ def load_active_ga_build(path: Path) -> str:
     match = RELEASE_IDENTITY_RE.fullmatch(data)
     if match is None:
         raise BuildIdentityError(
-            f"release identity file is not one canonical CFW_GA_BUILD record: {path}"
+            "release identity file is not one canonical CFW_PRODUCT_VERSION and "
+            f"CFW_GA_BUILD record: {path}"
         )
-    return canonical_build_version(
-        match.group(1).decode("ascii"), f"CFW_GA_BUILD in {path}"
+    return ReleaseIdentity(
+        canonical_product_version(
+            match.group(1).decode("ascii"), f"CFW_PRODUCT_VERSION in {path}"
+        ),
+        canonical_build_version(
+            match.group(2).decode("ascii"), f"CFW_GA_BUILD in {path}"
+        ),
     )
 
 
-ACTIVE_RELEASE_IDENTITY = ReleaseIdentity(
-    PRODUCT_VERSION, load_active_ga_build(RELEASE_IDENTITY_PATH)
-)
-PREVIEW_PRODUCT_VERSION: Final = "0.5.0"
+ACTIVE_RELEASE_IDENTITY: Final = load_release_identity(RELEASE_IDENTITY_PATH)
+# The product version of every candidate path, bundle and evidence document.
+# The unsigned validation builds below carry it as well.
+PRODUCT_VERSION: Final = ACTIVE_RELEASE_IDENTITY.product_version
 FROZEN_GA_REPOSITORY_RELATIVE = Path(
     f"target/release-worktrees/{ACTIVE_RELEASE_IDENTITY.ga_build}"
 )
@@ -168,13 +187,9 @@ def _read_plist(path: Path, *, label: str) -> dict[str, Any]:
     return value
 
 
-def bundle_build_identity(
-    app: Path, *, expected_product_version: str = PRODUCT_VERSION
-) -> BundleBuildIdentity:
-    if expected_product_version not in (PRODUCT_VERSION, PREVIEW_PRODUCT_VERSION):
-        raise BuildIdentityError("expected product version differs from supported policy")
-    app = app.resolve(strict=True)
-    plists = {
+def bundle_identity_plists(app: Path) -> dict[str, Path]:
+    """The Info.plist of each bundle that carries the application's identity."""
+    return {
         "host": app / "Contents/Info.plist",
         "native-bridge": (
             app
@@ -189,21 +204,38 @@ def bundle_build_identity(
             / "Contents/Library/SystemExtensions/com.bill.clashformac.packet-tunnel.systemextension/Contents/Info.plist"
         ),
     }
-    identities = {}
-    for name, path in plists.items():
+
+
+def read_bundle_identity(app: Path) -> BundleBuildIdentity:
+    """The one product version and build that every identity plist of `app` records.
+
+    An installed predecessor may record an earlier product version, so only
+    `bundle_build_identity` requires the active one.
+    """
+    versions = {}
+    builds = {}
+    for name, path in bundle_identity_plists(app.resolve(strict=True)).items():
         value = _read_plist(path, label=name)
-        product_version = value.get("CFBundleShortVersionString")
-        if product_version != expected_product_version:
-            raise BuildIdentityError(
-                f"{name} CFBundleShortVersionString is not the fixed product version"
-            )
-        identities[name] = canonical_build_version(
+        versions[name] = canonical_product_version(
+            value.get("CFBundleShortVersionString"), f"{name} CFBundleShortVersionString"
+        )
+        builds[name] = canonical_build_version(
             value.get("CFBundleVersion"), f"{name} CFBundleVersion"
         )
-    unique = set(identities.values())
+    if len(set(versions.values())) != 1:
+        raise BuildIdentityError(f"Host/Agent/System Extension product versions differ: {versions}")
+    unique = set(builds.values())
     if len(unique) != 1:
-        raise BuildIdentityError(f"Host/Agent/System Extension build versions differ: {identities}")
-    return BundleBuildIdentity(expected_product_version, unique.pop())
+        raise BuildIdentityError(f"Host/Agent/System Extension build versions differ: {builds}")
+    return BundleBuildIdentity(versions["host"], unique.pop())
+
+
+def bundle_build_identity(app: Path) -> BundleBuildIdentity:
+    """The identity of a candidate bundle, which records the fixed product version."""
+    identity = read_bundle_identity(app)
+    if identity.product_version != PRODUCT_VERSION:
+        raise BuildIdentityError("CFBundleShortVersionString is not the fixed product version")
+    return identity
 
 
 def unsigned_preview_root(repository: Path) -> Path:
@@ -214,7 +246,7 @@ def unsigned_preview_root(repository: Path) -> Path:
     only this directory tells the family apart: no other context may verify a
     path inside it.
     """
-    return repository / f"target/candidates/{PREVIEW_PRODUCT_VERSION}/unsigned/{UNSIGNED_PREVIEW_VALIDATION_BUILD}"
+    return repository / f"target/candidates/{PRODUCT_VERSION}/unsigned/{UNSIGNED_PREVIEW_VALIDATION_BUILD}"
 
 
 def unsigned_preview_native_products_root(repository: Path) -> Path:
@@ -405,12 +437,15 @@ def candidate_bundle_verification_paths(
     if app_path.name != SIGNED_APP_NAME:
         raise BuildIdentityError("candidate application name is invalid")
     if context is CandidateBundleContext.UNSIGNED_PREVIEW_HOST:
-        identity = bundle_build_identity(app_path, expected_product_version=PREVIEW_PRODUCT_VERSION)
+        identity = bundle_build_identity(app_path)
         expected_app = unsigned_preview_root(canonical_repository) / "cargo/release/bundle/macos" / SIGNED_APP_NAME
-        if (identity != BundleBuildIdentity(PREVIEW_PRODUCT_VERSION, UNSIGNED_PREVIEW_VALIDATION_BUILD)
+        if (identity != BundleBuildIdentity(PRODUCT_VERSION, UNSIGNED_PREVIEW_VALIDATION_BUILD)
             or app_path != expected_app
             or native_path != unsigned_preview_native_products_root(canonical_repository)):
-            raise BuildIdentityError("unsigned preview app/native pair is not the fixed 0.5.0/50000 validation output")
+            raise BuildIdentityError(
+                "unsigned preview app/native pair is not the fixed "
+                f"{PRODUCT_VERSION}/{UNSIGNED_PREVIEW_VALIDATION_BUILD} validation output"
+            )
         return CandidateBundleVerificationPaths(app_path, native_path, identity, context)
     if any(
         path.is_relative_to(unsigned_preview_root(canonical_repository))
@@ -423,7 +458,7 @@ def candidate_bundle_verification_paths(
 
     if context is CandidateBundleContext.UNSIGNED_HOST:
         if identity.build_version not in (UNSIGNED_VALIDATION_BUILD, ACTIVE_RELEASE_IDENTITY.ga_build):
-            raise BuildIdentityError("unsigned Host is not an admitted 0.5.0 build")
+            raise BuildIdentityError(f"unsigned Host is not an admitted {PRODUCT_VERSION} build")
         expected_native = candidate_native_products_output(
             canonical_repository,
             str(native_path),

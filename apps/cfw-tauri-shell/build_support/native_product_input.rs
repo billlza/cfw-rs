@@ -56,7 +56,9 @@ const GA_PRE_SIGN_ROOT_SUFFIX: &str = "/native-products";
 const GA_PRE_SIGNING_MODE: &str = "pre-sign";
 /// The GA pre-sign output and the unsigned validation outputs share the one
 /// product version; the three are told apart by their exact relative roots.
-const CANDIDATE_ROOT: &str = "target/candidates/0.5.0";
+/// The crate version is that product version: the version contract binds it
+/// to the release identity.
+const CANDIDATE_ROOT: &str = concat!("target/candidates/", env!("CARGO_PKG_VERSION"));
 const UNSIGNED_PREVIEW_RELATIVE_ROOT: &str = "unsigned/50000/native-products";
 const UNSIGNED_PREVIEW_BUILD_NUMBER: &str = "50000";
 
@@ -329,6 +331,7 @@ mod candidate_input_tests {
     /// build, so no test names the active allocation.
     const FIXTURE_BUILD: &str = "70001";
     const OTHER_BUILD: &str = "70002";
+    const PRODUCT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
     fn ga_pre_sign_relative(build: &str) -> String {
         format!("ga-preflight/{build}/native-products")
@@ -418,8 +421,8 @@ mod candidate_input_tests {
     #[test]
     fn ga_path_build_and_manifest_are_one_exact_identity() {
         let fixture = Fixture::new();
-        let root = fixture.root("0.5.0");
-        let output = fixture.output("0.5.0", &ga_pre_sign_relative(FIXTURE_BUILD));
+        let root = fixture.root(PRODUCT_VERSION);
+        let output = fixture.output(PRODUCT_VERSION, &ga_pre_sign_relative(FIXTURE_BUILD));
         let resolved = CandidateNativeProducts::resolve(&root, &output, FIXTURE_BUILD).unwrap();
         assert_eq!(resolved.context, NativeProductContext::GaPreSign);
         assert_eq!(resolved.context.expected_signing_mode(), "pre-sign");
@@ -442,7 +445,7 @@ mod candidate_input_tests {
         }
         let preview = CandidateNativeProducts::resolve(
             &root,
-            &fixture.output("0.5.0", UNSIGNED_PREVIEW_RELATIVE_ROOT),
+            &fixture.output(PRODUCT_VERSION, UNSIGNED_PREVIEW_RELATIVE_ROOT),
             UNSIGNED_PREVIEW_BUILD_NUMBER,
         )
         .unwrap();
@@ -452,8 +455,8 @@ mod candidate_input_tests {
     #[test]
     fn release_refuses_other_builds_and_legacy_context_paths() {
         let fixture = Fixture::new();
-        let root = fixture.root("0.5.0");
-        let output = fixture.output("0.5.0", &ga_pre_sign_relative(FIXTURE_BUILD));
+        let root = fixture.root(PRODUCT_VERSION);
+        let output = fixture.output(PRODUCT_VERSION, &ga_pre_sign_relative(FIXTURE_BUILD));
         for build in [
             OTHER_BUILD,
             "40000",
@@ -480,7 +483,7 @@ mod candidate_input_tests {
             other_build_root.as_str(),
             signed_output.as_str(),
         ] {
-            let wrong = fixture.output("0.5.0", relative);
+            let wrong = fixture.output(PRODUCT_VERSION, relative);
             assert!(
                 CandidateNativeProducts::resolve(&root, &wrong, FIXTURE_BUILD).is_err(),
                 "{relative}"
@@ -497,7 +500,7 @@ mod candidate_input_tests {
                 assert!(CandidateNativeProducts::resolve(&old_root, &old, build).is_err());
             }
         }
-        // Release and validation outputs live under the same 0.5.0 root and
+        // Release and validation outputs live under the same product version root and
         // are told apart by their exact relative roots and build numbers.
         for (relative, build, expected) in [
             (
@@ -511,7 +514,7 @@ mod candidate_input_tests {
                 NativeProductContext::UnsignedPreviewValidation,
             ),
         ] {
-            let sibling = fixture.output("0.5.0", relative);
+            let sibling = fixture.output(PRODUCT_VERSION, relative);
             assert_eq!(
                 CandidateNativeProducts::resolve(&root, &sibling, build)
                     .unwrap()
@@ -526,8 +529,8 @@ mod candidate_input_tests {
     #[test]
     fn unsigned_preview_context_is_disjoint_from_every_production_root_and_mode() {
         let fixture = Fixture::new();
-        let root = fixture.root("0.5.0");
-        let output = fixture.output("0.5.0", UNSIGNED_PREVIEW_RELATIVE_ROOT);
+        let root = fixture.root(PRODUCT_VERSION);
+        let output = fixture.output(PRODUCT_VERSION, UNSIGNED_PREVIEW_RELATIVE_ROOT);
         let admitted = CandidateNativeProducts::resolve(&root, &output, "50000").unwrap();
         assert_eq!(
             admitted.context,
@@ -549,8 +552,8 @@ mod candidate_input_tests {
         }
         let ga_root = ga_pre_sign_relative(FIXTURE_BUILD);
         for (version, relative, build) in [
-            ("0.5.0", UNSIGNED_RELATIVE_ROOT, "40000"),
-            ("0.5.0", ga_root.as_str(), FIXTURE_BUILD),
+            (PRODUCT_VERSION, UNSIGNED_RELATIVE_ROOT, "40000"),
+            (PRODUCT_VERSION, ga_root.as_str(), FIXTURE_BUILD),
         ] {
             let other = fixture.output(version, relative);
             assert!(CandidateNativeProducts::resolve(&root, &output, build).is_err());
@@ -601,9 +604,9 @@ mod candidate_input_tests {
     #[test]
     fn release_rejects_raw_alias_and_symlinked_roots() {
         let fixture = Fixture::new();
-        let root = fixture.root("0.5.0");
+        let root = fixture.root(PRODUCT_VERSION);
         let relative = ga_pre_sign_relative(FIXTURE_BUILD);
-        let output = fixture.output("0.5.0", &relative);
+        let output = fixture.output(PRODUCT_VERSION, &relative);
         for wrong in [
             output.replace("ga-preflight/", "ga-preflight//"),
             output.replace("ga-preflight/", "ga-preflight/./"),

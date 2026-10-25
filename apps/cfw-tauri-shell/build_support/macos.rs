@@ -32,7 +32,7 @@ const GO_TOOLCHAIN_TREE_SHA256_ENV: &str = "CFW_GO_TOOLCHAIN_TREE_SHA256";
 const GO_TOOLS_TREE_SHA256_ENV: &str = "CFW_GO_TOOLS_TREE_SHA256";
 const GO_MODULE_CACHE_TREE_SHA256_ENV: &str = "CFW_GO_MODULE_CACHE_TREE_SHA256";
 
-const LIBBOX_METADATA_KEYS: [&str; 26] = [
+const LIBBOX_METADATA_KEYS: [&str; 28] = [
     "sourceTag",
     "sourceCommit",
     "goVersion",
@@ -59,6 +59,8 @@ const LIBBOX_METADATA_KEYS: [&str; 26] = [
     "combinedDiffSha256",
     "patchedGoModSha256",
     "patchedGoSumSha256",
+    "xcodeVersion",
+    "xcodeBuild",
 ];
 
 /// Every native product the release bundle embeds, with its required artifact
@@ -478,6 +480,10 @@ fn verify_release_native_artifacts(repository_root: &Path) -> Result<(), String>
         (validation_version.as_deref(), validation_build.as_deref()),
         validation_python.as_deref(),
     )?;
+    // cgo compiles and links Libbox with the selected Xcode, so Libbox names it
+    // too: one built by another Xcode is refused like a stale native product.
+    require_metadata(&manifest, "xcodeVersion", xcode_version)?;
+    require_metadata(&manifest, "xcodeBuild", xcode_build)?;
     for (product, artifact_kind) in NATIVE_PRODUCTS {
         let product_path = products.root.join(product);
         let product_manifest_path = products.root.join(format!("{product}.manifest.json"));

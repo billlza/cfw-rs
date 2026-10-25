@@ -8,7 +8,7 @@ use cfw_platform::{
     observe_gatekeeper_status, verify_release_signature,
 };
 
-const RELEASE_VERSION: &str = "0.5.0";
+const RELEASE_VERSION: &str = "0.5.1";
 /// The bundle build this executable was compiled as. build.rs sets it only for
 /// a release-profile build, after binding `CFW_BUILD_NUMBER` to the candidate's
 /// native product root and every native manifest; a development build has none

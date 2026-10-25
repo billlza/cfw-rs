@@ -126,23 +126,30 @@ for platform_name in (
 
 override = parse_json(sys.argv[2], "inline override")
 require_no_signing_identity(override, "inline override")
-if sys.argv[3] == "--native-ui-release":
-    # The release build is the active GA build of the identity file.
+if sys.argv[3] in ("--native-ui-release", "--native-ui-unsigned-preview"):
+    # Both native UI Hosts carry the product version of the identity file;
+    # the release Host also carries its active GA build.
     sys.path.insert(0, sys.argv[5] + "/scripts")
     from release_build_identity import ACTIVE_RELEASE_IDENTITY
 
+    product_version = ACTIVE_RELEASE_IDENTITY.product_version
+if sys.argv[3] == "--native-ui-release":
     release_build = ACTIVE_RELEASE_IDENTITY.ga_build
-    if base_config.get("version") != "0.5.0" or sys.argv[4] != release_build:
+    if base_config.get("version") != product_version or sys.argv[4] != release_build:
         raise SystemExit(
-            f"error: native UI Host requires exact release version/build 0.5.0/{release_build}"
+            "error: native UI Host requires exact release version/build "
+            f"{product_version}/{release_build}"
         )
     if override["bundle"]["macOS"].get("bundleVersion") != sys.argv[4]:
         raise SystemExit(
             f"error: native UI Host override must retain release build {release_build}"
         )
 elif sys.argv[3] == "--native-ui-unsigned-preview":
-    if base_config.get("version") != "0.5.0" or sys.argv[4] != "50000":
-        raise SystemExit("error: unsigned native UI Host requires exact validation version/build 0.5.0/50000")
+    if base_config.get("version") != product_version or sys.argv[4] != "50000":
+        raise SystemExit(
+            "error: unsigned native UI Host requires exact validation version/build "
+            f"{product_version}/50000"
+        )
     if override["bundle"]["macOS"].get("bundleVersion") != "50000":
         raise SystemExit("error: unsigned native UI Host override must retain validation build 50000")
 PY

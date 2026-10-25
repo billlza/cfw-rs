@@ -370,7 +370,7 @@ class ExecutionBeforeVersionTests(unittest.TestCase):
             root = self.toolchain_root / f"xcodegen-{self.pins['XCODEGEN_VERSION']}"
             binary = root / "bin/xcodegen"
             metadata = [
-                "artifactKind=pinned-xcodegen-toolchain-v3",
+                "artifactKind=pinned-xcodegen-toolchain-v4",
                 "buildPolicy=isolated-resolved-swiftpm-v1",
                 f"macosDeploymentTarget={self.pins['MACOS_DEPLOYMENT_TARGET']}",
                 f"packageResolvedSha256={self.pins['XCODEGEN_PACKAGE_RESOLVED_SHA256']}",
@@ -378,8 +378,6 @@ class ExecutionBeforeVersionTests(unittest.TestCase):
                 f"dependencyPatchSha256={self.pins['XCODEGEN_DEPENDENCY_PATCH_SHA256']}",
                 f"aexmlCommit={self.pins['XCODEGEN_AEXML_COMMIT']}",
                 f"aexmlUpstreamManifestSha256={self.pins['XCODEGEN_AEXML_UPSTREAM_MANIFEST_SHA256']}",
-                f"aexmlPatchSha256={self.pins['XCODEGEN_AEXML_PATCH_SHA256']}",
-                f"aexmlPatchedManifestSha256={self.pins['XCODEGEN_AEXML_PATCHED_MANIFEST_SHA256']}",
                 f"patchSha256={self.pins['XCODEGEN_PATCH_SHA256']}",
                 f"patchedSettingsBuilderSha256={self.pins['XCODEGEN_PATCHED_SETTINGS_BUILDER_SHA256']}",
                 "platform=darwin-arm64",
@@ -1001,7 +999,7 @@ class ReleaseConsumerContractTests(unittest.TestCase):
         self.assertIn(
             'if [[ $preview_validation -eq 1 ]]; then\n'
             '  build_version="50000"\n'
-            '  candidate_relative="target/candidates/0.5.0/unsigned/50000"\n'
+            '  candidate_relative="target/candidates/$product_version/unsigned/50000"\n'
             '  bundle_context="unsigned-preview-host"',
             unsigned,
         )
@@ -1367,9 +1365,18 @@ LIBBOX_VET_PACKAGES=(".")
             "combinedDiffSha256=$SING_BOX_COMBINED_DIFF_SHA256",
             "patchedGoModSha256=$SING_BOX_PATCHED_GO_MOD_SHA256",
             "patchedGoSumSha256=$SING_BOX_PATCHED_GO_SUM_SHA256",
+            "xcodeVersion=$XCODE_VERSION",
+            "xcodeBuild=$XCODE_BUILD_VERSION",
         ):
             with self.subTest(metadata=metadata):
                 self.assertIn(metadata, contract)
+        producer = (SCRIPTS / "build_libbox.sh").read_text(encoding="utf-8")
+        for metadata in (
+            '--metadata "xcodeVersion=$XCODE_VERSION"',
+            '--metadata "xcodeBuild=$XCODE_BUILD_VERSION"',
+        ):
+            with self.subTest(producer=metadata):
+                self.assertIn(metadata, producer)
 
         for relative in (
             "build_libbox.sh",
@@ -1395,7 +1402,9 @@ LIBBOX_VET_PACKAGES=(".")
             encoding="utf-8"
         )
         for fragment in (
-            "const LIBBOX_METADATA_KEYS: [&str; 26]",
+            "const LIBBOX_METADATA_KEYS: [&str; 28]",
+            'require_metadata(&manifest, "xcodeVersion", xcode_version)?;',
+            'require_metadata(&manifest, "xcodeBuild", xcode_build)?;',
             '"goToolchainTreeSha256"',
             '"goToolsTreeSha256"',
             '"goModuleCacheTreeSha256"',
@@ -1739,7 +1748,7 @@ LIBBOX_VET_PACKAGES=(".")
         readme = (REPOSITORY / "native/macos/README.md").read_text(encoding="utf-8")
         self.assertIn("export CFW_BUILD_NUMBER=40000", readme)
         self.assertIn(
-            "target/candidates/0.5.0/native-validation/40000/native-products",
+            "target/candidates/$CFW_PRODUCT_VERSION/native-validation/40000/native-products",
             readme,
         )
         self.assertNotIn(
@@ -2100,9 +2109,11 @@ LIBBOX_VET_PACKAGES=(".")
             "LOGNAME=cfw-release",
             "-Xswiftc -warnings-as-errors",
             '/usr/bin/strip -S "$xcodegen_bin_dir/xcodegen"',
-            "isolated XcodeGen build emitted a warning",
+            'cfw_reject_swiftpm_warnings "$resolve_log" "dependency resolution"',
+            'cfw_verify_xcodegen_aexml "$build_root/checkouts"',
+            'cfw_reject_swiftpm_warnings "$build_log" build',
             "XcodeGenResourceProbe.xcodeproj/project.pbxproj",
-            "artifactKind=pinned-xcodegen-toolchain-v3",
+            "artifactKind=pinned-xcodegen-toolchain-v4",
             "buildPolicy=isolated-resolved-swiftpm-v1",
             "packageResolvedSha256=$XCODEGEN_PACKAGE_RESOLVED_SHA256",
             "patchSha256=$XCODEGEN_PATCH_SHA256",
@@ -2111,6 +2122,25 @@ LIBBOX_VET_PACKAGES=(".")
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, bootstrap)
         self.assertNotIn("--skip-update", bootstrap)
+
+    def test_xcodegen_bootstrap_resolves_once_and_gates_it_before_building(self) -> None:
+        bootstrap = (SCRIPTS / "bootstrap_release_toolchain.sh").read_text(
+            encoding="utf-8"
+        )
+        install = bootstrap[bootstrap.index("install_xcodegen() {"):]
+        # SwiftPM evaluates every dependency manifest while it resolves, so a
+        # second resolve after editing a checkout would mean the first one
+        # evaluated the unedited manifest.
+        self.assertEqual(install.count('"${swift_resolve_command[@]}"'), 1)
+        self.assertNotIn("cfw_patch_xcodegen_aexml", bootstrap)
+        order = [
+            install.index('"${swift_resolve_command[@]}" 2>&1 | tee "$resolve_log"'),
+            install.index('cfw_reject_swiftpm_warnings "$resolve_log" "dependency resolution"'),
+            install.index('cfw_verify_xcodegen_aexml "$build_root/checkouts"'),
+            install.index('"${swift_build_command[@]}" 2>&1 | tee "$build_log"'),
+            install.index('cfw_reject_swiftpm_warnings "$build_log" build'),
+        ]
+        self.assertEqual(order, sorted(order))
 
     def test_native_project_keeps_script_sandboxing_and_omits_unused_app_intents(self) -> None:
         project_spec = (REPOSITORY / "native/macos/project.yml").read_text(
@@ -2282,7 +2312,7 @@ class PublicationToolchainBindingTests(unittest.TestCase):
                 f"xcodegen-{self.pins['XCODEGEN_VERSION']}",
                 f"xcodegen-{self.pins['XCODEGEN_VERSION']}.manifest.json",
                 [
-                    "artifactKind=pinned-xcodegen-toolchain-v3",
+                    "artifactKind=pinned-xcodegen-toolchain-v4",
                     "buildPolicy=isolated-resolved-swiftpm-v1",
                     f"macosDeploymentTarget={self.pins['MACOS_DEPLOYMENT_TARGET']}",
                     f"packageResolvedSha256={self.pins['XCODEGEN_PACKAGE_RESOLVED_SHA256']}",
@@ -2290,8 +2320,6 @@ class PublicationToolchainBindingTests(unittest.TestCase):
                     f"dependencyPatchSha256={self.pins['XCODEGEN_DEPENDENCY_PATCH_SHA256']}",
                     f"aexmlCommit={self.pins['XCODEGEN_AEXML_COMMIT']}",
                     f"aexmlUpstreamManifestSha256={self.pins['XCODEGEN_AEXML_UPSTREAM_MANIFEST_SHA256']}",
-                    f"aexmlPatchSha256={self.pins['XCODEGEN_AEXML_PATCH_SHA256']}",
-                    f"aexmlPatchedManifestSha256={self.pins['XCODEGEN_AEXML_PATCHED_MANIFEST_SHA256']}",
                     f"patchSha256={self.pins['XCODEGEN_PATCH_SHA256']}",
                     f"patchedSettingsBuilderSha256={self.pins['XCODEGEN_PATCHED_SETTINGS_BUILDER_SHA256']}",
                     "platform=darwin-arm64",

@@ -134,12 +134,12 @@ def expected_metadata(repository: Path, build: str, *, signing: str, clean: bool
                       context: NativeUiContext) -> dict[str, str]:
     if __package__:
         from .release_build_identity import (
-            ACTIVE_RELEASE_IDENTITY, PREVIEW_PRODUCT_VERSION, UNSIGNED_PREVIEW_VALIDATION_BUILD,
+            ACTIVE_RELEASE_IDENTITY, UNSIGNED_PREVIEW_VALIDATION_BUILD,
         )
         from .apple_validation_policy import selected_apple_identity, unsigned_runtime_apple_identity
     else:
         from release_build_identity import (
-            ACTIVE_RELEASE_IDENTITY, PREVIEW_PRODUCT_VERSION, UNSIGNED_PREVIEW_VALIDATION_BUILD,
+            ACTIVE_RELEASE_IDENTITY, UNSIGNED_PREVIEW_VALIDATION_BUILD,
         )
         from apple_validation_policy import selected_apple_identity, unsigned_runtime_apple_identity
     if not isinstance(context, NativeUiContext):
@@ -147,11 +147,10 @@ def expected_metadata(repository: Path, build: str, *, signing: str, clean: bool
     if context is NativeUiContext.UNSIGNED_PREVIEW_VALIDATION:
         if build != UNSIGNED_PREVIEW_VALIDATION_BUILD or signing != "unsigned-validation":
             raise NativeUiArtifactError("unsigned preview UI requires exact 50000 unsigned-validation identity")
-        product_version = PREVIEW_PRODUCT_VERSION
-    else:
-        if build != ACTIVE_RELEASE_IDENTITY.ga_build or signing not in {"pre-sign", "developer-id"}:
-            raise NativeUiArtifactError("UI products require the exact release identity")
-        product_version = ACTIVE_RELEASE_IDENTITY.product_version
+    elif build != ACTIVE_RELEASE_IDENTITY.ga_build or signing not in {"pre-sign", "developer-id"}:
+        raise NativeUiArtifactError("UI products require the exact release identity")
+    # The unsigned preview validation build carries the active product version.
+    product_version = ACTIVE_RELEASE_IDENTITY.product_version
     pins = dict(re.findall(r"^(XCODE_VERSION|XCODE_BUILD_VERSION)=([^\n]+)$",
                            (repository / "scripts/dependency_pins.env").read_text(), re.M))
     if context is NativeUiContext.UNSIGNED_PREVIEW_VALIDATION:

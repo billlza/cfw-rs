@@ -67,6 +67,7 @@ from scripts.harness.raw_artifacts import (
     require_sha256,
     verify_ps256,
 )
+from scripts.release_build_identity import PRODUCT_VERSION
 
 from .policy import PhysicalCapturePolicyError, load_source_pinned_policy
 
@@ -115,10 +116,10 @@ RECEIPT_RESPONSE_FIELDS = {
 }
 
 AGGREGATE_RELATIVE_PATH = PurePosixPath(
-    "target/candidates/0.5.0/assurance/private-physical-evidence/aggregate.json"
+    f"target/candidates/{PRODUCT_VERSION}/assurance/private-physical-evidence/aggregate.json"
 )
 DESCRIPTOR_RELATIVE_PATH = PurePosixPath(
-    "target/candidates/0.5.0/assurance/physical-candidate/physical-evidence.json"
+    f"target/candidates/{PRODUCT_VERSION}/assurance/physical-candidate/physical-evidence.json"
 )
 _PRIVATE_DIRECTORY_COMPONENTS = AGGREGATE_RELATIVE_PATH.parts[:-1]
 _DESCRIPTOR_DIRECTORY_COMPONENTS = DESCRIPTOR_RELATIVE_PATH.parts[:-1]

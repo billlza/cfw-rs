@@ -178,7 +178,9 @@ replies with a retryable timeout `ProxyAgentCallBudget.configurationCheckReply`
 after a check arrived, and `profileProbeReplyAllowance` past a probe's own
 timeout, in awake time; the call keeps running and keeps the next check or
 probe out until it returns; one that returned frees its slot before its
-reply. A call still inside libbox `abandonAfterReply` after its reply, or a
+reply. libbox times a probe's nodes from when the probe's instance has
+started, so building, starting and closing that instance fall in the
+allowance. A call still inside libbox `abandonAfterReply` after its reply, or a
 check or probe whose instance libbox could not close, retires the agent: it
 refuses checks, probes and starts, lets a running session stop as usual, and
 ends once it owns no start and no bound owner context. A spent agent refuses
@@ -264,8 +266,9 @@ build the four immutable native products in a candidate-specific directory:
 ./scripts/run_release_ci_gate.sh verify-xcode-project
 ./scripts/run_release_ci_gate.sh build-script-boundary
 
+source scripts/release_identity.env
 export CFW_BUILD_NUMBER=40000
-export CFW_NATIVE_PRODUCTS_OUTPUT="$PWD/target/candidates/0.5.0/native-validation/40000/native-products"
+export CFW_NATIVE_PRODUCTS_OUTPUT="$PWD/target/candidates/$CFW_PRODUCT_VERSION/native-validation/40000/native-products"
 ./scripts/run_release_ci_gate.sh build-native-products-unsigned
 ./scripts/run_release_ci_gate.sh xcode-unsigned-test
 ```

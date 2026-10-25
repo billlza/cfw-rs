@@ -382,7 +382,7 @@ mod platform {
                     let channel =
                         channel.ok_or("new native switches session needs a completion channel")?;
                     let session = NEXT_SESSION
-                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_add(1))
+                        .try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_add(1))
                         .map_err(|_| "native switches session exhausted")?;
                     let bytes = serde_json::to_vec(&Frame {
                         version: 1,

@@ -15,6 +15,12 @@
   modules it requires directly move to their newest releases, among them
   `golang.org/x/crypto` 0.58.0, `golang.org/x/net` 0.61.0, gRPC 1.84.0 and
   uTLS 1.8.8; sing-box's own modules stay at the versions released with it.
+- Build with Rust 1.99.1 instead of 1.98.1. Release builds accept only that
+  exact toolchain.
+- Move the Rust crates to the newest releases their requirements allow,
+  among them tokio 1.54.1, hyper 1.12.0, uuid 1.29.0, and the Tauri runtime
+  2.12.2 with wry 0.57.1. Crates pinned to an exact version, Tauri 2.12.0
+  among them, are unchanged.
 
 ## 0.5.0 — 2026-10-17
 

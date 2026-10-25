@@ -465,7 +465,7 @@ async fn observe(app: &AppHandle, session: u64, permit: OpenPermit) -> Result<()
 
 fn next_sequence() -> Result<u64, String> {
     SEQUENCE
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
             value.checked_add(1)
         })
         .map_err(|_| "native overview sequence exhausted".into())

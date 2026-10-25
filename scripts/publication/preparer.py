@@ -413,13 +413,13 @@ _SOURCE_CLOSURE_PLANS = {
     "rust": {
         "classification": "official-release-source-archive",
         "upstream": "https://static.rust-lang.org/dist/",
-        "reference": "rustc-1.98.1-src.tar.xz",
+        "reference": "rustc-1.99.1-src.tar.xz",
         "closure_action": (
-            "bind signed Rust 1.98.1 channel metadata, rustc executable SHA-256, verbose version, "
+            "bind signed Rust 1.99.1 channel metadata, rustc executable SHA-256, verbose version, "
             "and source commit as external build-tool provenance"
         ),
         "acceptance": (
-            "bind archive SHA-256 and source commit 48a229ceaefd4985c50990b14116b6d856af0985"
+            "bind archive SHA-256 and source commit 58cf8f9c35b355199727627d07ae34a4e2846d67"
         ),
     },
     "swift": {

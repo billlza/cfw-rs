@@ -371,7 +371,9 @@ class PreviewCandidateBundleTests(unittest.TestCase):
         value = plistlib.loads(path.read_bytes())
         value["CFBundleShortVersionString"] = "0.4.0"
         write_plist(path, value)
-        with self.assertRaisesRegex(bundle.CandidateError, "fixed product version"):
+        with self.assertRaisesRegex(
+            bundle.CandidateError, r"product versions differ: .*'proxy-agent': '0\.4\.0'"
+        ):
             self.verify(fixture)
 
     def test_missing_embedded_ui_library_or_resources_is_rejected(self) -> None:

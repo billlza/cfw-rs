@@ -2789,6 +2789,14 @@ fn clash_yaml_conversion_fails_closed_without_echoing_secrets() {
     );
     assert!(!error.contains("TopSecretValue!"), "{error}");
 
+    let multiplexed = "proxies:\n  - name: node\n    type: trojan\n    server: a.example.com\n    port: 443\n    password: TopSecretValue!\n    smux:\n      enabled: true\n";
+    let error = import_subscription_document(multiplexed).expect_err("smux");
+    assert!(
+        error.contains("uses stream multiplexing (smux), which is not supported"),
+        "{error}"
+    );
+    assert!(!error.contains("TopSecretValue!"), "{error}");
+
     let unknown_key = "proxies:\n  - name: node\n    type: ss\n    server: a.example.com\n    port: 8388\n    cipher: aes-256-gcm\n    password: TopSecretValue!\n    TopSecretValue123: 5\n";
     let error = import_subscription_document(unknown_key).expect_err("unknown key");
     assert!(error.contains("unsupported keys"), "{error}");

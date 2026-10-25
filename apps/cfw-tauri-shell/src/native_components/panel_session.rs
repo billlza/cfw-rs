@@ -254,7 +254,7 @@ impl<F: Family> State<F> {
         }
         let number = parent()?;
         let session = NEXT_SESSION
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_add(1))
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_add(1))
             .map_err(|_| format!("{} session exhausted", F::LABEL))?;
         let bytes = frame::<F>(request, session, number)?;
         let pending = Session::begin(&self.active, request, session, number, channel);

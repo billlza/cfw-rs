@@ -1,15 +1,15 @@
 diff --git a/dns/runtime_policy_test.go b/dns/runtime_policy_test.go
 --- a/dns/runtime_policy_test.go
 +++ b/dns/runtime_policy_test.go
-@@ -552,0 +553 @@
+@@ -559,0 +560 @@
 +			writesDone := make(chan uint16, 3)
-@@ -556,2 +557,3 @@
+@@ -563,2 +564,3 @@
 -					t.Error(err)
 -				}
 +					t.Errorf("response write for %s: %v", mdns.TypeToString[request.Question[0].Qtype], err)
 +				}
 +				writesDone <- request.Question[0].Qtype
-@@ -583,0 +586,15 @@
+@@ -590,0 +593,15 @@
 +			// The transport also probes TCP reuse with A/AAAA requests. Keep
 +			// the engine alive until those fixture writes complete; otherwise
 +			// test cleanup can reset their sockets after the TXT answer wins.

@@ -8,6 +8,7 @@ import itertools
 import json
 import os
 from pathlib import Path
+import plistlib
 import re
 import selectors
 import signal
@@ -71,7 +72,11 @@ from scripts.dormant_app_install import (
     resolve_predecessor,
     select_active_predecessor,
 )
-from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY, PRODUCT_VERSION
+from scripts.release_build_identity import (
+    ACTIVE_RELEASE_IDENTITY,
+    PRODUCT_VERSION,
+    bundle_identity_plists,
+)
 from scripts.tests.release_identity_fixture import next_patch
 
 
@@ -1736,6 +1741,74 @@ class DormantInstallValidationTests(unittest.TestCase):
                 ),
             )
         self.assertEqual(tombstone_error.exception.code, "cfm_legacy_tombstone_invalid")
+
+
+class InstalledApplicationIdentityTests(unittest.TestCase):
+    """The live reader sees an installed application as its bundles record it."""
+
+    @staticmethod
+    def make_app(root: Path, version: str, build: str) -> Path:
+        app = root / "Clash for Mac.app"
+        for path in bundle_identity_plists(app).values():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(
+                plistlib.dumps(
+                    {"CFBundleShortVersionString": version, "CFBundleVersion": build}
+                )
+            )
+            path.chmod(0o644)
+        return app
+
+    def test_the_predecessor_from_an_earlier_version_reaches_admission(self) -> None:
+        self.assertNotEqual(ACTIVE_PREDECESSOR.product_version, PRODUCT_VERSION)
+        with tempfile.TemporaryDirectory() as directory:
+            app = self.make_app(
+                Path(directory),
+                ACTIVE_PREDECESSOR.product_version,
+                ACTIVE_PREDECESSOR.build_number,
+            )
+            observed = install.read_app_identity(app)
+            self.assertEqual(
+                (observed.version, observed.build_number),
+                (ACTIVE_PREDECESSOR.product_version, ACTIVE_PREDECESSOR.build_number),
+            )
+            # Admission, not the reader, rejects the fixture's tree.
+            with self.assertRaises(InstallError) as raised:
+                resolve_predecessor(observed, GA_BUILD)
+            self.assertEqual(raised.exception.code, "predecessor_identity_mismatch")
+            fixture = replace(ACTIVE_PREDECESSOR, tree_sha256=observed.tree_sha256)
+            with patch.object(install, "ACTIVE_PREDECESSOR", fixture):
+                self.assertIs(resolve_predecessor(observed, GA_BUILD), fixture)
+
+    def test_the_installed_candidate_is_read_at_the_active_version(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            observed = install.read_app_identity(
+                self.make_app(Path(directory), PRODUCT_VERSION, GA_BUILD)
+            )
+        self.assertEqual((observed.version, observed.build_number), (PRODUCT_VERSION, GA_BUILD))
+
+    def test_a_predecessor_build_at_the_active_version_is_not_the_predecessor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            observed = install.read_app_identity(
+                self.make_app(Path(directory), PRODUCT_VERSION, ACTIVE_PREDECESSOR.build_number)
+            )
+        with self.assertRaises(InstallError) as raised:
+            resolve_predecessor(observed, GA_BUILD)
+        self.assertEqual(raised.exception.code, "install_identity_mismatch")
+
+    def test_an_unregistered_earlier_identity_is_invalid(self) -> None:
+        unregistered_build = str(int(ACTIVE_PREDECESSOR.build_number) + 1)
+        self.assertNotIn(unregistered_build, SUPPORTED_PREDECESSORS)
+        for version, build in (
+            (ACTIVE_PREDECESSOR.product_version, unregistered_build),
+            (next_patch(PRODUCT_VERSION), ACTIVE_PREDECESSOR.build_number),
+        ):
+            with self.subTest(version=version, build=build):
+                with tempfile.TemporaryDirectory() as directory:
+                    app = self.make_app(Path(directory), version, build)
+                    with self.assertRaises(InstallError) as raised:
+                        install.read_app_identity(app)
+                self.assertEqual(raised.exception.code, "app_identity_invalid")
 
 
 class InstallPredecessorTests(unittest.TestCase):

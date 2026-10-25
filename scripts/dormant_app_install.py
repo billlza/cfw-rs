@@ -69,6 +69,7 @@ if __package__:
         canonical_build_version,
         ga_signed_native_products_root,
         ga_signed_root,
+        read_bundle_identity,
     )
     from .release_executor_source import (
         ExecutorSourceError,
@@ -109,6 +110,7 @@ else:
         canonical_build_version,
         ga_signed_native_products_root,
         ga_signed_root,
+        read_bundle_identity,
     )
     from release_executor_source import (
         ExecutorSourceError,
@@ -651,10 +653,26 @@ def _tree_sha256(path: Path, label: str) -> str:
 
 
 def read_app_identity(path: Path) -> AppIdentity:
+    """The identity of an installed or newly installed application.
+
+    The installed application may be a predecessor of an earlier product
+    version, so the reader admits the active product version or the exact
+    version and build of a registered predecessor; admission then decides
+    which installation may be replaced.
+    """
+
     try:
-        identity = bundle_build_identity(path)
+        identity = read_bundle_identity(path)
     except (OSError, BuildIdentityError, ValueError) as error:
         raise InstallError("app_identity_invalid", f"invalid application identity: {path}") from error
+    if identity.product_version != VERSION:
+        predecessor = SUPPORTED_PREDECESSORS.get(identity.build_version)
+        if predecessor is None or predecessor.product_version != identity.product_version:
+            raise InstallError(
+                "app_identity_invalid",
+                f"application identity is neither the active product version nor a "
+                f"registered predecessor: {path}",
+            )
     return AppIdentity(
         version=identity.product_version,
         build_number=identity.build_version,

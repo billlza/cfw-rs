@@ -142,7 +142,7 @@ pub(super) async fn present(
                     return Err("native menu renderer was closed or reloaded".into());
                 }
                 let session = NEXT_SESSION
-                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_add(1))
+                    .try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_add(1))
                     .map_err(|_| "native menu session exhausted")?;
                 let (mut number, mut x, mut y) = (0_i64, 0.0, 0.0);
                 let point = &request.point;

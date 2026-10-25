@@ -55,9 +55,9 @@ sha2.workspace = true
 # The pinned Tauri build checker reads this root dependency's feature list,
 # independently of target-specific additions. Keep it consistent with the
 # shared configuration; platform SDK dependencies remain target-selected.
-tauri = { version = "=2.12.0", features = ["macos-private-api", "tray-icon"] }
-tauri-plugin-single-instance = "=2.4.5"
-tauri-plugin-global-shortcut = "=2.3.2"
+tauri = { version = "=2.12.3", features = ["macos-private-api", "tray-icon"] }
+tauri-plugin-single-instance = "=2.5.4"
+tauri-plugin-global-shortcut = "=2.4.1"
 thiserror.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["io-util", "net"] }
@@ -67,11 +67,11 @@ uuid.workspace = true
 zeroize.workspace = true
 
 [build-dependencies]
-cc = "=1.5.1"
+cc = "=1.10.0"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sha2.workspace = true
-tauri-build = { version = "=2.7.0", features = [] }
+tauri-build = { version = "=2.7.2", features = [] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cfw-apple-network = { path = "../../crates/cfw-apple-network" }

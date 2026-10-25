@@ -150,6 +150,20 @@ def _pinned_versions(repository: Path) -> tuple[str, str, str, str]:
     )
 
 
+def pinned_release_python_launcher(repository: Path) -> Path:
+    """The Homebrew Cellar launcher of the pinned release Python.
+
+    Homebrew installs python@3.x as an altinstall once a newer series owns its
+    ``python3`` alias, so only the versioned launcher is guaranteed to exist.
+    """
+    version = _pinned_versions(repository)[0]
+    series = version.rsplit(".", 1)[0]
+    return Path(
+        f"/opt/homebrew/Cellar/python@{series}/{version}/Frameworks/"
+        f"Python.framework/Versions/{series}/bin/python{series}"
+    )
+
+
 def require_closed_release_runtime(*, allow_unsigned_validation: bool = False) -> None:
     repository = Path(__file__).resolve().parent.parent
     version, rust_version, cargo_audit_version, cargo_deny_version = (
@@ -196,11 +210,8 @@ def require_closed_release_runtime(*, allow_unsigned_validation: bool = False) -
                 "unsigned-validation Python identity cannot be resolved"
             ) from error
     else:
-        expected_root = Path(
-            f"/opt/homebrew/Cellar/python@{series}/{version}/Frameworks/"
-            f"Python.framework/Versions/{series}"
-        )
-        expected_executable = expected_root / "bin" / f"python{series}"
+        expected_executable = pinned_release_python_launcher(repository)
+        expected_root = expected_executable.parent.parent
     expected_runtime = expected_root / "Python"
     expected_stdlib = expected_root / "lib" / f"python{series}"
     try:

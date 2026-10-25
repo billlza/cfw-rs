@@ -247,9 +247,13 @@ applied to the macOS slice.
 The direct binder invocation adds the explicit `-macosversion` release
 requirement from `MACOS_DEPLOYMENT_TARGET`, which the upstream wrapper does not
 expose. The product tag set is
-intentionally smaller than the upstream Apple client: the unsupported Naive,
-Tailscale and DHCP surfaces are not compiled, so their transitive archives and
-warning-prone Cronet payload are absent rather than suppressed. WireGuard and
+intentionally smaller than the upstream Apple client: the unsupported Naive
+and DHCP surfaces are not compiled, so their transitive archives and
+warning-prone Cronet payload are absent rather than suppressed. Tailscale is
+compiled (`with_tailscale`) for the exit-node endpoint, with the same
+`ts_omit_*` tags as the upstream Apple build, so the log upload, the SSH
+server, Taildrive, Taildrop, the web client and the platform integrations the
+Mac never uses stay out of the archive. WireGuard and
 gVisor are compiled (`with_wireguard`, `with_gvisor`) for the userspace
 WireGuard endpoint described above.
 

@@ -211,6 +211,21 @@ fn retain_loadable_rules(rules: Option<&mut Value>, loadable: &BTreeSet<String>)
     }
 }
 
+/// The probe configuration and credentials derived from one projection, with
+/// the tags the probe cannot measure.
+pub(crate) struct ProxyProbeTemplate {
+    pub(crate) json: String,
+    pub(crate) credential_slots: Vec<CredentialSlot>,
+    pub(crate) excluded_tags: Vec<String>,
+}
+
+fn projected_tag(outbound: &Value) -> String {
+    outbound["tag"]
+        .as_str()
+        .expect("every projected outbound carries a tag")
+        .to_owned()
+}
+
 impl ProjectedConfig {
     /// A transient, outbound-only view for explicit node latency tests. The
     /// normal projection remains the source of protocol/DNS/credential policy;
@@ -224,7 +239,10 @@ impl ProjectedConfig {
     /// fall through to the rules after them. The inline sets the remaining
     /// rules name are kept: sing-box refuses a rule that names an undeclared
     /// set.
-    pub(crate) fn proxy_probe_json(&self) -> Result<String, ConfigError> {
+    ///
+    /// Tailscale endpoints stay with the running core (see below), and the
+    /// template names the tags it therefore cannot measure.
+    pub(crate) fn proxy_probe_template(&self) -> Result<ProxyProbeTemplate, ConfigError> {
         let mut root: Map<String, Value> = serde_json::from_str(&self.json)?;
         root.retain(|key, _| matches!(key.as_str(), "outbounds" | "endpoints" | "dns"));
         let mut original: Value = serde_json::from_str(&self.json)?;
@@ -286,7 +304,92 @@ impl ProjectedConfig {
                 }
             }
         }
-        Ok(serde_json::to_string(&root)?)
+        // A Tailscale endpoint registers a tailnet node from its persistent
+        // state directory. A transient probe would register a second node from
+        // the same key, or fail outright on a single-use key, so the probe
+        // leaves those endpoints out together with every group left without a
+        // member, and the slots of the remaining endpoints move up with them.
+        let mut excluded = BTreeSet::new();
+        let mut endpoint_positions = Vec::new();
+        if let Some(Value::Array(endpoints)) = root.get_mut("endpoints") {
+            let mut kept = Vec::with_capacity(endpoints.len());
+            for endpoint in endpoints.drain(..) {
+                if endpoint["type"] == "tailscale" {
+                    excluded.insert(projected_tag(&endpoint));
+                    endpoint_positions.push(None);
+                } else {
+                    endpoint_positions.push(Some(kept.len()));
+                    kept.push(endpoint);
+                }
+            }
+            *endpoints = kept;
+        }
+        if root
+            .get("endpoints")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty)
+        {
+            root.remove("endpoints");
+        }
+        if let Some(Value::Array(outbounds)) = root.get_mut("outbounds") {
+            while !excluded.is_empty() {
+                let mut emptied = Vec::new();
+                for outbound in outbounds.iter_mut() {
+                    if outbound["type"] != "selector" {
+                        continue;
+                    }
+                    let tag = projected_tag(outbound);
+                    let Some(Value::Array(members)) = outbound.get_mut("outbounds") else {
+                        continue;
+                    };
+                    members.retain(|member| {
+                        !member
+                            .as_str()
+                            .is_some_and(|member| excluded.contains(member))
+                    });
+                    if members.is_empty() {
+                        emptied.push(tag);
+                    } else if outbound["default"]
+                        .as_str()
+                        .is_some_and(|default| excluded.contains(default))
+                    {
+                        outbound
+                            .as_object_mut()
+                            .expect("selector projection is an object")
+                            .remove("default");
+                    }
+                }
+                if emptied.is_empty() {
+                    break;
+                }
+                outbounds.retain(|outbound| !emptied.contains(&projected_tag(outbound)));
+                excluded.extend(emptied);
+            }
+        }
+        let credential_slots = self
+            .credential_slots
+            .iter()
+            .filter_map(|slot| {
+                if slot.target().container() != "endpoints" {
+                    return Some(Ok(slot.clone()));
+                }
+                let position = endpoint_positions
+                    .get(usize::from(slot.outbound_index()))
+                    .copied()
+                    .expect("every endpoint slot indexes a projected endpoint");
+                position.map(|index| {
+                    CredentialSlot::new(slot.reference().clone(), slot.target(), index)
+                        .map_err(ConfigError::from)
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let template = Value::Object(root);
+        validate_slots(&template, &credential_slots)?;
+        Ok(ProxyProbeTemplate {
+            json: serde_json::to_string(&template)?,
+            credential_slots,
+            excluded_tags: excluded.into_iter().collect(),
+        })
     }
 
     pub fn mode(&self) -> ProjectionMode {
@@ -331,6 +434,7 @@ pub struct ProxyProbe {
     credential_audience: CredentialAudience,
     credential_slots: Vec<CredentialSlot>,
     json: String,
+    excluded_tags: Vec<String>,
 }
 
 impl fmt::Debug for ProxyProbe {
@@ -339,6 +443,7 @@ impl fmt::Debug for ProxyProbe {
             .debug_struct("ProxyProbe")
             .field("credential_audience", &self.credential_audience)
             .field("credential_slots", &self.credential_slots)
+            .field("excluded_tags", &self.excluded_tags)
             .field("json", &"[REDACTED CONFIG TEMPLATE]")
             .finish()
     }
@@ -355,6 +460,12 @@ impl ProxyProbe {
 
     pub fn as_json(&self) -> &str {
         &self.json
+    }
+
+    /// Tags the probe cannot measure: Tailscale endpoints, whose node state
+    /// belongs to the running core, and groups left without a member.
+    pub fn excluded_tags(&self) -> &[String] {
+        &self.excluded_tags
     }
 }
 
@@ -386,10 +497,12 @@ impl ValidatedSingBoxProfile {
             ..settings.clone()
         };
         let projected = self.project(profile_id, mode, &settings)?;
+        let template = projected.proxy_probe_template()?;
         Ok(ProxyProbe {
-            json: projected.proxy_probe_json()?,
+            json: template.json,
             credential_audience: projected.credential_audience,
-            credential_slots: projected.credential_slots,
+            credential_slots: template.credential_slots,
+            excluded_tags: template.excluded_tags,
         })
     }
 
@@ -452,10 +565,13 @@ impl ValidatedSingBoxProfile {
         let bootstrap_tags =
             crate::dns_policy::resolver_tags("cfw-bootstrap-dns", bootstrap_servers.len());
         let bootstrap_resolver = crate::dns_policy::resolver_value(&bootstrap_tags);
-        let runtime_outbounds = self.document.runtime_outbounds(DomainResolverTags {
-            server: &bootstrap_tags[0],
-            fallback_servers: &bootstrap_tags[1..],
-        })?;
+        let runtime_outbounds = self.document.runtime_outbounds(
+            profile_id,
+            DomainResolverTags {
+                server: &bootstrap_tags[0],
+                fallback_servers: &bootstrap_tags[1..],
+            },
+        )?;
         let selected_outbound = runtime_outbounds.selected_outbound.clone();
         let direct_outbound = runtime_outbounds.direct_outbound.clone();
         let global_outbound = runtime_outbounds.global_outbound.clone();

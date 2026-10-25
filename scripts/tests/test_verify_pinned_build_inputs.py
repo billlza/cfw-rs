@@ -142,6 +142,11 @@ PROJECTION_TRIGGER = (
     'root.insert("experimental".into(), clash_api.experimental_value());'
 )
 PROJECTION_SOURCE = f"fn project() {{\n    {PROJECTION_TRIGGER}\n}}\n"
+PROFILE_PROJECTION_RELATIVE_PATH = "crates/cfw-singbox-config/src/profile_projection.rs"
+PROFILE_PROJECTION_TRIGGER = 'base_outbound("tailscale", tag)'
+PROFILE_PROJECTION_SOURCE = (
+    f"fn runtime_projection() {{\n    let mut object = {PROFILE_PROJECTION_TRIGGER};\n}}\n"
+)
 TAURI_INSTALLER = """\
 #!/usr/bin/env bash
 echo "https://static.crates.io/crates/tauri-cli/tauri-cli-$TAURI_CLI_VERSION.crate"
@@ -402,6 +407,7 @@ class Fixture:
         }
         self.controller_source = CONTROLLER_SOURCE
         self.projection_source = PROJECTION_SOURCE
+        self.profile_projection_source = PROFILE_PROJECTION_SOURCE
         shipped = copy.deepcopy(SHIPPED_PINNED_MANIFEST)
         self.manifest = {
             "schema": shipped["schema"],
@@ -546,6 +552,9 @@ class Fixture:
         projection = root / PROJECTION_RELATIVE_PATH
         projection.parent.mkdir(parents=True, exist_ok=True)
         projection.write_text(self.projection_source, encoding="utf-8")
+        profile_projection = root / PROFILE_PROJECTION_RELATIVE_PATH
+        profile_projection.parent.mkdir(parents=True, exist_ok=True)
+        profile_projection.write_text(self.profile_projection_source, encoding="utf-8")
         (root / MANIFEST_RELATIVE_PATH).write_text(json.dumps(self.manifest), encoding="utf-8")
         (root / "scripts/dependency_pins.env").write_text(self.env_text(), encoding="utf-8")
         for key, body in self.patch_bodies.items():

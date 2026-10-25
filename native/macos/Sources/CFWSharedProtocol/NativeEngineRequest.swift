@@ -129,6 +129,7 @@ public enum CredentialKind: String, Codable, CaseIterable, Sendable {
   case anytlsPassword = "anytls_password"
   case tuicUUID = "tuic_uuid"
   case tuicPassword = "tuic_password"
+  case tailscaleAuthKey = "tailscale_auth_key"
 }
 
 extension CredentialKind {
@@ -150,6 +151,11 @@ extension CredentialKind {
     case .shadowsocksPassword, .trojanPassword, .hysteria2Password,
       .hysteria2ObfsPassword, .anytlsPassword, .tuicPassword:
       return true
+    case .tailscaleAuthKey:
+      // One bounded token of printable ASCII: Tailscale auth keys, OAuth
+      // client secrets and Headscale pre-authentication keys all have it.
+      return (1...256).contains(value.utf8.count)
+        && value.utf8.allSatisfy { (0x21...0x7e).contains($0) }
     }
   }
 }
@@ -170,6 +176,7 @@ public enum CredentialTarget: String, Codable, CaseIterable, Sendable {
   case anytlsPassword = "anytls_password"
   case tuicUUID = "tuic_uuid"
   case tuicPassword = "tuic_password"
+  case tailscaleAuthKey = "tailscale_auth_key"
 
   fileprivate var credentialKind: CredentialKind {
     switch self {
@@ -188,6 +195,7 @@ public enum CredentialTarget: String, Codable, CaseIterable, Sendable {
     case .anytlsPassword: .anytlsPassword
     case .tuicUUID: .tuicUUID
     case .tuicPassword: .tuicPassword
+    case .tailscaleAuthKey: .tailscaleAuthKey
     }
   }
 
@@ -204,12 +212,14 @@ public enum CredentialTarget: String, Codable, CaseIterable, Sendable {
       "uuid"
     case .hysteria2ObfsPassword:
       "obfs/password"
+    case .tailscaleAuthKey:
+      "auth_key"
     }
   }
 
   public var configurationContainer: String {
     switch self {
-    case .wireguardPrivateKey, .wireguardPreSharedKey: "endpoints"
+    case .wireguardPrivateKey, .wireguardPreSharedKey, .tailscaleAuthKey: "endpoints"
     case .socks5Username, .socks5Password, .httpProxyUsername, .httpProxyPassword,
       .shadowsocksPassword,
       .vmessUUID, .vlessUUID, .trojanPassword, .hysteria2Password,

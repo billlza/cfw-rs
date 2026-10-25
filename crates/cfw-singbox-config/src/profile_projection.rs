@@ -39,6 +39,7 @@ const APP_SELECTOR_TAG: &str = "cfw-proxy-selector";
 impl ProfileDocument {
     pub(crate) fn runtime_outbounds(
         &self,
+        profile_id: &str,
         bootstrap_resolver: DomainResolverTags<'_>,
     ) -> Result<RuntimeOutboundProjection, ConfigError> {
         let proxy_tags = self
@@ -67,14 +68,14 @@ impl ProfileDocument {
         let mut endpoints = Vec::new();
         let mut slots = Vec::new();
         for outbound in &self.outbounds {
-            let endpoint = matches!(outbound, ProfileOutbound::WireGuard { .. });
+            let endpoint = outbound.is_endpoint();
             let index = if endpoint {
                 endpoints.len()
             } else {
                 outbounds.len()
             };
             let (mut projected, mut outbound_slots) =
-                outbound.runtime_projection(index, bootstrap_resolver)?;
+                outbound.runtime_projection(index, profile_id, bootstrap_resolver)?;
             if let Some(detour) = self.detours.get(outbound.tag()) {
                 let object = projected
                     .as_object_mut()
@@ -174,8 +175,7 @@ impl ProfileDocument {
         // Endpoint-backed policies must not fall through to the synthesized
         // DIRECT outbound simply because endpoints use a separate array.
         let injected_route_final = injected_route_final.or_else(|| {
-            (!has_explicit_final && matches!(self.outbounds[0], ProfileOutbound::WireGuard { .. }))
-                .then(|| profile_final.clone())
+            (!has_explicit_final && self.outbounds[0].is_endpoint()).then(|| profile_final.clone())
         });
         if let Some(resolver) = direct_resolver {
             for outbound in &mut outbounds {
@@ -218,6 +218,7 @@ impl ProfileOutbound {
     fn runtime_projection(
         &self,
         index: usize,
+        profile_id: &str,
         bootstrap_resolver: DomainResolverTags<'_>,
     ) -> Result<(Value, Vec<CredentialSlot>), ConfigError> {
         let (mut object, slots) = match self {
@@ -257,6 +258,47 @@ impl ProfileOutbound {
                 if server.parse::<IpAddr>().is_err() {
                     object.insert("domain_resolver".into(), bootstrap_resolver.value());
                 }
+                (object, slots)
+            }
+            Self::Tailscale {
+                tag,
+                auth_key_credential_ref,
+                exit_node,
+                control_server,
+                hostname,
+                accept_routes,
+                exit_node_allow_lan_access,
+            } => {
+                let mut object = base_outbound("tailscale", tag);
+                // The node's key lives with the profile, inside the runtime's own
+                // working directory, so the agent and the tunnel daemon each keep
+                // their own registration and no other profile can reuse it.
+                object.insert(
+                    "state_directory".into(),
+                    json!(format!("tailscale/{profile_id}")),
+                );
+                object.insert("auth_key".into(), json!(""));
+                if let Some(server) = control_server {
+                    object.insert("control_url".into(), json!(server));
+                }
+                if let Some(hostname) = hostname {
+                    object.insert("hostname".into(), json!(hostname));
+                }
+                if *accept_routes {
+                    object.insert("accept_routes".into(), json!(true));
+                }
+                object.insert("exit_node".into(), json!(exit_node));
+                if *exit_node_allow_lan_access {
+                    object.insert("exit_node_allow_lan_access".into(), json!(true));
+                }
+                // The coordination server and the DERP relays are domain names
+                // the endpoint dials itself.
+                object.insert("domain_resolver".into(), bootstrap_resolver.value());
+                let slots = vec![CredentialSlot::new(
+                    auth_key_credential_ref.clone(),
+                    CredentialTarget::TailscaleAuthKey,
+                    index,
+                )?];
                 (object, slots)
             }
             Self::Direct { tag } => (base_outbound("direct", tag), Vec::new()),

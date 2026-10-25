@@ -2,6 +2,19 @@
 
 ## 0.5.1 - Unreleased
 
+### Profiles
+
+- Add the `tailscale` node. The Mac joins a tailnet with an auth key kept in
+  the credential vault and sends the traffic routed to the node through one
+  exit node (`exit_node`), with optional `control_server` (an https URL, for
+  Headscale), `hostname`, `accept_routes` and `exit_node_allow_lan_access`.
+  The node never advertises routes or an exit node, runs no Tailscale SSH
+  server and takes no Taildrop, in the profile and at import; a sing-box node
+  list's `endpoints` entry imports with its `auth_key` moved into the vault.
+  Each runtime keeps the node's state under its own working directory, so use
+  a reusable auth key, and the latency test measures the node only while the
+  core runs its profile. Earlier releases reject profiles that carry the node.
+
 ### Reliability
 
 - Give every node of a latency test its whole timeout. The engine a test
@@ -19,8 +32,27 @@
   exact toolchain.
 - Move the Rust crates to the newest releases their requirements allow,
   among them tokio 1.54.1, hyper 1.12.0, uuid 1.29.0, and the Tauri runtime
-  2.12.2 with wry 0.57.1. Crates pinned to an exact version, Tauri 2.12.0
-  among them, are unchanged.
+  2.12.2 with wry 0.57.1.
+- Move the crates pinned to an exact version to their newest admissible
+  releases: Tauri 2.12.3 with tauri-build 2.7.2, the single-instance plugin
+  2.5.4, the global-shortcut plugin 2.4.1 and cc 1.10.0, with the Tauri
+  JavaScript API 2.12.4. The pinned Tauri CLI that builds and signs the
+  release moves to 2.12.4. Tauri 2.12.4 and 2.12.5 require tauri-build 2.7.3
+  or later, which depends on `static_vcruntime` 3.0.0; that crate ships both
+  `README.md` and `Readme.md`, which cannot be vendored byte for byte on the
+  case-insensitive release volume, so those releases stay out until the crate
+  is republished.
+- Build the interface with Node 26.12.1 and npm 12.2.1, run the release tools
+  on Python 3.14.9, and scan the engine's Go graph with govulncheck 1.9.0.
+- Build the packet-evidence endpoint with Go 1.27.3, the release that fixes
+  GO-2026-6809 in `crypto/x509`, instead of 1.27.2. The endpoint keeps its
+  own toolchain pin; the rebuilt binary rebinds the installer, the three GCE
+  instance identities and the endpoint policy, and the instances run the
+  earlier binary until the installation transaction is rerun on each of them.
+- Build the network engine with `with_tailscale` and the `ts_omit_*` tags of
+  the upstream Apple client, which leave out the Tailscale log upload, SSH
+  server, Taildrive, Taildrop, web client and platform integrations the Mac
+  never uses.
 
 ## 0.5.0 — 2026-10-17
 

@@ -263,6 +263,11 @@ REQUIRED_ENGINE_START_PATH_BINDINGS = frozenset(
             "crates/cfw-singbox-config/src/projection.rs",
             'root.insert("experimental".into(), clash_api.experimental_value());',
         ),
+        (
+            "with_tailscale",
+            "crates/cfw-singbox-config/src/profile_projection.rs",
+            'base_outbound("tailscale", tag)',
+        ),
     }
 )
 REQUIRED_LIBBOX_BUILD_TAGS = frozenset(
@@ -272,6 +277,18 @@ REQUIRED_LIBBOX_BUILD_TAGS = frozenset(
         "with_quic",
         "with_utls",
         "with_clash_api",
+        "with_tailscale",
+        "ts_omit_logtail",
+        "ts_omit_ssh",
+        "ts_omit_drive",
+        "ts_omit_taildrop",
+        "ts_omit_webclient",
+        "ts_omit_doctor",
+        "ts_omit_capture",
+        "ts_omit_kube",
+        "ts_omit_aws",
+        "ts_omit_synology",
+        "ts_omit_bird",
         "badlinkname",
         "tfogo_checklinkname0",
         "grpcnotrace",
@@ -341,7 +358,7 @@ _PACKET_ENDPOINT_SYSTEMD_UNIT_SHA256 = (
     "7d485a9fe9081ebf019fcc8abc1d596358a64326e2490749d9903197262e3996"
 )
 _PACKET_ENDPOINT_INSTALL_SCRIPT_SHA256 = (
-    "331d82561cf88af651bf9bc854946b443655d5a2e6fa498f8f2925bcc767575a"
+    "fb24d320372c327a033a839c8759fb58afe5c7ecf140d204c31bccb73de06cff"
 )
 _PACKET_ENDPOINT_RESOLVER_CONFIG_SHA256 = (
     "b290cc794e7f0faac9ebbd63f83aad67d23086b48206295d5d6a2767721c1e62"
@@ -353,7 +370,7 @@ _PACKET_ENDPOINT_KNOWN_HOSTS_SHA256 = (
     "3741384531dbd24c65a2225386beae492bf92c61fdf2d5b90b57051d57be36ba"
 )
 _PACKET_ENDPOINT_POLICY_SHA256 = (
-    "9b7e1e8d892bc87568bbd122e502e4c0f74a2d9579e398d9d2563372772be19a"
+    "afa5339dea0b6369f45a6dac9005ad49314e5173b2b62d68b2271d6cfa490f14"
 )
 _PACKET_ENDPOINT_SOURCE_PATHS = frozenset(
     {

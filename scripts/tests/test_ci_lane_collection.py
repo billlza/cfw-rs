@@ -529,24 +529,33 @@ class ReleaseToolEnvironmentTests(unittest.TestCase):
                         self.assertNotIn("RUSTUP_HOME", environment)
                         self.assertNotIn("RUSTUP_TOOLCHAIN", environment)
 
-    def test_unsigned_validation_python_is_explicit_and_production_rejects_it(
-        self,
-    ) -> None:
+    def test_production_refuses_an_unsigned_validation_python(self) -> None:
         current = _current_release_environment(self.repository, self.pins)
-        validation_python = os.environ.get("CFW_UNSIGNED_VALIDATION_PYTHON")
-        if validation_python is None:
-            validation_python = str(
-                Path(current["CFW_RELEASE_PYTHON_EXECUTABLE"]).parent / "python3"
-            )
         source = dict(os.environ)
-        source["CFW_UNSIGNED_VALIDATION_PYTHON"] = validation_python
-
+        # Any launcher is refused by the production role, the release Python's
+        # own included; the refusal precedes every path check.
+        source["CFW_UNSIGNED_VALIDATION_PYTHON"] = os.environ.get(
+            "CFW_UNSIGNED_VALIDATION_PYTHON", current["CFW_RELEASE_PYTHON_EXECUTABLE"]
+        )
         with self.assertRaisesRegex(
             PublicationError, "refuses an unsigned-validation Python"
         ):
             ci_lanes.release_tool_environment(
                 self.repository, self.pins, source
             )
+
+    def test_unsigned_validation_python_round_trips_the_closed_environment(
+        self,
+    ) -> None:
+        # Only a real toolcache prefix (bin/python3 beside lib/python3.x) can
+        # seal the unsigned-validation role; Homebrew's altinstall Cellar has
+        # no such launcher, so the hosted lane supplies one explicitly.
+        validation_python = os.environ.get("CFW_UNSIGNED_VALIDATION_PYTHON")
+        if validation_python is None:
+            self.skipTest("no unsigned-validation Python launcher is configured")
+        current = _current_release_environment(self.repository, self.pins)
+        source = dict(os.environ)
+        source["CFW_UNSIGNED_VALIDATION_PYTHON"] = validation_python
 
         unsigned = ci_lanes.release_tool_environment(
             self.repository,

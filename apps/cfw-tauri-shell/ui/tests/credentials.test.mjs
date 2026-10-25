@@ -29,12 +29,21 @@ test("WireGuard provisioning validates canonical nonzero keys before IPC", () =>
   }
 });
 
+test("Tailscale auth keys are one printable token before IPC", () => {
+  const references = [{ id: FIRST.id, kind: "tailscale_auth_key" }];
+  const key = "tskey-auth-kTEST1CNTRL-abcdefghijklmnopqrstuvwxyz0123456789";
+  assert.equal(credentialProvisionBatch(references, [key])[0].secret, key);
+  for (const invalid of ["tskey auth", "tskey-auth-\u00fc", "x".repeat(257)]) {
+    assert.throws(() => credentialProvisionBatch(references, [invalid]), /Tailscale/u);
+  }
+});
+
 test("credential references must be immutable UUIDs of a known kind", () => {
   assert.deepEqual(
     normalizeCredentialReferences([FIRST, SECOND, ANYTLS, TUIC_UUID, TUIC_PASSWORD]),
     [FIRST, SECOND, ANYTLS, TUIC_UUID, TUIC_PASSWORD],
   );
-  assert.deepEqual(CREDENTIAL_KINDS.slice(-5), ["anytls_password", "tuic_uuid", "tuic_password", "wireguard_private_key", "wireguard_pre_shared_key"]);
+  assert.deepEqual(CREDENTIAL_KINDS.slice(-6), ["anytls_password", "tuic_uuid", "tuic_password", "wireguard_private_key", "wireguard_pre_shared_key", "tailscale_auth_key"]);
   assert.deepEqual(normalizeCredentialReferences([]), []);
   for (const rejected of [
     [{ id: "not-a-uuid", kind: "trojan_password" }],
@@ -133,6 +142,7 @@ test("credential kinds are labelled for a person, not for a schema", () => {
   assert.equal(credentialLabel("tuic_password"), "TUIC Password");
   assert.equal(credentialLabel("wireguard_private_key"), "WireGuard Private Key");
   assert.equal(credentialLabel("wireguard_pre_shared_key"), "WireGuard Pre-shared Key");
+  assert.equal(credentialLabel("tailscale_auth_key"), "Tailscale Auth Key");
 });
 
 test("SOCKS5 credentials preserve text and enforce 255-byte authentication fields", () => {

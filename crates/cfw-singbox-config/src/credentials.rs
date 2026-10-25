@@ -10,6 +10,7 @@ pub use crate::capacity::MAX_CREDENTIAL_SLOTS;
 const MAX_CREDENTIAL_OUTBOUNDS: usize = crate::capacity::MAX_OUTBOUNDS;
 const MAX_CREDENTIAL_SECRET_BYTES: usize = 16 * 1024;
 const MAX_SOCKS5_CREDENTIAL_SECRET_BYTES: usize = 255;
+const MAX_TAILSCALE_AUTH_KEY_BYTES: usize = 256;
 
 /// Exact, secret-free profile identity authorized to use a credential.
 ///
@@ -135,6 +136,7 @@ pub enum CredentialKind {
     AnyTlsPassword,
     TuicUuid,
     TuicPassword,
+    TailscaleAuthKey,
 }
 
 /// Stable, non-secret reference to a credential stored outside profile files.
@@ -216,6 +218,7 @@ pub enum CredentialTarget {
     AnyTlsPassword,
     TuicUuid,
     TuicPassword,
+    TailscaleAuthKey,
 }
 
 impl CredentialTarget {
@@ -236,6 +239,7 @@ impl CredentialTarget {
             Self::AnyTlsPassword => CredentialKind::AnyTlsPassword,
             Self::TuicUuid => CredentialKind::TuicUuid,
             Self::TuicPassword => CredentialKind::TuicPassword,
+            Self::TailscaleAuthKey => CredentialKind::TailscaleAuthKey,
         }
     }
 
@@ -253,12 +257,17 @@ impl CredentialTarget {
             | Self::TuicPassword => "password",
             Self::VmessUuid | Self::VlessUuid | Self::TuicUuid => "uuid",
             Self::Hysteria2ObfsPassword => "obfs/password",
+            Self::TailscaleAuthKey => "auth_key",
         }
     }
 
-    fn container(self) -> &'static str {
+    /// The projected array the slot indexes: sing-box keeps WireGuard and
+    /// Tailscale in `endpoints`, every other outbound in `outbounds`.
+    pub(crate) fn container(self) -> &'static str {
         match self {
-            Self::WireGuardPrivateKey | Self::WireGuardPreSharedKey => "endpoints",
+            Self::WireGuardPrivateKey | Self::WireGuardPreSharedKey | Self::TailscaleAuthKey => {
+                "endpoints"
+            }
             Self::Socks5Username
             | Self::HttpProxyUsername
             | Self::HttpProxyPassword
@@ -281,8 +290,9 @@ impl CredentialTarget {
 /// `json_pointer` is serialized for cross-language verification, but is always
 /// derived from `target` and `outbound_index`; deserialization rejects any
 /// disagreement or unknown field. The existing wire field `outbound_index`
-/// indexes the target's container: WireGuard targets use `endpoints`, while
-/// all other targets use `outbounds`. No caller-controlled container is accepted.
+/// indexes the target's container: WireGuard and Tailscale targets use
+/// `endpoints`, while all other targets use `outbounds`. No caller-controlled
+/// container is accepted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CredentialSlot {
@@ -448,6 +458,9 @@ impl<'a> CredentialSecret<'a> {
         {
             return Err(InvalidCredentialSecret);
         }
+        if kind == CredentialKind::TailscaleAuthKey && !valid_tailscale_auth_key(self.0) {
+            return Err(InvalidCredentialSecret);
+        }
         if matches!(
             kind,
             CredentialKind::Socks5Username | CredentialKind::Socks5Password
@@ -479,6 +492,13 @@ pub(crate) fn valid_wireguard_key(value: &str) -> bool {
         && STANDARD.decode(value).is_ok_and(|key| {
             key.len() == 32 && key.iter().any(|byte| *byte != 0) && STANDARD.encode(&key) == value
         })
+}
+
+/// A Tailscale auth key, pre-authentication key or OAuth client secret is one
+/// bounded token of printable ASCII; Headscale keys have the same shape.
+pub(crate) fn valid_tailscale_auth_key(value: &str) -> bool {
+    (1..=MAX_TAILSCALE_AUTH_KEY_BYTES).contains(&value.len())
+        && value.bytes().all(|byte| byte.is_ascii_graphic())
 }
 
 impl fmt::Debug for CredentialSecret<'_> {

@@ -364,6 +364,24 @@ pub(super) async fn probe_saved_nodes(
                 &settings,
             )
             .map_err(|error| error.to_string())?;
+        // A Tailscale node keeps its tailnet registration with the running
+        // core, so the offline probe reports it as unsupported instead of
+        // registering a second node from its key.
+        let (proxies, unsupported): (Vec<String>, Vec<String>) = proxies
+            .into_iter()
+            .partition(|name| !probe.excluded_tags().contains(name));
+        let mut results = unsupported
+            .into_iter()
+            .map(|name| ProxyDelayResult {
+                name,
+                delay: None,
+                error_kind: Some(cfw_controller::ProxyDelayFailureKind::Unsupported),
+                error: Some("Tailscale nodes are tested by the running core".into()),
+            })
+            .collect::<Vec<_>>();
+        if proxies.is_empty() {
+            return Ok(results);
+        }
         let request = cfw_engine_api::ProfileDelayTestRequest {
             audience: probe.credential_audience().clone(),
             config_json: probe.as_json().to_owned(),
@@ -373,32 +391,28 @@ pub(super) async fn probe_saved_nodes(
             target_url: Some(policy.url),
             expected_status: Some(policy.expected_status),
         };
-        return engine
+        let measured = engine
             .profile_delay_backend
             .test_profile_delays(request)
             .await
-            .map(|results| {
-                results
-                    .into_iter()
-                    .map(|result| ProxyDelayResult {
-                        name: result.name,
-                        delay: result.delay,
-                        error_kind: result.error_kind.map(|kind| match kind {
-                            cfw_engine_api::ProfileProbeFailure::Timeout => {
-                                cfw_controller::ProxyDelayFailureKind::Timeout
-                            }
-                            cfw_engine_api::ProfileProbeFailure::NotFound => {
-                                cfw_controller::ProxyDelayFailureKind::NotFound
-                            }
-                            cfw_engine_api::ProfileProbeFailure::ProbeFailed => {
-                                cfw_controller::ProxyDelayFailureKind::ProbeFailed
-                            }
-                        }),
-                        error: None,
-                    })
-                    .collect()
-            })
-            .map_err(|error| format!("Profile latency test failed: {}", error.message));
+            .map_err(|error| format!("Profile latency test failed: {}", error.message))?;
+        results.extend(measured.into_iter().map(|result| ProxyDelayResult {
+            name: result.name,
+            delay: result.delay,
+            error_kind: result.error_kind.map(|kind| match kind {
+                cfw_engine_api::ProfileProbeFailure::Timeout => {
+                    cfw_controller::ProxyDelayFailureKind::Timeout
+                }
+                cfw_engine_api::ProfileProbeFailure::NotFound => {
+                    cfw_controller::ProxyDelayFailureKind::NotFound
+                }
+                cfw_engine_api::ProfileProbeFailure::ProbeFailed => {
+                    cfw_controller::ProxyDelayFailureKind::ProbeFailed
+                }
+            }),
+            error: None,
+        }));
+        return Ok(results);
     }
     let client = controller_client(engine).map_err(|error| error.to_ipc())?;
     let accepted = engine

@@ -296,9 +296,12 @@ class PhysicalCollectorRequestTests(unittest.TestCase):
         self.assertEqual(result.stderr, b"")
 
     def test_cli_requires_fixed_isolated_no_site_runtime(self) -> None:
+        probe = physical_collector_request.fixed_python_probe()
+        if not probe.is_file():
+            self.skipTest(f"the pinned release Python is not installed: {probe}")
         accepted = subprocess.run(
             [
-                "/opt/homebrew/bin/python3",
+                str(probe),
                 "-I",
                 "-S",
                 "-B",
@@ -314,7 +317,7 @@ class PhysicalCollectorRequestTests(unittest.TestCase):
 
         rejected = subprocess.run(
             [
-                "/opt/homebrew/bin/python3",
+                str(probe),
                 "-I",
                 "-B",
                 str(REQUEST_SCRIPT),

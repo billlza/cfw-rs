@@ -113,10 +113,10 @@ index 41c9c926a0709981d42aac5a742ebf8b02b96c61..db89c27e007a8142df5cd9754c9bd40e
 +	resolvedDialer := dialer.NewResolveDialer(boxService.ctx, outbound, true, "", nil, adapter.DNSQueryOptions{}, 0)
 diff --git a/daemon/started_service_test.go b/daemon/started_service_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..6e9fde8a472790b2fc5b29b381a6747dfd75a020
+index 0000000000000000000000000000000000000000..d3fc2b3243f5847f7eaa988ce441c4a844588fca
 --- /dev/null
 +++ b/daemon/started_service_test.go
-@@ -0,0 +1,331 @@
+@@ -0,0 +1,336 @@
 +package daemon
 +
 +import (
@@ -140,6 +140,7 @@ index 0000000000000000000000000000000000000000..6e9fde8a472790b2fc5b29b381a6747d
 +	"github.com/sagernet/sing-box/dns"
 +	"github.com/sagernet/sing-box/dns/transport/local"
 +	"github.com/sagernet/sing-box/log"
++	"github.com/sagernet/sing/service/filemanager"
 +)
 +
 +func TestStartedServiceRuntimeStatusAndFatalCleanup(t *testing.T) {
@@ -168,7 +169,7 @@ index 0000000000000000000000000000000000000000..6e9fde8a472790b2fc5b29b381a6747d
 +
 +func TestCloseServiceRetainsInstanceWhenCleanupFails(t *testing.T) {
 +	startedService := NewStartedService(ServiceOptions{
-+		Context: testServiceContext(),
++		Context: testServiceContext(t),
 +	})
 +	defer startedService.Close()
 +	instance := newStartedFailingCleanupInstance(t, startedService)
@@ -193,7 +194,7 @@ index 0000000000000000000000000000000000000000..6e9fde8a472790b2fc5b29b381a6747d
 +
 +func TestReloadRetainsPreviousInstanceWhenCleanupFails(t *testing.T) {
 +	startedService := NewStartedService(ServiceOptions{
-+		Context: testServiceContext(),
++		Context: testServiceContext(t),
 +	})
 +	defer startedService.Close()
 +	instance := newStartedFailingCleanupInstance(t, startedService)
@@ -222,7 +223,7 @@ index 0000000000000000000000000000000000000000..6e9fde8a472790b2fc5b29b381a6747d
 +func TestAnInterruptedStartWhoseCloseFailsKeepsItsInstanceUnclosable(t *testing.T) {
 +	holding := make(chan struct{})
 +	startedService := NewStartedService(ServiceOptions{
-+		Context: testServiceContext(func(services *serviceRegistry.Registry) {
++		Context: testServiceContext(t, func(services *serviceRegistry.Registry) {
 +			serviceRegistry.Register[struct{}](services, holdingStartServiceType,
 +				func(_ context.Context, _ log.ContextLogger, tag string, _ struct{}) (adapter.Service, error) {
 +					return holdingStartService{tag: tag, holding: holding}, nil
@@ -297,7 +298,7 @@ index 0000000000000000000000000000000000000000..6e9fde8a472790b2fc5b29b381a6747d
 +		}
 +	}()
 +	startedService := NewStartedService(ServiceOptions{
-+		Context: testServiceContext(),
++		Context: testServiceContext(t),
 +	})
 +	defer startedService.Close()
 +
@@ -433,8 +434,11 @@ index 0000000000000000000000000000000000000000..6e9fde8a472790b2fc5b29b381a6747d
 +}
 +
 +// testServiceContext registers the failing-cleanup service and those a test
-+// adds with register.
-+func testServiceContext(register ...func(*serviceRegistry.Registry)) context.Context {
++// adds with register. Every instance the daemon starts keeps a cache file in
++// its base path, so the context owns a temporary one instead of the package
++// directory.
++func testServiceContext(t *testing.T, register ...func(*serviceRegistry.Registry)) context.Context {
++	t.Helper()
 +	dnsRegistry := dns.NewTransportRegistry()
 +	local.RegisterTransport(dnsRegistry)
 +	services := serviceRegistry.NewRegistry()
@@ -445,7 +449,8 @@ index 0000000000000000000000000000000000000000..6e9fde8a472790b2fc5b29b381a6747d
 +	for _, add := range register {
 +		add(services)
 +	}
-+	return box.Context(context.Background(), inbound.NewRegistry(), outbound.NewRegistry(),
++	ctx := filemanager.WithDefault(context.Background(), t.TempDir(), t.TempDir(), os.Getuid(), os.Getgid())
++	return box.Context(ctx, inbound.NewRegistry(), outbound.NewRegistry(),
 +		endpoint.NewRegistry(), dnsRegistry, services, certificate.NewRegistry())
 +}
 diff --git a/experimental/libbox/command_server.go b/experimental/libbox/command_server.go
@@ -624,10 +629,10 @@ index e42ea17d03c3d8dd1e69e561191c469e49946caf..498546e4d593fa22d27c0a8a1b7af120
 +
 diff --git a/experimental/libbox/monitor_network_change_test.go b/experimental/libbox/monitor_network_change_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..65cfb33f7bcbf03f2e377facac42d864520b2806
+index 0000000000000000000000000000000000000000..0e0aa1105dc3d6a70a084c54e50c1472031d614b
 --- /dev/null
 +++ b/experimental/libbox/monitor_network_change_test.go
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,97 @@
 +package libbox
 +
 +import (
@@ -652,6 +657,12 @@ index 0000000000000000000000000000000000000000..65cfb33f7bcbf03f2e377facac42d864
 +}
 +
 +func (m *networkChangeFixture) InterfaceFinder() control.InterfaceFinder { return m.finder }
++
++// Every platform but Darwin reads an interface's DNS servers from the network
++// manager's interface list, so the fixture reports its one interface there.
++func (m *networkChangeFixture) NetworkInterfaces() []adapter.NetworkInterface {
++	return []adapter.NetworkInterface{{Interface: m.current}}
++}
 +
 +func TestSameWiFiInterfaceNotifiesOnHotspotSubnetChange(t *testing.T) {
 +	network := &networkChangeFixture{

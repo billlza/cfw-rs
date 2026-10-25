@@ -294,10 +294,15 @@ the loss of hardware diversity; it does not weaken any lifecycle, packet,
 performance, security, or cleanup assertion.
 
 At the start of each OS run, create the private run context with the sole
-supported producer:
+supported producer. The collector runs only under the pinned release Python,
+the Homebrew Cellar launcher of `PYTHON_VERSION`; it refuses every other
+interpreter and any invocation without `-I -S -B`:
 
 ```sh
-/opt/homebrew/bin/python3 -I -S -B scripts/physical_capture/collector.py initialize \
+source scripts/dependency_pins.env
+python_series="${PYTHON_VERSION%.*}"
+release_python="/opt/homebrew/Cellar/python@$python_series/$PYTHON_VERSION/Frameworks/Python.framework/Versions/$python_series/bin/python$python_series"
+"$release_python" -I -S -B scripts/physical_capture/collector.py initialize \
   --lane macos15 \
   --attempt 01 \
   --confirm-clean-install \
@@ -344,15 +349,15 @@ revalidates every fixed restore/query command, digest, timestamp and
 empty-state output.
 
 ```sh
-/opt/homebrew/bin/python3 -I -S -B scripts/physical_capture/collector.py collect \
+"$release_python" -I -S -B scripts/physical_capture/collector.py collect \
   --lane macos15 --attempt 01 --harness lifecycle
-/opt/homebrew/bin/python3 -I -S -B scripts/physical_capture/collector.py collect \
+"$release_python" -I -S -B scripts/physical_capture/collector.py collect \
   --lane macos15 --attempt 01 --harness adversarial
-/opt/homebrew/bin/python3 -I -S -B scripts/physical_capture/collector.py collect \
+"$release_python" -I -S -B scripts/physical_capture/collector.py collect \
   --lane macos15 --attempt 01 --harness packet
-/opt/homebrew/bin/python3 -I -S -B scripts/physical_capture/collector.py collect \
+"$release_python" -I -S -B scripts/physical_capture/collector.py collect \
   --lane macos15 --attempt 01 --harness performance
-/opt/homebrew/bin/python3 -I -S -B scripts/physical_capture/collector.py finalize \
+"$release_python" -I -S -B scripts/physical_capture/collector.py finalize \
   --lane macos15 --attempt 01
 ```
 
@@ -364,7 +369,7 @@ flow with `--lane current-macos` on macOS 26.6. Once both lanes are finalized,
 publish the aggregate without a caller-supplied evidence path:
 
 ```sh
-/opt/homebrew/bin/python3 -I -S -B scripts/physical_capture/collector.py publish \
+"$release_python" -I -S -B scripts/physical_capture/collector.py publish \
   --macos15-attempt 01 --current-macos-attempt 01
 ```
 

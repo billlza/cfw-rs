@@ -106,7 +106,7 @@ PACKET_ENDPOINT_SYSTEMD_UNIT_SHA256: Final = (
     "7d485a9fe9081ebf019fcc8abc1d596358a64326e2490749d9903197262e3996"
 )
 PACKET_ENDPOINT_INSTALL_SCRIPT_SHA256: Final = (
-    "331d82561cf88af651bf9bc854946b443655d5a2e6fa498f8f2925bcc767575a"
+    "fb24d320372c327a033a839c8759fb58afe5c7ecf140d204c31bccb73de06cff"
 )
 PACKET_ENDPOINT_RESOLVER_CONFIG_SHA256: Final = (
     "b290cc794e7f0faac9ebbd63f83aad67d23086b48206295d5d6a2767721c1e62"
@@ -319,7 +319,7 @@ def _source_endpoint_binary_sha256() -> str:
 PACKET_ENDPOINT_BINARY_SHA256: Final = _source_endpoint_binary_sha256()
 ENDPOINT_POLICY_PATH: Final = Path(__file__).with_name("packet_endpoints.json")
 ENDPOINT_POLICY_SHA256: Final = (
-    "9b7e1e8d892bc87568bbd122e502e4c0f74a2d9579e398d9d2563372772be19a"
+    "afa5339dea0b6369f45a6dac9005ad49314e5173b2b62d68b2271d6cfa490f14"
 )
 PACKET_KNOWN_HOSTS_PATH: Final = Path(__file__).with_name("packet_known_hosts")
 PACKET_KNOWN_HOSTS_SHA256: Final = (

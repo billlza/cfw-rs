@@ -516,7 +516,12 @@ def release_tool_environment(
             if validation_python is not None
             else production_python_root / "bin"
         )
-        python_bin = python_bin_dir / "python3"
+        # The unsigned-validation toolcache exposes its launcher as the
+        # `python3` symlink; Homebrew's altinstall Cellar carries only the
+        # versioned regular launcher.
+        python_bin = python_bin_dir / (
+            "python3" if validation_python is not None else f"python{python_series}"
+        )
         python_bin_resolved = python_bin.resolve(strict=True)
         developer_dir = Path(environment["DEVELOPER_DIR"]).resolve(strict=True)
     except ReleaseRustToolchainError as error:
@@ -557,7 +562,7 @@ def release_tool_environment(
         or rust_root.is_symlink()
         or not rust_root.is_dir()
         or not all(_is_real_executable(executable) for executable in trusted_executables)
-        or not python_bin.is_symlink()
+        or python_bin.is_symlink() != (validation_python is not None)
         or python_bin_resolved != python_executable
         or environment.get("CFW_RELEASE_RUSTC_EXECUTABLE") != str(rust_bin / "rustc")
         or environment.get("CFW_RELEASE_CARGO_EXECUTABLE") != str(rust_bin / "cargo")

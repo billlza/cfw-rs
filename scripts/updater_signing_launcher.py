@@ -30,12 +30,12 @@ from typing import Callable, NoReturn, Sequence
 
 
 SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
-TAURI_CLI_VERSION = "2.12.0"
+TAURI_CLI_VERSION = "2.12.4"
 PINNED_TAURI_METADATA = (
     "artifactKind=pinned-tauri-cli-v3",
     "cacheContractSha256=25d57ed8856960d32edf748f59ff13b65eebc23b7b426e4b662afc5e1aa7521b",
     "cacheNormalization=cargo-runtime-metadata-v1",
-    "crateSha256=2e238d6e852e23a0c914ff8623544ed01b4c1cb67e3e48357a5e97fb966a0bcb",
+    "crateSha256=9966558da94fd1c9485d0d78f12233bea5fd4235826fb78e930fe7a26910b956",
     "dependencyMode=isolated-fetch-offline-locked-v1",
     "macosDeploymentTarget=15.0",
     "payloadLayout=bin-and-source-v1",
@@ -43,8 +43,8 @@ PINNED_TAURI_METADATA = (
     "rustToolchain=1.99.1-aarch64-apple-darwin",
     "spinCrateSha256=3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e",
     "spinVersion=0.9.9",
-    "upstreamCargoLockSha256=792031ed27ead83bd06bbf564a3c814f33a8c7ee81a8729f8d7c17cd041b0515",
-    "version=2.12.0",
+    "upstreamCargoLockSha256=c1a00985e0e36225856ac9edfaabb2d5cf7eb78a1bb6b5e7277647674e7ed367",
+    "version=2.12.4",
     "xcodeBuild=27A9275",
     "xcodeVersion=27.1",
 )

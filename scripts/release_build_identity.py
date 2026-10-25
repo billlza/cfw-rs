@@ -187,9 +187,9 @@ def _read_plist(path: Path, *, label: str) -> dict[str, Any]:
     return value
 
 
-def bundle_build_identity(app: Path) -> BundleBuildIdentity:
-    app = app.resolve(strict=True)
-    plists = {
+def bundle_identity_plists(app: Path) -> dict[str, Path]:
+    """The Info.plist of each bundle that carries the application's identity."""
+    return {
         "host": app / "Contents/Info.plist",
         "native-bridge": (
             app
@@ -204,21 +204,38 @@ def bundle_build_identity(app: Path) -> BundleBuildIdentity:
             / "Contents/Library/SystemExtensions/com.bill.clashformac.packet-tunnel.systemextension/Contents/Info.plist"
         ),
     }
-    identities = {}
-    for name, path in plists.items():
+
+
+def read_bundle_identity(app: Path) -> BundleBuildIdentity:
+    """The one product version and build that every identity plist of `app` records.
+
+    An installed predecessor may record an earlier product version, so only
+    `bundle_build_identity` requires the active one.
+    """
+    versions = {}
+    builds = {}
+    for name, path in bundle_identity_plists(app.resolve(strict=True)).items():
         value = _read_plist(path, label=name)
-        product_version = value.get("CFBundleShortVersionString")
-        if product_version != PRODUCT_VERSION:
-            raise BuildIdentityError(
-                f"{name} CFBundleShortVersionString is not the fixed product version"
-            )
-        identities[name] = canonical_build_version(
+        versions[name] = canonical_product_version(
+            value.get("CFBundleShortVersionString"), f"{name} CFBundleShortVersionString"
+        )
+        builds[name] = canonical_build_version(
             value.get("CFBundleVersion"), f"{name} CFBundleVersion"
         )
-    unique = set(identities.values())
+    if len(set(versions.values())) != 1:
+        raise BuildIdentityError(f"Host/Agent/System Extension product versions differ: {versions}")
+    unique = set(builds.values())
     if len(unique) != 1:
-        raise BuildIdentityError(f"Host/Agent/System Extension build versions differ: {identities}")
-    return BundleBuildIdentity(PRODUCT_VERSION, unique.pop())
+        raise BuildIdentityError(f"Host/Agent/System Extension build versions differ: {builds}")
+    return BundleBuildIdentity(versions["host"], unique.pop())
+
+
+def bundle_build_identity(app: Path) -> BundleBuildIdentity:
+    """The identity of a candidate bundle, which records the fixed product version."""
+    identity = read_bundle_identity(app)
+    if identity.product_version != PRODUCT_VERSION:
+        raise BuildIdentityError("CFBundleShortVersionString is not the fixed product version")
+    return identity
 
 
 def unsigned_preview_root(repository: Path) -> Path:

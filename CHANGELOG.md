@@ -31,6 +31,11 @@
   is republished.
 - Build the interface with Node 26.12.1 and npm 12.2.1, run the release tools
   on Python 3.14.9, and scan the engine's Go graph with govulncheck 1.9.0.
+- Build the packet-evidence endpoint with Go 1.27.3, the release that fixes
+  GO-2026-6809 in `crypto/x509`, instead of 1.27.2. The endpoint keeps its
+  own toolchain pin; the rebuilt binary rebinds the installer, the three GCE
+  instance identities and the endpoint policy, and the instances run the
+  earlier binary until the installation transaction is rerun on each of them.
 
 ## 0.5.0 — 2026-10-17
 

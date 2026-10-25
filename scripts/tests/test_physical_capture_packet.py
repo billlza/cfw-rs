@@ -508,7 +508,7 @@ class PacketPhysicalCaptureTests(unittest.TestCase):
         self.assertEqual(transport.remote_port, packet.PACKET_ENDPOINT_TRANSPORT_PORT)
         self.assertEqual(
             transport.endpoint_service_identity_sha256,
-            "31a63eb38ca0aab909cd458540ef01dfd9977e9dfe5422af2a6ef8681715c74b",
+            "9e4baf6a006c3da18e80db768a2eb904ba343ddac59837a061e60ced604943b8",
         )
         self.assertEqual(
             transport.endpoint_service_identity_sha256,

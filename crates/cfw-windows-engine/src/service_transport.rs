@@ -123,7 +123,7 @@ struct Slot(Arc<AtomicUsize>);
 impl Slot {
     fn reserve(count: &Arc<AtomicUsize>) -> Result<Self, ServiceTransportError> {
         count
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 (current < MAX_CONNECTIONS).then_some(current + 1)
             })
             .map_err(|_| ServiceTransportError::Capacity)?;

@@ -270,7 +270,9 @@ async fn a_start_whose_mainland_rule_sets_cannot_download_fails_and_leaves_no_ru
 /// engine against the journal's settings and the next launch starts from
 /// them: a committed preference would block the cleanup and be reverted on
 /// relaunch while the saved preferences, and the settings page, still showed
-/// it. The commit is refused instead, and nothing changes.
+/// it. The commit is refused instead, and nothing changes. Only the Mac has
+/// such a journal.
+#[cfg(target_os = "macos")]
 #[test]
 fn settings_are_not_committed_while_a_cutover_journal_governs_startup() {
     let root = tempfile::tempdir().expect("temporary app home");

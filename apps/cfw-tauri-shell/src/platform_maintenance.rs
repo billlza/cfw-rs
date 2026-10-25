@@ -24,6 +24,16 @@ pub(crate) fn require_start_allowed(gate: &PlatformMaintenanceGate) -> Result<()
     crate::legacy::require_network_start_allowed(gate)
 }
 
+/// Refuses a runtime preference change while a historical cutover journal
+/// governs startup.
+#[cfg(target_os = "macos")]
+pub(crate) fn require_runtime_preferences_changeable(
+    app_home: &std::path::Path,
+) -> Result<(), String> {
+    crate::legacy::require_runtime_preferences_changeable(app_home)
+        .map_err(|error| error.to_string())
+}
+
 /// This release has no predecessor Windows retirement protocol. This is an
 /// applicability fact, not evidence of stopped processes or restored proxies.
 #[cfg(windows)]
@@ -62,4 +72,13 @@ pub(crate) fn require_start_allowed(gate: &PlatformMaintenanceGate) -> Result<()
     match gate {
         PlatformMaintenanceGate::FirstWindowsRelease => Ok(()),
     }
+}
+
+/// No predecessor's cutover journal can govern startup on Windows, so runtime
+/// preferences are always changeable here.
+#[cfg(windows)]
+pub(crate) fn require_runtime_preferences_changeable(
+    _app_home: &std::path::Path,
+) -> Result<(), String> {
+    Ok(())
 }

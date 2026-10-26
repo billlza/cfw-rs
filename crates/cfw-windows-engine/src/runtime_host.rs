@@ -23,7 +23,7 @@ pub use agent::run_agent;
 pub use desktop::InstalledDesktop;
 #[cfg(windows)]
 pub use installation::{
-    InstallationSnapshot, InstalledRelease, InstalledRuntime, ObservedInstallation,
+    AdmittedImages, InstallationSnapshot, InstalledRelease, InstalledRuntime, ObservedInstallation,
     UpdateFinisherImage, UserPaths,
 };
 #[cfg(windows)]

@@ -4,7 +4,9 @@
 use super::{
     StopReason,
     handoff::{HandoffError, UserAgentLaunch},
-    launcher::{AgentExit, LaunchError, UserAgentChild, UserAgentInvocation, medium_process},
+    launcher::{
+        AdmittedAgent, AgentExit, LaunchError, UserAgentChild, UserAgentInvocation, medium_process,
+    },
 };
 use crate::{
     CheckedStartConfiguration, ServiceTransportError, VerifiedExecutable,
@@ -30,12 +32,22 @@ use std::{
 };
 
 const COMMAND_LIMIT: Duration = Duration::from_secs(5);
+/// The spawned Agent admits its own installed images and private storage
+/// before the lease is prepared; this bounds that cold admission.
+pub(crate) const ADMISSION_LIMIT: Duration = Duration::from_secs(10);
+/// From the launch handoff to Ready. The Authority's preparation lifetime
+/// starts with Prepare, which this owner sends only after admission.
 const START_LIMIT: Duration = Duration::from_secs(15);
 /// A Tunnel start also waits for SYSTEM's adapter, which may first install
 /// the pinned Wintun driver.
 const TUNNEL_START_LIMIT: Duration =
     Duration::from_secs(START_LIMIT.as_secs() + crate::tunnel::OPEN_LIMIT.as_secs());
 const STOP_LIMIT: Duration = Duration::from_secs(15);
+/// The complete proxy start as the application backend bounds it: the Agent's
+/// admission, one Prepare command, then the launch handoff up to Ready.
+pub(crate) const START_BUDGET: Duration = Duration::from_secs(
+    ADMISSION_LIMIT.as_secs() + COMMAND_LIMIT.as_secs() + START_LIMIT.as_secs(),
+);
 
 #[derive(Debug, thiserror::Error)]
 pub enum DesktopError {
@@ -177,49 +189,83 @@ impl DesktopCompleted {
 }
 
 pub struct DesktopUserAgent {
-    service: String,
     authority: Option<AuthorityChannel>,
     context: LeaseContext,
     pending: Option<UserAgentLaunch>,
-    agent_image: Arc<VerifiedExecutable>,
+    admitted: Option<AdmittedAgent>,
     child: Option<UserAgentChild>,
+    stop_signal: Arc<AtomicBool>,
     attempted: bool,
     last_authority: Option<AuthoritySnapshot>,
     runtime_reference: Option<Arc<RuntimeReference>>,
 }
 impl DesktopUserAgent {
+    /// Spawn the installed Agent and wait for its admission before preparing
+    /// the lease: the Authority's fixed preparation lifetime then covers only
+    /// the launch handoff and Bind, never the Agent's cold admission.
     pub fn prepare(
         credentials: &WindowsCredentialLifecycle,
         agent_image: Arc<VerifiedExecutable>,
+        invocation: UserAgentInvocation,
+        diagnostics: &File,
         request: EngineStartRequest,
+        stop: Arc<AtomicBool>,
         deadline: Instant,
     ) -> Result<Self> {
         let request = CheckedStartConfiguration::new(request)?;
-        Self::prepare_checked(credentials, agent_image, request, deadline)
+        Self::prepare_checked(
+            credentials,
+            agent_image,
+            invocation,
+            diagnostics,
+            request,
+            stop,
+            deadline,
+        )
     }
     pub(crate) fn prepare_checked(
         credentials: &WindowsCredentialLifecycle,
         agent_image: Arc<VerifiedExecutable>,
+        invocation: UserAgentInvocation,
+        diagnostics: &File,
         request: CheckedStartConfiguration,
+        stop: Arc<AtomicBool>,
         deadline: Instant,
     ) -> Result<Self> {
         check_deadline(deadline)?;
+        if invocation.service() != credentials.service() {
+            return Err(DesktopError::State("invocation names a different service"));
+        }
         let current = medium_process()?;
         current
             .require_current_console_session()
             .map_err(LaunchError::from)?;
-        let (authority, grant, request) = credentials.prepare(request, deadline)?;
+        let admitted = AdmittedAgent::spawn(
+            agent_image,
+            invocation,
+            diagnostics,
+            deadline.min(Instant::now() + ADMISSION_LIMIT),
+            Arc::clone(&stop),
+        )?;
+        let (authority, grant, request) = match credentials.prepare(request, deadline) {
+            Ok(prepared) => prepared,
+            Err(error) => return Err(retire_after_failure(admitted, error.into(), deadline)),
+        };
         // AuthorityChannel already checked root, operation, mode, digests,
-        // native owner and revision. No child exists if this validation fails;
-        // closing this exact connection revokes an unbound preparation.
-        let launch = UserAgentLaunch::checked(grant.into_bind(), request)?;
+        // native owner and revision. The admitted Agent holds no ticket if this
+        // validation fails: closing this exact connection revokes the unbound
+        // preparation, and the retired Agent exits on its own.
+        let launch = match UserAgentLaunch::checked(grant.into_bind(), request) {
+            Ok(launch) => launch,
+            Err(error) => return Err(retire_after_failure(admitted, error.into(), deadline)),
+        };
         Ok(Self {
-            service: credentials.service().to_owned(),
             authority: Some(authority),
             context: launch.context().clone(),
             pending: Some(launch),
-            agent_image,
+            admitted: Some(admitted),
             child: None,
+            stop_signal: stop,
             attempted: false,
             last_authority: None,
             runtime_reference: None,
@@ -250,41 +296,26 @@ impl DesktopUserAgent {
     /// cancellation and never force-kills a possibly active UserAgent.
     /// The readiness channel needs capacity for one observation; an unavailable
     /// receiver fails the operation and runs its normal scoped cleanup.
-    pub fn run(
-        &mut self,
-        invocation: UserAgentInvocation,
-        diagnostics: &File,
-        stop: Arc<AtomicBool>,
-        ready: SyncSender<DesktopReady>,
-    ) -> Result<DesktopCompleted> {
-        self.run_inner(invocation, diagnostics, stop, ready, None)
+    pub fn run(&mut self, ready: SyncSender<DesktopReady>) -> Result<DesktopCompleted> {
+        self.run_inner(ready, None)
     }
     pub fn run_observed(
         &mut self,
-        invocation: UserAgentInvocation,
-        diagnostics: &File,
-        stop: Arc<AtomicBool>,
         ready: SyncSender<DesktopReady>,
         status: DesktopStatusRequests,
     ) -> Result<DesktopCompleted> {
-        self.run_inner(invocation, diagnostics, stop, ready, Some(status))
+        self.run_inner(ready, Some(status))
     }
     fn run_inner(
         &mut self,
-        invocation: UserAgentInvocation,
-        diagnostics: &File,
-        stop: Arc<AtomicBool>,
         ready: SyncSender<DesktopReady>,
         status: Option<DesktopStatusRequests>,
     ) -> Result<DesktopCompleted> {
-        if self.attempted || self.pending.is_none() {
+        if self.attempted || self.pending.is_none() || self.admitted.is_none() {
             return Err(DesktopError::State("operation already consumed"));
         }
-        if invocation.service() != self.service {
-            return Err(DesktopError::State("invocation names a different service"));
-        }
         self.attempted = true;
-        let operated = self.operate(invocation, diagnostics, stop, ready, status);
+        let operated = self.operate(ready, status);
         let stopped = self.stop(Instant::now() + STOP_LIMIT);
         match (operated, stopped) {
             (Ok(reason), Ok(stopped)) => Ok(DesktopCompleted { reason, stopped }),
@@ -297,12 +328,10 @@ impl DesktopUserAgent {
     }
     fn operate(
         &mut self,
-        invocation: UserAgentInvocation,
-        diagnostics: &File,
-        stop: Arc<AtomicBool>,
         ready: SyncSender<DesktopReady>,
         status: Option<DesktopStatusRequests>,
     ) -> Result<StopReason> {
+        let stop = Arc::clone(&self.stop_signal);
         if stop.load(Ordering::Acquire) {
             return Ok(StopReason::Requested);
         }
@@ -310,6 +339,10 @@ impl DesktopUserAgent {
             .pending
             .take()
             .ok_or(DesktopError::State("missing launch"))?;
+        let admitted = self
+            .admitted
+            .take()
+            .ok_or(DesktopError::State("missing admitted Agent"))?;
         let deadline = Instant::now()
             + if self.context.operation.mode == cfw_engine_api::authority_v1::AuthorityMode::Tunnel
             {
@@ -317,14 +350,7 @@ impl DesktopUserAgent {
             } else {
                 START_LIMIT
             };
-        match UserAgentChild::launch(
-            Arc::clone(&self.agent_image),
-            invocation,
-            launch,
-            diagnostics,
-            deadline,
-            Arc::clone(&stop),
-        ) {
+        match admitted.hand_off(launch, deadline) {
             Ok(child) => self.child = Some(child),
             Err(failure) => {
                 self.child = failure.owner.map(|owner| *owner);
@@ -526,12 +552,18 @@ impl DesktopUserAgent {
         if revoked.is_err() {
             self.authority.take();
         }
-        let retired = match &mut self.child {
-            Some(child) => child
+        let retired = match (&mut self.child, self.admitted.take()) {
+            (Some(child), _) => child
                 .wait_for_exit(deadline)
                 .map(Some)
                 .map_err(DesktopError::from),
-            None => Ok(None),
+            // Prepared but never handed off: the Agent holds no ticket and
+            // exits once its channel closes; its exit code is not a run result.
+            (None, Some(admitted)) => admitted
+                .retire(deadline)
+                .map(Some)
+                .map_err(DesktopError::from),
+            (None, None) => Ok(None),
         };
         let agent_exit = match (revoked, retired) {
             (Ok(()), Ok(exit)) => exit,
@@ -683,6 +715,8 @@ impl Drop for DesktopUserAgent {
         // Close the host binding first. Native authority timers revoke closed
         // bindings; this cannot certify completed OS cleanup.
         self.authority.take();
+        // A never-handed-off Agent loses its channel here and exits on its own.
+        self.admitted.take();
         if let Some(child) = &self.child {
             child.cancel_handoff();
         }
@@ -708,6 +742,20 @@ fn send(authority: &mut AuthorityChannel, command: Command, deadline: Instant) -
         Request::new(command)?,
         deadline.min(Instant::now() + COMMAND_LIMIT),
     )?)
+}
+/// Retire an admitted Agent after no lease could be prepared for it.
+fn retire_after_failure(
+    admitted: AdmittedAgent,
+    error: DesktopError,
+    deadline: Instant,
+) -> DesktopError {
+    match admitted.retire(deadline) {
+        Ok(_) => error,
+        Err(cleanup) => DesktopError::Cleanup {
+            operation: Box::new(error),
+            cleanup: Box::new(cleanup.into()),
+        },
+    }
 }
 fn wait_signal(stop: &AtomicBool, interval: Duration) {
     let end = Instant::now() + interval;

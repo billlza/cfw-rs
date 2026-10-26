@@ -163,10 +163,46 @@ pub(super) fn run(name: &str, hex: &str) -> Result<()> {
             let worker = scope.spawn(move || -> Result<_> {
                 // Construct the native connection on the owning lifecycle
                 // thread; no thread-affine channel is transferred from the UI.
+                // An invocation naming another service is refused before any
+                // Agent is spawned or any lease is prepared.
+                if !matches!(
+                    DesktopUserAgent::prepare(
+                        lifecycle,
+                        Arc::clone(&worker_image),
+                        UserAgentInvocation::installed("CFW-unrelated")
+                            .map_err(|e| e.to_string())?,
+                        &output,
+                        start_request.clone(),
+                        Arc::clone(&worker_stop),
+                        Instant::now() + LIMIT,
+                    ),
+                    Err(
+                        cfw_windows_engine::user_agent::desktop::DesktopError::State(
+                            "invocation names a different service"
+                        )
+                    )
+                ) {
+                    return Err(
+                        "invalid Desktop invocation did not fail before lifecycle mutation".into(),
+                    );
+                }
+                let invocation = UserAgentInvocation::for_validation(
+                    name,
+                    if index == 0 {
+                        ValidationAgent::Local
+                    } else {
+                        ValidationAgent::System
+                    },
+                    expected,
+                )
+                .map_err(|e| e.to_string())?;
                 let mut operation = DesktopUserAgent::prepare(
                     lifecycle,
                     Arc::clone(&worker_image),
+                    invocation,
+                    &output,
                     start_request,
+                    Arc::clone(&worker_stop),
                     Instant::now() + LIMIT,
                 )
                 .map_err(|e| e.to_string())?;
@@ -182,25 +218,6 @@ pub(super) fn run(name: &str, hex: &str) -> Result<()> {
                         None,
                     )?;
                 }
-                let (invalid_ready, _) = mpsc::sync_channel(1);
-                if !matches!(
-                    operation.run(
-                        UserAgentInvocation::installed("CFW-unrelated")
-                            .map_err(|e| e.to_string())?,
-                        &output,
-                        Arc::clone(&worker_stop),
-                        invalid_ready
-                    ),
-                    Err(
-                        cfw_windows_engine::user_agent::desktop::DesktopError::State(
-                            "invocation names a different service"
-                        )
-                    )
-                ) {
-                    return Err(
-                        "invalid Desktop invocation did not fail before lifecycle mutation".into(),
-                    );
-                }
                 if !matches!(
                     operation.stop(Instant::now()),
                     Err(
@@ -211,19 +228,7 @@ pub(super) fn run(name: &str, hex: &str) -> Result<()> {
                 ) {
                     return Err("expired Desktop stop was not rejected before mutation".into());
                 }
-                let invocation = UserAgentInvocation::for_validation(
-                    name,
-                    if index == 0 {
-                        ValidationAgent::Local
-                    } else {
-                        ValidationAgent::System
-                    },
-                    expected,
-                )
-                .map_err(|e| e.to_string())?;
-                let finished = operation
-                    .run(invocation, &output, worker_stop, ready_sender)
-                    .map_err(|e| e.to_string())?;
+                let finished = operation.run(ready_sender).map_err(|e| e.to_string())?;
                 let cleanup = if mode == ProjectionMode::SystemProxy {
                     if finished.stopped().authority().state != AuthorityState::Stopping {
                         return Err("SystemProxy stopped acknowledgement prematurely became Off".into());

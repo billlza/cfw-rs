@@ -1,6 +1,6 @@
 # CFW 0.5.0：CFM GA 对齐与 Windows 发布计划
 
-评估日期：2026-10-18；最近实施检查：2026-10-23。状态：已在托管 Windows
+评估日期：2026-10-18；最近实施检查：2026-10-26。状态：已在托管 Windows
 普通输入桌面完成真实 MSI 安装、非管理员九页检查、两种代理的真实流量、
 停止／运行中退出恢复及卸载。产品 TUN（SYSTEM 适配器／UserAgent 引擎）已在托管 Windows 的
 安装运行与安装 GUI 中验证（含 UserAgent 被终止后的恢复），UI 已开放 TUN；组合模式、完整 UI
@@ -3002,6 +3002,46 @@ TUN（或反之）会以四种语言的专门原因拒绝，不显示无关的�
 系统代理开关显示组合模式被拒、控制器描述导入的配置，同会话的原生探针证明该安装的
 适配器存在、系统为探测主机选择的路由进入适配器、HTTP 连接从适配器地址发出且用户
 代理设置不变；关闭 TUN 后交给本地核心，探针确认适配器消失，核心停止后再退出。
+
+### 2026-10-26：安装版首启 LocalProxy 间歇失败的根因与修正
+
+根因（`fbb80d95` 桌面作业 [39883054290](https://github.com/billlza/cfw-rs/actions/runs/39883054290)
+保留的 Agent 日志、`9287fb79` 作业 39763925394 第一次尝试的记录以及源码）：Authority v1 的准备期限
+`PREPARATION_LIFETIME_MS` 为 10 秒，是与 macOS 共用的一次性票据契约（见
+`docs/release/tunnel-start-ticket-expiry.md`），从 Desktop 发出 Prepare 起计时；而 Desktop 在 Prepare
+之后才创建 UserAgent 进程，该进程在 Bind 之前要完成 `InstalledRuntime::open`、入口的
+`require_runtime_process`（运行时、43 MB 桌面、36 MB 引擎与 Wintun 各哈希一次）、`run_agent` 中再次
+`require_runtime_process`，以及 `desktop()`/`runtime()`/`engine()` 的重复打开——同一批镜像共哈希三遍，
+约 260 MB——然后才读取启动帧。安装后的第一次启动这些文件不在页缓存且经历首次访问扫描，准入偶尔超过
+10 秒：Authority 定时器执行 `AbortUnbound`，Agent 的 Bind 与 Stopped 被拒为 `Stale`，Agent 以 0x1
+退出并记录 “installed Agent readiness was not delivered”，Desktop 观察到 “authority ended before
+Ready”，backend 报 “runtime Ready was not delivered: channel is empty and sending half is closed”。
+失败制品中的三份记录与该链条逐项吻合；同一轮的第二个 GUI 会话和之后各轮未复现，符合冷热差异。
+
+修正（不改 10 秒契约）：
+- 启动通道新增 `cfw.launch.admitted.v1` 宣告。Agent 完成镜像准入与私有存储打开后先宣告；Desktop
+  （`AdmittedAgent::spawn`）读到宣告后才向 Authority 发 Prepare 并交接启动帧（`AdmittedAgent::hand_off`），
+  准备期限因此只覆盖交接与 Bind。准入等待上限 `ADMISSION_LIMIT` 10 秒，与 Prepare 的 5 秒命令上限、
+  `START_LIMIT` 15 秒相加得到 backend 的 30 秒 `START_BUDGET`，不再各自写死。
+- `require_runtime_process` 返回一次验证过的 `AdmittedImages`，入口、服务与 Agent 复用同一批保留句柄，
+  Bind 之前不再重复哈希。
+- Agent 在 Ready 时向安装自有的诊断文件写一行非敏感计时（准入、收到启动帧、Ready 距进程启动的毫秒数）；
+  安装 GUI 验证脚本改为成功与失败都保留应用日志，用于核对冷启动的实际准入耗时。
+- 夹具（`native-service-fixture` 的 Desktop、子进程与重启用例）同步改为先宣告再交接；通道新增三项单元
+  测试：宣告先于帧、错误宣告被拒、无宣告超时。
+
+托管验证（代码头 `34120c79`，两条工作流均以 `workflow_dispatch` 在分支上运行）：
+[共享契约 40317881338](https://github.com/billlza/cfw-rs/actions/runs/40317881338) 五项作业通过（含以
+真实交接运行安装版宿主套件的引擎作业）；安装版桌面构建连续三轮通过——
+[40317885076](https://github.com/billlza/cfw-rs/actions/runs/40317885076)、
+[40321006648](https://github.com/billlza/cfw-rs/actions/runs/40321006648)、[40323438514](https://github.com/billlza/cfw-rs/actions/runs/40323438514)——每轮四个 GUI 会话
+（fresh-off、local-proxy、tunnel、system-proxy-quit）全部正常退出并完成各自网络验证。保留日志中的 Agent
+计时行（毫秒，距进程启动）：第一轮四次 Agent 运行准入 3066/3073/3082/3066、收到启动帧 3301/3287/3323/3301、
+Ready 3939/4958/3829/4028；第二轮准入 1880/1927/1953/1993、收到启动帧 2038/2114/2104/2186、Ready
+3149/2591/2478/2543。即 Prepare 到交接约 0.15–0.24 秒，Bind 到 Ready 不到 1 秒（TUN 约 1.7 秒），10 秒票据
+窗口内只剩这些；准入本身每次 2–3 秒且与冷热无关，修复前它乘以三倍哈希落在窗口之内。准入为何恒定
+2–3 秒（镜像打开时的实时扫描或 runner 的哈希吞吐）仍未归因，它现已不影响正确性，列为后续优化项。
+
 
 ### 2026-10-23：开放事项（需要用户决定或外部条件）
 

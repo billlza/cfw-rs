@@ -10,11 +10,12 @@ use crate::{
         wire::{Command, Request, Response},
     },
     credential_lifecycle::WindowsCredentialLifecycle,
-    user_agent::{UserRuntimeStorage, desktop::DesktopUserAgent},
+    user_agent::{UserRuntimeStorage, desktop::DesktopUserAgent, launcher::UserAgentInvocation},
 };
 use cfw_engine_api::EngineStartRequest;
 use std::{
-    sync::Arc,
+    fs::File,
+    sync::{Arc, atomic::AtomicBool},
     time::{Duration, Instant},
 };
 
@@ -168,24 +169,36 @@ impl InstalledDesktop {
         }
     }
 
+    /// Spawn and admit the installed Agent, then prepare its lease. The
+    /// diagnostic sink is the application's; the stop signal cancels the
+    /// admission wait and, later, the handoff.
     pub fn prepare_proxy(
         &self,
         request: EngineStartRequest,
+        invocation: UserAgentInvocation,
+        diagnostics: &File,
+        stop: Arc<AtomicBool>,
         deadline: Instant,
     ) -> Result<DesktopUserAgent> {
         let request = CheckedStartConfiguration::new(request)?;
-        self.prepare_checked_run(request, deadline)
+        self.prepare_checked_run(request, invocation, diagnostics, stop, deadline)
     }
     pub(crate) fn prepare_checked_run(
         &self,
         request: CheckedStartConfiguration,
+        invocation: UserAgentInvocation,
+        diagnostics: &File,
+        stop: Arc<AtomicBool>,
         deadline: Instant,
     ) -> Result<DesktopUserAgent> {
         self.require_current_process()?;
         Ok(DesktopUserAgent::prepare_checked(
             &self.credentials,
             Arc::clone(&self.image),
+            invocation,
+            diagnostics,
             request,
+            stop,
             deadline,
         )?)
     }

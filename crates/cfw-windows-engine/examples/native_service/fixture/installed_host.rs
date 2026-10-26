@@ -186,19 +186,19 @@ pub(super) fn exercise() -> Result<()> {
             let desktop = &desktop;
             let worker = scope.spawn(move || -> Result<_> {
                 let mut operation = desktop
-                    .prepare_proxy(request, Instant::now() + LIMIT)
-                    .map_err(|e| e.to_string())?;
-                let completed = operation
-                    .run_observed(
+                    .prepare_proxy(
+                        request,
                         cfw_windows_engine::user_agent::launcher::UserAgentInvocation::installed(
                             SERVICE_NAME,
                         )
                         .map_err(|e| e.to_string())?,
                         &diagnostics,
                         worker_stop,
-                        send,
-                        queries,
+                        Instant::now() + LIMIT,
                     )
+                    .map_err(|e| e.to_string())?;
+                let completed = operation
+                    .run_observed(send, queries)
                     .map_err(|e| e.to_string())?;
                 if completed.reason() != cfw_windows_engine::user_agent::StopReason::Requested
                     || completed

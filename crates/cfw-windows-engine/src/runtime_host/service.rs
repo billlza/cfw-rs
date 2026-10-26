@@ -91,9 +91,9 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut *mut u16) {
         }
         crate::configure_service_process_observation()?;
         let installation = InstalledRuntime::open()?;
-        installation.require_runtime_process()?;
+        let images = installation.require_runtime_process()?;
         super::maintenance::require_service_start_allowed(&installation)?;
-        serve(installation, handle)
+        serve(images, handle)
     });
     let failed = match operated {
         Ok(Ok(())) => false,
@@ -151,7 +151,7 @@ fn report_status(
     }
     Ok(())
 }
-fn serve(installation: InstalledRuntime, status: SERVICE_STATUS_HANDLE) -> Result<()> {
+fn serve(images: AdmittedImages, status: SERVICE_STATUS_HANDLE) -> Result<()> {
     let root = InstalledRuntime::machine_root()?;
     let diagnostics = Arc::new(PrivateDirectory::open_or_create(&root.join("diagnostics"))?);
     let mut controller = WindowsAuthority::open(&root.join("journal"), SERVICE_NAME)?;
@@ -167,9 +167,17 @@ fn serve(installation: InstalledRuntime, status: SERVICE_STATUS_HANDLE) -> Resul
         let _wake = WakeOnExit(Arc::clone(&done));
         let (ready_send, ready_receive) = mpsc::sync_channel(2);
         let mut listeners = Vec::new();
+        // The admitted engine and driver images stay retained for the service
+        // lifetime; the two client roles take their peer images.
+        let AdmittedImages {
+            desktop,
+            runtime,
+            engine: _engine,
+            wintun: _wintun,
+        } = images;
         for (role, image) in [
-            (ServiceClientRole::Desktop, installation.desktop()?),
-            (ServiceClientRole::UserAgent, installation.runtime()?),
+            (ServiceClientRole::Desktop, desktop),
+            (ServiceClientRole::UserAgent, runtime),
         ] {
             let authority = Arc::clone(&authority);
             let done = Arc::clone(&done);

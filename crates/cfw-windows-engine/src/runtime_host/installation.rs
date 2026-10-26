@@ -37,6 +37,15 @@ pub struct InstalledRelease {
     pub package_code: String,
 }
 
+/// Every installed image one runtime process admits, hashed once and held by
+/// its file identity for the process lifetime.
+pub struct AdmittedImages {
+    pub runtime: VerifiedExecutable,
+    pub desktop: VerifiedExecutable,
+    pub engine: VerifiedExecutable,
+    pub wintun: VerifiedExecutable,
+}
+
 pub struct InstalledRuntime {
     _package: Vec<File>,
     _manifest: Vec<File>,
@@ -150,16 +159,20 @@ impl InstalledRuntime {
         let pin = wintun_image_pin()?;
         self.executable(WINTUN_FILE, pin.digest()?, pin.version)
     }
-    pub fn require_runtime_process(&self) -> Result<()> {
+    /// Admit the current process as the installed runtime and verify every
+    /// shipped image once. Hosts consume the returned images instead of
+    /// reopening and rehashing the same files on their start path; the
+    /// manifest and directory stay pinned throughout the host.
+    pub fn require_runtime_process(&self) -> Result<AdmittedImages> {
         let runtime = self.runtime()?;
         let current = crate::NativePeerProcess::open(std::process::id())?;
         current.verify_executable(&runtime)?;
-        // Check all admitted images now; later consumers retain their own
-        // handles. Manifest and directory stay pinned throughout the host.
-        self.desktop()?;
-        self.engine()?;
-        self.wintun()?;
-        Ok(())
+        Ok(AdmittedImages {
+            runtime,
+            desktop: self.desktop()?,
+            engine: self.engine()?,
+            wintun: self.wintun()?,
+        })
     }
     pub fn require_desktop_process(&self) -> Result<()> {
         let desktop = self.desktop()?;

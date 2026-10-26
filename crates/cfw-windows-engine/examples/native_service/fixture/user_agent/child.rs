@@ -10,8 +10,12 @@ fn receive() -> Result<UserAgentLaunch> {
         .try_clone_to_owned()
         .map_err(|e| e.to_string())?;
     let receiver = LaunchReceiver::from_inherited(input, expected).map_err(|e| e.to_string())?;
+    let cancel = AtomicBool::new(false);
     receiver
-        .receive(Instant::now() + LIMIT, &AtomicBool::new(false))
+        .announce_admitted(Instant::now() + LIMIT, &cancel)
+        .map_err(|e| e.to_string())?;
+    receiver
+        .receive(Instant::now() + LIMIT, &cancel)
         .map_err(|e| e.to_string())
 }
 

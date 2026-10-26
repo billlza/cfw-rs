@@ -46,6 +46,7 @@ fn desktop_kind(error: &DesktopError) -> Kind {
             | LaunchError::Console(_)
             | LaunchError::Identity
             | LaunchError::Invocation => Kind::IdentityRejected,
+            LaunchError::Admission { .. } => Kind::CleanupUnproven,
         },
         DesktopError::Proxy(error) => proxy_kind(error),
         DesktopError::Observation(error) => desktop_kind(error),
@@ -78,6 +79,7 @@ fn channel_kind(error: &LaunchChannelError) -> Kind {
         LaunchChannelError::Io(_) => Kind::OwnerUnresponsive,
         LaunchChannelError::Frame(_)
         | LaunchChannelError::Acknowledgement
+        | LaunchChannelError::Admission
         | LaunchChannelError::Observation => Kind::InvalidMessage,
     }
 }

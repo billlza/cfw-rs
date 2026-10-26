@@ -23,6 +23,11 @@ use windows_sys::Win32::System::Pipes::{
 
 const ACK_PREFIX: &[u8] = b"cfw.launch.received.v1\0";
 const ACK_BYTES: usize = ACK_PREFIX.len() + 32;
+/// Sent by the launched Agent once its own installed images and private
+/// storage are admitted. The launcher prepares the lease only after reading
+/// it, so the Authority's fixed preparation lifetime covers the launch
+/// handoff and Bind alone, never the Agent's cold admission.
+const ADMITTED: &[u8] = b"cfw.launch.admitted.v1\0";
 mod observation;
 pub(crate) use observation::{ObservationClient, ObservationServer};
 
@@ -40,6 +45,8 @@ pub enum LaunchChannelError {
     Identity,
     #[error("Windows launch acknowledgement does not match the sent frame")]
     Acknowledgement,
+    #[error("Windows launch admission announcement is invalid")]
+    Admission,
     #[error("Windows runtime observation is malformed, stale or unrelated")]
     Observation,
 }
@@ -62,6 +69,17 @@ impl LaunchSender {
         let current = user()?;
         let (pipe, receiver) = native_io::connected_pair(&current, "launch", 8192)?;
         Ok((Self { pipe }, receiver))
+    }
+    /// Wait for the launched Agent's admission announcement. Nothing has been
+    /// sent yet: a timeout or a foreign message leaves no ticket with the Agent.
+    pub fn await_admission(&self, deadline: Instant, cancel: &AtomicBool) -> Result<()> {
+        user()?;
+        check_deadline(deadline)?;
+        let received = native_io::read_bounded(&self.pipe, deadline, ADMITTED.len(), Some(cancel))?;
+        if received.as_bytes() != ADMITTED {
+            return Err(LaunchChannelError::Admission);
+        }
+        Ok(())
     }
     pub fn send(
         self,
@@ -157,6 +175,16 @@ impl LaunchReceiver {
             parent,
             expected_parent,
         })
+    }
+    /// Announce that this Agent finished admitting its installed images and
+    /// private storage. The launcher prepares the lease only after this.
+    pub fn announce_admitted(&self, deadline: Instant, cancel: &AtomicBool) -> Result<()> {
+        user()?;
+        check_deadline(deadline)?;
+        self.parent.verify_pipe_server(&self.pipe)?;
+        self.parent.verify_executable(&self.expected_parent)?;
+        native_io::write_bounded(&self.pipe, ADMITTED, deadline, ADMITTED.len(), Some(cancel))?;
+        Ok(())
     }
     pub fn receive(self, deadline: Instant, cancel: &AtomicBool) -> Result<UserAgentLaunch> {
         self.receive_observed(deadline, cancel)

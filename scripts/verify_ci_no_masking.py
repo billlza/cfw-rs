@@ -59,6 +59,7 @@ RELEASE_CI_GATE = REPO_ROOT / "scripts" / "run_release_ci_gate.sh"
 NATIVE_UI_DEVELOPMENT_CHECKS = REPO_ROOT / "scripts" / "native_ui_development_checks.sh"
 REQUIRED_NATIVE_UI_DEVELOPMENT_CHECKS_SHA256 = "472500cd394803a7a355e8f9137fee88041b8f6f0fea0828a35345c577a4d609"
 REQUIRED_RUN_SHELL = "/bin/bash --noprofile --norc -p -e -o pipefail {0}"
+REQUIRED_MACOS_RUNNER = "xcode-27"
 REQUIRED_CHECKOUT_ACTION = (
     "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
 )
@@ -107,7 +108,7 @@ REQUIRED_SWIFT_TARGET_INFO_PROBE = (
 # Level 1 integrity identity for the complete dispatch program. This detects
 # unreviewed control-flow drift; it is not an authentication mechanism.
 REQUIRED_RELEASE_CI_GATE_SHA256 = (
-    "5b9e3bfd91d8ad33090589b7e9f5d1235588dd768986837be97efd524cda231c"
+    "6126f9232290c3457eb84cc5af747fca0e09c7811df4e07b88fab87fae7d5b68"
 )
 REQUIRED_WORKFLOW_SHA256 = (
     "ef739c29a9bd8d1c54be411ebef8c77894febf15505de951aa0b4f6ffe2aa760"
@@ -417,8 +418,13 @@ def _yaml_structural_lines(text: str) -> list[tuple[int, str, str]]:
     return result
 
 
-def _check_yaml_mapping_policy(text: str) -> list[str]:
-    """Enforce one non-conditional YAML dialect without a third-party parser."""
+def _check_yaml_mapping_policy(text: str, *, boundary_indent: int = 0) -> list[str]:
+    """Enforce one non-conditional YAML dialect without a third-party parser.
+
+    ``boundary_indent`` is where the single fixed Bash boundary lives: the
+    workflow level of ``ci.yml`` (0) or the job level of one macOS-hosted job
+    in another workflow (4).
+    """
 
     findings: list[str] = []
     forbidden_keys = {"if", "continue-on-error", "working-directory", "BASH_ENV"}
@@ -426,7 +432,9 @@ def _check_yaml_mapping_policy(text: str) -> list[str]:
     anchor_or_alias = re.compile(r"(?<![A-Za-z0-9_])[&*][A-Za-z_][A-Za-z0-9_-]*")
     defaults_lines: list[int] = []
     shell_lines: list[int] = []
-    required_shell_line = f'    shell: "{REQUIRED_RUN_SHELL}"'
+    boundary = " " * boundary_indent
+    required_defaults_line = f"{boundary}defaults:"
+    required_shell_line = f'{boundary}    shell: "{REQUIRED_RUN_SHELL}"'
     for number, original, syntax in _yaml_structural_lines(text):
         if syntax == "\t":
             findings.append(f"line {number}: tab-indented YAML is outside the release dialect")
@@ -463,7 +471,7 @@ def _check_yaml_mapping_policy(text: str) -> list[str]:
             )
         if plain_key is not None and plain_key.group(1) == "defaults":
             defaults_lines.append(number)
-            if original != "defaults:":
+            if original != required_defaults_line:
                 findings.append(
                     f"line {number}: job or step defaults are outside the release dialect"
                 )
@@ -486,8 +494,8 @@ def _check_yaml_mapping_policy(text: str) -> list[str]:
                 f"line {number}: tagged or anchored YAML keys are outside the release dialect"
             )
     required_shell_block = (
-        "defaults:\n"
-        "  run:\n"
+        f"{required_defaults_line}\n"
+        f"{boundary}  run:\n"
         f"{required_shell_line}\n"
     )
     if (
@@ -495,8 +503,9 @@ def _check_yaml_mapping_policy(text: str) -> list[str]:
         or len(shell_lines) != 1
         or text.count(required_shell_block) != 1
     ):
+        scope, level = ("workflow", "top-level ") if boundary_indent == 0 else ("job", "")
         findings.append(
-            "workflow must declare exactly one top-level fixed privileged Bash boundary"
+            f"{scope} must declare exactly one {level}fixed privileged Bash boundary"
         )
     return findings
 
@@ -592,7 +601,9 @@ def _is_simple_assignment(tokens: tuple[str, ...]) -> bool:
     )
 
 
-def _canonical_release_gate(tokens: tuple[str, ...]) -> str | None:
+def _canonical_release_invocation(tokens: tuple[str, ...]) -> tuple[str, ...] | None:
+    """Return the gate name and arguments of one closed release gate command."""
+
     if not tokens or tokens[0] != _RELEASE_GATE_WRAPPER or _has_shell_control(tokens):
         return None
     gate_index = 1
@@ -604,11 +615,12 @@ def _canonical_release_gate(tokens: tuple[str, ...]) -> str | None:
         return None
     if len(tokens) <= gate_index:
         return None
-    gate = tokens[gate_index]
-    return gate if re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", gate) else None
+    if re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", tokens[gate_index]) is None:
+        return None
+    return tuple(tokens[gate_index:])
 
 
-def _release_gate_commands(text: str) -> tuple[str, ...]:
+def _release_gate_invocations(text: str) -> tuple[tuple[str, ...], ...]:
     lines = text.splitlines()
     scripts: list[str] = []
     index = 0
@@ -645,7 +657,7 @@ def _release_gate_commands(text: str) -> tuple[str, ...]:
             index += 1
         scripts.append(script)
 
-    gates: list[str] = []
+    invocations: list[tuple[str, ...]] = []
     for script in scripts:
         reachable = True
         for command in _logical_shell_commands(script):
@@ -655,12 +667,16 @@ def _release_gate_commands(text: str) -> tuple[str, ...]:
                 continue
             if _is_simple_assignment(tokens):
                 continue
-            gate = _canonical_release_gate(tokens)
-            if reachable and gate is not None:
-                gates.append(gate)
+            invocation = _canonical_release_invocation(tokens)
+            if reachable and invocation is not None:
+                invocations.append(invocation)
                 continue
             reachable = False
-    return tuple(gates)
+    return tuple(invocations)
+
+
+def _release_gate_commands(text: str) -> tuple[str, ...]:
+    return tuple(invocation[0] for invocation in _release_gate_invocations(text))
 
 
 def _uses_release_gate(text: str, gate: str) -> bool:
@@ -741,6 +757,49 @@ def _check_python_isolation(text: str) -> list[str]:
     return findings
 
 
+def _check_raw_cargo(text: str) -> list[str]:
+    raw_cargo = re.compile(r"(?<![A-Za-z0-9_./-])cargo(?:\s|$)")
+    return [
+        f"line {number}: raw Cargo command bypasses the closed release CI gate"
+        for number, line in enumerate(text.splitlines(), start=1)
+        if raw_cargo.search(line)
+    ]
+
+
+def _check_closed_python_binding(
+    name: str, body: str, pins: dict[str, str]
+) -> list[str]:
+    """A job that runs closed gates binds the pinned validation Python exactly."""
+
+    return [
+        f"job {name!r} does not bind closed CI Python through {fragment!r}"
+        for fragment in (
+            "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
+            "id: validation-python",
+            f'python-version: "{pins["PYTHON_VERSION"]}"',
+            "architecture: arm64",
+            "update-environment: false",
+            "--validation-python-executable",
+            "steps.validation-python.outputs.python-path",
+        )
+        if fragment not in body
+    ]
+
+
+def _check_policy_bootstrap_order(name: str, job_gates: tuple[str, ...]) -> list[str]:
+    """Policy tools are bootstrapped only after the verified Cargo inputs."""
+
+    if "bootstrap-policy-tools" not in job_gates:
+        return []
+    if "prepare-cargo-workspace-inputs" not in job_gates:
+        return [f"job {name!r} bootstraps policy tools without verified Cargo inputs"]
+    if job_gates.index("prepare-cargo-workspace-inputs") > job_gates.index(
+        "bootstrap-policy-tools"
+    ):
+        return [f"job {name!r} prepares verified Cargo inputs after policy bootstrap"]
+    return []
+
+
 def _check_release_ci_boundary(text: str, pins: dict[str, str]) -> list[str]:
     findings: list[str] = []
     required_workflow_gates = (
@@ -806,41 +865,14 @@ def _check_release_ci_boundary(text: str, pins: dict[str, str]) -> list[str]:
                 f"job {job_name!r} must bind the pinned Tauri CLI install step "
                 "to exactly one runner-owned temporary directory"
             )
-    raw_cargo = re.compile(r"(?<![A-Za-z0-9_./-])cargo(?:\s|$)")
-    for number, line in enumerate(text.splitlines(), start=1):
-        if raw_cargo.search(line):
-            findings.append(
-                f"line {number}: raw Cargo command bypasses the closed release CI gate"
-            )
+    findings += _check_raw_cargo(text)
 
     for name, body in _split_jobs(text).items():
         job_gates = _release_gate_commands(body)
         if not job_gates:
             continue
-        for fragment in (
-            "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
-            "id: validation-python",
-            f'python-version: "{pins["PYTHON_VERSION"]}"',
-            "architecture: arm64",
-            "update-environment: false",
-            "--validation-python-executable",
-            "steps.validation-python.outputs.python-path",
-        ):
-            if fragment not in body:
-                findings.append(
-                    f"job {name!r} does not bind closed CI Python through {fragment!r}"
-                )
-        if "bootstrap-policy-tools" in job_gates:
-            if "prepare-cargo-workspace-inputs" not in job_gates:
-                findings.append(
-                    f"job {name!r} bootstraps policy tools without verified Cargo inputs"
-                )
-            elif job_gates.index("prepare-cargo-workspace-inputs") > job_gates.index(
-                "bootstrap-policy-tools"
-            ):
-                findings.append(
-                    f"job {name!r} prepares verified Cargo inputs after policy bootstrap"
-                )
+        findings += _check_closed_python_binding(name, body, pins)
+        findings += _check_policy_bootstrap_order(name, job_gates)
 
     if RELEASE_CI_GATE.is_symlink() or not RELEASE_CI_GATE.is_file():
         findings.append("closed release CI gate script is missing or is a symlink")
@@ -1177,6 +1209,65 @@ def audit_workflow(workflow_path: Path, pins_path: Path) -> None:
         raise CiPolicyError(
             "CI workflow is not deterministic or fails open:\n  - " + "\n  - ".join(findings)
         )
+
+
+def audit_macos_hosted_job(
+    workflow_path: Path, job_name: str, pins_path: Path
+) -> tuple[tuple[str, ...], ...]:
+    """Audit one macOS-hosted job of a workflow other than the macOS CI.
+
+    The Windows line keeps its workflows apart from ``ci.yml``, but a job that
+    runs the closed release gates on the macOS release runner obeys the same
+    fail-closed lane policy as every ``ci.yml`` job: the exact source checkout
+    and assertion, the pinned validation Python and Xcode ownership, the job's
+    own fixed privileged Bash boundary, explicit bounds, no masking, no raw
+    Cargo, and the pinned Rust toolchain. Returns the job's closed gate
+    invocations (gate name and arguments) in order, so the caller binds the
+    gates and targets it expects.
+    """
+
+    if workflow_path.is_symlink() or not workflow_path.is_file():
+        raise CiPolicyError(f"workflow is missing: {workflow_path}")
+    try:
+        text = workflow_path.read_bytes().decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise CiPolicyError("workflow is not UTF-8 source") from error
+    jobs = _split_jobs(_without_full_line_comments(text))
+    if job_name not in jobs:
+        raise CiPolicyError(
+            f"workflow {workflow_path.name} declares no job {job_name!r}"
+        )
+    body = jobs[job_name]
+    job = {job_name: body}
+    pins = _read_pins(pins_path)
+
+    findings: list[str] = []
+    findings += _check_yaml_mapping_policy(body, boundary_indent=4)
+    findings += _check_masking(body)
+    findings += _check_python_isolation(body)
+    findings += _check_raw_cargo(body)
+    findings += _check_source_checkout(job)
+    findings += _check_hosted_xcode_ownership(job, pins)
+    findings += _check_job_bounds(job)
+    runner = re.compile(rf"^    runs-on: {re.escape(REQUIRED_MACOS_RUNNER)}\s*$", re.MULTILINE)
+    if runner.search(body) is None:
+        findings.append(
+            f"job {job_name!r} must run on the {REQUIRED_MACOS_RUNNER!r} release runner"
+        )
+    invocations = _release_gate_invocations(body)
+    job_gates = tuple(invocation[0] for invocation in invocations)
+    if not job_gates:
+        findings.append(f"job {job_name!r} runs no closed release CI gate")
+    findings += _check_closed_python_binding(job_name, body, pins)
+    findings += _check_policy_bootstrap_order(job_name, job_gates)
+    rust = set(re.findall(r'toolchain:\s*"([0-9][0-9A-Za-z.\-]*)"', body))
+    _single(rust, "Rust", pins["RUST_VERSION"], findings)
+    if findings:
+        raise CiPolicyError(
+            f"job {job_name!r} of {workflow_path.name} is not deterministic or "
+            "fails open:\n  - " + "\n  - ".join(findings)
+        )
+    return invocations
 
 
 def main() -> None:

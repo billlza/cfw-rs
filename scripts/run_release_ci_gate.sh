@@ -22,6 +22,15 @@ die() {
   exit 1
 }
 
+# The two Rust policy gates audit one shipped program's exact dependency graph.
+# Without arguments they audit the macOS program, as the hosted macOS CI and the
+# sealed lane transcription invoke them; the Windows line names its target. The
+# audited scripts own the closed set of accepted targets.
+require_shipped_target_arguments() {
+  [[ $# -eq 0 || ( $# -eq 2 && "$1" == "--target" && -n "$2" ) ]] ||
+    die "$gate accepts no arguments or exactly --target TRIPLE"
+}
+
 ci_release_role="production"
 if [[ $# -ge 3 && "$1" == "--validation-python-executable" && "$2" == /* ]]; then
   export CFW_UNSIGNED_VALIDATION_PYTHON="$2"
@@ -222,16 +231,16 @@ case "$gate" in
     cfw_run_native_ui_development_check "$repo_root" test
     ;;
   rust-target-audit)
-    [[ $# -eq 0 ]] || die "$gate accepts no arguments"
+    require_shipped_target_arguments "$@"
     cfw_run_with_release_cargo_runtime \
       "$repo_root" cfw_run_release_python_script \
-      "$repo_root" "$repo_root/scripts/audit_rust_target.py"
+      "$repo_root" "$repo_root/scripts/audit_rust_target.py" "$@"
     ;;
   cargo-deny)
-    [[ $# -eq 0 ]] || die "$gate accepts no arguments"
+    require_shipped_target_arguments "$@"
     cfw_run_with_release_cargo_runtime \
       "$repo_root" cfw_run_release_python_script \
-      "$repo_root" "$repo_root/scripts/audit_cargo_policy.py"
+      "$repo_root" "$repo_root/scripts/audit_cargo_policy.py" "$@"
     ;;
   bootstrap-node-toolchain)
     [[ $# -eq 0 ]] || die "$gate accepts no arguments"

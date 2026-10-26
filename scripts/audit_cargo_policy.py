@@ -6,10 +6,16 @@ license/source/bans checks reuse that closed environment. Advisories and yanked
 status use the same metadata but a fresh private Cargo home so current registry
 policy data can be fetched without becoming a compiler input. Both cargo-deny
 results must be a single warning-free JSON summary.
+
+Each shipped program has its own policy file naming its exact target graph:
+``--target`` selects the program and defaults to the macOS program
+(``deny.toml``); the Windows program's policy is
+``deny.x86_64-pc-windows-msvc.toml``.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 from pathlib import Path
@@ -21,17 +27,30 @@ from typing import Any, Mapping, Sequence
 
 if __package__:
     from .publication.bounded_process import BoundedProcessError, run_bounded_process
+    from .publication.rust_targets import MACOS_TARGET, SHIPPED_TARGETS, WINDOWS_TARGET
 else:
     from publication.bounded_process import BoundedProcessError, run_bounded_process
+    from publication.rust_targets import MACOS_TARGET, SHIPPED_TARGETS, WINDOWS_TARGET
 
 
-SUPPORTED_TARGET = "aarch64-apple-darwin"
+# One cargo-deny policy per shipped program. The programs share every rule
+# except the exact license allowance, which names only the licenses each
+# program's own dependency graph carries (cargo-deny warns on unused entries,
+# and this gate fails on every warning).
+POLICY_CONFIG_NAMES = {
+    MACOS_TARGET: "deny.toml",
+    WINDOWS_TARGET: "deny.x86_64-pc-windows-msvc.toml",
+}
 POLICY_NAMES = ("advisories", "bans", "licenses", "sources")
 SUMMARY_STAT_NAMES = ("errors", "helps", "notes", "warnings")
 METADATA_TIMEOUT_SECONDS = 300
 OFFLINE_POLICY_TIMEOUT_SECONDS = 300
 ONLINE_POLICY_TIMEOUT_SECONDS = 900
 OUTPUT_LIMIT_BYTES = 64 * 1024 * 1024
+# A failed check names its cargo-deny records in the gate output, bounded so
+# a hosted log stays readable when every crate reports the same failure.
+RENDERED_RECORD_LIMIT = 8
+RENDERED_RECORD_TEXT_LIMIT = 400
 
 
 class CargoPolicyError(RuntimeError):
@@ -61,8 +80,44 @@ def _decode_json(encoded: bytes, label: str) -> Any:
         raise CargoPolicyError(f"{label} is not strict UTF-8 JSON") from error
 
 
+def _bounded_text(value: Any) -> str:
+    text = value if isinstance(value, str) else json.dumps(value, sort_keys=True)
+    if len(text) > RENDERED_RECORD_TEXT_LIMIT:
+        return text[:RENDERED_RECORD_TEXT_LIMIT] + " [cut]"
+    return text
+
+
+def _render_policy_record(record: Any) -> str:
+    """One line naming what a cargo-deny log, diagnostic, or summary record said."""
+
+    if not isinstance(record, dict) or not isinstance(record.get("fields"), dict):
+        return _bounded_text(f"malformed record: {json.dumps(record, sort_keys=True)}")
+    kind = record.get("type")
+    fields = record["fields"]
+    if kind == "log":
+        return _bounded_text(f"log {fields.get('level')}: {fields.get('message')}")
+    if kind == "diagnostic":
+        parts = [f"{fields.get('severity')} {fields.get('code')}: {fields.get('message')}"]
+        labels = fields.get("labels")
+        if isinstance(labels, list):
+            parts.extend(
+                f"{label.get('message')} ({label.get('span')})"
+                for label in labels
+                if isinstance(label, dict)
+            )
+        notes = fields.get("notes")
+        if isinstance(notes, list):
+            parts.extend(str(note) for note in notes)
+        return _bounded_text("; ".join(parts))
+    return _bounded_text(f"{kind}: {json.dumps(fields, sort_keys=True)}")
+
+
 def parse_policy_result(encoded: bytes, expected_checks: Sequence[str]) -> dict[str, dict[str, int]]:
-    """Accept exactly one clean cargo-deny JSON summary and no diagnostics."""
+    """Accept exactly one clean cargo-deny JSON summary and no diagnostics.
+
+    Anything else fails with the records themselves (bounded), so a hosted log
+    says which crate, registry query, or policy rule cargo-deny complained about.
+    """
 
     if not expected_checks or any(name not in POLICY_NAMES for name in expected_checks):
         raise CargoPolicyError("cargo-deny expected check set is invalid")
@@ -71,13 +126,16 @@ def parse_policy_result(encoded: bytes, expected_checks: Sequence[str]) -> dict[
         if line.strip():
             records.append(_decode_json(line, "cargo-deny output line"))
     if len(records) != 1:
-        kinds = [
-            record.get("type", "unknown") if isinstance(record, dict) else "non-object"
-            for record in records[:4]
+        rendered = [
+            _render_policy_record(record) for record in records[:RENDERED_RECORD_LIMIT]
         ]
-        rendered = ", ".join(kinds) if kinds else "empty output"
+        omitted = len(records) - len(rendered)
+        if omitted:
+            rendered.append(f"{omitted} more records not shown")
+        detail = "\n  ".join(rendered) if rendered else "empty output"
         raise CargoPolicyError(
-            "cargo-deny emitted diagnostics instead of one summary: " + rendered
+            f"cargo-deny {'/'.join(expected_checks)} check emitted {len(records)} "
+            f"records instead of one summary:\n  {detail}"
         )
     record = records[0]
     if not isinstance(record, dict) or set(record) != {"fields", "type"}:
@@ -146,31 +204,32 @@ def _require_private_directory(path: Path, label: str) -> Path:
     return path
 
 
-def _require_policy_config(path: Path) -> None:
+def _require_policy_config(path: Path, target: str) -> None:
+    """The policy file names exactly the selected program's all-features graph."""
+
     try:
         with path.open("rb") as handle:
             config = tomllib.load(handle)
     except (OSError, tomllib.TOMLDecodeError) as error:
-        raise CargoPolicyError("deny.toml is not valid TOML") from error
+        raise CargoPolicyError(f"{path.name} is not valid TOML") from error
     if not isinstance(config, dict):
-        raise CargoPolicyError("deny.toml root is not a table")
+        raise CargoPolicyError(f"{path.name} root is not a table")
     graph = config.get("graph")
     if not isinstance(graph, dict):
-        raise CargoPolicyError("deny.toml has no graph policy")
-    if (
-        graph.get("targets") != [SUPPORTED_TARGET]
-        or graph.get("all-features") is not True
-    ):
+        raise CargoPolicyError(f"{path.name} has no graph policy")
+    if graph.get("targets") != [target] or graph.get("all-features") is not True:
         raise CargoPolicyError(
-            "deny.toml must select the exact macOS Arm64 all-features graph"
+            f"{path.name} must select exactly the {target} all-features graph"
         )
     advisories = config.get("advisories")
     if not isinstance(advisories, dict):
-        raise CargoPolicyError("deny.toml has no advisory policy")
+        raise CargoPolicyError(f"{path.name} has no advisory policy")
     if advisories.get("yanked") != "deny":
-        raise CargoPolicyError("deny.toml must deny yanked packages")
+        raise CargoPolicyError(f"{path.name} must deny yanked packages")
     if advisories.get("disable-yank-checking") is not False:
-        raise CargoPolicyError("deny.toml must keep yanked-package checking enabled")
+        raise CargoPolicyError(
+            f"{path.name} must keep yanked-package checking enabled"
+        )
 
 
 def _bounded(
@@ -225,6 +284,7 @@ def _cargo_deny_command(
     metadata_path: Path,
     config_path: Path,
     checks: Sequence[str],
+    target: str,
 ) -> list[str]:
     return [
         str(cargo_deny),
@@ -236,14 +296,16 @@ def _cargo_deny_command(
         str(config_path),
         "--locked",
         "--target",
-        SUPPORTED_TARGET,
+        target,
         "check",
         *checks,
     ]
 
 
-def run(repository: Path) -> int:
+def run(repository: Path, target: str) -> int:
     repository = repository.resolve(strict=True)
+    if target not in POLICY_CONFIG_NAMES:
+        raise CargoPolicyError(f"unsupported shipped Rust target: {target}")
     cargo = _require_executable(
         os.environ.get("CFW_RELEASE_CARGO_EXECUTABLE"), "Cargo"
     )
@@ -258,10 +320,10 @@ def run(repository: Path) -> int:
     )
     if os.environ.get("CARGO_NET_OFFLINE") != "true":
         raise CargoPolicyError("closed Cargo metadata must run offline")
-    config_path = repository / "deny.toml"
+    config_path = repository / POLICY_CONFIG_NAMES[target]
     if not config_path.is_file() or config_path.is_symlink():
-        raise CargoPolicyError("deny.toml is unavailable")
-    _require_policy_config(config_path)
+        raise CargoPolicyError(f"{config_path.name} is unavailable")
+    _require_policy_config(config_path, target)
 
     release_home_value = os.environ.get("HOME")
     if not release_home_value:
@@ -279,7 +341,7 @@ def run(repository: Path) -> int:
             "--locked",
             "--all-features",
             "--filter-platform",
-            SUPPORTED_TARGET,
+            target,
             "--format-version",
             "1",
         ],
@@ -313,6 +375,7 @@ def run(repository: Path) -> int:
                 metadata_path,
                 config_path,
                 ("bans", "licenses", "sources"),
+                target,
             ),
             repository=repository,
             environment=closed_environment,
@@ -354,6 +417,7 @@ def run(repository: Path) -> int:
                 metadata_path,
                 config_path,
                 ("advisories",),
+                target,
             ),
             repository=repository,
             environment=online_environment,
@@ -372,15 +436,23 @@ def run(repository: Path) -> int:
         raise CargoPolicyError("closed Cargo home disappeared during policy checks")
     print(
         "cargo-deny policy passed: "
-        f"{SUPPORTED_TARGET}, advisories/yanked/bans/licenses/sources, "
+        f"{target} ({config_path.name}), advisories/yanked/bans/licenses/sources, "
         "0 errors, 0 warnings, 0 notes"
     )
     return 0
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--target",
+        choices=SHIPPED_TARGETS,
+        default=MACOS_TARGET,
+        help="the shipped program whose dependency policy to enforce (default: the macOS program)",
+    )
+    arguments = parser.parse_args()
     try:
-        raise SystemExit(run(Path(__file__).resolve().parent.parent))
+        raise SystemExit(run(Path(__file__).resolve().parent.parent, arguments.target))
     except (CargoPolicyError, OSError, ValueError) as error:
         raise SystemExit(f"error: cargo-deny policy failed: {error}") from error
 
@@ -389,4 +461,4 @@ if __name__ == "__main__":
     main()
 
 
-__all__ = ["CargoPolicyError", "parse_policy_result", "run"]
+__all__ = ["POLICY_CONFIG_NAMES", "CargoPolicyError", "parse_policy_result", "run"]

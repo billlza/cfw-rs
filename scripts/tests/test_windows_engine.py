@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import sys
 import tempfile
 import unittest
@@ -175,6 +176,153 @@ class WindowsEngineContractTests(unittest.TestCase):
                         self.assertEqual(archive.read(file["path"]), (output / file["path"]).read_bytes())
             self.assertEqual(result["archive"]["sha256"], engine.sha256(output / result["archive"]["filename"]))
 
+    def test_component_notices_accept_only_the_workspace_sing_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            workspace, modules, output, sdk = (root / name for name in ("workspace", "modules", "output", "go"))
+            corrected = workspace / "cfw-dependencies/sing"
+            for directory in (corrected, modules, output, sdk / "bin"):
+                directory.mkdir(parents=True)
+            (workspace / "LICENSE").write_bytes(b"application license\n")
+            (corrected / "LICENSE").write_bytes(b"sing license\n")
+            (sdk / "LICENSE").write_bytes(b"Go license\n")
+            version = "v0.9.7-0.20261023115459-5dc452e537bf"
+            main = {"Module": {"Path": "github.com/sagernet/sing-box", "Main": True, "Dir": str(workspace)}}
+            sing = {"Module": {"Path": "github.com/sagernet/sing", "Version": version, "Dir": str(corrected),
+                               "Replace": {"Path": "./cfw-dependencies/sing", "Dir": str(corrected)}}}
+            pins = {"GO_VERSION": "1.27.3", "SING_BOX_VERSION": "v1.14.4", "LIBBOX_BUILD_TAGS": "with_quic"}
+            environment = {"GOMODCACHE": str(modules)}
+
+            def notices(packages):
+                data = b"\n".join(json.dumps(item).encode() for item in packages)
+                with patch.object(engine, "command", return_value=data):
+                    return engine.bundle_notices(REPOSITORY, sdk / "bin/go.exe", workspace, output / str(len(list(output.iterdir()))), environment, pins)
+
+            result = notices([main, sing])
+            self.assertEqual((result["components"], result["files"]), (3, 3))
+            index = json.loads((output / "0/third-party-notices.json").read_text())
+            sing_component = [component for component in index["components"] if component["component"] == "github.com/sagernet/sing"]
+            self.assertEqual(len(sing_component), 1)
+            self.assertEqual(sing_component[0]["version"], version)
+            self.assertEqual((output / "0" / sing_component[0]["files"][0]["path"]).read_bytes(), b"sing license\n")
+            elsewhere = modules / "github.com/sagernet/sing@elsewhere"
+            elsewhere.mkdir(parents=True)
+            (elsewhere / "LICENSE").write_bytes(b"sing license\n")
+            for rejected, message in (
+                ({"Module": {**sing["Module"], "Dir": str(elsewhere), "Replace": {"Path": "./cfw-dependencies/sing", "Dir": str(elsewhere)}}},
+                 "linked module replacement escaped the build workspace"),
+                ({"Module": {**sing["Module"], "Replace": {"Path": "./cfw-dependencies/other", "Dir": str(corrected)}}},
+                 "unexpected linked module replacement"),
+                ({"Module": {**sing["Module"], "Path": "example.invalid/other"}}, "unexpected linked module replacement"),
+                ({"Module": {**sing["Module"], "Replace": "./cfw-dependencies/sing"}}, "unexpected linked module replacement"),
+            ):
+                with self.subTest(message=message), self.assertRaisesRegex(RuntimeError, message):
+                    notices([main, rejected])
+
+    def test_build_workspace_is_the_source_plus_the_corrected_sing_copy_and_one_replacement(self) -> None:
+        version = "v0.9.7-0.20261023115459-5dc452e537bf"
+        replace_line = f"\nreplace github.com/sagernet/sing {version} => ./cfw-dependencies/sing\n".encode()
+
+        def layout(root: Path) -> tuple[Path, Path, Path, Path]:
+            source, modules, output = root / "host-source", root / "modules", root / "workspace"
+            module = modules / f"github.com/sagernet/sing@{version}"
+            for directory in (source / "cmd/cfm-build-workspace", source / "common", module / "common/bufio"):
+                directory.mkdir(parents=True)
+            (source / "go.mod").write_bytes(b"module github.com/sagernet/sing-box\n\nrequire (\n\tgithub.com/sagernet/sing " + version.encode() + b"\n)\n")
+            (source / "go.sum").write_bytes(b"github.com/sagernet/sing " + version.encode() + b" h1:zip\n")
+            (source / "common/box.go").write_bytes(b"package common\n")
+            (source / "cmd/cfm-build-workspace/main.go").write_bytes(b"package main\n")
+            (module / "LICENSE").write_bytes(b"sing license\n")
+            (module / "common/bufio/bind.go").write_bytes(b"package bufio // uncorrected\n")
+            (module / "common/bufio/bind_wait.go").write_bytes(b"package bufio // wait\n")
+            return source, modules, module, output
+
+        def tool(source: Path, module: Path, output: Path, mutate=None) -> None:
+            """What cmd/cfm-build-workspace does: copy, correct two files, append the replacement."""
+            shutil.copytree(source, output)
+            shutil.copytree(module, output / "cfw-dependencies/sing")
+            (output / "cfw-dependencies/sing/common/bufio/bind.go").write_bytes(b"package bufio // corrected\n")
+            (output / "cfw-dependencies/sing/common/bufio/bind_wait.go").write_bytes(b"package bufio // wait corrected\n")
+            (output / "go.mod").write_bytes((source / "go.mod").read_bytes() + replace_line)
+            if mutate is not None:
+                mutate(output)
+
+        def fake_command_for(source: Path, module: Path, output: Path, *, printed=None, replaced_after=True,
+                             replaced_before=False, module_dir=None, mutate=None, calls=None):
+            def fake_command(arguments, *, cwd=None, env=None, timeout=900):
+                if calls is not None:
+                    calls.append((arguments, cwd, env))
+                if arguments[1:] == ["list", "-m", "-json", "github.com/sagernet/sing"] and cwd == source:
+                    record = {"Path": "github.com/sagernet/sing", "Version": version, "Dir": str(module_dir or module), "Sum": "h1:zip"}
+                    if replaced_before:
+                        record["Replace"] = {"Path": "../elsewhere", "Dir": str(source.parent / "elsewhere")}
+                    return json.dumps(record).encode()
+                if arguments[1:4] == ["run", "./cmd/cfm-build-workspace", "-module-source"] and cwd == source:
+                    self.assertEqual(arguments[4:], [str(module), "-output", str(output)])
+                    tool(source, module, output, mutate)
+                    return (printed if printed is not None else str(output)).encode() + b"\n"
+                if arguments[1:] == ["list", "-m", "-json", "github.com/sagernet/sing"] and cwd == output:
+                    record = {"Path": "github.com/sagernet/sing", "Version": version, "Dir": str(output / "cfw-dependencies/sing")}
+                    if replaced_after:
+                        record["Replace"] = {"Path": "./cfw-dependencies/sing", "Dir": str(output / "cfw-dependencies/sing")}
+                    return json.dumps(record).encode()
+                raise AssertionError((arguments, cwd))
+            return fake_command
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            source, modules, module, output = layout(root)
+            environment = {"GOMODCACHE": str(modules), "GOPROXY": "off", "GOFLAGS": "-mod=readonly", "PATH": "x"}
+            calls: list = []
+            go = root / "go/bin/go.exe"
+            with patch.object(engine, "command", fake_command_for(source, module, output, calls=calls)):
+                workspace, record, files = engine.prepare_build_workspace(go, source, environment, output)
+            self.assertEqual(workspace, output)
+            self.assertEqual([(arguments[1], cwd) for arguments, cwd, _ in calls],
+                             [("list", source), ("run", source), ("list", output)])
+            self.assertTrue(all(env is environment for _, _, env in calls))
+            self.assertEqual(files, engine.source_files(output))
+            self.assertEqual(record, {
+                "module": "github.com/sagernet/sing", "version": version, "replacement": "./cfw-dependencies/sing",
+                "corrected_files": {
+                    "common/bufio/bind.go": {"before_sha256": hashlib.sha256(b"package bufio // uncorrected\n").hexdigest(),
+                                             "after_sha256": hashlib.sha256(b"package bufio // corrected\n").hexdigest()},
+                    "common/bufio/bind_wait.go": {"before_sha256": hashlib.sha256(b"package bufio // wait\n").hexdigest(),
+                                                  "after_sha256": hashlib.sha256(b"package bufio // wait corrected\n").hexdigest()}},
+                "files_sha256": hashlib.sha256(json.dumps(files, sort_keys=True, separators=(",", ":")).encode()).hexdigest()})
+            self.assertEqual(engine.source_files(source)["go.mod"], hashlib.sha256((source / "go.mod").read_bytes()).hexdigest())
+            with patch.object(engine, "command", fake_command_for(source, module, output)), \
+                    self.assertRaisesRegex(RuntimeError, "refusing to overwrite a build workspace"):
+                engine.prepare_build_workspace(go, source, environment, output)
+
+        def drop_correction(workspace: Path) -> None:
+            for name in ("bind.go", "bind_wait.go"):
+                shutil.copyfile(module / "common/bufio" / name, workspace / "cfw-dependencies/sing/common/bufio" / name)
+
+        cases = (
+            (dict(replaced_before=True), "does not require the sing module from the verified cache"),
+            (dict(module_dir=Path("/elsewhere") / f"github.com/sagernet/sing@{version}"), "sing module is not the verified cache copy"),
+            (dict(printed="/somewhere/else"), "did not produce its exact output"),
+            (dict(replaced_after=False), "resolved an unexpected sing replacement"),
+            (dict(mutate=lambda workspace: (workspace / "go.mod").write_bytes((workspace / "go.mod").read_bytes() + b"// drift\n")),
+             "changed go.mod beyond the relative replacement"),
+            (dict(mutate=lambda workspace: (workspace / "common/box.go").write_bytes(b"package common // drift\n")),
+             "changed engine source bytes: common/box.go"),
+            (dict(mutate=lambda workspace: (workspace / "cfw-dependencies/sing/extra.go").write_bytes(b"package sing\n")),
+             "changed the sing module's membership"),
+            (dict(mutate=lambda workspace: ((workspace / "cfw-dependencies/other").mkdir(), (workspace / "cfw-dependencies/other/x.go").write_bytes(b"package other\n"))),
+             "added unexpected dependencies"),
+            (dict(mutate=drop_correction), "applied no correction"),
+        )
+        for options, message in cases:
+            with tempfile.TemporaryDirectory() as temporary, self.subTest(message=message):
+                root = Path(temporary).resolve()
+                source, modules, module, output = layout(root)
+                environment = {"GOMODCACHE": str(modules)}
+                with patch.object(engine, "command", fake_command_for(source, module, output, **options)), \
+                        self.assertRaisesRegex(RuntimeError, message):
+                    engine.prepare_build_workspace(root / "go/bin/go.exe", source, environment, output)
+
     def test_module_graph_keeps_checksums_and_versioned_replacements_without_local_paths(self) -> None:
         graph = engine.module_graph(b'{"Path":"example.invalid/main","Main":true,"Dir":"private-path"}\n{"Path":"example.invalid/dep","Version":"v1.0.0","Sum":"h1:zip","GoModSum":"h1:mod","Replace":{"Path":"example.invalid/replacement","Version":"v1.0.1","Sum":"h1:other","Dir":"another-private-path"}}\n')
         self.assertEqual(graph[0], {"Path": "example.invalid/main", "Main": True})
@@ -183,6 +331,30 @@ class WindowsEngineContractTests(unittest.TestCase):
         for invalid in (b'', b'{"Path":"p"}garbage', b'{"Path":"p","Replace":{"Path":"../local"}}'):
             with self.subTest(invalid=invalid), self.assertRaises((RuntimeError, ValueError)):
                 engine.module_graph(invalid)
+
+    def test_module_graph_admits_only_the_named_relative_replacement_of_the_workspace(self) -> None:
+        replacement = (engine.WORKSPACE_MODULE, engine.WORKSPACE_REPLACEMENT)
+        corrected = (b'{"Path":"github.com/sagernet/sing-box","Main":true,"Dir":"workspace"}\n'
+                     b'{"Path":"github.com/sagernet/sing","Version":"v0.9.7-0.20261023115459-5dc452e537bf",'
+                     b'"Replace":{"Path":"./cfw-dependencies/sing","Dir":"workspace/cfw-dependencies/sing","GoMod":"g","GoVersion":"1.25.0"},'
+                     b'"Dir":"workspace/cfw-dependencies/sing"}\n'
+                     b'{"Path":"example.invalid/dep","Version":"v1.0.0","Sum":"h1:zip","GoModSum":"h1:mod"}\n')
+        graph = engine.module_graph(corrected, local_replacement=replacement)
+        self.assertEqual(graph[1], {"Path": "github.com/sagernet/sing", "Version": "v0.9.7-0.20261023115459-5dc452e537bf",
+                                    "Replace": {"Path": "./cfw-dependencies/sing"}})
+        self.assertEqual(graph[2], {"Path": "example.invalid/dep", "Version": "v1.0.0", "Sum": "h1:zip", "GoModSum": "h1:mod"})
+        with self.assertRaisesRegex(RuntimeError, "unversioned local module replacement is not admitted"):
+            engine.module_graph(corrected)
+        for other in (("github.com/sagernet/sing", "./cfw-dependencies/other"), ("example.invalid/dep", "./cfw-dependencies/sing")):
+            with self.subTest(other=other), self.assertRaisesRegex(RuntimeError, "unversioned local module replacement is not admitted"):
+                engine.module_graph(corrected, local_replacement=other)
+        foreign = corrected.replace(b'"Path":"github.com/sagernet/sing",', b'"Path":"example.invalid/other",')
+        with self.assertRaisesRegex(RuntimeError, "unversioned local module replacement is not admitted"):
+            engine.module_graph(foreign, local_replacement=replacement)
+        with self.assertRaisesRegex(RuntimeError, "unversioned local module replacement is not admitted"):
+            engine.module_graph(corrected.replace(b'"Replace":{', b'"Replace":{"Version":"",'), local_replacement=replacement)
+        with self.assertRaisesRegex(RuntimeError, "invalid module replacement"):
+            engine.module_graph(b'{"Path":"github.com/sagernet/sing","Replace":"./cfw-dependencies/sing"}\n', local_replacement=replacement)
 
     def test_linked_wintun_preserves_the_separate_official_binary_license(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -442,26 +614,27 @@ class WindowsEngineContractTests(unittest.TestCase):
             output.mkdir()
             environment = {"PATH": "ambient-path", "GOOS": "windows", "GOPROXY": "off", "GOFLAGS": "-mod=readonly"}
             with patch.object(engine.subprocess, "run", fake_run):
-                report = engine.scan_vulnerabilities(scanner, go, source, environment, tags, pins, output)
+                report = engine.scan_vulnerabilities(scanner, go, source, environment, tags, pins, output, "pinned")
             self.assertEqual((report["called_vulnerabilities"], report["scanned_modules"]), (0, 3))
             arguments, env = runs[0]
             self.assertEqual(arguments, [str(scanner), "-C", str(source), "-db", "https://vuln.go.dev", "-mode", "source",
                                          "-scan", "symbol", "-show", "version,verbose", "-tags", tags,
                                          "./cmd/sing-box", "./cmd/cfw-engine-host"])
             self.assertEqual(env, {**environment, "PATH": os.pathsep.join([str(go.parent), "ambient-path"])})
-            self.assertEqual((output / "vulnerability-scan.txt").read_bytes(), outcome["stdout"])
-            self.assertEqual((output / "vulnerability-scan.stderr.txt").read_bytes(), b"scanner stderr\n")
+            self.assertEqual((output / "vulnerability-scan-pinned.txt").read_bytes(), outcome["stdout"])
+            self.assertEqual((output / "vulnerability-scan-pinned.stderr.txt").read_bytes(), b"scanner stderr\n")
             outcome.update(code=3, stdout=b"Your code is affected by 1 vulnerability from 1 module.\n")
             with patch.object(engine.subprocess, "run", fake_run), \
-                    self.assertRaisesRegex(RuntimeError, "calls known vulnerable code; inspect vulnerability-scan.txt"):
-                engine.scan_vulnerabilities(scanner, go, source, environment, tags, pins, output)
-            self.assertEqual((output / "vulnerability-scan.txt").read_bytes(), outcome["stdout"])
+                    self.assertRaisesRegex(RuntimeError, "calls known vulnerable code; inspect vulnerability-scan-corrected.txt"):
+                engine.scan_vulnerabilities(scanner, go, source, environment, tags, pins, output, "corrected")
+            self.assertEqual((output / "vulnerability-scan-corrected.txt").read_bytes(), outcome["stdout"])
+            self.assertEqual((output / "vulnerability-scan-pinned.txt").read_bytes(), scan_report_text(pins).encode())
             outcome.update(code=1, stdout=b"")
             with patch.object(engine.subprocess, "run", fake_run), \
-                    self.assertRaisesRegex(RuntimeError, r"vulnerability scan failed \(1\); inspect vulnerability-scan.stderr.txt"):
-                engine.scan_vulnerabilities(scanner, go, source, environment, tags, pins, output)
+                    self.assertRaisesRegex(RuntimeError, r"vulnerability scan failed \(1\); inspect vulnerability-scan-pinned.stderr.txt"):
+                engine.scan_vulnerabilities(scanner, go, source, environment, tags, pins, output, "pinned")
             with patch.object(engine.subprocess, "run", fake_run), self.assertRaisesRegex(RuntimeError, "no PATH"):
-                engine.scan_vulnerabilities(scanner, go, source, {"GOOS": "windows"}, tags, pins, output)
+                engine.scan_vulnerabilities(scanner, go, source, {"GOOS": "windows"}, tags, pins, output, "pinned")
             self.assertEqual(len(runs), 3)
 
 

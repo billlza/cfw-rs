@@ -43,6 +43,24 @@ $attached = $false
 $failure = $null
 $probeAttempts = [Collections.Generic.List[object]]::new()
 
+function Save-ApplicationLogs {
+    # Bounded copy of the product's own native logs, kept for passing sessions
+    # too so the Agent's admission and start timing is retained.
+    $logs = Join-Path $userState 'logs'
+    if (-not (Test-Path -LiteralPath $logs -PathType Container)) { return }
+    $files = @(Get-ChildItem -LiteralPath $logs -File -Recurse)
+    if ($files.Count -gt 64) { throw 'GUI diagnostic file count bound exceeded' }
+    foreach ($file in $files) {
+        if (($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $file.Length -gt 2MB) {
+            throw 'GUI diagnostic file is not a bounded regular log'
+        }
+        $relative = [IO.Path]::GetRelativePath($logs, $file.FullName)
+        $destination = Join-Path (Join-Path $outputRoot 'application-logs') $relative
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) -ErrorAction Stop | Out-Null
+        Copy-Item -LiteralPath $file.FullName -Destination $destination -ErrorAction Stop
+    }
+}
+
 function Invoke-Playwright([string]$Name, [string[]]$Arguments) {
     Push-Location $playwrightOutput
     try {
@@ -394,20 +412,6 @@ try {
             ConvertTo-Json -InputObject $descendants.ToArray() -Depth 5 |
                 Set-Content -LiteralPath (Join-Path $outputRoot 'gui-descendants.json') -Encoding utf8NoBOM
         }
-        $logs = Join-Path $userState 'logs'
-        if (Test-Path -LiteralPath $logs -PathType Container) {
-            $files = @(Get-ChildItem -LiteralPath $logs -File -Recurse)
-            if ($files.Count -gt 64) { throw 'GUI diagnostic file count bound exceeded' }
-            foreach ($file in $files) {
-                if (($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $file.Length -gt 2MB) {
-                    throw 'GUI diagnostic file is not a bounded regular log'
-                }
-                $relative = [IO.Path]::GetRelativePath($logs, $file.FullName)
-                $destination = Join-Path (Join-Path $outputRoot 'application-logs') $relative
-                New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) -ErrorAction Stop | Out-Null
-                Copy-Item -LiteralPath $file.FullName -Destination $destination -ErrorAction Stop
-            }
-        }
     } catch {
         ($_.Exception.ToString() + "`n" + $_.ScriptStackTrace) |
             Set-Content -LiteralPath (Join-Path $outputRoot 'diagnostic-capture-failure.txt') -Encoding utf8NoBOM
@@ -430,6 +434,12 @@ try {
         $controller.Dispose()
     }
     if ($null -ne $guiProcess) { $guiProcess.Dispose() }
+    try { Save-ApplicationLogs }
+    catch {
+        ($_.Exception.ToString() + "`n" + $_.ScriptStackTrace) |
+            Set-Content -LiteralPath (Join-Path $outputRoot 'application-log-capture-failure.txt') -Encoding utf8NoBOM
+        if ($null -eq $failure) { $failure = $_ }
+    }
     $receipt | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $outputRoot 'session.json') -Encoding utf8NoBOM
     ConvertTo-Json -InputObject $probeAttempts.ToArray() -Depth 5 |
         Set-Content -LiteralPath (Join-Path $outputRoot 'webview-startup-attempts.json') -Encoding utf8NoBOM

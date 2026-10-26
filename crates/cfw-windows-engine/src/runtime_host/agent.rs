@@ -11,25 +11,39 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub fn run_agent(installation: InstalledRuntime) -> Result<()> {
-    installation.require_runtime_process()?;
+/// `started` is the process start and `images` were verified once by the entry
+/// point. Admission is announced before the launch frame is read, so the
+/// Desktop prepares the lease only when Bind can follow at once.
+pub fn run_agent(
+    installation: InstalledRuntime,
+    images: AdmittedImages,
+    started: Instant,
+) -> Result<()> {
+    let AdmittedImages {
+        runtime,
+        desktop,
+        engine,
+        wintun: _wintun,
+    } = images;
     let paths = installation.user_paths()?;
-    let expected = Arc::new(installation.desktop()?);
     let input = std::io::stdin().as_handle().try_clone_to_owned()?;
-    let (launch, observation) = LaunchReceiver::from_inherited(input, expected)?.receive_observed(
-        Instant::now() + Duration::from_secs(15),
-        &AtomicBool::new(false),
-    )?;
-    let context = launch.context().clone();
+    let launch_receiver = LaunchReceiver::from_inherited(input, Arc::new(desktop))?;
     let storage = UserRuntimeStorage::open(&paths.runtime)?;
+    let cancel = AtomicBool::new(false);
+    let admitted = started.elapsed();
+    launch_receiver.announce_admitted(Instant::now() + Duration::from_secs(15), &cancel)?;
+    let (launch, observation) =
+        launch_receiver.receive_observed(Instant::now() + Duration::from_secs(15), &cancel)?;
+    let launched = started.elapsed();
+    let context = launch.context().clone();
     let plan = launch.into_plan(cfw_windows_credentials::WindowsCredentialStore::new(
         paths.credentials.join("vault"),
     ))?;
     let mut session = UserAgentSession::new(
         plan,
         SERVICE_NAME.to_owned(),
-        Arc::new(installation.runtime()?),
-        storage.runtime(installation.engine()?, context.operation.mode)?,
+        Arc::new(runtime),
+        storage.runtime(engine, context.operation.mode)?,
     )?;
     let stop = AtomicBool::new(false);
     let (sender, receiver) = mpsc::sync_channel(1);
@@ -47,6 +61,14 @@ pub fn run_agent(installation: InstalledRuntime) -> Result<()> {
                     && ready.authority().state
                         == cfw_engine_api::authority_v1::AuthorityState::Active =>
             {
+                // Non-secret start timing for the installation-owned diagnostic
+                // sink: how long admission, the launch handoff and Ready took.
+                eprintln!(
+                    "installed Agent timing: admitted {} ms, launch received {} ms, ready {} ms after process start",
+                    admitted.as_millis(),
+                    launched.as_millis(),
+                    started.elapsed().as_millis()
+                );
                 Ok(())
             }
             Ok(_) => Err(HostError::State(

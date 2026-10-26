@@ -87,15 +87,13 @@ pub(crate) fn run(name: &str, hex: &str, mode: Mode) -> Result<()> {
             let mut operation = DesktopUserAgent::prepare(
                 &credentials,
                 worker_image,
-                request,
-                Instant::now() + LIMIT,
-            )?;
-            operation.run(
                 UserAgentInvocation::for_validation(name, mode.invocation(), expected)?,
                 &output,
+                request,
                 worker_stop,
-                sender,
-            )
+                Instant::now() + LIMIT,
+            )?;
+            operation.run(sender)
         });
         let exercised = (|| {
             let ready = receiver

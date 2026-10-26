@@ -92,3 +92,50 @@ fn inherited_launch_read_cancellation_is_an_error_and_releases_its_endpoint() {
         ))
     ));
 }
+
+#[test]
+fn admission_announcement_precedes_the_launch_frame_on_the_same_channel() {
+    let launch = launch(ProjectionMode::LocalProxy);
+    let expected = launch.encode().unwrap();
+    let message = launch.encode().unwrap();
+    let (sender, input) = LaunchSender::create().unwrap();
+    let receiver = LaunchReceiver::from_inherited(input, executable()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let worker = std::thread::spawn(move || {
+        let cancel = AtomicBool::new(false);
+        sender.await_admission(deadline, &cancel)?;
+        sender.send(message, deadline, &cancel)
+    });
+    let cancel = AtomicBool::new(false);
+    receiver.announce_admitted(deadline, &cancel).unwrap();
+    let received = receiver.receive(deadline, &cancel).unwrap();
+    worker.join().unwrap().unwrap();
+    assert!(received.encode().unwrap().as_bytes() == expected.as_bytes());
+}
+
+#[test]
+fn admission_wait_rejects_a_foreign_announcement_without_sending_a_frame() {
+    let (sender, input) = LaunchSender::create().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut foreign = ADMITTED.to_vec();
+    foreign[0] ^= 1;
+    native_io::write_bounded(&input, &foreign, deadline, ADMITTED.len(), None).unwrap();
+    assert!(matches!(
+        sender.await_admission(deadline, &AtomicBool::new(false)),
+        Err(LaunchChannelError::Admission)
+    ));
+}
+
+#[test]
+fn admission_wait_without_an_announcement_expires_before_any_ticket_exists() {
+    let (sender, _held_silent_receiver) = LaunchSender::create().unwrap();
+    assert!(matches!(
+        sender.await_admission(
+            Instant::now() + Duration::from_millis(50),
+            &AtomicBool::new(false)
+        ),
+        Err(LaunchChannelError::Transport(
+            ServiceTransportError::Deadline
+        ))
+    ));
+}

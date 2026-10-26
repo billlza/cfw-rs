@@ -32,7 +32,9 @@ use error::{desktop_error, host_error};
 
 type Result<T> = std::result::Result<T, BackendError>;
 const LIMIT: Duration = Duration::from_secs(60);
-const NATIVE_LIMIT: Duration = Duration::from_secs(30);
+/// The Desktop's complete start budget: Agent admission, Prepare, handoff
+/// and Ready. Every other native request shares this single bound.
+const NATIVE_LIMIT: Duration = crate::user_agent::desktop::START_BUDGET;
 /// Ready for a Tunnel run includes SYSTEM's adapter creation, which may first
 /// install the pinned Wintun driver. Still inside the worker's `LIMIT`.
 const TUNNEL_READY_LIMIT: Duration = Duration::from_secs(55);
@@ -498,14 +500,21 @@ fn run_owned(
     ready: SyncSender<DesktopReady>,
     queries: crate::user_agent::desktop::DesktopStatusRequests,
 ) -> (Option<DesktopUserAgent>, Result<()>) {
-    let mut owner = match desktop.prepare_checked_run(request, Instant::now() + NATIVE_LIMIT) {
+    let invocation = match UserAgentInvocation::installed(SERVICE_NAME) {
+        Ok(invocation) => invocation,
+        Err(error) => return (None, Err(desktop_error(DesktopError::from(error)))),
+    };
+    let mut owner = match desktop.prepare_checked_run(
+        request,
+        invocation,
+        diagnostics,
+        stop,
+        Instant::now() + NATIVE_LIMIT,
+    ) {
         Ok(owner) => owner,
         Err(error) => return (None, Err(host_error(error))),
     };
-    let operated = UserAgentInvocation::installed(SERVICE_NAME)
-        .map_err(DesktopError::from)
-        .and_then(|invocation| owner.run_observed(invocation, diagnostics, stop, ready, queries))
-        .map_err(desktop_error);
+    let operated = owner.run_observed(ready, queries).map_err(desktop_error);
     let cleanup = owner
         .finish_global_stop(desktop.storage().proxy(), Instant::now() + NATIVE_LIMIT)
         .map(|_| ())

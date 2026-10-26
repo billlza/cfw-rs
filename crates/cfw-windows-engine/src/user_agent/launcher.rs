@@ -63,6 +63,13 @@ pub enum LaunchError {
     State,
     #[error("Windows UserAgent exited unsuccessfully ({0:#x})")]
     Exit(u32),
+    #[error(
+        "Windows UserAgent admission failed ({operation}); the unadmitted Agent did not retire ({cleanup})"
+    )]
+    Admission {
+        operation: Box<Self>,
+        cleanup: Box<Self>,
+    },
 }
 pub type Result<T> = std::result::Result<T, LaunchError>;
 
@@ -156,43 +163,42 @@ enum Delivery {
     Failed(Arc<LaunchChannelError>),
     Panicked,
 }
-pub struct UserAgentChild {
+/// A spawned, identity-checked UserAgent that has admitted its own installed
+/// images and now waits for its launch frame. It holds no lease and no ticket:
+/// the Desktop prepares the lease only after this admission, so the
+/// Authority's fixed preparation lifetime covers the handoff and Bind alone.
+/// Dropping it closes the channel; a ticketless Agent then exits on its own.
+pub struct AdmittedAgent {
     process: OwnedHandle,
     process_id: u32,
-    context: LeaseContext,
-    _executable: Arc<VerifiedExecutable>,
-    peer: Option<NativePeerProcess>,
-    worker: Option<JoinHandle<std::result::Result<ObservationClient, LaunchChannelError>>>,
-    observation: Option<ObservationClient>,
+    executable: Arc<VerifiedExecutable>,
+    peer: NativePeerProcess,
+    sender: LaunchSender,
     cancel: Arc<AtomicBool>,
-    delivery: Delivery,
-    exit: Option<AgentExit>,
 }
-impl UserAgentChild {
-    /// The output file is an installation-owned diagnostic sink; it is not
-    /// selected by the launch frame. The caller retains the Authority channel
-    /// that prepared this lease and owns stop/recovery when launch fails.
-    pub fn launch(
+impl AdmittedAgent {
+    /// Create the Agent process with the inherited launch channel and the
+    /// installation-owned diagnostic sink, then wait for its admission
+    /// announcement. A failure after process creation retires that Agent
+    /// before returning: it never received a ticket and owns no runtime.
+    pub fn spawn(
         executable: impl Into<Arc<VerifiedExecutable>>,
         invocation: UserAgentInvocation,
-        launch: UserAgentLaunch,
         diagnostics: &File,
         deadline: Instant,
         cancel: Arc<AtomicBool>,
-    ) -> std::result::Result<Self, LaunchFailure> {
+    ) -> Result<Self> {
         let executable = executable.into();
-        let prepared = (|| -> Result<_> {
-            check_deadline(deadline)?;
-            if cancel.load(Ordering::Acquire) {
-                return Err(LaunchError::Cancelled);
-            }
-            let parent = medium_owner(launch.context())?;
-            let message = launch
-                .encode()
-                .map_err(|e| LaunchError::Handoff(Arc::new(LaunchChannelError::Frame(e))))?;
-            let (sender, input) =
-                LaunchSender::create().map_err(|e| LaunchError::Handoff(Arc::new(e)))?;
-            let input = inherit(input.as_handle())?;
+        check_deadline(deadline)?;
+        if cancel.load(Ordering::Acquire) {
+            return Err(LaunchError::Cancelled);
+        }
+        let parent = medium_process()?;
+        parent.require_current_console_session()?;
+        let (sender, child_end) =
+            LaunchSender::create().map_err(|e| LaunchError::Handoff(Arc::new(e)))?;
+        let (process, process_id) = {
+            let input = inherit(child_end.as_handle())?;
             let output = inherit(diagnostics.as_handle())?;
             let mut attributes = ProcessHandleList::new(&[input.as_handle(), output.as_handle()])?;
             let path: Vec<_> = executable.path().as_os_str().encode_wide().collect();
@@ -250,23 +256,12 @@ impl UserAgentChild {
             }
             let process_handle = unsafe { OwnedHandle::from_raw_handle(process.hProcess) };
             let _thread = unsafe { OwnedHandle::from_raw_handle(process.hThread) };
-            Ok((process_handle, process.dwProcessId, parent, sender, message))
-        })()
-        .map_err(|error| LaunchFailure::uncreated(error, launch.context()))?;
-        let (process, process_id, parent, sender, message) = prepared;
-        let mut owner = Self {
-            process,
-            process_id,
-            context: launch.context().clone(),
-            _executable: executable,
-            peer: None,
-            worker: None,
-            observation: None,
-            cancel,
-            delivery: Delivery::Absent,
-            exit: None,
+            (process_handle, process.dwProcessId)
         };
-        let initialized = (|| -> Result<()> {
+        // Only the Agent holds its channel end from here on, so a closed
+        // sender ends every wait in the Agent and a dead Agent ends ours.
+        drop(child_end);
+        let admitted = (|| -> Result<NativePeerProcess> {
             let child = NativePeerProcess::open(process_id)?;
             if child.identity().integrity_rid() != 0x2000
                 || child.identity().user_session() != parent.identity().user_session()
@@ -275,8 +270,96 @@ impl UserAgentChild {
             {
                 return Err(LaunchError::Identity);
             }
-            child.verify_executable(&owner._executable)?;
-            owner.peer = Some(child);
+            child.verify_executable(&executable)?;
+            sender
+                .await_admission(deadline, &cancel)
+                .map_err(|e| LaunchError::Handoff(Arc::new(e)))?;
+            child.revalidate()?;
+            child.verify_executable(&executable)?;
+            Ok(child)
+        })();
+        match admitted {
+            Ok(peer) => Ok(Self {
+                process,
+                process_id,
+                executable,
+                peer,
+                sender,
+                cancel,
+            }),
+            Err(error) => {
+                drop(sender);
+                Err(match retire_unadmitted(&process, deadline) {
+                    Ok(()) => error,
+                    Err(cleanup) => LaunchError::Admission {
+                        operation: Box::new(error),
+                        cleanup: Box::new(cleanup),
+                    },
+                })
+            }
+        }
+    }
+    pub fn process_id(&self) -> u32 {
+        self.process_id
+    }
+    /// Retire an admitted Agent that will not receive a launch frame. The
+    /// channel closes first; the ticketless Agent then exits on its own.
+    pub fn retire(self, deadline: Instant) -> Result<AgentExit> {
+        let Self {
+            process,
+            process_id,
+            sender,
+            ..
+        } = self;
+        drop(sender);
+        retire_unadmitted(&process, deadline)?;
+        let mut code = 0;
+        if unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut code) } == 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        Ok(AgentExit {
+            process_id,
+            exit_code: code,
+        })
+    }
+    /// Deliver the prepared launch frame on the inherited channel. The caller
+    /// retains the Authority channel that prepared this lease and owns
+    /// stop/recovery when the handoff fails: the Agent exists either way.
+    pub fn hand_off(
+        self,
+        launch: UserAgentLaunch,
+        deadline: Instant,
+    ) -> std::result::Result<UserAgentChild, LaunchFailure> {
+        let Self {
+            process,
+            process_id,
+            executable,
+            peer,
+            sender,
+            cancel,
+        } = self;
+        let mut owner = UserAgentChild {
+            process,
+            process_id,
+            context: launch.context().clone(),
+            _executable: executable,
+            peer: Some(peer),
+            worker: None,
+            observation: None,
+            cancel,
+            delivery: Delivery::Absent,
+            exit: None,
+        };
+        let initialized = (|| -> Result<()> {
+            check_deadline(deadline)?;
+            if owner.cancel.load(Ordering::Acquire) {
+                return Err(LaunchError::Cancelled);
+            }
+            medium_owner(launch.context())?.revalidate()?;
+            let message = launch
+                .encode()
+                .map_err(|e| LaunchError::Handoff(Arc::new(LaunchChannelError::Frame(e))))?;
+            owner.verify_live()?;
             let signal = Arc::clone(&owner.cancel);
             owner.worker = Some(
                 thread::Builder::new()
@@ -297,6 +380,52 @@ impl UserAgentChild {
                 })
             }
         }
+    }
+}
+/// Wait for an Agent that never received a ticket to exit after its launch
+/// channel closed. Nothing is killed; such an Agent owns no runtime.
+fn retire_unadmitted(process: &OwnedHandle, deadline: Instant) -> Result<()> {
+    match wait_until(process, deadline)? {
+        WaitOutcome::Signaled => Ok(()),
+        WaitOutcome::TimedOut => Err(LaunchError::Deadline),
+        _ => Err(io::Error::other("unadmitted agent wait reported abandonment").into()),
+    }
+}
+pub struct UserAgentChild {
+    process: OwnedHandle,
+    process_id: u32,
+    context: LeaseContext,
+    _executable: Arc<VerifiedExecutable>,
+    peer: Option<NativePeerProcess>,
+    worker: Option<JoinHandle<std::result::Result<ObservationClient, LaunchChannelError>>>,
+    observation: Option<ObservationClient>,
+    cancel: Arc<AtomicBool>,
+    delivery: Delivery,
+    exit: Option<AgentExit>,
+}
+impl UserAgentChild {
+    /// Create the Agent, wait for its admission and hand it the prepared
+    /// launch in one step. Validation callers hold a prepared launch already;
+    /// the product Desktop spawns first and prepares the lease only after
+    /// admission so the preparation lifetime never covers that admission.
+    pub fn launch(
+        executable: impl Into<Arc<VerifiedExecutable>>,
+        invocation: UserAgentInvocation,
+        launch: UserAgentLaunch,
+        diagnostics: &File,
+        deadline: Instant,
+        cancel: Arc<AtomicBool>,
+    ) -> std::result::Result<Self, LaunchFailure> {
+        let admitted = (|| -> Result<AdmittedAgent> {
+            check_deadline(deadline)?;
+            if cancel.load(Ordering::Acquire) {
+                return Err(LaunchError::Cancelled);
+            }
+            medium_owner(launch.context())?;
+            AdmittedAgent::spawn(executable, invocation, diagnostics, deadline, cancel)
+        })()
+        .map_err(|error| LaunchFailure::uncreated(error, launch.context()))?;
+        admitted.hand_off(launch, deadline)
     }
     pub fn process_id(&self) -> u32 {
         self.process_id

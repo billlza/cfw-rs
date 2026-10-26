@@ -11,6 +11,7 @@ fn main() {
 #[cfg(windows)]
 fn run() -> Result<(), String> {
     use cfw_windows_engine::runtime_host::{self, InstalledRuntime};
+    let started = std::time::Instant::now();
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     // SCM identity admission requires the exact quoted executable with no
     // arguments. Keep the service entrypoint aligned with that installation
@@ -26,7 +27,7 @@ fn run() -> Result<(), String> {
         return Ok(());
     }
     let installation = InstalledRuntime::open().map_err(|e| e.to_string())?;
-    installation
+    let images = installation
         .require_runtime_process()
         .map_err(|e| e.to_string())?;
     if args.len() == 2
@@ -140,7 +141,7 @@ fn run() -> Result<(), String> {
             std::ffi::OsStr::new(runtime_host::SERVICE_NAME),
         ]
     {
-        return runtime_host::run_agent(installation).map_err(|e| e.to_string());
+        return runtime_host::run_agent(installation, images, started).map_err(|e| e.to_string());
     }
     Err(
         "expected SCM, --check-installation [manifest-sha256], --inspect-update, installed --user-agent, SYSTEM --prepare-maintenance/--rollback-maintenance with a transaction UUID, or SYSTEM --prepare-update/--commit-update with a transaction UUID and target manifest SHA-256"

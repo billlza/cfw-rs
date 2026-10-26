@@ -1,0 +1,40 @@
+# Dependency policy of the Windows x64 program (scripts/audit_cargo_policy.py
+# selects it with --target x86_64-pc-windows-msvc). The macOS program's policy
+# is deny.toml; the two share every rule except the exact license allowance,
+# which names only the licenses each program's own dependency graph carries.
+[graph]
+targets = ["x86_64-pc-windows-msvc"]
+all-features = true
+
+[advisories]
+ignore = []
+yanked = "deny"
+disable-yank-checking = false
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "GPL-3.0-or-later",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "allow"
+# Cargo treats versionless local path dependencies as wildcard requirements.
+# They are workspace-internal and are versioned by the workspace package table.
+wildcards = "allow"
+workspace-default-features = "allow"
+external-default-features = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

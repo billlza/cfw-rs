@@ -475,3 +475,55 @@ jobs:
         run: |
           "Validated the shared Rust packages, Windows storage and native desktop observations, and the bundled UI contract tests on Windows x64." >> $env:GITHUB_STEP_SUMMARY
           "This job does not build or launch a Windows application, install a service or TUN driver, or establish desktop, network, signing, or release acceptance." >> $env:GITHUB_STEP_SUMMARY
+  supply-chain:
+    name: Windows x64 Rust supply-chain policy
+    # The closed policy gates evaluate the Windows x64 dependency graph from
+    # Cargo metadata without compiling it, and their sealed tooling (verified
+    # Cargo workspace inputs, pinned cargo-audit and cargo-deny) is hosted on
+    # the macOS release runner, so this job runs there beside the macOS CI.
+    runs-on: xcode-27
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: "/bin/bash --noprofile --norc -p -e -o pipefail {0}"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Assert exact CI source and workflow identity ${{ github.workflow_sha }}
+        run: /bin/test "$(/usr/bin/git rev-parse HEAD)" = "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        id: validation-python
+        with:
+          python-version: "3.14.9"
+          architecture: arm64
+          update-environment: false
+      - name: Select latest available Xcode
+        run: |
+          validation_python='${{ steps.validation-python.outputs.python-path }}'
+          /usr/bin/env -i \
+            GITHUB_ACTIONS=true \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+            "$validation_python" -I -S -B -W error scripts/select_ci_xcode.py \
+            --github-env "$GITHUB_ENV" \
+            --output "$RUNNER_TEMP/cfw-ci-xcode.json"
+      - name: Record Apple validation toolchain ${{ env.CFW_UNSIGNED_VALIDATION_XCODE_VERSION }} (${{ env.CFW_UNSIGNED_VALIDATION_XCODE_BUILD_VERSION }})
+        run: /bin/cat "$RUNNER_TEMP/cfw-ci-xcode.json"
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: "1.99.1"
+          components: clippy,rustfmt,llvm-tools-preview
+      - name: Prepare lock-verified Cargo workspace sources
+        run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' prepare-cargo-workspace-inputs
+      - name: Install pinned policy tools
+        run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' bootstrap-policy-tools
+      - name: Audit the exact Windows x64 Rust target graph
+        run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' rust-target-audit --target x86_64-pc-windows-msvc
+      - name: Enforce Windows x64 dependency, source, and license policy
+        run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' cargo-deny --target x86_64-pc-windows-msvc
+      - name: Record the scope of this validation
+        run: |
+          echo "Audited the exact x86_64-pc-windows-msvc all-features dependency graph of the Windows program with RustSec (cargo-audit) and the Windows dependency policy (cargo-deny: advisories, yanked packages, bans, licenses, sources) from verified offline Cargo workspace inputs." >> "$GITHUB_STEP_SUMMARY"
+          echo "This job evaluates Cargo metadata only: it compiles nothing for Windows and establishes no build, test, signing, or release acceptance." >> "$GITHUB_STEP_SUMMARY"

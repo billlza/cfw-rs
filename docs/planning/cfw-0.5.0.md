@@ -3030,7 +3030,18 @@ Ready”，backend 报 “runtime Ready was not delivered: channel is empty and 
 - 夹具（`native-service-fixture` 的 Desktop、子进程与重启用例）同步改为先宣告再交接；通道新增三项单元
   测试：宣告先于帧、错误宣告被拒、无宣告超时。
 
-托管验证：见本节后续补记。
+托管验证（代码头 `34120c79`，两条工作流均以 `workflow_dispatch` 在分支上运行）：
+[共享契约 40317881338](https://github.com/billlza/cfw-rs/actions/runs/40317881338) 五项作业通过（含以
+真实交接运行安装版宿主套件的引擎作业）；安装版桌面构建连续三轮通过——
+[40317885076](https://github.com/billlza/cfw-rs/actions/runs/40317885076)、
+[40321006648](https://github.com/billlza/cfw-rs/actions/runs/40321006648)、[40323438514](https://github.com/billlza/cfw-rs/actions/runs/40323438514)——每轮四个 GUI 会话
+（fresh-off、local-proxy、tunnel、system-proxy-quit）全部正常退出并完成各自网络验证。保留日志中的 Agent
+计时行（毫秒，距进程启动）：第一轮四次 Agent 运行准入 3066/3073/3082/3066、收到启动帧 3301/3287/3323/3301、
+Ready 3939/4958/3829/4028；第二轮准入 1880/1927/1953/1993、收到启动帧 2038/2114/2104/2186、Ready
+3149/2591/2478/2543。即 Prepare 到交接约 0.15–0.24 秒，Bind 到 Ready 不到 1 秒（TUN 约 1.7 秒），10 秒票据
+窗口内只剩这些；准入本身每次 2–3 秒且与冷热无关，修复前它乘以三倍哈希落在窗口之内。准入为何恒定
+2–3 秒（镜像打开时的实时扫描或 runner 的哈希吞吐）仍未归因，它现已不影响正确性，列为后续优化项。
+
 
 ### 2026-10-23：开放事项（需要用户决定或外部条件）
 

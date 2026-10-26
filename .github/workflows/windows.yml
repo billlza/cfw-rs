@@ -126,6 +126,10 @@ jobs:
         with:
           toolchain: ${{ steps.engine-pins.outputs.RUST_VERSION }}
       - name: Build and test the exact CFM engine source on Windows
+        # The job's own limit cancels the runner and loses every log and
+        # artifact; a step bound fails this step instead, so the failure steps
+        # below still keep what the build wrote.
+        timeout-minutes: 25
         run: |
           python -m unittest discover -s scripts/tests -p test_windows_engine.py -v
           if ($LASTEXITCODE -ne 0) { throw "Windows engine source contract tests failed" }

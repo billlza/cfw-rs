@@ -47,6 +47,10 @@ METADATA_TIMEOUT_SECONDS = 300
 OFFLINE_POLICY_TIMEOUT_SECONDS = 300
 ONLINE_POLICY_TIMEOUT_SECONDS = 900
 OUTPUT_LIMIT_BYTES = 64 * 1024 * 1024
+# A failed check names its cargo-deny records in the gate output, bounded so
+# a hosted log stays readable when every crate reports the same failure.
+RENDERED_RECORD_LIMIT = 8
+RENDERED_RECORD_TEXT_LIMIT = 400
 
 
 class CargoPolicyError(RuntimeError):
@@ -76,8 +80,44 @@ def _decode_json(encoded: bytes, label: str) -> Any:
         raise CargoPolicyError(f"{label} is not strict UTF-8 JSON") from error
 
 
+def _bounded_text(value: Any) -> str:
+    text = value if isinstance(value, str) else json.dumps(value, sort_keys=True)
+    if len(text) > RENDERED_RECORD_TEXT_LIMIT:
+        return text[:RENDERED_RECORD_TEXT_LIMIT] + " [cut]"
+    return text
+
+
+def _render_policy_record(record: Any) -> str:
+    """One line naming what a cargo-deny log, diagnostic, or summary record said."""
+
+    if not isinstance(record, dict) or not isinstance(record.get("fields"), dict):
+        return _bounded_text(f"malformed record: {json.dumps(record, sort_keys=True)}")
+    kind = record.get("type")
+    fields = record["fields"]
+    if kind == "log":
+        return _bounded_text(f"log {fields.get('level')}: {fields.get('message')}")
+    if kind == "diagnostic":
+        parts = [f"{fields.get('severity')} {fields.get('code')}: {fields.get('message')}"]
+        labels = fields.get("labels")
+        if isinstance(labels, list):
+            parts.extend(
+                f"{label.get('message')} ({label.get('span')})"
+                for label in labels
+                if isinstance(label, dict)
+            )
+        notes = fields.get("notes")
+        if isinstance(notes, list):
+            parts.extend(str(note) for note in notes)
+        return _bounded_text("; ".join(parts))
+    return _bounded_text(f"{kind}: {json.dumps(fields, sort_keys=True)}")
+
+
 def parse_policy_result(encoded: bytes, expected_checks: Sequence[str]) -> dict[str, dict[str, int]]:
-    """Accept exactly one clean cargo-deny JSON summary and no diagnostics."""
+    """Accept exactly one clean cargo-deny JSON summary and no diagnostics.
+
+    Anything else fails with the records themselves (bounded), so a hosted log
+    says which crate, registry query, or policy rule cargo-deny complained about.
+    """
 
     if not expected_checks or any(name not in POLICY_NAMES for name in expected_checks):
         raise CargoPolicyError("cargo-deny expected check set is invalid")
@@ -86,13 +126,16 @@ def parse_policy_result(encoded: bytes, expected_checks: Sequence[str]) -> dict[
         if line.strip():
             records.append(_decode_json(line, "cargo-deny output line"))
     if len(records) != 1:
-        kinds = [
-            record.get("type", "unknown") if isinstance(record, dict) else "non-object"
-            for record in records[:4]
+        rendered = [
+            _render_policy_record(record) for record in records[:RENDERED_RECORD_LIMIT]
         ]
-        rendered = ", ".join(kinds) if kinds else "empty output"
+        omitted = len(records) - len(rendered)
+        if omitted:
+            rendered.append(f"{omitted} more records not shown")
+        detail = "\n  ".join(rendered) if rendered else "empty output"
         raise CargoPolicyError(
-            "cargo-deny emitted diagnostics instead of one summary: " + rendered
+            f"cargo-deny {'/'.join(expected_checks)} check emitted {len(records)} "
+            f"records instead of one summary:\n  {detail}"
         )
     record = records[0]
     if not isinstance(record, dict) or set(record) != {"fields", "type"}:

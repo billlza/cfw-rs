@@ -13,6 +13,8 @@ from unittest.mock import ANY, patch
 
 from scripts.audit_cargo_policy import (
     POLICY_CONFIG_NAMES,
+    RENDERED_RECORD_LIMIT,
+    RENDERED_RECORD_TEXT_LIMIT,
     CargoPolicyError,
     _require_policy_config,
     _require_success,
@@ -103,11 +105,107 @@ class CargoPolicyResultTests(unittest.TestCase):
         diagnostic = json.dumps(
             {"fields": {"level": "ERROR", "message": "fetch failed"}, "type": "log"}
         ).encode()
-        with self.assertRaisesRegex(CargoPolicyError, "emitted diagnostics"):
+        with self.assertRaisesRegex(
+            CargoPolicyError,
+            r"cargo-deny advisories check emitted 2 records instead of one summary:\n"
+            r"  log ERROR: fetch failed\n"
+            r'  summary: \{"advisories": \{"errors": 0, "helps": 0, "notes": 0, '
+            r'"warnings": 0\}\}$',
+        ):
             parse_policy_result(
                 diagnostic + b"\n" + summary(("advisories",)),
                 ("advisories",),
             )
+
+    def test_failure_names_the_live_yank_check_records(self) -> None:
+        """A hosted failure must say which crate and registry query failed."""
+
+        records = [
+            {
+                "fields": {
+                    "level": "WARN",
+                    "message": "unable to open local crates.io index",
+                    "timestamp": "2026-10-26T12:18:40Z",
+                },
+                "type": "log",
+            },
+            {
+                "fields": {
+                    "code": "index-failure",
+                    "graphs": [{"Krate": {"name": "winreg", "version": "0.56.0"}}],
+                    "labels": [
+                        {
+                            "column": 1,
+                            "line": 1,
+                            "message": "crate whose registry we failed to query",
+                            "span": "winreg 0.56.0",
+                        }
+                    ],
+                    "message": "unable to check for yanked crates",
+                    "notes": ["connection timed out"],
+                    "severity": "warning",
+                },
+                "type": "diagnostic",
+            },
+        ]
+        encoded = b"".join(json.dumps(record).encode() + b"\n" for record in records)
+        with self.assertRaisesRegex(
+            CargoPolicyError,
+            r"cargo-deny advisories check emitted 3 records instead of one summary:\n"
+            r"  log WARN: unable to open local crates.io index\n"
+            r"  warning index-failure: unable to check for yanked crates; "
+            r"crate whose registry we failed to query \(winreg 0.56.0\); "
+            r"connection timed out\n"
+            r"  summary: ",
+        ):
+            parse_policy_result(encoded + summary(("advisories",)), ("advisories",))
+
+    def test_failure_rendering_is_bounded_per_record_and_in_count(self) -> None:
+        diagnostic = json.dumps(
+            {
+                "fields": {
+                    "code": "license-not-encountered",
+                    "message": "x" * (RENDERED_RECORD_TEXT_LIMIT + 50),
+                    "severity": "warning",
+                },
+                "type": "diagnostic",
+            }
+        ).encode()
+        encoded = (diagnostic + b"\n") * 30 + summary(("bans", "licenses", "sources"))
+        with self.assertRaises(CargoPolicyError) as raised:
+            parse_policy_result(encoded, ("bans", "licenses", "sources"))
+        lines = str(raised.exception).split("\n")
+        self.assertEqual(
+            lines[0],
+            "cargo-deny bans/licenses/sources check emitted 31 records instead of one summary:",
+        )
+        self.assertEqual(len(lines), RENDERED_RECORD_LIMIT + 2)
+        for line in lines[1 : RENDERED_RECORD_LIMIT + 1]:
+            self.assertTrue(line.startswith("  warning license-not-encountered: xxx"))
+            self.assertTrue(line.endswith(" [cut]"))
+            self.assertEqual(len(line), 2 + RENDERED_RECORD_TEXT_LIMIT + len(" [cut]"))
+        self.assertEqual(lines[-1], f"  {31 - RENDERED_RECORD_LIMIT} more records not shown")
+
+    def test_failure_rendering_survives_malformed_records(self) -> None:
+        encoded = b"\n".join(
+            [
+                b"[]",
+                b'"text"',
+                b'{"fields": "oops", "type": "diagnostic"}',
+                b'{"fields": {"a": 1}, "type": "mystery"}',
+                summary(("advisories",)),
+            ]
+        )
+        with self.assertRaisesRegex(
+            CargoPolicyError,
+            r"emitted 5 records instead of one summary:\n"
+            r"  malformed record: \[\]\n"
+            r'  malformed record: "text"\n'
+            r'  malformed record: \{"fields": "oops", "type": "diagnostic"\}\n'
+            r'  mystery: \{"a": 1\}\n'
+            r"  summary: ",
+        ):
+            parse_policy_result(encoded, ("advisories",))
 
     def test_rejects_warning_note_and_error_counts(self) -> None:
         for stat_name in ("warnings", "notes", "errors"):

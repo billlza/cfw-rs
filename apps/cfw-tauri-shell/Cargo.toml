@@ -33,7 +33,6 @@ required-features = ["native-dashboard"]
 
 [dependencies]
 cfw-application = { path = "../../crates/cfw-application" }
-cfw-apple-network = { path = "../../crates/cfw-apple-network" }
 cfw-controller = { path = "../../crates/cfw-controller" }
 cfw-core = { path = "../../crates/cfw-core" }
 cfw-engine-api = { path = "../../crates/cfw-engine-api" }
@@ -53,6 +52,9 @@ semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+# The pinned Tauri build checker reads this root dependency's feature list,
+# independently of target-specific additions. Keep it consistent with the
+# shared configuration; platform SDK dependencies remain target-selected.
 tauri = { version = "=2.12.3", features = ["macos-private-api", "tray-icon"] }
 tauri-plugin-single-instance = "=2.5.4"
 tauri-plugin-global-shortcut = "=2.4.1"
@@ -72,9 +74,15 @@ sha2.workspace = true
 tauri-build = { version = "=2.7.2", features = [] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+cfw-apple-network = { path = "../../crates/cfw-apple-network" }
 core-foundation = "=0.10.1"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "libc", "NSRunningApplication"] }
 security-framework = { version = "=3.7.0", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+cfw-windows-engine = { path = "../../crates/cfw-windows-engine" }
+cfw-windows-storage = { path = "../../crates/cfw-windows-storage" }
+windows-sys = { version = "=0.61.2", features = ["Win32_Storage_FileSystem", "Win32_System_Diagnostics_Etw", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 dispatch2 = "=0.3.1"

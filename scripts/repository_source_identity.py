@@ -40,6 +40,7 @@ RELEASE_PATHS = (
     "contracts",
     "crates",
     "deny.toml",
+    "deny.x86_64-pc-windows-msvc.toml",
     "docs",
     "fixtures",
     "native",

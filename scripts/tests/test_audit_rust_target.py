@@ -1,18 +1,21 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 from scripts.audit_rust_target import (
     AUDIT_TIMEOUT_SECONDS,
     AuditContractError,
     METADATA_TIMEOUT_SECONDS,
     OUTPUT_LIMIT_BYTES,
+    main,
     parse_audit_result,
     reachable_package_ids,
     render_audit_lock,
@@ -21,6 +24,7 @@ from scripts.audit_rust_target import (
     target_package_keys,
 )
 from scripts.publication.bounded_process import BoundedProcessError
+from scripts.publication.rust_targets import MACOS_TARGET, WINDOWS_TARGET
 
 
 def metadata_fixture() -> dict:
@@ -176,7 +180,7 @@ checksum = "abc"
                     "scripts.audit_rust_target.run_bounded_process",
                     side_effect=completed,
                 ):
-                    self.assertEqual(run(self.repository, no_fetch=no_fetch), 0)
+                    self.assertEqual(run(self.repository, no_fetch=no_fetch, target=MACOS_TARGET), 0)
 
                 self.assertEqual(len(calls), 2)
                 metadata_command, metadata_cwd, _, metadata_timeout, metadata_limit = (
@@ -221,7 +225,7 @@ checksum = "abc"
                     "scripts.audit_rust_target.run_bounded_process",
                     side_effect=completed,
                 ), self.assertRaisesRegex(AuditContractError, "emitted diagnostics"):
-                    run(self.repository, no_fetch=True)
+                    run(self.repository, no_fetch=True, target=MACOS_TARGET)
 
     def test_timeout_and_output_limit_are_typed_failures(self) -> None:
         for reason in ("timeout", "output-limit"):
@@ -237,7 +241,7 @@ checksum = "abc"
             ), self.assertRaisesRegex(
                 AuditContractError, f"{reason} boundary: bounded diagnostic"
             ):
-                run(self.repository, no_fetch=True)
+                run(self.repository, no_fetch=True, target=MACOS_TARGET)
 
     def test_nonzero_audit_preserves_bounded_diagnostic(self) -> None:
         results = (
@@ -249,7 +253,62 @@ checksum = "abc"
         ), self.assertRaisesRegex(
             AuditContractError, "status 7: registry unavailable"
         ):
-            run(self.repository, no_fetch=True)
+            run(self.repository, no_fetch=True, target=MACOS_TARGET)
+
+    def test_windows_target_audits_the_windows_graph_and_lock(self) -> None:
+        calls: list[list[str]] = []
+        audit_locks: list[str] = []
+
+        def completed(command, *, cwd, environment, timeout, output_limit):
+            calls.append(list(command))
+            if len(calls) == 1:
+                return subprocess.CompletedProcess(command, 0, self.metadata, b"")
+            lock_path = Path(command[command.index("--file") + 1])
+            audit_locks.append(lock_path.read_text(encoding="utf-8"))
+            return subprocess.CompletedProcess(command, 0, self.audit, b"")
+
+        with patch.dict(os.environ, self.environment, clear=True), patch(
+            "scripts.audit_rust_target.run_bounded_process", side_effect=completed
+        ):
+            self.assertEqual(
+                run(self.repository, no_fetch=True, target=WINDOWS_TARGET), 0
+            )
+
+        self.assertEqual(len(calls), 2)
+        metadata_command = calls[0]
+        self.assertEqual(
+            metadata_command[metadata_command.index("--filter-platform") + 1],
+            WINDOWS_TARGET,
+        )
+        self.assertEqual(len(audit_locks), 1)
+        self.assertIn(f"# target = {WINDOWS_TARGET}\n", audit_locks[0])
+        self.assertNotIn(MACOS_TARGET, audit_locks[0])
+
+
+class TargetAuditCommandLineTests(unittest.TestCase):
+    def test_default_and_explicit_targets_reach_run(self) -> None:
+        for argv, expected in (
+            ([], (False, MACOS_TARGET)),
+            (["--no-fetch", "--target", WINDOWS_TARGET], (True, WINDOWS_TARGET)),
+        ):
+            with self.subTest(argv=argv), patch(
+                "scripts.audit_rust_target.run", return_value=0
+            ) as run_mock, patch(
+                "sys.argv", ["audit_rust_target.py", *argv]
+            ), self.assertRaises(SystemExit) as exit_context:
+                main()
+            self.assertEqual(exit_context.exception.code, 0)
+            run_mock.assert_called_once_with(ANY, *expected)
+
+    def test_unknown_target_is_rejected_at_the_command_line(self) -> None:
+        with patch("scripts.audit_rust_target.run") as run_mock, patch(
+            "sys.argv", ["audit_rust_target.py", "--target", "x86_64-unknown-linux-gnu"]
+        ), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(
+            SystemExit
+        ) as exit_context:
+            main()
+        self.assertEqual(exit_context.exception.code, 2)
+        run_mock.assert_not_called()
 
 
 if __name__ == "__main__":

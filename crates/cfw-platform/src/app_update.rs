@@ -208,38 +208,6 @@ fn host_user_environment(
         .collect()
 }
 
-/// The running system's product version, for example `15.4.1`.
-pub fn operating_system_version() -> Result<String, AppUpdateToolError> {
-    const NAME: &std::ffi::CStr = c"kern.osproductversion";
-    let unavailable = |detail: String| AppUpdateToolError::Unavailable {
-        tool: "system version query",
-        detail,
-    };
-    let mut buffer = [0_u8; 64];
-    let mut length = buffer.len();
-    // SAFETY: the name is NUL-terminated, the buffer is writable for `length`
-    // bytes, and no new value is supplied.
-    let status = unsafe {
-        libc::sysctlbyname(
-            NAME.as_ptr(),
-            buffer.as_mut_ptr().cast(),
-            &mut length,
-            std::ptr::null_mut(),
-            0,
-        )
-    };
-    if status != 0 {
-        return Err(unavailable(std::io::Error::last_os_error().to_string()));
-    }
-    let value = buffer
-        .get(..length)
-        .and_then(|bytes| bytes.strip_suffix(&[0]))
-        .and_then(|bytes| std::str::from_utf8(bytes).ok())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| unavailable("the reported version is not text".into()))?;
-    Ok(value.to_owned())
-}
-
 /// Asks LaunchServices to start the application at its canonical location.
 ///
 /// An application opened this way inherits the launcher's environment (see
@@ -311,6 +279,7 @@ mod tests {
     use std::process::Command;
 
     use super::*;
+    use crate::operating_system_version;
 
     struct Scratch(PathBuf);
 

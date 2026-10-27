@@ -37,8 +37,15 @@ pub(crate) fn prepare_cutover_request(
         .checked_add(1)
         .ok_or(EngineCoordinatorError::GenerationExhausted)?;
     let context = EngineCommandContext::new(session, generation);
-    let system_proxy = profile.project(profile_id, ProjectionMode::SystemProxy, settings)?;
-    let tunnel = profile.project(profile_id, ProjectionMode::Tunnel, settings)?;
+    let stack = state.runtime_platform.tunnel_stack();
+    let system_proxy = profile.project_with_tunnel_stack(
+        profile_id,
+        ProjectionMode::SystemProxy,
+        settings,
+        stack,
+    )?;
+    let tunnel =
+        profile.project_with_tunnel_stack(profile_id, ProjectionMode::Tunnel, settings, stack)?;
     CutoverPreflightRequest::new(
         target,
         start_request(&system_proxy, settings, context.clone()),

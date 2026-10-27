@@ -25,6 +25,31 @@ const AUTHENTICATED_DNS_SECONDARY_TAG: &str = "cfw-authenticated-dns-1";
 /// new closed vocabulary.
 pub const CONFIGURATION_IDENTITY_SCHEMA_VERSION: u16 = 7;
 
+/// Compute the shared native-boundary identity without changing its schema.
+/// This is a canonical digest calculation, not request/lease authorization;
+/// callers separately validate mode, options and credential-slot semantics.
+pub fn configuration_identity_digest(
+    configuration_sha256: &str,
+    credential_audience: &CredentialAudience,
+    credential_slots: &[CredentialSlot],
+    mode: ProjectionMode,
+    network_options: &impl Serialize,
+) -> Result<String, serde_json::Error> {
+    let identity = canonicalize(json!({
+        "configuration_sha256": configuration_sha256,
+        "credential_audience": credential_audience,
+        "credential_slots": credential_slots,
+        "mode": match mode {
+            ProjectionMode::LocalProxy => "local_proxy",
+            ProjectionMode::SystemProxy => "system_proxy",
+            ProjectionMode::Tunnel | ProjectionMode::TunnelSystemProxy => "tunnel",
+        },
+        "network_options": serde_json::to_value(network_options)?,
+        "schema_version": CONFIGURATION_IDENTITY_SCHEMA_VERSION,
+    }));
+    Ok(sha256_hex(serde_json::to_string(&identity)?.as_bytes()))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TunnelAddressPlan {
     pub ipv4_address: &'static str,
@@ -34,6 +59,13 @@ pub struct TunnelAddressPlan {
     pub ipv6_prefix_length: u8,
     pub ipv6_dns_peer: &'static str,
 }
+
+/// Application-owned identities in every projection. Native admission
+/// boundaries compare these exact values; they are not profile choices.
+pub const SYSTEM_PROXY_INBOUND_TAG: &str = "cfw-system-proxy";
+pub const TUNNEL_INBOUND_TAG: &str = "cfw-tunnel";
+/// Relative to the engine's private working directory.
+pub const ROUTING_CACHE_PATH: &str = "routing-cache.db";
 
 pub const TUNNEL_ADDRESS_PLAN: TunnelAddressPlan = TunnelAddressPlan {
     ipv4_address: "198.18.64.1",
@@ -56,6 +88,26 @@ pub enum ProjectionMode {
 impl ProjectionMode {
     pub const fn has_tunnel(self) -> bool {
         matches!(self, Self::Tunnel | Self::TunnelSystemProxy)
+    }
+}
+
+/// Packet-processing implementation selected by the trusted native backend.
+/// This is not an imported profile field or a user preference. It is selected
+/// before canonicalization so both configuration digests bind the actual stack.
+/// `Gvisor` is the Windows packet-endpoint stack, whose tunnel projections
+/// also bind the engine's outbound sockets to the physical default interface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TunnelStack {
+    System,
+    Gvisor,
+}
+
+impl TunnelStack {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Gvisor => "gvisor",
+        }
     }
 }
 
@@ -460,6 +512,18 @@ impl ValidatedSingBoxProfile {
         mode: ProjectionMode,
         settings: &EngineSettings,
     ) -> Result<ProjectedConfig, ConfigError> {
+        self.project_with_tunnel_stack(profile_id, mode, settings, TunnelStack::System)
+    }
+
+    /// Use the native backend's packet stack. The existing `project` entry point
+    /// retains the CFM NetworkExtension contract and its exact template bytes.
+    pub fn project_with_tunnel_stack(
+        &self,
+        profile_id: &str,
+        mode: ProjectionMode,
+        settings: &EngineSettings,
+        tunnel_stack: TunnelStack,
+    ) -> Result<ProjectedConfig, ConfigError> {
         settings.validate_listener_settings()?;
         let credential_audience = CredentialAudience::new(profile_id, self.digest())?;
         if !(1_280..=9_000).contains(&settings.tunnel_mtu) {
@@ -653,7 +717,7 @@ impl ValidatedSingBoxProfile {
                 }
                 json!({
                     "type": "mixed",
-                    "tag": "cfw-system-proxy",
+                    "tag": SYSTEM_PROXY_INBOUND_TAG,
                     "listen": "127.0.0.1",
                     "listen_port": settings.mixed_port
                 })
@@ -671,13 +735,12 @@ impl ValidatedSingBoxProfile {
                 }
                 json!({
                     "type": "tun",
-                    "tag": "cfw-tunnel",
+                    "tag": TUNNEL_INBOUND_TAG,
                     "address": addresses,
-                    // NetworkExtension owns route installation. The embedded
-                    // engine only processes packets supplied by the public
-                    // packet-flow adapter and never mutates host routes.
+                    // The native platform owner installs routes. This engine
+                    // processes only the packets supplied by that owner.
                     "auto_route": false,
-                    "stack": "system",
+                    "stack": tunnel_stack.as_str(),
                     "mtu": settings.tunnel_mtu
                 })
             }
@@ -689,7 +752,7 @@ impl ValidatedSingBoxProfile {
             }
             inbounds.push(json!({
                 "type": "mixed",
-                "tag": "cfw-system-proxy",
+                "tag": SYSTEM_PROXY_INBOUND_TAG,
                 "listen": "127.0.0.1",
                 "listen_port": settings.mixed_port,
             }));
@@ -788,12 +851,20 @@ impl ValidatedSingBoxProfile {
         }
         if needs_routing_cache || fake_ip {
             let mut cache =
-                json!({"enabled": true, "path": "routing-cache.db", "cache_id": profile_id});
+                json!({"enabled": true, "path": ROUTING_CACHE_PATH, "cache_id": profile_id});
             if fake_ip {
                 cache["store_fakeip"] = json!(true);
             }
             root.get_mut("experimental")
                 .expect("app-owned experimental settings")["cache_file"] = cache;
+        }
+        // The Windows packet-endpoint stack runs the engine as an ordinary
+        // process while its platform owner routes the default route into the
+        // tunnel adapter. Outside any Network Extension exemption, its own
+        // sockets must bind to the physical default interface or they would
+        // loop back into the tunnel.
+        if mode.has_tunnel() && tunnel_stack == TunnelStack::Gvisor {
+            route.insert("auto_detect_interface".into(), Value::Bool(true));
         }
         if !route.is_empty() {
             root.insert("route".into(), Value::Object(route));
@@ -822,19 +893,13 @@ impl ValidatedSingBoxProfile {
         if mode == ProjectionMode::TunnelSystemProxy {
             network_options["system_proxy_port"] = json!(settings.mixed_port);
         }
-        let identity = canonicalize(json!({
-            "configuration_sha256": configuration_digest,
-            "credential_audience": credential_audience,
-            "credential_slots": credential_slots,
-            "mode": match mode {
-                ProjectionMode::LocalProxy => "local_proxy",
-                ProjectionMode::SystemProxy => "system_proxy",
-                ProjectionMode::Tunnel | ProjectionMode::TunnelSystemProxy => "tunnel",
-            },
-            "network_options": network_options,
-            "schema_version": CONFIGURATION_IDENTITY_SCHEMA_VERSION,
-        }));
-        let digest = sha256_hex(serde_json::to_string(&identity)?.as_bytes());
+        let digest = configuration_identity_digest(
+            &configuration_digest,
+            &credential_audience,
+            &credential_slots,
+            mode,
+            &network_options,
+        )?;
         Ok(ProjectedConfig {
             mode,
             credential_audience,

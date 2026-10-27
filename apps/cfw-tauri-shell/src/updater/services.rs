@@ -11,8 +11,7 @@ use cfw_platform::run_installed_host;
 use thiserror::Error;
 
 use super::error::FailureCategory;
-use crate::launch::SERVICE_MAINTENANCE_FLAG;
-use crate::service_maintenance::MaintenanceReceipt;
+use crate::service_maintenance::{MaintenanceReceipt, SERVICE_MAINTENANCE_FLAG};
 
 const STATUS: &str = "status";
 const UNREGISTER_PROXY_AGENT: &str = "unregister-proxy-agent";
@@ -121,11 +120,14 @@ fn run(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "macos")]
     use std::ffi::OsString;
 
     use super::*;
+    #[cfg(target_os = "macos")]
     use crate::launch::{LaunchMode, ServiceMaintenanceAction, parse_launch_mode};
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn each_mode_is_an_argument_the_host_parses_as_exactly_that_action() {
         for (argument, action) in [

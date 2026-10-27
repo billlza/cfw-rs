@@ -16,7 +16,7 @@ use super::ManagedProfiles;
 use super::profiles::read_repository;
 use super::subscriptions::{fetch_provider_resources, prepare_subscription_update_attempt};
 use crate::engine::{ManagedEngine, apply_profile_change};
-use crate::legacy::LegacyRetirementGate;
+use crate::platform_maintenance::PlatformMaintenanceGate;
 use crate::subscription_import::{
     ProviderKind, ProviderRequest, replace_provider_resources, stored_provider_requests,
 };
@@ -270,7 +270,7 @@ fn unchanged_source(before: &StoredProfile, current: &StoredProfile) -> bool {
 
 async fn update_resources(
     engine: &ManagedEngine,
-    retirement: &LegacyRetirementGate,
+    retirement: &PlatformMaintenanceGate,
     profiles: &ManagedProfiles,
     manager: &ManagedProviders,
     stored: StoredProfile,
@@ -343,7 +343,7 @@ async fn update_resources(
 
 async fn update_kind(
     engine: &ManagedEngine,
-    retirement: &LegacyRetirementGate,
+    retirement: &PlatformMaintenanceGate,
     profiles: &ManagedProfiles,
     providers: &ManagedProviders,
     kind: ProviderKind,
@@ -357,7 +357,7 @@ async fn update_kind(
 #[tauri::command]
 pub(crate) async fn update_proxy_provider(
     engine: State<'_, ManagedEngine>,
-    retirement: State<'_, LegacyRetirementGate>,
+    retirement: State<'_, PlatformMaintenanceGate>,
     profiles: State<'_, ManagedProfiles>,
     providers: State<'_, ManagedProviders>,
     name: String,
@@ -376,7 +376,7 @@ pub(crate) async fn update_proxy_provider(
 #[tauri::command]
 pub(crate) async fn update_rule_provider(
     engine: State<'_, ManagedEngine>,
-    retirement: State<'_, LegacyRetirementGate>,
+    retirement: State<'_, PlatformMaintenanceGate>,
     profiles: State<'_, ManagedProfiles>,
     providers: State<'_, ManagedProviders>,
     name: String,
@@ -395,7 +395,7 @@ pub(crate) async fn update_rule_provider(
 #[tauri::command]
 pub(crate) async fn update_all_proxy_providers(
     engine: State<'_, ManagedEngine>,
-    retirement: State<'_, LegacyRetirementGate>,
+    retirement: State<'_, PlatformMaintenanceGate>,
     profiles: State<'_, ManagedProfiles>,
     providers: State<'_, ManagedProviders>,
 ) -> Result<ProviderBatchResult, String> {
@@ -412,7 +412,7 @@ pub(crate) async fn update_all_proxy_providers(
 #[tauri::command]
 pub(crate) async fn update_all_rule_providers(
     engine: State<'_, ManagedEngine>,
-    retirement: State<'_, LegacyRetirementGate>,
+    retirement: State<'_, PlatformMaintenanceGate>,
     profiles: State<'_, ManagedProfiles>,
     providers: State<'_, ManagedProviders>,
 ) -> Result<ProviderBatchResult, String> {
@@ -548,7 +548,7 @@ pub(crate) async fn health_check_all_proxy_providers(
 #[tauri::command]
 pub(crate) async fn update_all_providers(
     engine: State<'_, ManagedEngine>,
-    retirement: State<'_, LegacyRetirementGate>,
+    retirement: State<'_, PlatformMaintenanceGate>,
     profiles: State<'_, ManagedProfiles>,
     providers: State<'_, ManagedProviders>,
 ) -> Result<ProviderBatchResult, String> {

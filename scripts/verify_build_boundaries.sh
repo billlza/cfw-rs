@@ -153,7 +153,7 @@ cfw_run_release_python_script "$repo_root" \
 cfw_run_release_python_script "$repo_root" \
   "$repo_root/scripts/production_release_evidence.py" self-check
 
-build_scripts="$(git ls-files '**/build.rs' 'build.rs')"
+build_scripts="$(git ls-files '**/build.rs' 'build.rs' 'apps/cfw-tauri-shell/build_support/macos.rs')"
 if [[ -z "$build_scripts" ]]; then
   echo "error: no tracked Cargo build scripts found" >&2
   exit 1

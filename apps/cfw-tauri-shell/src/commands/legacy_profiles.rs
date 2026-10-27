@@ -6,14 +6,16 @@
 //! the exact sidecar/document pair and rejects any source drift before writing
 //! the new repository or credential vault.
 
-use std::ffi::CString;
 use std::fmt;
-use std::fs::{File, OpenOptions};
-use std::io::Read as _;
-use std::os::fd::{AsRawFd as _, FromRawFd as _};
-use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+#[cfg(test)]
 use std::path::Path;
 use std::time::{Duration, Instant};
+
+mod source;
+use source::{
+    Directory, open_directory_at, open_owned_directory, read_legacy_entry,
+    read_optional_legacy_entry,
+};
 
 use cfw_engine_api::CredentialVaultProvisioner;
 use cfw_profiles::{ExactProfileImportOutcome, ProfileRepository};
@@ -128,6 +130,7 @@ pub(crate) fn preview_legacy_cfw_profile_migration(
     engine: State<'_, ManagedEngine>,
     profiles: State<'_, ManagedProfiles>,
 ) -> Result<LegacyProfileMigrationPreview, String> {
+    crate::platform_maintenance::require_legacy_profile_migration()?;
     // The preview validates the same Off boundary as commit, but does not create
     // directories or write any durable state.
     let _maintenance = engine
@@ -190,6 +193,7 @@ pub(crate) async fn commit_legacy_cfw_profile_migration(
     preview_id: String,
     confirmed: bool,
 ) -> Result<LegacyProfileMigrationOutcome, String> {
+    crate::platform_maintenance::require_legacy_profile_migration()?;
     if !confirmed {
         return Err("legacy profile migration requires explicit confirmation".into());
     }
@@ -309,7 +313,7 @@ fn read_selected_legacy_candidate() -> Result<LegacyCandidateState, String> {
 }
 
 fn read_candidate_from_directory(
-    directory: &File,
+    directory: &Directory,
     active_profile: &str,
 ) -> Result<LegacyCandidateState, String> {
     validate_legacy_basename(active_profile)?;
@@ -373,125 +377,6 @@ fn read_candidate_from_directory(
         legacy_bytes,
         document,
     }))
-}
-
-fn open_owned_directory(path: &Path, require_private: bool) -> Result<File, String> {
-    if !path.is_absolute() {
-        return Err("legacy profile directory must be absolute".into());
-    }
-    let directory = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(path)
-        .map_err(|error| format!("legacy profile directory is unavailable: {error}"))?;
-    validate_directory(&directory, require_private)?;
-    Ok(directory)
-}
-
-fn open_directory_at(parent: &File, name: &str) -> Result<File, String> {
-    let name = CString::new(name).map_err(|_| "legacy directory name contains NUL")?;
-    let descriptor = unsafe {
-        libc::openat(
-            parent.as_raw_fd(),
-            name.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
-    };
-    if descriptor < 0 {
-        return Err(format!(
-            "legacy profile directory could not be opened safely: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    let directory = unsafe { File::from_raw_fd(descriptor) };
-    validate_directory(&directory, false)?;
-    Ok(directory)
-}
-
-fn validate_directory(directory: &File, require_private: bool) -> Result<(), String> {
-    let metadata = directory
-        .metadata()
-        .map_err(|error| format!("legacy profile directory metadata is unavailable: {error}"))?;
-    if !metadata.file_type().is_dir()
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || (require_private && metadata.mode() & 0o077 != 0)
-    {
-        return Err(
-            "legacy profile directory is not an effective-user-owned real directory".into(),
-        );
-    }
-    Ok(())
-}
-
-fn read_legacy_entry(directory: &File, name: &str, maximum: usize) -> Result<Vec<u8>, String> {
-    read_optional_legacy_entry(directory, name, maximum)?
-        .ok_or_else(|| format!("required legacy profile entry is missing: {name}"))
-}
-
-fn read_optional_legacy_entry(
-    directory: &File,
-    name: &str,
-    maximum: usize,
-) -> Result<Option<Vec<u8>>, String> {
-    let name = CString::new(name).map_err(|_| "legacy profile entry name contains NUL")?;
-    let descriptor = unsafe {
-        libc::openat(
-            directory.as_raw_fd(),
-            name.as_ptr(),
-            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
-    };
-    if descriptor < 0 {
-        let error = std::io::Error::last_os_error();
-        if error.kind() == std::io::ErrorKind::NotFound {
-            return Ok(None);
-        }
-        return Err(format!(
-            "legacy profile entry could not be opened safely: {error}"
-        ));
-    }
-    let mut file = unsafe { File::from_raw_fd(descriptor) };
-    let before = file
-        .metadata()
-        .map_err(|error| format!("legacy profile entry metadata is unavailable: {error}"))?;
-    if !before.file_type().is_file()
-        || before.uid() != unsafe { libc::geteuid() }
-        || before.nlink() != 1
-        || before.mode() & 0o022 != 0
-    {
-        return Err(
-            "legacy profile entry is not an effective-user-owned regular non-writable file".into(),
-        );
-    }
-    if before.len() > maximum as u64 {
-        return Err(format!(
-            "legacy profile entry exceeds the {maximum}-byte migration limit"
-        ));
-    }
-    let mut bytes = Vec::with_capacity(before.len() as usize);
-    file.by_ref()
-        .take(maximum as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("legacy profile entry read failed: {error}"))?;
-    let after = file
-        .metadata()
-        .map_err(|error| format!("legacy profile entry metadata is unavailable: {error}"))?;
-    if !after.file_type().is_file()
-        || after.uid() != unsafe { libc::geteuid() }
-        || after.nlink() != 1
-        || after.mode() & 0o022 != 0
-        || before.dev() != after.dev()
-        || before.ino() != after.ino()
-        || before.len() != after.len()
-        || before.ctime() != after.ctime()
-        || before.ctime_nsec() != after.ctime_nsec()
-        || before.mtime() != after.mtime()
-        || before.mtime_nsec() != after.mtime_nsec()
-        || bytes.len() > maximum
-    {
-        return Err("legacy profile entry changed while it was being read".into());
-    }
-    Ok(Some(bytes))
 }
 
 fn validate_legacy_basename(value: &str) -> Result<(), String> {
@@ -651,7 +536,10 @@ fn migration_provision_attempt_error(error: &ImportedCredentialProvisionAttemptE
 mod tests {
     use std::collections::VecDeque;
     use std::fs;
+    #[cfg(unix)]
     use std::os::unix::fs::{PermissionsExt as _, symlink};
+    #[cfg(windows)]
+    use std::os::windows::fs::symlink_file as symlink;
     use std::sync::Mutex;
 
     use cfw_engine_api::{
@@ -777,11 +665,53 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn legacy_directory() -> tempfile::TempDir {
         let temporary = tempfile::TempDir::new().expect("temporary directory");
         fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o775))
             .expect("legacy directory permissions");
         temporary
+    }
+
+    #[cfg(windows)]
+    struct LegacyTestDirectory {
+        _temporary: tempfile::TempDir,
+        path: std::path::PathBuf,
+    }
+
+    #[cfg(windows)]
+    impl LegacyTestDirectory {
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    #[cfg(windows)]
+    fn legacy_directory() -> LegacyTestDirectory {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("legacy");
+        cfw_windows_storage::PrivateDirectory::open_or_create(&path).unwrap();
+        LegacyTestDirectory {
+            _temporary: temporary,
+            path,
+        }
+    }
+
+    fn write_legacy_file(directory: &Path, name: &str, bytes: &[u8]) {
+        #[cfg(unix)]
+        fs::write(directory.join(name), bytes).expect("write legacy file");
+        #[cfg(windows)]
+        {
+            // A newly created Win32 file need not inherit its owner's SID.
+            // Set the fixture's owner and DACL through the actual private store.
+            cfw_windows_storage::PrivateDirectory::open_existing(directory)
+                .unwrap()
+                .unwrap()
+                .write()
+                .unwrap()
+                .replace(name, bytes, bytes.len().max(1))
+                .unwrap();
+        }
     }
 
     fn write_candidate(directory: &Path, source_url: Option<&str>) {
@@ -793,16 +723,16 @@ mod tests {
             "subscription_userinfo": "upload=0",
             "update_interval": "0"
         });
-        fs::write(
-            directory.join("active-profile.json"),
-            serde_json::to_vec(&sidecar).expect("sidecar JSON"),
-        )
-        .expect("write sidecar");
-        fs::write(
-            directory.join("active-profile.yaml"),
+        write_legacy_file(
+            directory,
+            "active-profile.json",
+            &serde_json::to_vec(&sidecar).expect("sidecar JSON"),
+        );
+        write_legacy_file(
+            directory,
+            "active-profile.yaml",
             b"proxies:\n  - name: Direct\n    type: ss\n",
-        )
-        .expect("write YAML");
+        );
     }
 
     fn ready(directory: &Path) -> LegacyCandidate {
@@ -865,14 +795,17 @@ mod tests {
             directory.path(),
             Some("https://subscription.example/profile"),
         );
-        fs::write(directory.path().join("active-profile.yml"), b"proxies: []")
-            .expect("ambiguous YAML");
+        write_legacy_file(directory.path(), "active-profile.yml", b"proxies: []");
         let file = open_owned_directory(directory.path(), false).expect("open directory");
-        assert!(read_candidate_from_directory(&file, "active-profile").is_err());
+        let error = match read_candidate_from_directory(&file, "active-profile") {
+            Err(error) => error,
+            Ok(_) => panic!("ambiguous YAML must fail"),
+        };
+        assert!(error.contains("ambiguous .yaml and .yml"), "{error}");
         fs::remove_file(directory.path().join("active-profile.yml")).expect("remove YAML");
 
         let outside = directory.path().join("outside.json");
-        fs::write(&outside, b"{}").expect("outside sidecar");
+        write_legacy_file(directory.path(), "outside.json", b"{}");
         fs::remove_file(directory.path().join("active-profile.json")).expect("remove sidecar");
         symlink(&outside, directory.path().join("active-profile.json")).expect("sidecar symlink");
         let file = open_owned_directory(directory.path(), false).expect("open directory");

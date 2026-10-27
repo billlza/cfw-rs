@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use cfw_engine_api::{
     BackendError, BackendErrorKind, BackendFuture, EngineBackend, EngineCommandContext, EngineMode,
-    EngineOwner, EngineSessionIdentity, EngineSnapshot, EngineStartRequest, EngineState,
-    NativeEngineStatus, RuntimeIdentity, TunnelInstallOutcome,
+    EngineOwner, EngineRuntimePlatform, EngineSessionIdentity, EngineSnapshot, EngineStartRequest,
+    EngineState, NativeEngineStatus, RuntimeIdentity, TunnelInstallOutcome,
 };
 use cfw_profiles::{ProfileError, ProfileRepository};
 use cfw_singbox_config::{EngineSettings, ValidatedSingBoxProfile};
@@ -451,6 +451,42 @@ fn non_off_mode_refuses_a_selected_profile_that_fails_validation_without_a_fallb
 }
 
 #[test]
+fn windows_controller_binding_accepts_the_ready_user_agent() {
+    let settings = EngineSettings::default();
+    let endpoints = std::sync::RwLock::new(endpoint_binding(settings));
+    let active = EngineSnapshot {
+        desired_mode: EngineMode::LocalProxy,
+        state: EngineState::LocalProxyActive {
+            runtime: RuntimeIdentity {
+                owner: EngineOwner::WindowsUserAgent,
+                context: EngineCommandContext {
+                    installation_id: "installation".into(),
+                    config_epoch: 1,
+                    generation: 7,
+                },
+                config_digest: "digest-a".into(),
+                ready: true,
+            },
+        },
+        generation: 7,
+        config_digest: Some("digest-a".into()),
+    };
+    record_endpoint_runtime(&endpoints, EngineRuntimePlatform::Windows, &active)
+        .expect("bind the Windows controller");
+    assert!(read_active_controller_access(&endpoints, 7, "digest-a").is_ok());
+    let original = endpoints.read().unwrap().clone();
+    assert!(record_endpoint_runtime(&endpoints, EngineRuntimePlatform::MacOs, &active).is_err());
+    assert_eq!(*endpoints.read().unwrap(), original);
+    record_endpoint_runtime(
+        &endpoints,
+        EngineRuntimePlatform::Windows,
+        &EngineSnapshot::default(),
+    )
+    .expect("Off invalidates the controller");
+    assert!(read_active_controller_access(&endpoints, 7, "digest-a").is_err());
+}
+
+#[test]
 fn controller_access_is_bound_to_the_exact_active_generation_and_digest() {
     let settings = EngineSettings::default();
     let endpoints = std::sync::RwLock::new(EngineEndpointBinding {
@@ -477,7 +513,9 @@ fn controller_access_is_bound_to_the_exact_active_generation_and_digest() {
         generation: 7,
         config_digest: Some("digest-a".into()),
     };
-    record_endpoint_runtime(&endpoints, &active).expect("bind active controller");
+    record_endpoint_runtime(&endpoints, EngineRuntimePlatform::MacOs, &active)
+        .expect("bind active controller");
+    assert!(record_endpoint_runtime(&endpoints, EngineRuntimePlatform::Windows, &active).is_err());
     assert!(read_active_controller_access(&endpoints, 7, "digest-a").is_ok());
     assert!(read_active_controller_access(&endpoints, 8, "digest-a").is_err());
     assert!(read_active_controller_access(&endpoints, 7, "digest-b").is_err());
@@ -542,7 +580,7 @@ fn invalid_active_snapshot_cannot_bind_controller_access() {
         generation: 2,
         config_digest: Some("digest".into()),
     };
-    assert!(record_endpoint_runtime(&endpoints, &invalid).is_err());
+    assert!(record_endpoint_runtime(&endpoints, EngineRuntimePlatform::MacOs, &invalid).is_err());
     assert!(read_active_controller_access(&endpoints, 1, "prior").is_ok());
 }
 
@@ -581,6 +619,10 @@ impl EndpointRetryBackend {
 }
 
 impl EngineBackend for EndpointRetryBackend {
+    fn runtime_platform(&self) -> cfw_engine_api::EngineRuntimePlatform {
+        cfw_engine_api::EngineRuntimePlatform::MacOs
+    }
+
     fn check_configuration(&self, _request: EngineStartRequest) -> BackendFuture<'_, ()> {
         Box::pin(async { Ok(()) })
     }
@@ -899,11 +941,11 @@ mod runtime_settings;
 #[path = "tests/ticket_retry.rs"]
 mod ticket_retry;
 
-/// What the recovery asks macOS for, and what macOS answers.
+/// What the recovery asks the platform for, and what the platform answers.
 fn restoration_answer(
     requests: &Arc<Mutex<Vec<bool>>>,
-    answer: Result<(), cfw_apple_network::NativeBridgeError>,
-) -> impl FnOnce(bool) -> std::future::Ready<Result<(), cfw_apple_network::NativeBridgeError>> {
+    answer: Result<(), cfw_engine_api::BackendError>,
+) -> impl FnOnce(bool) -> std::future::Ready<Result<(), cfw_engine_api::BackendError>> {
     let requests = requests.clone();
     move |restoration_only| {
         requests
@@ -916,17 +958,13 @@ fn restoration_answer(
 
 #[tokio::test]
 async fn a_declined_settings_restoration_ends_the_recovery_before_it_starts() {
-    use cfw_apple_network::{NativeBridgeError, NativeBridgeErrorCode as Code};
-    for (code, expected) in [
-        (Code::Timeout, "or the ProxyAgent did not reply"),
-        (Code::ApprovalDenied, "cancelled or denied"),
-        (Code::PermissionDenied, "cancelled or denied"),
-    ] {
+    use cfw_engine_api::{BackendError, BackendErrorKind as Code};
+    for code in [Code::Timeout, Code::ApprovalDenied, Code::PermissionDenied] {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let recoveries = Arc::new(AtomicUsize::new(0));
         let recovered = recoveries.clone();
         let outcome = super::recover_after_settings_restoration(
-            restoration_answer(&requests, Err(NativeBridgeError::new(code, "the prompt"))),
+            restoration_answer(&requests, Err(BackendError::new(code, "the prompt"))),
             async move {
                 recovered.fetch_add(1, Ordering::SeqCst);
                 Ok(())
@@ -934,10 +972,23 @@ async fn a_declined_settings_restoration_ends_the_recovery_before_it_starts() {
         )
         .await;
         let message = outcome.expect_err("a declined restoration must end the recovery");
-        assert!(message.contains(expected), "{message}");
-        assert!(
-            message.contains("Recover background services again"),
-            "{message}"
+        #[cfg(target_os = "macos")]
+        {
+            let expected = if code == Code::Timeout {
+                "or the ProxyAgent did not reply"
+            } else {
+                "cancelled or denied"
+            };
+            assert!(message.contains(expected), "{message}");
+            assert!(
+                message.contains("Recover background services again"),
+                "{message}"
+            );
+        }
+        #[cfg(windows)]
+        assert_eq!(
+            message,
+            "Restoring System Proxy settings was not authorized: the prompt. Check Windows proxy policy and the user session, then recover background services again."
         );
         assert_eq!(recoveries.load(Ordering::SeqCst), 0, "{code:?}");
         assert_eq!(*requests.lock().expect("requests"), vec![true]);
@@ -970,7 +1021,6 @@ async fn a_granted_settings_restoration_runs_the_recovery_and_reports_its_result
 #[derive(Default)]
 struct RestorationRightsBridge {
     requests: Mutex<Vec<bool>>,
-    absent: cfw_apple_network::MissingNativeBridge,
 }
 
 impl RestorationRightsBridge {
@@ -979,85 +1029,25 @@ impl RestorationRightsBridge {
     }
 }
 
-impl cfw_apple_network::NativeBridge for RestorationRightsBridge {
+impl cfw_engine_api::SystemProxyAuthorization for RestorationRightsBridge {
     fn authorize_system_proxy(
         &self,
         restoration_only: bool,
-    ) -> cfw_apple_network::NativeBridgeFuture<'_, ()> {
+    ) -> cfw_engine_api::BackendFuture<'_, ()> {
         self.requests
             .lock()
             .expect("rights requests")
             .push(restoration_only);
         Box::pin(async { Ok(()) })
     }
-    fn query_status(&self) -> cfw_apple_network::NativeBridgeFuture<'_, NativeEngineStatus> {
-        self.absent.query_status()
-    }
-    fn check_configuration(
+}
+
+impl cfw_engine_api::ProfileDelayBackend for RestorationRightsBridge {
+    fn test_profile_delays(
         &self,
-        request: EngineStartRequest,
-    ) -> cfw_apple_network::NativeBridgeFuture<'_, ()> {
-        self.absent.check_configuration(request)
-    }
-    fn start_local_proxy(
-        &self,
-        request: EngineStartRequest,
-    ) -> cfw_apple_network::NativeBridgeFuture<'_, RuntimeIdentity> {
-        self.absent.start_local_proxy(request)
-    }
-    fn stop_local_proxy(
-        &self,
-        context: EngineCommandContext,
-    ) -> cfw_apple_network::NativeBridgeFuture<'_, ()> {
-        self.absent.stop_local_proxy(context)
-    }
-    fn start_system_proxy(
-        &self,
-        request: EngineStartRequest,
-    ) -> cfw_apple_network::NativeBridgeFuture<'_, RuntimeIdentity> {
-        self.absent.start_system_proxy(request)
-    }
-    fn stop_system_proxy(
-        &self,
-        context: EngineCommandContext,
-    ) -> cfw_apple_network::NativeBridgeFuture<'_, ()> {
-        self.absent.stop_system_proxy(context)
-    }
-    fn install_tunnel(
-        &self,
-        context: EngineCommandContext,
-    ) -> cfw_apple_network::NativeBridgeFuture<'_, TunnelInstallOutcome> {
-        self.absent.install_tunnel(context)
-    }
-    fn cancel_tunnel_install(
-        &self,
-        context: EngineCommandContext,
-    ) -> cfw_apple_network::NativeBridgeFuture<'_, ()> {
-        self.absent.cancel_tunnel_install(context)
-    }
-    fn authorize_tunnel_configuration(
-        &self,
-        request: EngineStartRequest,
-    ) -> cfw_apple_network::NativeBridgeFuture<'_, ()> {
-        self.absent.authorize_tunnel_configuration(request)
-    }
-    fn start_tunnel(
-        &self,
-        request: EngineStartRequest,
-    ) -> cfw_apple_network::NativeBridgeFuture<'_, RuntimeIdentity> {
-        self.absent.start_tunnel(request)
-    }
-    fn stop_tunnel(
-        &self,
-        context: EngineCommandContext,
-    ) -> cfw_apple_network::NativeBridgeFuture<'_, ()> {
-        self.absent.stop_tunnel(context)
-    }
-    fn preflight_cutover(
-        &self,
-        request: cfw_engine_api::CutoverPreflightRequest,
-    ) -> cfw_apple_network::NativeBridgeFuture<'_, cfw_engine_api::CutoverPreflightOutcome> {
-        self.absent.preflight_cutover(request)
+        _request: cfw_engine_api::ProfileDelayTestRequest,
+    ) -> cfw_engine_api::BackendFuture<'_, Vec<cfw_engine_api::ProfileProxyDelay>> {
+        panic!("a network restoration rights test must never start a latency probe")
     }
 }
 
@@ -1069,19 +1059,50 @@ fn engine_with_rights_bridge(bridge: Arc<RestorationRightsBridge>) -> super::Man
             local_proxy: true,
             system_proxy: true,
             tunnel: true,
+            tunnel_system_proxy: true,
             provider_management: true,
         },
         unavailable_reason: None,
-        preflight_backend: Arc::new(cfw_apple_network::AppleNetworkBackend::new(
-            cfw_apple_network::MissingNativeBridge,
-        )),
-        authorization_bridge: bridge,
+        preflight_backend: None,
+        profile_delay_backend: bridge.clone(),
+        system_proxy_authorization: bridge,
+        #[cfg(target_os = "macos")]
         cutover: super::cutover::CutoverPreparationGate::default(),
         maintenance: EngineMaintenanceGate::default(),
         endpoints: Arc::new(std::sync::RwLock::new(endpoint_binding(
             EngineSettings::default(),
         ))),
     }
+}
+
+/// Each integration on its own does not admit their combination: Windows
+/// offers Tunnel and System Proxy separately while the combined mode is closed,
+/// and the UI reads the separate capability from the status payload.
+#[tokio::test]
+async fn combined_mode_requires_its_own_capability() {
+    let mut engine = engine_with_rights_bridge(Arc::new(RestorationRightsBridge::default()));
+    engine.capabilities.tunnel_system_proxy = false;
+    for mode in [
+        EngineMode::LocalProxy,
+        EngineMode::SystemProxy,
+        EngineMode::Tunnel,
+    ] {
+        assert_eq!(engine.require_capability(mode), Ok(()));
+    }
+    assert!(
+        engine
+            .require_capability(EngineMode::TunnelSystemProxy)
+            .is_err()
+    );
+    let payload = serde_json::to_value(engine.capabilities).unwrap();
+    assert_eq!(payload["tunnel"], true);
+    assert_eq!(payload["system_proxy"], true);
+    assert_eq!(payload["tunnel_system_proxy"], false);
+    engine.capabilities.tunnel_system_proxy = true;
+    assert_eq!(
+        engine.require_capability(EngineMode::TunnelSystemProxy),
+        Ok(())
+    );
 }
 
 /// "Recover background services" asks macOS for the rights to restore settings
@@ -1108,12 +1129,12 @@ async fn background_recovery_asks_only_for_restoration_rights_then_recovers() {
 
 #[tokio::test]
 async fn a_service_fault_before_the_restoration_leaves_the_recovery_to_repair_it() {
-    use cfw_apple_network::{NativeBridgeError, NativeBridgeErrorCode as Code};
+    use cfw_engine_api::{BackendError, BackendErrorKind as Code};
     let requests = Arc::new(Mutex::new(Vec::new()));
     let fault = || {
         restoration_answer(
             &requests,
-            Err(NativeBridgeError::new(
+            Err(BackendError::new(
                 Code::Unavailable,
                 "ProxyAgent connection-retired",
             )),
@@ -1139,8 +1160,9 @@ async fn a_service_fault_before_the_restoration_leaves_the_recovery_to_repair_it
 }
 
 #[test]
+#[cfg(target_os = "macos")]
 fn system_proxy_authorization_outcomes_tell_the_user_what_to_do() {
-    use cfw_apple_network::NativeBridgeErrorCode as Code;
+    use cfw_engine_api::BackendErrorKind as Code;
     let timed_out =
         super::authorization_failure_message(Code::Timeout, "The native operation timed out.");
     assert!(timed_out.contains("did not get an answer"), "{timed_out}");
@@ -1160,4 +1182,27 @@ fn system_proxy_authorization_outcomes_tell_the_user_what_to_do() {
         ),
         "System Proxy authorization failed: Unavailable: signed macOS Host Bridge is not linked"
     );
+}
+
+#[test]
+#[cfg(windows)]
+fn system_proxy_authorization_outcomes_preserve_windows_failure_and_recovery_guidance() {
+    use cfw_engine_api::BackendErrorKind as Code;
+    for (code, detail) in [
+        (Code::Timeout, "The native operation timed out"),
+        (Code::ApprovalDenied, "denied"),
+        (Code::PermissionDenied, "denied"),
+        (
+            Code::Unavailable,
+            "installed Windows runtime is unavailable",
+        ),
+    ] {
+        let message = super::authorization_failure_message(code, detail);
+        assert_eq!(
+            message,
+            format!(
+                "System Proxy authorization failed: {code:?}: {detail}. Check Windows proxy policy and the user session before trying again."
+            )
+        );
+    }
 }

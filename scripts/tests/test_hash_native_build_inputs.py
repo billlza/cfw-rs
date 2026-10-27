@@ -35,7 +35,7 @@ class NativeBuildInputHashTests(unittest.TestCase):
     def test_host_build_script_hashes_the_same_inputs(self) -> None:
         # build.rs recomputes this digest to admit the native products, so both
         # sides must list the same native build inputs.
-        source = (REPOSITORY / "apps/cfw-tauri-shell/build.rs").read_text(
+        source = (REPOSITORY / "apps/cfw-tauri-shell/build_support/macos.rs").read_text(
             encoding="utf-8"
         )
         function = source[source.index("fn native_build_inputs_digest(") :]

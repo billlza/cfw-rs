@@ -15,6 +15,9 @@ import {
 /// whole run.
 const test = (name, body) => nodeTest(name, { timeout: 5_000 }, body);
 
+const macFailureText = (failure, detail = null) => installFailureText(failure, "macos", detail);
+const macUpdateInstallView = (update, install) => updateInstallView(update, install, "macos");
+
 const UPDATE = Object.freeze({ available: true, version: "0.5.0", install: { supported: true } });
 const NEWER = Object.freeze({ ...UPDATE, version: "0.5.1" });
 const UNAUTHENTIC = Object.freeze({
@@ -34,7 +37,7 @@ const NETWORK = failure("network", "network");
 const TOO_LATE = failure("cancellation_too_late", "state");
 const READY_LOG = ["info", "updater", t("Update v{version} is verified and ready to install", { version: "0.5.0" })];
 const CANCELLED_LOG = ["info", "updater", t("Update download cancelled")];
-const NETWORK_LOG = ["error", "updater", t("Update not installed: {reason}", { reason: installFailureText(NETWORK) })];
+const NETWORK_LOG = ["error", "updater", t("Update not installed: {reason}", { reason: macFailureText(NETWORK) })];
 const failed = (reason) => ({ ...IDLE_UPDATE_INSTALL, version: "0.5.0", failure: reason });
 const withdrawn = (status) => ({
   status, primary: null, cancel: false, busy: false, offerDownloadPage: false,
@@ -52,7 +55,7 @@ const answers = (...replies) => () => (replies.length > 0 ? replies.shift() : UN
 const settled = () => new Promise((resolve) => setImmediate(resolve));
 
 function harness(replies = {}) {
-  const state = { updateInfo: { ...UPDATE }, updateInstall: { ...IDLE_UPDATE_INSTALL } };
+  const state = { payload: { product: { operating_system: "macos" } }, updateInfo: { ...UPDATE }, updateInstall: { ...IDLE_UPDATE_INSTALL } };
   const invoked = [];
   const logs = [];
   const notices = [];
@@ -77,7 +80,7 @@ function harness(replies = {}) {
     notify: (notice) => notices.push(notice),
     onChange: () => { changes += 1; },
   });
-  const view = () => updateInstallView(state.updateInfo, state.updateInstall);
+  const view = () => macUpdateInstallView(state.updateInfo, state.updateInstall);
   const issued = (command) => invoked.filter(([name]) => name === command).length;
   /// Lets the one wait between two questions to the host elapse.
   const elapse = async () => {
@@ -89,7 +92,7 @@ function harness(replies = {}) {
 }
 
 test("an installable release offers the installation and keeps the download page", () => {
-  const view = updateInstallView(UPDATE, IDLE_UPDATE_INSTALL);
+  const view = macUpdateInstallView(UPDATE, IDLE_UPDATE_INSTALL);
   assert.deepEqual(view, {
     status: null, primary: INSTALL_OFFER, cancel: false, busy: false, offerDownloadPage: true,
   });
@@ -97,43 +100,43 @@ test("an installable release offers the installation and keeps the download page
 
 test("a copy that cannot replace itself is offered only the download page", () => {
   for (const install of [{ supported: false, code: "not_in_applications" }, null, undefined]) {
-    const view = updateInstallView({ ...UPDATE, install }, IDLE_UPDATE_INSTALL);
+    const view = macUpdateInstallView({ ...UPDATE, install }, IDLE_UPDATE_INSTALL);
     assert.equal(view.primary, null);
     assert.equal(view.offerDownloadPage, true);
     assert.equal(view.busy, false);
   }
-  assert.equal(updateInstallView({ available: false }, IDLE_UPDATE_INSTALL).primary, null);
-  assert.equal(updateInstallView(null, IDLE_UPDATE_INSTALL).primary, null);
+  assert.equal(macUpdateInstallView({ available: false }, IDLE_UPDATE_INSTALL).primary, null);
+  assert.equal(macUpdateInstallView(null, IDLE_UPDATE_INSTALL).primary, null);
 });
 
 test("download and verification show progress, allow cancellation and block other actions", () => {
   const downloading = { ...IDLE_UPDATE_INSTALL, phase: "downloading", version: "0.5.0", downloaded: 30, total: 120 };
-  assert.deepEqual(updateInstallView(UPDATE, downloading), {
+  assert.deepEqual(macUpdateInstallView(UPDATE, downloading), {
     status: t("Downloading update… {percent}%", { percent: 25 }),
     primary: null, cancel: true, busy: true, offerDownloadPage: false,
   });
   assert.equal(
-    updateInstallView(UPDATE, { ...downloading, total: null }).status,
+    macUpdateInstallView(UPDATE, { ...downloading, total: null }).status,
     t("Downloading update…"),
   );
   assert.equal(
-    updateInstallView(UPDATE, { ...downloading, downloaded: 500 }).status,
+    macUpdateInstallView(UPDATE, { ...downloading, downloaded: 500 }).status,
     t("Downloading update… {percent}%", { percent: 100 }),
     "a reply that overshoots its announced size never shows more than 100%",
   );
-  assert.deepEqual(updateInstallView(UPDATE, { ...downloading, phase: "verifying" }), {
+  assert.deepEqual(macUpdateInstallView(UPDATE, { ...downloading, phase: "verifying" }), {
     status: t("Verifying update…"),
     primary: null, cancel: true, busy: true, offerDownloadPage: false,
   });
 });
 
 test("a staged release asks for the disconnecting step explicitly", () => {
-  assert.deepEqual(updateInstallView(UPDATE, READY), {
+  assert.deepEqual(macUpdateInstallView(UPDATE, READY), {
     status: t("v{version} is ready to install. Clash for Mac will stop the core, quit, and reopen.", { version: "0.5.0" }),
     primary: { action: "commit", label: t("Install and Relaunch") },
     cancel: true, busy: false, offerDownloadPage: false,
   });
-  const installing = updateInstallView(UPDATE, { ...READY, phase: "installing" });
+  const installing = macUpdateInstallView(UPDATE, { ...READY, phase: "installing" });
   assert.equal(installing.primary, null);
   assert.equal(installing.cancel, false);
   assert.equal(installing.busy, true);
@@ -142,13 +145,13 @@ test("a staged release asks for the disconnecting step explicitly", () => {
 test("a running or staged installation is shown whatever release is presented", () => {
   for (const phase of ["downloading", "verifying", "ready", "installing"]) {
     const install = { ...IDLE_UPDATE_INSTALL, phase, version: "0.5.0", downloaded: 30, total: 120 };
-    const shown = updateInstallView(UPDATE, install);
-    assert.notDeepEqual(shown, updateInstallView(UPDATE, IDLE_UPDATE_INSTALL), phase);
+    const shown = macUpdateInstallView(UPDATE, install);
+    assert.notDeepEqual(shown, macUpdateInstallView(UPDATE, IDLE_UPDATE_INSTALL), phase);
     for (const presented of [NEWER, UNAUTHENTIC, NOTHING_PRESENTED, { available: false, error: "offline" }, null]) {
-      assert.deepEqual(updateInstallView(presented, install), shown, `${phase}: ${JSON.stringify(presented)}`);
+      assert.deepEqual(macUpdateInstallView(presented, install), shown, `${phase}: ${JSON.stringify(presented)}`);
     }
   }
-  const staged = updateInstallView(NEWER, READY);
+  const staged = macUpdateInstallView(NEWER, READY);
   assert.equal(
     staged.status,
     t("v{version} is ready to install. Clash for Mac will stop the core, quit, and reopen.", { version: "0.5.0" }),
@@ -162,17 +165,17 @@ test("an attempt that ended without a staged release withdraws both offers", () 
   const network = failed(NETWORK);
   for (const presented of [UPDATE, NEWER, NOTHING_PRESENTED, null]) {
     assert.deepEqual(
-      updateInstallView(presented, network),
-      withdrawn(installFailureText(network.failure)),
+      macUpdateInstallView(presented, network),
+      withdrawn(macFailureText(network.failure)),
       `failed: ${JSON.stringify(presented)}`,
     );
     assert.deepEqual(
-      updateInstallView(presented, CANCELLED),
+      macUpdateInstallView(presented, CANCELLED),
       withdrawn(t("Update download cancelled")),
       `cancelled: ${JSON.stringify(presented)}`,
     );
   }
-  assert.ok(updateInstallView(UPDATE, network).status.endsWith("(network)"));
+  assert.ok(macUpdateInstallView(UPDATE, network).status.endsWith("(network)"));
 });
 
 test("a fresh check supersedes how an earlier attempt ended", () => {
@@ -180,7 +183,7 @@ test("a fresh check supersedes how an earlier attempt ended", () => {
     for (const presented of [UPDATE, NEWER, NOTHING_PRESENTED]) {
       assert.deepEqual(installAfterCheck(ended, presented), IDLE_UPDATE_INSTALL);
     }
-    assert.deepEqual(updateInstallView(UPDATE, installAfterCheck(ended, UPDATE)), {
+    assert.deepEqual(macUpdateInstallView(UPDATE, installAfterCheck(ended, UPDATE)), {
       status: null, primary: INSTALL_OFFER, cancel: false, busy: false, offerDownloadPage: true,
     });
   }
@@ -200,8 +203,8 @@ test("a check never disturbs a running or staged installation", () => {
 
 test("an authenticity failure outlives every check that presents the same release", () => {
   const forged = failed(failure("signature_mismatch", "authenticity"));
-  const view = updateInstallView(UPDATE, forged);
-  assert.deepEqual(view, withdrawn(installFailureText(forged.failure)));
+  const view = macUpdateInstallView(UPDATE, forged);
+  assert.deepEqual(view, withdrawn(macFailureText(forged.failure)));
   assert.ok(view.status.endsWith("(signature_mismatch)"));
 
   for (const presentedAgain of [UPDATE, UNAUTHENTIC, { ...UPDATE, install: null }]) {
@@ -213,24 +216,24 @@ test("an authenticity failure outlives every check that presents the same releas
 });
 
 test("the host's verdict on a release that failed authentication withdraws both offers", () => {
-  const verdict = installFailureText(failure("release_failed_authentication", "authenticity"));
-  assert.deepEqual(updateInstallView(UNAUTHENTIC, IDLE_UPDATE_INSTALL), withdrawn(verdict));
+  const verdict = macFailureText(failure("release_failed_authentication", "authenticity"));
+  assert.deepEqual(macUpdateInstallView(UNAUTHENTIC, IDLE_UPDATE_INSTALL), withdrawn(verdict));
   assert.equal(
     verdict,
     `${t("The downloaded update is not the signed release and was discarded. Do not install it from another source.")} (release_failed_authentication)`,
   );
   assert.equal(
-    updateInstallView({ ...UNAUTHENTIC, install: { supported: true, code: "release_failed_authentication" } }, IDLE_UPDATE_INSTALL).primary,
+    macUpdateInstallView({ ...UNAUTHENTIC, install: { supported: true, code: "release_failed_authentication" } }, IDLE_UPDATE_INSTALL).primary,
     null,
     "the verdict wins over a contradictory support flag",
   );
   assert.equal(
-    updateInstallView({ ...UNAUTHENTIC, available: false }, IDLE_UPDATE_INSTALL).status,
+    macUpdateInstallView({ ...UNAUTHENTIC, available: false }, IDLE_UPDATE_INSTALL).status,
     null,
     "a verdict on a release that is not presented says nothing",
   );
   assert.equal(
-    updateInstallView({ ...UPDATE, install: { supported: false, code: "not_in_applications" } }, IDLE_UPDATE_INSTALL).offerDownloadPage,
+    macUpdateInstallView({ ...UPDATE, install: { supported: false, code: "not_in_applications" } }, IDLE_UPDATE_INSTALL).offerDownloadPage,
     true,
     "any other reason leaves the download page",
   );
@@ -249,12 +252,12 @@ test("host failures are accepted only in their exact shape", () => {
   const categories = ["state", "busy", "environment", "network", "storage", "authenticity", "package", "engine", "internal"];
   const sentences = categories.map((category) => {
     assert.deepEqual(normalizeInstallFailure({ code: "some_code", category }), failure("some_code", category));
-    return installFailureText(failure("some_code", category));
+    return macFailureText(failure("some_code", category));
   });
   assert.equal(new Set(sentences).size, categories.length, "every category has its own sentence");
   for (const sentence of sentences) assert.ok(sentence.endsWith(" (some_code)"), sentence);
   assert.equal(
-    installFailureText(failure("install_already_active", "busy")),
+    macFailureText(failure("install_already_active", "busy")),
     `${t("Another update operation is in progress. Try again in a moment.")} (install_already_active)`,
   );
 
@@ -270,8 +273,8 @@ test("host failures are accepted only in their exact shape", () => {
   ]) {
     assert.deepEqual(normalizeInstallFailure(invalid), UNEXPECTED, JSON.stringify(invalid));
   }
-  assert.ok(installFailureText(UNEXPECTED).endsWith("(unexpected_error)"));
-  assert.ok(installFailureText(UNEXPECTED, "bridge closed").endsWith("(unexpected_error: bridge closed)"));
+  assert.ok(macFailureText(UNEXPECTED).endsWith("(unexpected_error)"));
+  assert.ok(macFailureText(UNEXPECTED, "bridge closed").endsWith("(unexpected_error: bridge closed)"));
 });
 
 test("an action the view does not offer issues no command", async () => {
@@ -349,7 +352,7 @@ test("a failed preparation is shown and logged, a cancelled one is not an error"
   await rejected.install.prepare();
   assert.deepEqual(rejected.state.updateInstall, failed(forged));
   assert.deepEqual(rejected.logs, [
-    ["error", "updater", t("Update not installed: {reason}", { reason: installFailureText(forged) })],
+    ["error", "updater", t("Update not installed: {reason}", { reason: macFailureText(forged) })],
   ]);
 
   const cancelled = harness({ prepare_update_install: { reject: failure("download_cancelled", "state") } });
@@ -365,7 +368,7 @@ test("a failed preparation is shown and logged, a cancelled one is not an error"
     await unstructured.install.prepare();
     assert.deepEqual(unstructured.state.updateInstall, failed(UNEXPECTED));
     assert.deepEqual(unstructured.logs, [
-      ["error", "updater", t("Update not installed: {reason}", { reason: installFailureText(UNEXPECTED, text) })],
+      ["error", "updater", t("Update not installed: {reason}", { reason: macFailureText(UNEXPECTED, text) })],
     ]);
     assert.ok(
       unstructured.logs[0][2].includes(text),
@@ -458,8 +461,8 @@ test("a release staged after this page stopped waiting for it is discarded on th
 
 test("a refused discard of a release no view shows is logged", async () => {
   for (const [refusal, reason] of [
-    [{ reject: TOO_LATE }, installFailureText(TOO_LATE)],
-    [{ cancelled: true }, installFailureText(UNEXPECTED, "cancel_update_install returned an unexpected reply")],
+    [{ reject: TOO_LATE }, macFailureText(TOO_LATE)],
+    [{ cancelled: true }, macFailureText(UNEXPECTED, "cancel_update_install returned an unexpected reply")],
   ]) {
     const { state, logs, pending, install } = harness({
       cancel_update_install: answers({ cancelled: "nothing" }, refusal),
@@ -531,7 +534,7 @@ test("a refused cancellation changes nothing but the reported reason", async () 
   await refused.install.cancel();
   assert.deepEqual(refused.state.updateInstall, { ...READY, failure: TOO_LATE }, "the staged release is kept");
   assert.deepEqual(refused.logs, [
-    ["error", "updater", t("Update not cancelled: {reason}", { reason: installFailureText(TOO_LATE) })],
+    ["error", "updater", t("Update not cancelled: {reason}", { reason: macFailureText(TOO_LATE) })],
   ]);
   assert.deepEqual(refused.view().primary, { action: "commit", label: t("Install and Relaunch") });
 });
@@ -556,7 +559,7 @@ test("a cancellation reply outside the contract is a defect and discards nothing
     assert.deepEqual(malformed.logs, [[
       "error", "updater",
       t("Update not cancelled: {reason}", {
-        reason: installFailureText(UNEXPECTED, "cancel_update_install returned an unexpected reply"),
+        reason: macFailureText(UNEXPECTED, "cancel_update_install returned an unexpected reply"),
       }),
     ]], JSON.stringify(reply));
   }
@@ -591,9 +594,9 @@ test("installing commits only a staged release and returns to it when the hand-o
     "the verified release stays staged for another attempt",
   );
   assert.deepEqual(busy.view().primary, { action: "commit", label: t("Install and Relaunch") });
-  assert.equal(busy.view().status, installFailureText(stopFailed));
+  assert.equal(busy.view().status, macFailureText(stopFailed));
   assert.deepEqual(busy.logs, [
-    ["error", "updater", t("Update not installed: {reason}", { reason: installFailureText(stopFailed) })],
+    ["error", "updater", t("Update not installed: {reason}", { reason: macFailureText(stopFailed) })],
   ]);
 
   const missing = failure("no_staged_update", "state");
@@ -602,7 +605,7 @@ test("installing commits only a staged release and returns to it when the hand-o
   await gone.install.commit();
   assert.deepEqual(gone.state.updateInstall, failed(missing));
   assert.deepEqual(
-    gone.view(), withdrawn(installFailureText(missing)),
+    gone.view(), withdrawn(macFailureText(missing)),
     "a release the host no longer holds is offered neither for installation nor for download",
   );
 });
@@ -622,7 +625,7 @@ test("a hand-off that fails after the host discarded the release does not restor
   assert.deepEqual(raced.state.updateInstall, CANCELLED);
   assert.deepEqual(raced.logs, [
     CANCELLED_LOG,
-    ["error", "updater", t("Update not installed: {reason}", { reason: installFailureText(active) })],
+    ["error", "updater", t("Update not installed: {reason}", { reason: macFailureText(active) })],
   ]);
 });
 
@@ -655,9 +658,9 @@ test("the outcome of the previous attempt is logged and a failure is shown", asy
 test("a previous attempt that could not be reviewed is logged and shown with its reason", async () => {
   const journal = failure("journal_failed", "storage");
   for (const [rejection, reason] of [
-    [journal, installFailureText(journal)],
-    ["journal task ended", installFailureText(UNEXPECTED, "journal task ended")],
-    [new Error("bridge closed"), installFailureText(UNEXPECTED, "bridge closed")],
+    [journal, macFailureText(journal)],
+    ["journal task ended", macFailureText(UNEXPECTED, "journal task ended")],
+    [new Error("bridge closed"), macFailureText(UNEXPECTED, "bridge closed")],
   ]) {
     const unavailable = harness({ resolve_update_install: { reject: rejection } });
     const body = t("The previous update attempt could not be reviewed: {reason}", { reason });
@@ -667,7 +670,7 @@ test("a previous attempt that could not be reviewed is logged and shown with its
     assert.deepEqual(unavailable.state.updateInstall, IDLE_UPDATE_INSTALL);
     assert.deepEqual(unavailable.naps, []);
   }
-  assert.ok(installFailureText(journal).endsWith("(journal_failed)"));
+  assert.ok(macFailureText(journal).endsWith("(journal_failed)"));
 });
 
 test("a reply about the previous attempt outside the contract is a defect, not an absent record", async () => {
@@ -688,7 +691,7 @@ test("a reply about the previous attempt outside the contract is a defect, not a
   ]) {
     const malformed = harness({ resolve_update_install: reply });
     const body = t("The previous update attempt could not be reviewed: {reason}", {
-      reason: installFailureText(UNEXPECTED, "resolve_update_install returned an unexpected reply"),
+      reason: macFailureText(UNEXPECTED, "resolve_update_install returned an unexpected reply"),
     });
     await malformed.install.resolveOutcome();
     assert.deepEqual(malformed.notices, [{ title: t("Updates"), body }], JSON.stringify(reply));
@@ -857,8 +860,8 @@ const unread = (reason) => [
   "error", "updater",
   t("The state of the update installation could not be read: {reason}", { reason }),
 ];
-const REFUSED_LOG = unread(installFailureText(JOURNAL));
-const MALFORMED_LOG = unread(installFailureText(UNEXPECTED, "resolve_update_install returned an unexpected reply"));
+const REFUSED_LOG = unread(macFailureText(JOURNAL));
+const MALFORMED_LOG = unread(macFailureText(UNEXPECTED, "resolve_update_install returned an unexpected reply"));
 
 test("a question the host refuses is logged with its code and asked again until it is answered", async () => {
   const { state, install, logs, naps, issued, elapse } = harness({

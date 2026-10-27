@@ -9,6 +9,11 @@ script derives the reachable package inventory from `cargo metadata
 with warning advisories denied. It never ignores an advisory. Current yanked
 status is owned by the mandatory cargo-deny gate, which uses the same target
 and all-features graph and fails closed on registry or policy diagnostics.
+
+The audited graph belongs to exactly one shipped program: ``--target`` names it
+from the closed set in ``publication.rust_targets`` and defaults to the macOS
+program, which the hosted macOS CI and the sealed lane transcription audit
+without arguments.
 """
 
 from __future__ import annotations
@@ -24,11 +29,12 @@ from typing import Any, Mapping, Sequence
 
 if __package__:
     from .publication.bounded_process import BoundedProcessError, run_bounded_process
+    from .publication.rust_targets import MACOS_TARGET, SHIPPED_TARGETS
 else:
     from publication.bounded_process import BoundedProcessError, run_bounded_process
+    from publication.rust_targets import MACOS_TARGET, SHIPPED_TARGETS
 
 
-SUPPORTED_TARGET = "aarch64-apple-darwin"
 METADATA_TIMEOUT_SECONDS = 300
 AUDIT_TIMEOUT_SECONDS = 900
 OUTPUT_LIMIT_BYTES = 64 * 1024 * 1024
@@ -269,7 +275,7 @@ def parse_audit_result(encoded: str, expected_package_count: int) -> None:
         raise AuditContractError(f"cargo audit reported {warning_count} warning advisories")
 
 
-def run(repository: Path, no_fetch: bool) -> int:
+def run(repository: Path, no_fetch: bool, target: str) -> int:
     cargo_value = os.environ.get("CFW_RELEASE_CARGO_EXECUTABLE")
     cargo_audit_value = os.environ.get("CFW_RELEASE_CARGO_AUDIT_EXECUTABLE")
     if not cargo_value or not cargo_audit_value:
@@ -290,7 +296,7 @@ def run(repository: Path, no_fetch: bool) -> int:
         "--locked",
         "--all-features",
         "--filter-platform",
-        SUPPORTED_TARGET,
+        target,
         "--format-version",
         "1",
     ]
@@ -308,7 +314,7 @@ def run(repository: Path, no_fetch: bool) -> int:
     with (repository / "Cargo.lock").open("rb") as handle:
         lock_data = tomllib.load(handle)
     packages = select_locked_packages(lock_data, keys)
-    encoded_lock = render_audit_lock(packages, SUPPORTED_TARGET)
+    encoded_lock = render_audit_lock(packages, target)
 
     descriptor, temporary_path = tempfile.mkstemp(prefix="cfw-rustsec-", suffix=".lock")
     try:
@@ -355,7 +361,7 @@ def run(repository: Path, no_fetch: bool) -> int:
 
     print(
         "RustSec target audit passed: "
-        f"{SUPPORTED_TARGET}, {len(packages)} reachable packages, "
+        f"{target}, {len(packages)} reachable packages, "
         "0 vulnerabilities, 0 advisory warnings; "
         "current yanked status is owned by the mandatory cargo-deny gate"
     )
@@ -369,10 +375,16 @@ def main() -> None:
         action="store_true",
         help="reuse the local RustSec database instead of updating it",
     )
+    parser.add_argument(
+        "--target",
+        choices=SHIPPED_TARGETS,
+        default=MACOS_TARGET,
+        help="the shipped program's Rust target to audit (default: the macOS program)",
+    )
     arguments = parser.parse_args()
     repository = Path(__file__).resolve().parent.parent
     try:
-        raise SystemExit(run(repository, arguments.no_fetch))
+        raise SystemExit(run(repository, arguments.no_fetch, arguments.target))
     except (AuditContractError, json.JSONDecodeError, OSError, subprocess.SubprocessError) as error:
         raise SystemExit(f"error: target RustSec audit failed: {error}") from error
 

@@ -272,7 +272,7 @@ def _automatic_files(
     ]
 
 
-def _candidate_files(root: Path | None, maximum_depth: int = 3) -> list[Path]:
+def candidate_license_files(root: Path | None, maximum_depth: int = 3) -> list[Path]:
     if root is None or not root.is_dir() or root.is_symlink():
         return []
     candidates: list[Path] = []
@@ -441,7 +441,7 @@ def _metadata_identity(seed: ComponentSeed) -> dict[str, str] | None:
 
 def resolve_license(seed: ComponentSeed) -> dict[str, Any]:
     metadata = _metadata_identity(seed)
-    candidates = _candidate_files(seed.license_root, 1 if seed.ecosystem == "go" else 3)
+    candidates = candidate_license_files(seed.license_root, 1 if seed.ecosystem == "go" else 3)
     decoded: dict[Path, str] = {}
     for path in candidates:
         try:

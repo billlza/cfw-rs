@@ -1,9 +1,8 @@
 use std::collections::BTreeSet;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::{engine::ManagedEngine, settings_store};
-use cfw_apple_network::NativeFrameworkBridge;
 use cfw_engine_api::{
     CredentialGarbageCollectionCommitRequest, CredentialGarbageCollectionPreview,
     CredentialGarbageCollectionRequest, CredentialPresence, CredentialPresenceRequest,
@@ -89,10 +88,9 @@ pub(crate) struct UiProfileSnapshot {
     invalid_profiles: Vec<UiInvalidProfileRecord>,
 }
 
-#[derive(Debug)]
 pub(crate) struct ManagedProfiles {
     repository: ProfileRepository,
-    credential_vault: NativeFrameworkBridge,
+    credential_vault: Arc<dyn CredentialVaultProvisioner>,
     credential_gc_preview: Mutex<Option<CredentialGcAuthority>>,
     legacy_profile_migration_preview: Mutex<Option<LegacyProfileMigrationAuthority>>,
 }
@@ -143,10 +141,13 @@ fn take_gc_authority(
 }
 
 impl ManagedProfiles {
-    fn new(repository: ProfileRepository, credential_vault: NativeFrameworkBridge) -> Self {
+    fn new(
+        repository: ProfileRepository,
+        credential_vault: impl CredentialVaultProvisioner,
+    ) -> Self {
         Self {
             repository,
-            credential_vault,
+            credential_vault: Arc::new(credential_vault),
             credential_gc_preview: Mutex::new(None),
             legacy_profile_migration_preview: Mutex::new(None),
         }
@@ -156,7 +157,7 @@ impl ManagedProfiles {
         &self.repository
     }
 
-    pub(crate) fn credential_vault(&self) -> &NativeFrameworkBridge {
+    pub(crate) fn credential_vault(&self) -> &Arc<dyn CredentialVaultProvisioner> {
         &self.credential_vault
     }
 
@@ -180,7 +181,7 @@ pub(crate) struct UiCredentialGcReceipt {
 }
 
 pub(crate) fn build_managed_profiles(
-    credential_vault: NativeFrameworkBridge,
+    credential_vault: impl CredentialVaultProvisioner,
 ) -> Result<ManagedProfiles, String> {
     let store = settings_store()?;
     store.ensure_layout().map_err(|error| error.to_string())?;
@@ -521,7 +522,7 @@ fn credential_requirements(
 #[tauri::command]
 pub(crate) async fn select_profile(
     engine: State<'_, ManagedEngine>,
-    retirement: State<'_, crate::legacy::LegacyRetirementGate>,
+    retirement: State<'_, crate::platform_maintenance::PlatformMaintenanceGate>,
     profiles: State<'_, ManagedProfiles>,
     id: String,
 ) -> Result<UiProfileRecord, String> {
@@ -923,7 +924,7 @@ mod tests {
     #[test]
     fn credential_requirements_are_loaded_from_the_validated_stored_profile() {
         let temporary = TempDir::new().expect("temporary repository");
-        let repository = ProfileRepository::new(temporary.path());
+        let repository = ProfileRepository::new(temporary.path().join("profiles"));
         let profile = ValidatedSingBoxProfile::parse(
             r#"{"outbounds":[{"type":"trojan","tag":"proxy","server":"proxy.example.com","server_port":443,"credential_ref":{"id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","kind":"trojan_password"},"tls":{"enabled":true,"server_name":"proxy.example.com"}}]}"#,
         )

@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 #[cfg(target_os = "macos")]
 use cfw_apple_network::NATIVE_BRIDGE_OUTER_WATCHDOG;
+#[cfg(target_os = "macos")]
 use cfw_apple_network::NativeFrameworkBridge;
 use cfw_engine_api::{
     NativeServiceEngineStatus, NativeServiceMaintenanceAction, NativeServiceMaintenanceResult,
@@ -11,11 +12,13 @@ use cfw_engine_api::{
 };
 use serde::{Deserialize, Serialize};
 
+#[cfg(target_os = "macos")]
 use crate::launch::ServiceMaintenanceAction;
 #[cfg(target_os = "macos")]
 use crate::main_run_loop_driver::pump_until_deadline;
 
 const DOCUMENT: &str = "cfw-current-service-maintenance-v2";
+pub(crate) const SERVICE_MAINTENANCE_FLAG: &str = "--service-maintenance-v2";
 #[cfg(target_os = "macos")]
 const MAIN_RUN_LOOP_OUTER_SLACK: Duration = Duration::from_secs(1);
 #[cfg(target_os = "macos")]
@@ -44,6 +47,7 @@ pub(crate) struct MaintenanceReceipt {
 }
 
 impl MaintenanceReceipt {
+    #[cfg(any(target_os = "macos", test))]
     fn of(result: &NativeServiceMaintenanceResult) -> Self {
         Self {
             action: result.action,
@@ -77,6 +81,7 @@ impl MaintenanceReceipt {
     }
 }
 
+#[cfg(target_os = "macos")]
 pub(crate) fn run(action: ServiceMaintenanceAction) -> Result<(), String> {
     let bridge = NativeFrameworkBridge::load();
     if !bridge.is_available() {
@@ -163,14 +168,7 @@ fn wait_for_worker(
     }
 }
 
-#[cfg(not(target_os = "macos"))]
-fn run_native_maintenance(
-    _bridge: NativeFrameworkBridge,
-    _action: NativeServiceMaintenanceAction,
-) -> Result<NativeServiceMaintenanceResult, String> {
-    Err("service maintenance is supported only on macOS".to_owned())
-}
-
+#[cfg(target_os = "macos")]
 const fn native_action(action: ServiceMaintenanceAction) -> NativeServiceMaintenanceAction {
     match action {
         ServiceMaintenanceAction::ProveOff => NativeServiceMaintenanceAction::ProveOff,
@@ -341,6 +339,7 @@ mod tests {
         assert_eq!(waits, 2);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn every_cli_action_maps_to_one_closed_native_action() {
         let cases = [

@@ -5,6 +5,9 @@
 //! and stores them in a private application-owned directory.
 
 mod envelope;
+#[cfg(test)]
+#[path = "../tests/support/private_file.rs"]
+mod private_file_fixture;
 mod repository;
 mod selected_replace;
 mod selection;
@@ -96,7 +99,7 @@ pub enum ProfileError {
     InvalidSourceUrl,
     #[error("profile source kind does not match its subscription metadata: {id}")]
     SourceKindMismatch { id: String },
-    #[error("profile repository path contains a NUL byte")]
+    #[error("profile repository path is invalid")]
     InvalidRepositoryPath,
     #[error("profile repository is not an effective-user-owned real directory")]
     UnsafeRepositoryDirectory,

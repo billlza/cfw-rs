@@ -1,17 +1,22 @@
+#[cfg(target_os = "macos")]
 use std::fs;
 use std::io;
+#[cfg(target_os = "macos")]
 use std::os::unix::fs::PermissionsExt;
 
+#[cfg(target_os = "macos")]
 use uuid::Uuid;
 
 use crate::ProfileError;
 use crate::storage::{
-    MAX_ABANDONED_TEMPORARIES, RepositoryDirectory, effective_user_id,
-    ensure_directory_entry_capacity, ensure_entry_capacity, is_owned_temporary_name,
-    repository_directory_is_safe,
+    MAX_ABANDONED_TEMPORARIES, ensure_entry_capacity, is_owned_temporary_name,
+    remaining_directory_entry_capacity,
 };
+#[cfg(target_os = "macos")]
+use crate::storage::{RepositoryDirectory, effective_user_id, repository_directory_is_safe};
 use crate::storage_atomic::{committed_sync_result, error_after_cleanup};
 
+#[cfg(target_os = "macos")]
 fn test_directory(name: &str) -> (std::path::PathBuf, RepositoryDirectory) {
     let root = std::env::temp_dir().join(format!(
         "cfw-profile-storage-{name}-{}-{}",
@@ -26,6 +31,7 @@ fn test_directory(name: &str) -> (std::path::PathBuf, RepositoryDirectory) {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
 fn repository_directory_requires_effective_user_ownership() {
     let (root, directory) = test_directory("owner");
     let metadata = directory.file.metadata().expect("directory metadata");
@@ -40,6 +46,7 @@ fn repository_directory_requires_effective_user_ownership() {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
 fn fchmod_failure_unlinks_the_new_temporary_entry() {
     let (root, directory) = test_directory("chmod-cleanup");
     let name = ".injected-chmod-failure.tmp";
@@ -119,10 +126,12 @@ fn repository_capacity_allows_reads_at_the_limit_but_rejects_another_write() {
 
 #[test]
 fn directory_enumeration_reserves_bounded_crash_recovery_capacity() {
-    ensure_directory_entry_capacity(crate::MAX_REPOSITORY_ENTRIES + MAX_ABANDONED_TEMPORARIES + 1)
-        .expect("profiles, selection, transaction intent, and final recovery entry fit");
+    remaining_directory_entry_capacity(
+        crate::MAX_REPOSITORY_ENTRIES + MAX_ABANDONED_TEMPORARIES + 1,
+    )
+    .expect("profiles, selection, transaction intent, and final recovery entry fit");
     assert!(matches!(
-        ensure_directory_entry_capacity(
+        remaining_directory_entry_capacity(
             crate::MAX_REPOSITORY_ENTRIES + MAX_ABANDONED_TEMPORARIES + 2
         ),
         Err(ProfileError::TooManyEntries)

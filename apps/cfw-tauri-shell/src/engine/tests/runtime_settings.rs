@@ -1,6 +1,6 @@
 use super::*;
 use cfw_application::ProfileChange;
-use cfw_core::{MacOsAppPaths, SettingsStore};
+use cfw_core::{AppPaths, SettingsStore};
 use cfw_singbox_config::{EngineLogLevel, RuntimePreferences};
 
 #[tokio::test]
@@ -8,7 +8,7 @@ async fn online_settings_publish_the_new_binding_only_after_a_successful_commit(
     for stale_revision in [false, true] {
         let root =
             std::env::temp_dir().join(format!("cfm-runtime-transaction-{}", uuid::Uuid::new_v4()));
-        let store = SettingsStore::new(MacOsAppPaths::from_app_home(root.clone()));
+        let store = SettingsStore::new(AppPaths::from_app_home(root.clone()));
         let previous = store.runtime_settings::<RuntimePreferences>().unwrap();
         let backend = Arc::new(EndpointRetryBackend::new(0));
         let coordinator = endpoint_retry_coordinator(backend.clone());
@@ -27,7 +27,7 @@ async fn online_settings_publish_the_new_binding_only_after_a_successful_commit(
             )
             .await
             .unwrap();
-        record_endpoint_runtime(&endpoints, &initial).unwrap();
+        record_endpoint_runtime(&endpoints, coordinator.runtime_platform(), &initial).unwrap();
         let expected = endpoints.read().unwrap().clone();
         let settings = EngineSettings {
             mixed_port: 8890,
@@ -72,7 +72,7 @@ async fn online_settings_publish_the_new_binding_only_after_a_successful_commit(
             })
             .await;
         let current = coordinator.snapshot();
-        record_endpoint_runtime(&endpoints, &current).unwrap();
+        record_endpoint_runtime(&endpoints, coordinator.runtime_platform(), &current).unwrap();
         if stale_revision {
             assert!(result.unwrap_err().to_string().contains("restored"));
             assert_eq!(
@@ -129,7 +129,7 @@ async fn a_mainland_switch_whose_rule_sets_cannot_download_restores_the_previous
     ] {
         let root =
             std::env::temp_dir().join(format!("cfm-mainland-transaction-{}", uuid::Uuid::new_v4()));
-        let store = SettingsStore::new(MacOsAppPaths::from_app_home(root.clone()));
+        let store = SettingsStore::new(AppPaths::from_app_home(root.clone()));
         let previous = store.runtime_settings::<RuntimePreferences>().unwrap();
         let mut backend = EndpointRetryBackend::new(0);
         backend.rule_set_start_failure = Some(failure);
@@ -157,7 +157,7 @@ async fn a_mainland_switch_whose_rule_sets_cannot_download_restores_the_previous
             )
             .await
             .unwrap();
-        record_endpoint_runtime(&endpoints, &initial).unwrap();
+        record_endpoint_runtime(&endpoints, coordinator.runtime_platform(), &initial).unwrap();
         let expected = endpoints.read().unwrap().clone();
         let settings = EngineSettings {
             mainland_china_direct: true,
@@ -191,7 +191,7 @@ async fn a_mainland_switch_whose_rule_sets_cannot_download_restores_the_previous
             })
             .await;
         let current = coordinator.snapshot();
-        record_endpoint_runtime(&endpoints, &current).unwrap();
+        record_endpoint_runtime(&endpoints, coordinator.runtime_platform(), &current).unwrap();
         let error = result.unwrap_err().to_string();
         assert!(error.contains("rule-set"), "{failure:?}: {error}");
         assert!(error.contains("restored"), "{failure:?}: {error}");
@@ -270,11 +270,13 @@ async fn a_start_whose_mainland_rule_sets_cannot_download_fails_and_leaves_no_ru
 /// engine against the journal's settings and the next launch starts from
 /// them: a committed preference would block the cleanup and be reverted on
 /// relaunch while the saved preferences, and the settings page, still showed
-/// it. The commit is refused instead, and nothing changes.
+/// it. The commit is refused instead, and nothing changes. Only the Mac has
+/// such a journal.
+#[cfg(target_os = "macos")]
 #[test]
 fn settings_are_not_committed_while_a_cutover_journal_governs_startup() {
     let root = tempfile::tempdir().expect("temporary app home");
-    let store = SettingsStore::new(MacOsAppPaths::from_app_home(root.path()));
+    let store = SettingsStore::new(AppPaths::from_app_home(root.path()));
     let journal_settings = EngineSettings::default();
     crate::legacy::write_journal_governing_startup(
         &store.paths().app_home,

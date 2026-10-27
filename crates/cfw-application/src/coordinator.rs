@@ -2,7 +2,7 @@ use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use cfw_engine_api::{
     CutoverPreflightRequest, EngineBackend, EngineGenerationStore, EngineMode,
-    EngineSessionIdentity, EngineSnapshot, EngineState,
+    EngineRuntimePlatform, EngineSessionIdentity, EngineSnapshot, EngineState,
 };
 use cfw_singbox_config::{EngineSettings, ValidatedSingBoxProfile};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -47,12 +47,20 @@ impl Default for CoordinatorOptions {
 
 #[derive(Clone)]
 pub struct EngineModeCoordinator {
+    runtime_platform: EngineRuntimePlatform,
     commands: mpsc::Sender<Command>,
     snapshots: watch::Receiver<EngineSnapshot>,
     reconciliation: watch::Receiver<Option<ReconciliationOutcome>>,
 }
 
 impl EngineModeCoordinator {
+    /// The platform selected by the trusted backend at construction. Controller
+    /// consumers use the same identity policy as the actor, never an incoming
+    /// runtime's claimed owner or a later backend observation.
+    pub fn runtime_platform(&self) -> EngineRuntimePlatform {
+        self.runtime_platform
+    }
+
     pub fn spawn(backend: Arc<dyn EngineBackend>, session: EngineSessionIdentity) -> Self {
         Self::spawn_with_options(backend, session, CoordinatorOptions::default())
     }
@@ -180,6 +188,7 @@ impl EngineModeCoordinator {
             !options.status_query_timeout.is_zero(),
             "status query timeout must be nonzero"
         );
+        let runtime_platform = backend.runtime_platform();
         let (command_tx, command_rx) = mpsc::channel(COMMAND_QUEUE_CAPACITY);
         let mut initial_snapshot = EngineSnapshot {
             generation: options.initial_generation,
@@ -200,6 +209,7 @@ impl EngineModeCoordinator {
             reconciliation_tx,
             CoordinatorRuntime {
                 backend,
+                runtime_platform,
                 session,
                 generation_store,
                 options,
@@ -208,6 +218,7 @@ impl EngineModeCoordinator {
         ));
         (
             Self {
+                runtime_platform,
                 commands: command_tx,
                 snapshots: snapshot_rx,
                 reconciliation: reconciliation_rx,

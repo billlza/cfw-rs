@@ -569,9 +569,11 @@ impl MigrationHandoffLease {
             .acquire_lock_file(LOCK_FILE)
             .map(|file| Self { _file: file })
             .map_err(|error| match error {
+                #[cfg(unix)]
                 LockFileError::Open(error) => {
                     format!("failed to open migration handoff lock: {error}")
                 }
+                #[cfg(unix)]
                 LockFileError::Inspect(error) => error.to_string(),
                 LockFileError::UnsafeMetadata => {
                     "migration handoff lock has unsafe metadata".into()

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use cfw_core::{LegacyNetworkState, MacOsAppPaths, SettingsStore};
+use cfw_core::{AppPaths, LegacyNetworkState, SettingsStore};
 use cfw_engine_api::{
     EngineCommandContext, EngineMode, EngineOwner, EngineSnapshot, EngineState, RuntimeIdentity,
 };
@@ -32,7 +32,7 @@ use super::{
 #[test]
 fn normal_start_leaves_legacy_files_and_missing_marker_untouched() {
     let root = tempfile::tempdir().expect("temporary app home");
-    let store = SettingsStore::new(MacOsAppPaths::from_app_home(root.path()));
+    let store = SettingsStore::new(AppPaths::from_app_home(root.path()));
     store.ensure_layout().expect("modern layout");
     let old_settings = b"unparsed legacy settings retained for optional cleanup";
     fs::write(&store.paths().legacy_settings_file, old_settings).expect("old settings");
@@ -66,7 +66,7 @@ fn normal_start_leaves_legacy_files_and_missing_marker_untouched() {
 #[test]
 fn normal_start_preserves_runtime_observation_failure() {
     let root = tempfile::tempdir().expect("temporary app home");
-    let store = SettingsStore::new(MacOsAppPaths::from_app_home(root.path()));
+    let store = SettingsStore::new(AppPaths::from_app_home(root.path()));
     store.ensure_layout().expect("modern layout");
     let refused = "legacy process observation was denied by the operating system";
     let error = require_network_start_with(&LegacyRetirementGate::default(), &store, |_| {
@@ -84,7 +84,7 @@ fn normal_start_preserves_runtime_observation_failure() {
 #[test]
 fn normal_start_rejects_corrupt_journal_before_runtime_observation() {
     let root = tempfile::tempdir().expect("temporary app home");
-    let store = SettingsStore::new(MacOsAppPaths::from_app_home(root.path()));
+    let store = SettingsStore::new(AppPaths::from_app_home(root.path()));
     store.ensure_layout().expect("modern layout");
     let journal = root.path().join("legacy-cutover-journal-v1.json");
     fs::write(&journal, b"broken journal").expect("corrupt journal");
@@ -253,7 +253,7 @@ fn optional_cleanup_does_not_hide_start_but_active_maintenance_still_serializes_
 fn later_legacy_cleanup_preserves_modern_preferences() {
     use cfw_core::{AppearanceTheme, UiPreferences};
     let root = tempfile::tempdir().expect("temporary app home");
-    let store = SettingsStore::new(MacOsAppPaths::from_app_home(root.path()));
+    let store = SettingsStore::new(AppPaths::from_app_home(root.path()));
     let legacy = UiPreferences {
         theme: AppearanceTheme::Light,
         launch_at_login: true,
@@ -649,7 +649,7 @@ fn legacy_profile_cleanup_cannot_delete_staged_native_profiles() {
         std::process::id(),
         std::thread::current().id()
     ));
-    let paths = MacOsAppPaths::from_app_home(root.join("app"));
+    let paths = AppPaths::from_app_home(root.join("app"));
     fs::create_dir_all(&paths.legacy_profiles_dir).expect("create legacy profiles");
     fs::create_dir_all(&paths.profiles_dir).expect("create staged profiles");
     fs::write(paths.legacy_profiles_dir.join("legacy.yaml"), b"legacy").expect("legacy");

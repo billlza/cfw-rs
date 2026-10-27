@@ -96,4 +96,12 @@ impl CredentialRebindRequest {
     pub fn audience(&self) -> &CredentialAudience {
         &self.audience
     }
+
+    pub fn previous_audience(&self) -> &CredentialAudience {
+        &self.previous_audience
+    }
+
+    pub fn slots(&self) -> &[CredentialSlot] {
+        &self.slots
+    }
 }

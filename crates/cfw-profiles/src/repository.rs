@@ -1622,7 +1622,10 @@ fn ensure_credential_reference_capacity(actual: usize) -> Result<(), ProfileErro
 #[cfg(test)]
 mod tests {
     use std::fs;
+    #[cfg(target_os = "macos")]
     use std::os::unix::fs::{PermissionsExt as _, symlink};
+    #[cfg(windows)]
+    use std::os::windows::fs::symlink_file as symlink;
     use std::path::{Path, PathBuf};
 
     use uuid::Uuid;
@@ -1656,11 +1659,7 @@ mod tests {
         .expect("valid profile")
     }
 
-    fn write_private(path: &Path, bytes: &[u8]) {
-        fs::write(path, bytes).expect("write test repository entry");
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .expect("set private test entry mode");
-    }
+    use crate::private_file_fixture::write_private;
 
     fn stage_selected_replace(
         root: &Path,
@@ -2175,8 +2174,18 @@ mod tests {
         let (mode_root, mode_repository, mode_original) = selected_fixture("intent-mode");
         stage_selected_replace(&mode_root, &mode_original, &profile("direct-replacement"));
         let mode_path = mode_root.join("profiles").join(SELECTED_REPLACE_FILE_NAME);
+        #[cfg(target_os = "macos")]
         fs::set_permissions(&mode_path, fs::Permissions::from_mode(0o644))
             .expect("weaken intent mode for fixture");
+        #[cfg(windows)]
+        {
+            let grant = std::process::Command::new("icacls.exe")
+                .arg(&mode_path)
+                .args(["/grant", "*S-1-1-0:(R)"])
+                .output()
+                .unwrap();
+            assert!(grant.status.success(), "weaken intent DACL for fixture");
+        }
         assert!(matches!(
             mode_repository.snapshot(),
             Err(ProfileError::UnsafeSelectedReplaceFile)

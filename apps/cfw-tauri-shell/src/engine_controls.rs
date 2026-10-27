@@ -10,7 +10,7 @@ use crate::commands::ManagedProfiles;
 use crate::engine::{
     EngineStatusPayload, ManagedEngine, apply_admitted_engine_mode, serialized_switch_transition,
 };
-use crate::legacy::LegacyRetirementGate;
+use crate::platform_maintenance::PlatformMaintenanceGate;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EngineControl {
@@ -23,7 +23,7 @@ pub(crate) enum EngineControl {
 /// reconciliation path. It never carries a requested start or a profile.
 pub(crate) async fn reconcile_startup_services(
     engine: &ManagedEngine,
-    retirement: &LegacyRetirementGate,
+    retirement: &PlatformMaintenanceGate,
 ) -> Result<EngineStatusPayload, String> {
     // Capture the actor's current recovery offer before waiting in the Host
     // queue; a queued click cannot adopt a newer offer after another attempt.
@@ -34,7 +34,7 @@ pub(crate) async fn reconcile_startup_services(
         .map_err(|error| error.to_string())?;
     // Recovery may register the current services, so retain the same exclusion
     // against a live legacy runtime or an unfinished maintenance transaction.
-    crate::legacy::require_network_start_allowed(retirement)?;
+    crate::platform_maintenance::require_start_allowed(retirement)?;
     let completion =
         mode_lease.run_to_completion(engine.recover_with_restoration_rights(async move {
             recovery.await.map(drop).map_err(|error| error.to_string())
@@ -50,7 +50,7 @@ pub(crate) async fn reconcile_startup_services(
 /// Enables or removes System Proxy while preserving the core and Packet Tunnel.
 pub(crate) async fn set_system_proxy_enabled(
     engine: &ManagedEngine,
-    retirement: &LegacyRetirementGate,
+    retirement: &PlatformMaintenanceGate,
     profiles: &ManagedProfiles,
     enabled: bool,
 ) -> Result<EngineStatusPayload, String> {
@@ -69,7 +69,7 @@ pub(crate) async fn set_system_proxy_enabled(
 /// Starts or removes the Packet Tunnel through the existing Authority path.
 pub(crate) async fn set_tun_enabled(
     engine: &ManagedEngine,
-    retirement: &LegacyRetirementGate,
+    retirement: &PlatformMaintenanceGate,
     profiles: &ManagedProfiles,
     enabled: bool,
 ) -> Result<EngineStatusPayload, String> {
@@ -89,7 +89,7 @@ pub(crate) async fn set_tun_enabled(
 /// app-owned runtime. A delayed enable cannot undo a more recent stop.
 pub(crate) async fn set_core_enabled(
     engine: &ManagedEngine,
-    retirement: &LegacyRetirementGate,
+    retirement: &PlatformMaintenanceGate,
     profiles: &ManagedProfiles,
     enabled: bool,
 ) -> Result<EngineStatusPayload, String> {
@@ -110,7 +110,7 @@ pub(crate) async fn set_core_enabled(
 /// newer observation before this request enters the serialized mutation queue.
 pub(crate) async fn apply_observed_control(
     engine: &ManagedEngine,
-    retirement: &LegacyRetirementGate,
+    retirement: &PlatformMaintenanceGate,
     profiles: &ManagedProfiles,
     control: EngineControl,
     enabled: bool,

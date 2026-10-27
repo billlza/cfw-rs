@@ -30,7 +30,8 @@ function bootPayload({ handoff = false, rendererReady = null } = {}) {
       name: "Clash for Mac",
       version: "0.4.0",
       license: "GPL-3.0-or-later",
-      minimum_macos: "15.0",
+      operating_system: "macos",
+      minimum_os_version: "15.0",
       architecture: "arm64",
     },
     migration_handoff: handoff,
@@ -75,6 +76,78 @@ test("boot payload strictly separates dashboard, challenge and published rendere
     bootPayload({ handoff: true, rendererReady: { state: "unknown" } }),
   ]) {
     assert.throws(() => normalizeBootPayload(invalid), /invalid|requires|cannot/u);
+  }
+});
+
+test("boot identity requires an explicit supported operating system without Apple-only metadata", () => {
+  for (const [operatingSystem, name, minimum, architecture] of [
+    ["macos", "Clash for Mac", "15.0", "arm64"],
+    ["windows", "Clash for Windows", "10.0.26100", "x64"],
+  ]) {
+    const payload = bootPayload();
+    payload.product = {
+      name, version: "0.5.0", license: "GPL-3.0-or-later",
+      operating_system: operatingSystem, minimum_os_version: minimum, architecture,
+    };
+    assert.deepEqual(normalizeBootPayload(payload).product, payload.product);
+    for (const invalid of [undefined, null, "", "linux", "Windows", "macos\n", 1]) {
+      assert.throws(() => normalizeBootPayload({
+        ...payload, product: { ...payload.product, operating_system: invalid },
+      }), /invalid/u);
+    }
+    assert.throws(() => normalizeBootPayload({
+      ...payload, product: { ...payload.product, minimum_macos: "15.0" },
+    }), /invalid/u);
+  }
+});
+
+test("unqualified Windows minimum version is explicit and never substitutes for malformed identity", () => {
+  const payload = bootPayload();
+  payload.product = {
+    ...payload.product, name: "Clash for Windows", operating_system: "windows",
+    architecture: "x64", minimum_os_version: null,
+  };
+  assert.deepEqual(normalizeBootPayload(payload).product, payload.product);
+  for (const invalid of [undefined, "", false, 0, {}, []]) {
+    assert.throws(() => normalizeBootPayload({
+      ...payload, product: { ...payload.product, minimum_os_version: invalid },
+    }), /invalid/u);
+  }
+  for (const field of ["name", "version", "license", "operating_system", "architecture"]) {
+    assert.throws(() => normalizeBootPayload({
+      ...payload, product: { ...payload.product, [field]: null },
+    }), /invalid/u);
+  }
+  assert.throws(() => normalizeBootPayload({
+    ...payload, product: { ...payload.product, operating_system: "macos" },
+  }), /invalid/u);
+});
+
+test("Windows historical maintenance is inapplicable, never cleared or handoff authority", () => {
+  const status = { state: "not_applicable" };
+  assert.deepEqual(normalizeRetirementStatus(status, "windows"), status);
+  assert.equal(migrationRoute(status, false), "none");
+  assert.equal(legacyMaintenanceRoute(status, false, true), "none");
+  assert.throws(() => migrationRoute(status, true), /cannot own/u);
+  assert.throws(() => normalizeRetirementStatus(status, "macos"), /unknown/u);
+  for (const value of [
+    { state: "cleared" }, { state: "awaiting_confirmation" }, { state: "cleaning" },
+    { state: "not_applicable", ready: true }, null, {},
+  ]) {
+    assert.throws(() => normalizeRetirementStatus(value, "windows"), /invalid/u);
+  }
+  assert.throws(() => normalizeRetirementStatus(status), /invalid/u);
+  const payload = bootPayload();
+  payload.product = {
+    ...payload.product, name: "Clash for Windows", operating_system: "windows",
+    architecture: "x64", minimum_os_version: null,
+  };
+  assert.deepEqual(normalizeBootPayload(payload).product, payload.product);
+  for (const invalid of [
+    { ...payload, migration_handoff_status: { state: "in_progress" } },
+    { ...payload, migration_handoff: true, migration_handoff_renderer_ready: { state: "published" } },
+  ]) {
+    assert.throws(() => normalizeBootPayload(invalid), /cannot grant/u);
   }
 });
 
@@ -233,7 +306,7 @@ test("every durable retirement status has one explicit migration route", () => {
     [{ state: "cleared" }, "none", "none"],
   ];
   for (const [raw, dashboard, handoff] of cases) {
-    const normalized = normalizeRetirementStatus(raw);
+    const normalized = normalizeRetirementStatus(raw, "macos");
     assert.equal(migrationRoute(normalized, false), dashboard);
     assert.equal(migrationRoute(normalized, true), handoff);
   }
@@ -274,7 +347,7 @@ test("unknown or structurally ambiguous status fails instead of routing to Prepa
     { state: "manual_cleanup_required", action: "unknown", message: "x" },
     { state: "recovery_start_required", target: "off", message: "x" },
   ]) {
-    assert.throws(() => normalizeRetirementStatus(value), /invalid|unknown/u);
+    assert.throws(() => normalizeRetirementStatus(value, "macos"), /invalid|unknown/u);
   }
 });
 

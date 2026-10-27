@@ -15,6 +15,7 @@ mod dns_policy;
 mod domain_pattern;
 mod engine_settings;
 mod lan;
+pub use lan::{LAN_INBOUND_TAG, access_rule as lan_access_rule};
 mod mainland;
 pub use engine_settings::{EngineLogLevel, LanProxySettings, RuntimePreferences};
 mod error;
@@ -43,13 +44,15 @@ pub use credentials::{
     CredentialAudience, CredentialBinding, CredentialKind, CredentialRef, CredentialSecret,
     CredentialSlot, CredentialSlotError, CredentialTarget, InvalidCredentialAudience,
     InvalidCredentialRef, InvalidCredentialSecret, MAX_CREDENTIAL_SLOTS,
+    validate_slots as validate_credential_slots,
 };
 pub use error::{ConfigError, ProfileParseError};
 pub use profile::{MAX_OUTBOUNDS, UtlsFingerprint};
 pub use projection::{
     AuthenticatedDnsServer, CONFIGURATION_IDENTITY_SCHEMA_VERSION, DEFAULT_MIXED_PORT,
-    EngineSettings, ProjectedConfig, ProjectionMode, ProxyProbe, TUNNEL_ADDRESS_PLAN,
-    TunnelAddressPlan,
+    EngineSettings, ProjectedConfig, ProjectionMode, ProxyProbe, ROUTING_CACHE_PATH,
+    SYSTEM_PROXY_INBOUND_TAG, TUNNEL_ADDRESS_PLAN, TUNNEL_INBOUND_TAG, TunnelAddressPlan,
+    TunnelStack, configuration_identity_digest,
 };
 pub use release_dns::ReleaseDnsEvidenceCase;
 pub use release_packet::{
@@ -57,7 +60,7 @@ pub use release_packet::{
 };
 pub use validation::{
     MAX_ENGINE_CONFIG_BYTES, MAX_PROFILE_BYTES, MAX_PROFILE_NODES, ValidatedSingBoxProfile,
-    sha256_hex,
+    canonicalize as canonicalize_configuration_value, sha256_hex,
 };
 
 #[cfg(test)]

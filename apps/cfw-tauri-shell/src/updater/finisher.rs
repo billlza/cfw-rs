@@ -22,9 +22,7 @@ use super::journal::{
 use super::services::{self, ServicePair};
 use super::staged_bundle::{StagedExpectation, verify_staged_bundle};
 use super::staging::StagingArea;
-use crate::legacy::{ProcessIdentity, exact_processes, process_identity_exists};
-
-pub(crate) const FINISH_UPDATE_FLAG: &str = "--finish-update-v1";
+use crate::process_identity::{ProcessIdentity, exact_processes, process_identity_exists};
 
 const DASHBOARD_EXIT_TIMEOUT: Duration = Duration::from_secs(30);
 const DASHBOARD_EXIT_POLL: Duration = Duration::from_millis(100);
@@ -315,9 +313,16 @@ pub(crate) fn run(transaction: &str) -> i32 {
         eprintln!("update installer requires one canonical transaction identifier");
         return USAGE;
     };
-    if !runs_from_installed_location() {
-        eprintln!("update installer must run from the installed application");
-        return ADMISSION;
+    match runs_from_installed_location() {
+        Ok(true) => {}
+        Ok(false) => {
+            eprintln!("update installer must run from the installed application");
+            return ADMISSION;
+        }
+        Err(error) => {
+            eprintln!("update installer location could not be observed: {error}");
+            return ADMISSION;
+        }
     }
     let app_home = match crate::settings_store() {
         Ok(store) => store.paths().app_home.clone(),

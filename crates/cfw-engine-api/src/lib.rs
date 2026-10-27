@@ -23,7 +23,9 @@ pub use cfw_singbox_config::{
 // together; older bridges cannot attest these operations.
 mod profile_probe;
 pub use cfw_singbox_config::ProjectionMode as EngineStartMode;
-pub use profile_probe::{ProfileDelayTestRequest, ProfileProbeFailure, ProfileProxyDelay};
+pub use profile_probe::{
+    ProfileDelayBackend, ProfileDelayTestRequest, ProfileProbeFailure, ProfileProxyDelay,
+};
 
 pub const ENGINE_PROTOCOL_VERSION: u16 = 10;
 
@@ -62,6 +64,67 @@ impl EngineMode {
 pub enum EngineOwner {
     ProxyAgent,
     PacketTunnelSystemExtension,
+    WindowsUserAgent,
+    WindowsTunnelService,
+}
+
+/// Closed platform identity selected by the concrete backend, never inferred
+/// from an incoming runtime observation. The Apple wire owner names stay intact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineRuntimePlatform {
+    MacOs,
+    Windows,
+}
+
+impl EngineRuntimePlatform {
+    /// This affects the canonical configuration before any digest or lease is
+    /// prepared. It does not advertise or authorize platform TUN availability.
+    pub const fn tunnel_stack(self) -> cfw_singbox_config::TunnelStack {
+        match self {
+            Self::MacOs => cfw_singbox_config::TunnelStack::System,
+            Self::Windows => cfw_singbox_config::TunnelStack::Gvisor,
+        }
+    }
+
+    pub const fn proxy_owner(self) -> EngineOwner {
+        match self {
+            Self::MacOs => EngineOwner::ProxyAgent,
+            Self::Windows => EngineOwner::WindowsUserAgent,
+        }
+    }
+
+    pub const fn tunnel_owner(self) -> EngineOwner {
+        match self {
+            Self::MacOs => EngineOwner::PacketTunnelSystemExtension,
+            Self::Windows => EngineOwner::WindowsTunnelService,
+        }
+    }
+
+    /// Whether authorizing a tunnel configuration waits for a person. macOS
+    /// saves the VPN configuration only after the user's consent. On Windows
+    /// the SYSTEM service was approved when the MSI was installed, so its
+    /// authorization is a configuration check with nothing to approve.
+    pub const fn tunnel_authorization_awaits_consent(self) -> bool {
+        match self {
+            Self::MacOs => true,
+            Self::Windows => false,
+        }
+    }
+}
+
+impl EngineOwner {
+    pub const fn supports_mode(self, mode: EngineMode) -> bool {
+        matches!(
+            (self, mode),
+            (
+                Self::ProxyAgent | Self::WindowsUserAgent,
+                EngineMode::LocalProxy | EngineMode::SystemProxy
+            ) | (
+                Self::PacketTunnelSystemExtension | Self::WindowsTunnelService,
+                EngineMode::Tunnel | EngineMode::TunnelSystemProxy
+            )
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -307,7 +370,9 @@ impl fmt::Debug for CredentialProvision<'_> {
 /// admitted only when both its kind and secret bytes are exactly identical,
 /// making retries idempotent. Changing either is an immutable-reference
 /// conflict; credential rotation must generate a new UUID and update the
-/// profile. Any error must leave the prior vault unchanged. This contract
+/// profile. A confirmed failure leaves the prior vault unchanged.
+/// `OutcomeUnknown` does not assert rollback: a timeout or a failed durability
+/// confirmation can occur after publication. This contract
 /// prevents partial import and keeps runtime identity bound to public
 /// reference IDs without deriving a digest from secret bytes.
 /// The request carries the validated profile's complete unique reference set
@@ -718,7 +783,7 @@ impl CredentialPresenceRequest {
 
 #[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
 pub enum CredentialVaultError {
-    #[error("credential vault outcome is unknown after a boundary timeout")]
+    #[error("credential vault outcome is unknown; completion could not be confirmed")]
     OutcomeUnknown,
     #[error("credential vault is unavailable")]
     Unavailable,
@@ -795,6 +860,43 @@ pub trait CredentialVaultProvisioner: Send + Sync + 'static {
         &self,
         request: CredentialGarbageCollectionCommitRequest,
     ) -> CredentialGarbageCollectionCommitFuture<'_>;
+}
+
+impl<T: CredentialVaultProvisioner + ?Sized> CredentialVaultProvisioner for std::sync::Arc<T> {
+    fn rebind_profile_credentials(
+        &self,
+        request: CredentialRebindRequest,
+    ) -> CredentialVaultFuture<'_> {
+        (**self).rebind_profile_credentials(request)
+    }
+
+    fn provision_profile_credentials<'a>(
+        &'a self,
+        request: CredentialProvisionRequest<'a>,
+    ) -> CredentialVaultFuture<'a> {
+        (**self).provision_profile_credentials(request)
+    }
+
+    fn query_profile_credentials(
+        &self,
+        request: CredentialPresenceRequest,
+    ) -> CredentialPresenceFuture<'_> {
+        (**self).query_profile_credentials(request)
+    }
+
+    fn preview_credential_garbage_collection(
+        &self,
+        request: CredentialGarbageCollectionRequest,
+    ) -> CredentialGarbageCollectionPreviewFuture<'_> {
+        (**self).preview_credential_garbage_collection(request)
+    }
+
+    fn commit_credential_garbage_collection(
+        &self,
+        request: CredentialGarbageCollectionCommitRequest,
+    ) -> CredentialGarbageCollectionCommitFuture<'_> {
+        (**self).commit_credential_garbage_collection(request)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1233,11 +1335,28 @@ impl BackendError {
 
 pub type BackendFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, BackendError>> + Send + 'a>>;
 
+/// Native authorization before a System Proxy transition or recovery.
+///
+/// This may require interactive consent and therefore runs before a short-lived
+/// engine start/cleanup transaction. It neither starts/stops an engine nor
+/// changes proxy settings or claims an ownership lease. Implementations must
+/// authenticate the intended user and respect the platform's access policy.
+/// `restoration_only` permits restoring settings already owned by this app, not
+/// taking over new settings. A refusal or unanswered consent request remains an
+/// explicit error; callers must not stop a working engine before resolving it.
+pub trait SystemProxyAuthorization: Send + Sync + 'static {
+    fn authorize_system_proxy(&self, restoration_only: bool) -> BackendFuture<'_, ()>;
+}
+
 /// Native engine operations used by the application coordinator.
 ///
 /// A successful stop is a barrier: the process has stopped libbox, released
 /// its cross-process lease, and will issue no more callbacks for that runtime.
 pub trait EngineBackend: Send + Sync + 'static {
+    /// Fixed for this backend's lifetime. The coordinator uses this closed
+    /// mapping for start, recovery and observation; a peer cannot choose it.
+    fn runtime_platform(&self) -> EngineRuntimePlatform;
+
     /// Queries both native owners and returns one fresh, mutually-exclusive
     /// typed observation. Implementations must reject conflicting simultaneous
     /// owners instead of selecting one, and must not return a cached Active

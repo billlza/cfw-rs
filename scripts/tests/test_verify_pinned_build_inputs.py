@@ -1001,7 +1001,11 @@ class PinnedBuildInputsTests(unittest.TestCase):
         # Removing a pin from both the pin file and the policy cannot pass: the
         # fixed key set still requires it (build_native_products.sh, for one,
         # skips its Xcode identity check when XCODE_VERSION is unset).
-        for key in ("XCODE_VERSION", "GOVULNCHECK_MODULE_SUM", "NPM_ARCHIVE_SHA256"):
+        for key in (
+            "XCODE_VERSION", "GOVULNCHECK_MODULE_SUM", "NPM_ARCHIVE_SHA256",
+            "GO_WINDOWS_AMD64_SHA256", "WINTUN_WINDOWS_AMD64_SHA256",
+            "WINTUN_BINARY_LICENSE_PATH",
+        ):
             with self.subTest(key=key):
                 fixture = Fixture()
                 del fixture.env[key]
@@ -1041,6 +1045,54 @@ class PinnedBuildInputsTests(unittest.TestCase):
         self._assert_fails(
             fixture, "pins the policy does not declare: UNDECLARED_TOOL_VERSION"
         )
+
+    def test_windows_go_archive_digest_is_required_and_validated(self) -> None:
+        fixture = Fixture()
+        del fixture.env["GO_WINDOWS_AMD64_SHA256"]
+        self._assert_fails(fixture, "missing required pins: GO_WINDOWS_AMD64_SHA256")
+        for malformed in ("A" * 64, "0" * 63, "windows-go-archive"):
+            with self.subTest(digest=malformed):
+                fixture = Fixture()
+                fixture.env["GO_WINDOWS_AMD64_SHA256"] = malformed
+                self._assert_fails(fixture, "GO_WINDOWS_AMD64_SHA256 is not a sha256 value")
+
+    def test_windows_wintun_pins_are_required_and_validated(self) -> None:
+        # The Windows engine package admits the official Wintun archive, DLL
+        # and binary licence by these pins; each is a declared release pin.
+        keys = (
+            "WINTUN_VERSION", "WINTUN_ARCHIVE_SHA256", "WINTUN_WINDOWS_AMD64_SHA256",
+            "WINTUN_BINARY_LICENSE_PATH", "WINTUN_BINARY_LICENSE_SHA256",
+        )
+        for key in keys:
+            with self.subTest(missing=key):
+                fixture = Fixture()
+                del fixture.env[key]
+                self._assert_fails(fixture, f"missing required pins: {key}$")
+        malformed = (
+            ("WINTUN_VERSION", "0.14", "WINTUN_VERSION is not a version value"),
+            ("WINTUN_ARCHIVE_SHA256", "A" * 64, "WINTUN_ARCHIVE_SHA256 is not a sha256 value"),
+            (
+                "WINTUN_WINDOWS_AMD64_SHA256", "0" * 63,
+                "WINTUN_WINDOWS_AMD64_SHA256 is not a sha256 value",
+            ),
+            (
+                "WINTUN_BINARY_LICENSE_SHA256", "wintun-license",
+                "WINTUN_BINARY_LICENSE_SHA256 is not a sha256 value",
+            ),
+            (
+                "WINTUN_BINARY_LICENSE_PATH", "native/windows/wintun LICENSE.txt",
+                "WINTUN_BINARY_LICENSE_PATH is not a repository-path value",
+            ),
+            (
+                "WINTUN_BINARY_LICENSE_PATH", "native/../LICENSE.txt",
+                "WINTUN_BINARY_LICENSE_PATH path has an unsafe component",
+            ),
+        )
+        for key, value, pattern in malformed:
+            with self.subTest(key=key, value=value):
+                fixture = Fixture()
+                fixture.env[key] = value
+                self._assert_fails(fixture, pattern)
 
     def test_every_pin_format_rejects_a_malformed_value(self) -> None:
         malformed = {

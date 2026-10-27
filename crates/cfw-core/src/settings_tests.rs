@@ -1,9 +1,11 @@
 use std::fs;
-use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 
 use super::*;
+use crate::test_support::{
+    assert_private_directory, assert_private_file, hold_directory_lock, symlink, write_private,
+};
 
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -13,19 +15,32 @@ fn test_store(name: &str) -> (PathBuf, SettingsStore) {
         std::process::id(),
         TEST_COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
-    let store = SettingsStore::new(MacOsAppPaths::from_app_home(root.join("app")));
+    let store = SettingsStore::new(AppPaths::from_app_home(root.join("app")));
     (root, store)
 }
 
 #[test]
+fn a_non_directory_ancestor_never_becomes_default_preferences() {
+    let (root, store) = test_store("invalid-ancestor");
+    fs::write(&root, b"preserved non-directory ancestor").unwrap();
+    assert!(
+        store.read_or_default().is_err(),
+        "an invalid path is not a first launch"
+    );
+    assert_eq!(
+        fs::read(&root).unwrap(),
+        b"preserved non-directory ancestor"
+    );
+    fs::remove_file(root).unwrap();
+}
+
+#[test]
 fn a_contended_settings_lock_times_out_without_inventing_defaults() {
-    use std::os::fd::AsRawFd;
     use std::time::Duration;
 
     let (root, store) = test_store("contended-startup");
     store.write(&UiPreferences::default()).unwrap();
-    let guard = fs::File::open(&store.paths().app_home).unwrap();
-    assert_eq!(unsafe { libc::flock(guard.as_raw_fd(), libc::LOCK_EX) }, 0);
+    let guard = hold_directory_lock(&store.paths().app_home);
     let (reply, result) = std::sync::mpsc::sync_channel(1);
     let reader = std::thread::spawn(move || {
         reply.send(store.read_or_default()).unwrap();
@@ -104,8 +119,36 @@ fn corrupt_runtime_settings_never_become_defaults() {
 }
 
 #[test]
+fn platform_application_path_preserves_the_product_directory() {
+    #[cfg(target_os = "macos")]
+    let paths = {
+        let paths = AppPaths::for_user_home("/Users/path-contract");
+        assert_eq!(
+            paths.app_home,
+            PathBuf::from("/Users/path-contract/Library/Application Support/Clash for Mac")
+        );
+        paths
+    };
+    #[cfg(windows)]
+    let paths = {
+        let paths = AppPaths::default_for_current_user().unwrap();
+        assert!(paths.app_home.is_absolute());
+        assert_eq!(paths.app_home.file_name().unwrap(), "Clash for Windows");
+        paths
+    };
+    assert_eq!(
+        paths.preferences_file,
+        paths.app_home.join(PREFERENCES_FILE_NAME)
+    );
+    assert_eq!(
+        paths.window_state_file,
+        paths.app_home.join(WINDOW_STATE_FILE_NAME)
+    );
+}
+
+#[test]
 fn native_profile_staging_never_reuses_the_legacy_profile_directory() {
-    let paths = MacOsAppPaths::from_app_home("/tmp/cfw-profile-path-contract");
+    let paths = AppPaths::from_app_home("/tmp/cfw-profile-path-contract");
     assert_eq!(
         paths
             .legacy_profiles_dir
@@ -141,17 +184,8 @@ fn strict_json_round_trip_is_private_and_atomic() {
     assert!(snapshot.persisted);
 
     let path = &store.paths.preferences_file;
-    let metadata = fs::metadata(path).expect("preferences metadata");
-    assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
-    assert_eq!(metadata.nlink(), 1);
-    assert_eq!(
-        fs::metadata(&store.paths.app_home)
-            .expect("directory metadata")
-            .permissions()
-            .mode()
-            & 0o777,
-        0o700
-    );
+    assert_private_file(path);
+    assert_private_directory(&store.paths.app_home);
     let entries = fs::read_dir(&store.paths.app_home)
         .expect("read app home")
         .collect::<Result<Vec<_>, _>>()
@@ -165,16 +199,34 @@ fn strict_json_round_trip_is_private_and_atomic() {
 }
 
 #[test]
+fn windows_font_preferences_round_trip_without_coercing_the_family() {
+    let (root, store) = test_store("windows-font-families");
+    for family in ["Segoe UI", "Consolas"] {
+        let mut document = serde_json::to_value(UiPreferences::default()).unwrap();
+        document["font_family"] = family.into();
+        let preferences: UiPreferences = serde_json::from_value(document).unwrap();
+        store.write(&preferences).expect("save Windows font");
+        let snapshot = store.snapshot().expect("reopen saved Windows font");
+        assert_eq!(snapshot.settings, preferences);
+        assert_eq!(
+            serde_json::to_value(snapshot.settings).unwrap()["font_family"],
+            family
+        );
+    }
+    for family in ["segoe ui", "Arial", "Consolas, monospace"] {
+        let mut document = serde_json::to_value(UiPreferences::default()).unwrap();
+        document["font_family"] = family.into();
+        assert!(serde_json::from_value::<UiPreferences>(document).is_err());
+    }
+    fs::remove_dir_all(root).expect("remove test root");
+}
+
+#[test]
 fn v1_preferences_upgrade_without_mutating_the_original_on_read() {
     let (root, store) = test_store("v1-language-upgrade");
     store.ensure_layout().expect("create layout");
     let original = br#"{"schema_version":1,"preferences":{"theme":"dark","font_family":"SF Mono","retain_window_bounds":false,"launch_at_login":true,"silent_start":true,"check_for_updates":false}}"#;
-    fs::write(&store.paths.preferences_file, original).expect("write v1");
-    fs::set_permissions(
-        &store.paths.preferences_file,
-        fs::Permissions::from_mode(0o600),
-    )
-    .expect("private v1");
+    write_private(&store.paths.preferences_file, original);
     let mut snapshot = store.snapshot().expect("read v1");
     assert!(snapshot.persisted);
     assert_eq!(snapshot.settings.language, UiLanguage::System);
@@ -235,9 +287,7 @@ fn window_bounds_round_trip_is_private_canonical_and_independent() {
         fs::read(&store.paths.window_state_file).expect("read canonical state"),
         br#"{"schema_version":1,"bounds":{"x":-1440,"y":25,"width":1200,"height":800}}"#,
     );
-    let metadata = fs::metadata(&store.paths.window_state_file).expect("window state metadata");
-    assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
-    assert_eq!(metadata.nlink(), 1);
+    assert_private_file(&store.paths.window_state_file);
     assert!(!store.paths.preferences_file.exists());
 
     fs::remove_dir_all(root).expect("remove test root");
@@ -255,12 +305,7 @@ fn malformed_noncanonical_and_out_of_range_window_bounds_fail_closed() {
         br#"{"schema_version":1,"bounds":{"x":1000001,"y":0,"width":850,"height":603}}"#,
     ];
     for bytes in cases {
-        fs::write(&store.paths.window_state_file, bytes).expect("write malformed state");
-        fs::set_permissions(
-            &store.paths.window_state_file,
-            fs::Permissions::from_mode(0o600),
-        )
-        .expect("set file mode");
+        write_private(&store.paths.window_state_file, bytes);
         assert!(store.window_bounds().is_err(), "accepted {bytes:?}");
     }
 
@@ -338,12 +383,7 @@ fn malformed_unknown_and_noncanonical_json_fail_closed() {
         br#"{ "schema_version": 1, "preferences": {"theme":"system","font_family":"","retain_window_bounds":true,"launch_at_login":false,"silent_start":false,"check_for_updates":false} }"#,
     ];
     for bytes in cases {
-        fs::write(&store.paths.preferences_file, bytes).expect("write malformed preferences");
-        fs::set_permissions(
-            &store.paths.preferences_file,
-            fs::Permissions::from_mode(0o600),
-        )
-        .expect("set file mode");
+        write_private(&store.paths.preferences_file, bytes);
         assert!(store.snapshot().is_err());
     }
     fs::remove_dir_all(root).expect("remove test root");
@@ -353,16 +393,10 @@ fn malformed_unknown_and_noncanonical_json_fail_closed() {
 fn oversized_preferences_are_rejected_before_json_parsing() {
     let (root, store) = test_store("oversized");
     store.ensure_layout().expect("create layout");
-    fs::write(
+    write_private(
         &store.paths.preferences_file,
         vec![b' '; MAX_PREFERENCES_BYTES + 1],
-    )
-    .expect("write oversized preferences");
-    fs::set_permissions(
-        &store.paths.preferences_file,
-        fs::Permissions::from_mode(0o600),
-    )
-    .expect("set file mode");
+    );
     assert!(matches!(
         store.snapshot(),
         Err(SettingsStoreError::TooLarge { .. })
@@ -444,7 +478,7 @@ fn concurrent_window_state_readers_never_observe_partial_json() {
 
 #[test]
 fn app_paths_separate_new_json_from_legacy_yaml() {
-    let paths = MacOsAppPaths::for_user_home("/Users/example");
+    let paths = AppPaths::from_app_home(std::env::temp_dir().join("cfw-path-contract"));
     assert_eq!(
         paths
             .preferences_file

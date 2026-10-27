@@ -1,3 +1,4 @@
+#[cfg(target_os = "macos")]
 mod cutover;
 mod endpoints;
 mod maintenance;
@@ -20,16 +21,13 @@ pub(crate) const ENDPOINT_CONFLICT_RETRY_DELAY: std::time::Duration =
 mod tests;
 
 use std::sync::{Arc, RwLock};
+#[cfg(target_os = "macos")]
 use std::time::Instant;
 
-use cfw_apple_network::{
-    AppleNetworkBackend, KeychainEngineGenerationStore, NATIVE_BRIDGE_OUTER_WATCHDOG,
-    NativeBridgeErrorCode, NativeFrameworkBridge,
-};
 use cfw_application::{EngineControllerAccess, EngineCoordinatorError, EngineModeCoordinator};
 use cfw_engine_api::{
-    BackendErrorKind, CutoverPreflightBackend, EngineBackend, EngineEvent, EngineMode, EngineOwner,
-    EngineSnapshot, EngineState,
+    BackendErrorKind, CutoverPreflightBackend, EngineEvent, EngineMode, EngineRuntimePlatform,
+    EngineSnapshot, EngineState, RuntimeIdentity, SystemProxyAuthorization,
 };
 use cfw_profiles::{ProfileError, ProfileRepository};
 use cfw_singbox_config::{EngineSettings, ValidatedSingBoxProfile};
@@ -37,13 +35,17 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::commands::ManagedProfiles;
-use crate::legacy::{LegacyRetirementGate, load_replacement_engine_settings};
+#[cfg(target_os = "macos")]
+use crate::legacy::load_replacement_engine_settings;
+use crate::platform_maintenance::PlatformMaintenanceGate;
 use crate::settings_store;
+#[cfg(target_os = "macos")]
 use cutover::CutoverPreparationGate;
 use endpoints::{EndpointCandidateCursor, EndpointRole};
 pub(crate) use maintenance::{EngineMaintenanceError, EngineMaintenanceLease, ProfileControlError};
 use maintenance::{EngineMaintenanceGate, EngineModeChangeIntent, EngineModeChangeLease};
 
+#[cfg(target_os = "macos")]
 pub(crate) use cutover::{
     CutoverAuthority, prepare_legacy_cutover, run_native_preflight, validate_outcome_binding,
 };
@@ -136,6 +138,8 @@ pub(crate) struct EngineCapabilities {
     local_proxy: bool,
     system_proxy: bool,
     tunnel: bool,
+    /// Both integrations in one run; never true unless each alone is.
+    tunnel_system_proxy: bool,
     provider_management: bool,
 }
 
@@ -164,8 +168,10 @@ pub struct ManagedEngine {
     pub(crate) coordinator: EngineModeCoordinator,
     capabilities: EngineCapabilities,
     unavailable_reason: Option<String>,
-    pub(crate) preflight_backend: Arc<dyn CutoverPreflightBackend>,
-    authorization_bridge: Arc<dyn cfw_apple_network::NativeBridge>,
+    preflight_backend: Option<Arc<dyn CutoverPreflightBackend>>,
+    system_proxy_authorization: Arc<dyn SystemProxyAuthorization>,
+    pub(crate) profile_delay_backend: Arc<dyn cfw_engine_api::ProfileDelayBackend>,
+    #[cfg(target_os = "macos")]
     cutover: CutoverPreparationGate,
     maintenance: EngineMaintenanceGate,
     endpoints: Arc<RwLock<EngineEndpointBinding>>,
@@ -189,6 +195,7 @@ pub(crate) struct StagedEndpointRebind {
     replacement: EngineEndpointBinding,
 }
 
+#[cfg(target_os = "macos")]
 impl StagedEndpointRebind {
     pub(crate) fn settings(&self) -> &EngineSettings {
         self.replacement.controller.settings()
@@ -196,6 +203,13 @@ impl StagedEndpointRebind {
 }
 
 impl ManagedEngine {
+    #[cfg(target_os = "macos")]
+    pub(crate) fn legacy_preflight(&self) -> Result<&dyn CutoverPreflightBackend, String> {
+        self.preflight_backend
+            .as_deref()
+            .ok_or_else(|| "legacy service cutover is unavailable on this platform".into())
+    }
+
     pub(crate) fn mode_intent_revision(&self) -> Result<u64, EngineMaintenanceError> {
         self.maintenance.intent_revision()
     }
@@ -229,10 +243,16 @@ impl ManagedEngine {
         read_active_controller_access(&self.endpoints, generation, config_digest)
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn record_endpoint_runtime(&self, snapshot: &EngineSnapshot) -> Result<(), String> {
-        record_endpoint_runtime(&self.endpoints, snapshot)
+        record_endpoint_runtime(
+            &self.endpoints,
+            self.coordinator.runtime_platform(),
+            snapshot,
+        )
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn stage_endpoint_rebind(
         &self,
         conflict: BackendErrorKind,
@@ -240,6 +260,7 @@ impl ManagedEngine {
         stage_endpoint_rebind(&self.endpoints, &self.coordinator, conflict)
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn commit_endpoint_rebind(
         &self,
         staged: StagedEndpointRebind,
@@ -310,7 +331,7 @@ impl ManagedEngine {
             .reserve_maintenance()
             .map_err(|error| error.to_string())?;
         let coordinator = self.coordinator.clone();
-        let authorization = self.authorization_bridge.clone();
+        let authorization = self.system_proxy_authorization.clone();
         let (result, maintenance) = maintenance
             .run_to_completion(async move {
                 authorize_proxy_transition(authorization.as_ref(), true).await?;
@@ -337,9 +358,11 @@ impl ManagedEngine {
     where
         R: std::future::Future<Output = Result<(), String>> + Send + 'static,
     {
-        let bridge = self.authorization_bridge.clone();
+        let authorization = self.system_proxy_authorization.clone();
         recover_after_settings_restoration(
-            move |restoration_only| async move { bridge.authorize_system_proxy(restoration_only).await },
+            move |restoration_only| async move {
+                authorization.authorize_system_proxy(restoration_only).await
+            },
             recovery,
         )
     }
@@ -350,9 +373,7 @@ impl ManagedEngine {
             EngineMode::LocalProxy => self.capabilities.local_proxy,
             EngineMode::SystemProxy => self.capabilities.system_proxy,
             EngineMode::Tunnel => self.capabilities.tunnel,
-            EngineMode::TunnelSystemProxy => {
-                self.capabilities.tunnel && self.capabilities.system_proxy
-            }
+            EngineMode::TunnelSystemProxy => self.capabilities.tunnel_system_proxy,
         };
         if available {
             Ok(())
@@ -364,6 +385,7 @@ impl ManagedEngine {
         }
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn take_cutover_authority(
         &self,
         receipt_id: &str,
@@ -373,20 +395,31 @@ impl ManagedEngine {
 
     pub(crate) fn status_payload(
         &self,
-        retirement: &LegacyRetirementGate,
+        retirement: &PlatformMaintenanceGate,
     ) -> Result<EngineStatusPayload, String> {
-        let retirement_reason = retirement.status()?.start_block_reason();
+        let retirement_reason = crate::platform_maintenance::start_block_reason(retirement)?;
         let capabilities = if retirement_reason.is_some() {
             EngineCapabilities {
                 local_proxy: false,
                 system_proxy: false,
                 tunnel: false,
+                tunnel_system_proxy: false,
                 provider_management: true,
             }
         } else {
             self.capabilities
         };
+        #[cfg(target_os = "macos")]
         let (cutover_ready, mut cutover_reason) = self.cutover.readiness(Instant::now())?;
+        #[cfg(windows)]
+        let (cutover_ready, mut cutover_reason) = (
+            false,
+            Some("legacy maintenance does not apply to this Windows release".into()),
+        );
+        let cutover_ready = cutover_ready && self.preflight_backend.is_some();
+        if self.preflight_backend.is_none() {
+            cutover_reason = Some("legacy service cutover is unavailable on this platform".into());
+        }
         if self.unavailable_reason.is_some() {
             cutover_reason = self.unavailable_reason.clone();
         }
@@ -404,91 +437,67 @@ impl ManagedEngine {
     }
 }
 
-/// Preparing filesystem / Keychain state never starts the coordinator. The
+/// Preparing filesystem / platform state never starts the coordinator. The
 /// startup owner admits this task only after checking for an intervening quit.
 pub(crate) struct PreparedEngine {
     pub(crate) engine: ManagedEngine,
     pub(crate) task: cfw_application::CoordinatorTask,
 }
 
+fn configured_engine_settings(
+    store: &cfw_core::SettingsStore,
+) -> Result<(EngineSettings, EndpointCandidateCursor), String> {
+    #[cfg(target_os = "macos")]
+    if let Some(settings) = load_replacement_engine_settings(&store.paths().app_home)? {
+        let cursor = EndpointCandidateCursor::from_persisted(settings.clone())
+            .map_err(|error| format!("persisted engine endpoints are unusable: {error}"))?;
+        return Ok((settings, cursor));
+    }
+    let preferences = store
+        .runtime_settings::<cfw_singbox_config::RuntimePreferences>()
+        .map_err(|error| error.to_string())?
+        .settings;
+    let settings = preferences
+        .apply_to(EngineSettings::default())
+        .map_err(|error| error.to_string())?;
+    endpoints::select_configured_engine_settings(settings, preferences.preferred_mixed_port)
+        .map_err(|error| format!("engine loopback endpoints are unavailable: {error}"))
+}
+
 pub(crate) fn prepare_managed_engine(
-    bridge: NativeFrameworkBridge,
+    services: crate::platform_runtime::PlatformRuntime,
 ) -> Result<PreparedEngine, String> {
     let store = settings_store()?;
     store.ensure_layout().map_err(|error| error.to_string())?;
-    let (settings, cursor) = match load_replacement_engine_settings(&store.paths().app_home)? {
-        Some(settings) => {
-            let cursor = EndpointCandidateCursor::from_persisted(settings.clone())
-                .map_err(|error| format!("persisted engine endpoints are unusable: {error}"))?;
-            (settings, cursor)
-        }
-        None => {
-            let preferences = store
-                .runtime_settings::<cfw_singbox_config::RuntimePreferences>()
-                .map_err(|error| error.to_string())?
-                .settings;
-            let settings = preferences
-                .apply_to(EngineSettings::default())
-                .map_err(|error| error.to_string())?;
-            endpoints::select_configured_engine_settings(settings, preferences.preferred_mixed_port)
-                .map_err(|error| format!("engine loopback endpoints are unavailable: {error}"))?
-        }
-    };
+    let (settings, cursor) = configured_engine_settings(&store)?;
     let controller = EngineControllerAccess::resolve(settings)
         .map_err(|error| format!("engine settings are unusable: {error}"))?;
-    let native_available = bridge.is_available();
-    let native_failure = bridge.unavailable_reason().map(ToOwned::to_owned);
-    let authorization_bridge = Arc::new(bridge.clone());
-    let concrete_backend = Arc::new(AppleNetworkBackend::new(bridge));
-    let engine_backend: Arc<dyn EngineBackend> = concrete_backend.clone();
-    let preflight_backend: Arc<dyn CutoverPreflightBackend> = concrete_backend;
-    let generation_store =
-        KeychainEngineGenerationStore::new(store.paths().app_home.join("engine"));
-    let mut prepared_task = None;
-    let persisted = match generation_store {
-        Ok(generation_store) => {
-            let generation_store: Arc<dyn cfw_engine_api::EngineGenerationStore> =
-                Arc::new(generation_store);
-            EngineModeCoordinator::spawn_persisted_with(
-                engine_backend.clone(),
-                generation_store,
-                NATIVE_BRIDGE_OUTER_WATCHDOG,
-                |task| prepared_task = Some(task),
-            )
-        }
-        Err(error) => Err(cfw_application::EngineCoordinatorError::Journal(
-            error.to_string(),
-        )),
-    };
-    let (coordinator, lineage_failure) = match persisted {
-        Ok(coordinator) => (coordinator, None),
-        Err(error) => {
-            let message = format!("authoritative engine lineage is unavailable: {error}");
-            let coordinator = EngineModeCoordinator::spawn_journal_unavailable_with(
-                engine_backend,
-                message.clone(),
-                NATIVE_BRIDGE_OUTER_WATCHDOG,
-                |task| prepared_task = Some(task),
-            );
-            (coordinator, Some(message))
-        }
-    };
+    let crate::platform_runtime::PreparedRuntime {
+        services,
+        coordinator,
+        task,
+    } = services.prepare()?;
 
     let engine = ManagedEngine {
         coordinator,
         capabilities: EngineCapabilities {
-            local_proxy: native_available && lineage_failure.is_none(),
-            system_proxy: native_available && lineage_failure.is_none(),
-            tunnel: native_available && lineage_failure.is_none(),
+            local_proxy: services.proxy_available,
+            system_proxy: services.proxy_available,
+            tunnel: services.tunnel_available,
+            tunnel_system_proxy: services.tunnel_system_proxy_available
+                && services.tunnel_available
+                && services.proxy_available,
             // Providers are application-owned resources (commands::providers).
             // The pinned sing-box 1.14.4 schema has no proxy or rule providers,
             // so the controller's provider methods stay fail-closed backstops
             // that nothing probes.
             provider_management: true,
         },
-        unavailable_reason: lineage_failure.or(native_failure),
-        preflight_backend,
-        authorization_bridge,
+        unavailable_reason: services.unavailable_reason,
+        preflight_backend: services.legacy_preflight,
+        system_proxy_authorization: services.authorization,
+        profile_delay_backend: services.probes,
+        #[cfg(target_os = "macos")]
         cutover: CutoverPreparationGate::default(),
         maintenance: EngineMaintenanceGate::default(),
         endpoints: Arc::new(RwLock::new(EngineEndpointBinding {
@@ -497,7 +506,6 @@ pub(crate) fn prepare_managed_engine(
             active: None,
         })),
     };
-    let task = prepared_task.ok_or("engine preparation produced no coordinator task")?;
     Ok(PreparedEngine { engine, task })
 }
 
@@ -567,7 +575,7 @@ pub(crate) fn start_engine_event_forwarder(app: AppHandle) {
 #[tauri::command]
 pub(crate) fn engine_snapshot(
     engine: State<'_, ManagedEngine>,
-    retirement: State<'_, LegacyRetirementGate>,
+    retirement: State<'_, PlatformMaintenanceGate>,
 ) -> Result<EngineStatusPayload, String> {
     engine.status_payload(&retirement)
 }
@@ -582,20 +590,20 @@ pub(crate) fn engine_snapshot(
 /// actor responds, so accepted native work cannot escape maintenance.
 pub(crate) async fn apply_admitted_engine_mode(
     engine: &ManagedEngine,
-    retirement: &LegacyRetirementGate,
+    retirement: &PlatformMaintenanceGate,
     profiles: &ManagedProfiles,
     mode: EngineMode,
     mode_lease: EngineModeChangeLease,
 ) -> Result<EngineStatusPayload, String> {
     if mode != EngineMode::Off {
-        crate::legacy::require_network_start_allowed(retirement)?;
+        crate::platform_maintenance::require_start_allowed(retirement)?;
         engine.require_capability(mode)?;
     }
     let (profile_id, profile) = selected_profile_for_mode(profiles.repository(), mode)
         .map_err(|error| error.to_string())?;
     let coordinator = engine.coordinator.clone();
     let endpoints = engine.endpoints.clone();
-    let authorization = engine.authorization_bridge.clone();
+    let authorization = engine.system_proxy_authorization.clone();
     let retry_guard = mode_lease.retry_guard();
     let completion = mode_lease.run_to_completion(async move {
         // Authorization precedes the runtime transition, including restoration
@@ -629,7 +637,7 @@ pub(crate) async fn apply_admitted_engine_mode(
 /// for a crashed active runtime. The owned task survives a dropped UI waiter.
 pub(crate) async fn apply_profile_change<T, F, P>(
     engine: &ManagedEngine,
-    retirement: &LegacyRetirementGate,
+    retirement: &PlatformMaintenanceGate,
     prepare: P,
 ) -> Result<T, String>
 where
@@ -644,7 +652,7 @@ where
         .await
         .map_err(|error| error.to_string())?;
     let start_admission = if mode != EngineMode::Off {
-        crate::legacy::require_network_start_allowed(retirement)
+        crate::platform_maintenance::require_start_allowed(retirement)
             .and_then(|()| engine.require_capability(mode))
     } else {
         Ok(())
@@ -652,7 +660,7 @@ where
     let settings = engine.engine_settings()?;
     let coordinator = engine.coordinator.clone();
     let endpoints = engine.endpoints.clone();
-    let authorization = engine.authorization_bridge.clone();
+    let authorization = engine.system_proxy_authorization.clone();
     let (result, lease) = lease
         .run_to_completion(async move {
             let before = coordinator.snapshot();
@@ -680,7 +688,7 @@ where
             let binding = if after == before {
                 Ok(())
             } else {
-                record_endpoint_runtime(&endpoints, &after)
+                record_endpoint_runtime(&endpoints, coordinator.runtime_platform(), &after)
             };
             match (result, binding) {
                 (Ok(value), Ok(())) => Ok(value),
@@ -712,10 +720,10 @@ enum RightsPromptOutcome {
 }
 
 impl RightsPromptOutcome {
-    fn of(code: NativeBridgeErrorCode) -> Option<Self> {
+    fn of(code: BackendErrorKind) -> Option<Self> {
         match code {
-            NativeBridgeErrorCode::Timeout => Some(Self::Unanswered),
-            NativeBridgeErrorCode::ApprovalDenied | NativeBridgeErrorCode::PermissionDenied => {
+            BackendErrorKind::Timeout => Some(Self::Unanswered),
+            BackendErrorKind::ApprovalDenied | BackendErrorKind::PermissionDenied => {
                 Some(Self::Refused)
             }
             _ => None,
@@ -725,7 +733,12 @@ impl RightsPromptOutcome {
 
 /// What the page shows when System Proxy authorization does not go through:
 /// either outcome the user caused gets the way back.
-fn authorization_failure_message(code: NativeBridgeErrorCode, message: &str) -> String {
+fn authorization_failure_message(code: BackendErrorKind, message: &str) -> String {
+    if cfg!(windows) {
+        return format!(
+            "System Proxy authorization failed: {code:?}: {message}. Check Windows proxy policy and the user session before trying again."
+        );
+    }
     match RightsPromptOutcome::of(code) {
         Some(RightsPromptOutcome::Unanswered) => "System Proxy authorization timed out: macOS did \
              not get an answer to its prompt. Turn System Proxy on again and approve the prompt."
@@ -738,13 +751,13 @@ fn authorization_failure_message(code: NativeBridgeErrorCode, message: &str) -> 
 }
 
 async fn authorize_proxy_transition(
-    authorization: &dyn cfw_apple_network::NativeBridge,
+    authorization: &dyn SystemProxyAuthorization,
     restoration_only: bool,
 ) -> Result<(), String> {
     authorization
         .authorize_system_proxy(restoration_only)
         .await
-        .map_err(|error| authorization_failure_message(error.code, &error.message))
+        .map_err(|error| authorization_failure_message(error.kind, &error.message))
 }
 
 /// Recovers background services once macOS granted the rights to restore the
@@ -761,11 +774,18 @@ async fn recover_after_settings_restoration<A>(
     recovery: impl std::future::Future<Output = Result<(), String>>,
 ) -> Result<(), String>
 where
-    A: std::future::Future<Output = Result<(), cfw_apple_network::NativeBridgeError>>,
+    A: std::future::Future<Output = Result<(), cfw_engine_api::BackendError>>,
 {
     let unrequested = match authorize(true).await {
         Ok(()) => None,
-        Err(error) => match RightsPromptOutcome::of(error.code) {
+        #[cfg(windows)]
+        Err(error) if RightsPromptOutcome::of(error.kind).is_some() => {
+            return Err(format!(
+                "Restoring System Proxy settings was not authorized: {}. Check Windows proxy policy and the user session, then recover background services again.",
+                error.message
+            ));
+        }
+        Err(error) => match RightsPromptOutcome::of(error.kind) {
             Some(RightsPromptOutcome::Unanswered) => {
                 return Err(
                     "Restoring System Proxy settings timed out: macOS did not get an \
@@ -781,7 +801,7 @@ where
                         .into(),
                 );
             }
-            None => Some(format!("{:?}: {}", error.code, error.message)),
+            None => Some(format!("{:?}: {}", error.kind, error.message)),
         },
     };
     recovery.await.map_err(|error| match unrequested {
@@ -810,7 +830,7 @@ async fn set_mode_with_endpoint_rebind(
             .await
         {
             Ok(snapshot) => {
-                record_endpoint_runtime(endpoints, &snapshot)?;
+                record_endpoint_runtime(endpoints, coordinator.runtime_platform(), &snapshot)?;
                 return Ok(snapshot);
             }
             Err(EngineCoordinatorError::StartEndpointConflictAfterOff { conflict, .. }) => {
@@ -874,42 +894,44 @@ fn read_active_controller_access(
     Ok(binding.controller.clone())
 }
 
+/// Shared desktop identity policy for endpoints, controller commands and tray
+/// state. The platform must come from the coordinator's pinned backend choice.
+pub(crate) fn ready_runtime(
+    platform: EngineRuntimePlatform,
+    snapshot: &EngineSnapshot,
+) -> Option<&RuntimeIdentity> {
+    let (runtime, owner) = match &snapshot.state {
+        EngineState::LocalProxyActive { runtime } | EngineState::ProxyActive { runtime } => {
+            (runtime, platform.proxy_owner())
+        }
+        EngineState::TunnelActive { runtime }
+        | EngineState::TunnelSystemProxyActive { runtime } => (runtime, platform.tunnel_owner()),
+        _ => return None,
+    };
+    (snapshot.desired_mode == snapshot.state.active_mode()
+        && runtime.owner == owner
+        && runtime.ready
+        && runtime.context.generation == snapshot.generation
+        && snapshot.config_digest.as_deref() == Some(runtime.config_digest.as_str()))
+    .then_some(runtime)
+}
+
 fn record_endpoint_runtime(
     endpoints: &RwLock<EngineEndpointBinding>,
+    platform: EngineRuntimePlatform,
     snapshot: &EngineSnapshot,
 ) -> Result<(), String> {
     let active = match &snapshot.state {
         EngineState::Off if snapshot.desired_mode == EngineMode::Off => None,
         EngineState::AwaitingApproval { .. } if snapshot.desired_mode.tunnel_enabled() => None,
-        EngineState::LocalProxyActive { runtime } | EngineState::ProxyActive { runtime }
-            if snapshot.desired_mode == snapshot.state.active_mode()
-                && runtime.owner == EngineOwner::ProxyAgent
-                && runtime.ready
-                && runtime.context.generation == snapshot.generation
-                && snapshot.config_digest.as_deref() == Some(runtime.config_digest.as_str()) =>
-        {
-            Some(ActiveControllerBinding {
-                generation: runtime.context.generation,
-                config_digest: runtime.config_digest.clone(),
-            })
-        }
-        EngineState::TunnelActive { runtime }
-        | EngineState::TunnelSystemProxyActive { runtime }
-            if snapshot.desired_mode == snapshot.state.active_mode()
-                && runtime.owner == EngineOwner::PacketTunnelSystemExtension
-                && runtime.ready
-                && runtime.context.generation == snapshot.generation
-                && snapshot.config_digest.as_deref() == Some(runtime.config_digest.as_str()) =>
-        {
-            Some(ActiveControllerBinding {
-                generation: runtime.context.generation,
-                config_digest: runtime.config_digest.clone(),
-            })
-        }
         _ => {
-            return Err(
-                "coordinator returned a state that cannot bind controller access".to_owned(),
-            );
+            let runtime = ready_runtime(platform, snapshot).ok_or_else(|| {
+                "coordinator returned a state that cannot bind controller access".to_owned()
+            })?;
+            Some(ActiveControllerBinding {
+                generation: runtime.context.generation,
+                config_digest: runtime.config_digest.clone(),
+            })
         }
     };
     endpoints

@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use cfw_engine_api::{
     BackendError, BackendErrorKind, EngineBackend, EngineCommandContext, EngineGenerationStore,
-    EngineMode, EngineOwner, EngineSnapshot, EngineState, TunnelInstallOutcome,
+    EngineMode, EngineSnapshot, EngineState, TunnelInstallOutcome,
 };
 use cfw_singbox_config::{EngineSettings, ProjectionMode, ValidatedSingBoxProfile};
 use tokio::sync::watch;
@@ -52,19 +52,19 @@ pub(crate) async fn transition(
     if let Some(quarantine) = &state.quarantine {
         return Err(quarantine.clone());
     }
-    let projected = match target {
-        EngineMode::LocalProxy => {
-            profile.project(profile_id, ProjectionMode::LocalProxy, settings)?
-        }
-        EngineMode::SystemProxy => {
-            profile.project(profile_id, ProjectionMode::SystemProxy, settings)?
-        }
-        EngineMode::Tunnel => profile.project(profile_id, ProjectionMode::Tunnel, settings)?,
-        EngineMode::TunnelSystemProxy => {
-            profile.project(profile_id, ProjectionMode::TunnelSystemProxy, settings)?
-        }
+    let projected_mode = match target {
+        EngineMode::LocalProxy => ProjectionMode::LocalProxy,
+        EngineMode::SystemProxy => ProjectionMode::SystemProxy,
+        EngineMode::Tunnel => ProjectionMode::Tunnel,
+        EngineMode::TunnelSystemProxy => ProjectionMode::TunnelSystemProxy,
         EngineMode::Off => unreachable!("off returned before projection"),
     };
+    let projected = profile.project_with_tunnel_stack(
+        profile_id,
+        projected_mode,
+        settings,
+        state.runtime_platform.tunnel_stack(),
+    )?;
 
     let is_same_active_runtime = match &state.snapshot.state {
         EngineState::LocalProxyActive { runtime } | EngineState::ProxyActive { runtime }
@@ -157,7 +157,7 @@ pub(crate) async fn transition(
             };
             if let Err(error) = validate_runtime(
                 &runtime,
-                EngineOwner::ProxyAgent,
+                state.runtime_platform.proxy_owner(),
                 &context,
                 &request.config_digest,
             ) {
@@ -208,7 +208,13 @@ pub(crate) async fn transition(
 
             // Human consent saves only a disabled descriptor. Keep it outside
             // the ordinary start budget and before credentials or tickets exist.
-            state.snapshot.state = EngineState::AwaitingApproval { generation };
+            // Where nothing asks a person, authorization is part of starting
+            // and is never shown as awaiting approval.
+            state.snapshot.state = if state.runtime_platform.tunnel_authorization_awaits_consent() {
+                EngineState::AwaitingApproval { generation }
+            } else {
+                EngineState::TunnelStarting { generation }
+            };
             state.native_lease = Some(NativeLease {
                 kind: NativeLeaseKind::TunnelRuntime,
                 context: context.clone(),
@@ -255,7 +261,7 @@ pub(crate) async fn transition(
             };
             if let Err(error) = validate_runtime(
                 &runtime,
-                EngineOwner::PacketTunnelSystemExtension,
+                state.runtime_platform.tunnel_owner(),
                 &context,
                 &request.config_digest,
             ) {

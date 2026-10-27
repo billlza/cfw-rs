@@ -380,6 +380,21 @@ impl NativeFrameworkBridge {
     }
 }
 
+impl cfw_engine_api::ProfileDelayBackend for NativeFrameworkBridge {
+    fn test_profile_delays(
+        &self,
+        request: cfw_engine_api::ProfileDelayTestRequest,
+    ) -> cfw_engine_api::BackendFuture<'_, Vec<cfw_engine_api::ProfileProxyDelay>> {
+        Box::pin(async move {
+            NativeFrameworkBridge::test_profile_delays(self, request)
+                .await
+                .map_err(|error| {
+                    cfw_engine_api::BackendError::new(error.code.into(), error.message)
+                })
+        })
+    }
+}
+
 impl NativeBridge for NativeFrameworkBridge {
     fn check_configuration(&self, request: EngineStartRequest) -> NativeBridgeFuture<'_, ()> {
         Box::pin(async move {

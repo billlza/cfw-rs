@@ -508,7 +508,7 @@ mod tests {
     use std::cell::Cell;
     use std::fs;
 
-    use cfw_core::MacOsAppPaths;
+    use cfw_core::AppPaths;
     use cfw_platform::LegacyServiceJobProgram;
 
     use super::*;
@@ -517,7 +517,7 @@ mod tests {
 
     fn fresh_store() -> (tempfile::TempDir, SettingsStore) {
         let temporary = tempfile::tempdir().expect("fresh installation fixture");
-        let store = SettingsStore::new(MacOsAppPaths::from_app_home(temporary.path().join("app")));
+        let store = SettingsStore::new(AppPaths::from_app_home(temporary.path().join("app")));
         store.ensure_layout().expect("new settings layout");
         (temporary, store)
     }

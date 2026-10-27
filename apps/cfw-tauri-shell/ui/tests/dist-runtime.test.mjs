@@ -95,7 +95,8 @@ test("the generated dist bundle performs no controller or provider IPC while Eng
         name: "Clash for Mac",
         version: "0.4.0",
         license: "GPL-3.0-or-later",
-        minimum_macos: "15.0",
+        operating_system: "macos",
+      minimum_os_version: "15.0",
         architecture: "arm64",
       },
       migration_handoff: false,
@@ -138,6 +139,7 @@ test("the generated dist bundle performs no controller or provider IPC while Eng
       capabilities: {
         system_proxy: true,
         tunnel: true,
+        tunnel_system_proxy: true,
         provider_management: false,
       },
       cutover_ready: false,

@@ -1,15 +1,16 @@
 import { t } from "./i18n.js";
+import { platformPresentation } from "./platform-presentation.js";
 
 // One sentence per failure category the host reports. The stable code is
 // appended for diagnostics and is never translated.
 const FAILURE_TEXT = Object.freeze({
   state: () => t("The update changed or is no longer available. Check for updates again."),
   busy: () => t("Another update operation is in progress. Try again in a moment."),
-  environment: () => t("This copy cannot update itself. Download the disk image and replace the app in Applications."),
+  environment: (platform) => t(platform.updateEnvironmentFailure),
   network: () => t("The download did not complete. Check the connection and try again."),
-  storage: () => t("The update could not be stored on this Mac. Free some disk space and try again."),
+  storage: (platform) => t(platform.updateStorageFailure),
   authenticity: () => t("The downloaded update is not the signed release and was discarded. Do not install it from another source."),
-  package: () => t("This release cannot be installed on this Mac."),
+  package: (platform) => t(platform.updatePackageFailure),
   engine: () => t("The core could not be stopped. Stop the core and try again."),
   internal: () => t("The update could not be installed because of an internal error."),
 });
@@ -57,9 +58,10 @@ export function normalizeInstallFailure(error) {
 
 /// `detail` is the text of a rejection the host does not define. It is kept
 /// beside the code so the log still says what was received.
-export function installFailureText(failure, detail = null) {
+export function installFailureText(failure, operatingSystem, detail = null) {
+  const platform = platformPresentation(operatingSystem);
   const code = detail === null ? failure.code : `${failure.code}: ${detail}`;
-  return `${FAILURE_TEXT[failure.category]()} (${code})`;
+  return `${FAILURE_TEXT[failure.category](platform)} (${code})`;
 }
 
 function byteCount(value) {
@@ -86,9 +88,10 @@ function downloadStatus(install) {
 /// authentication is never answered by pointing at another copy of it.
 ///
 /// `status` replaces the dialog's own status line when it is not null.
-export function updateInstallView(update, install) {
+export function updateInstallView(update, install, operatingSystem) {
+  const platform = platformPresentation(operatingSystem);
   const { phase, version } = install;
-  const failureStatus = install.failure ? installFailureText(install.failure) : null;
+  const failureStatus = install.failure ? installFailureText(install.failure, operatingSystem) : null;
   if (phase === "downloading" || phase === "verifying") {
     return {
       status: phase === "downloading" ? downloadStatus(install) : t("Verifying update…"),
@@ -97,13 +100,13 @@ export function updateInstallView(update, install) {
   }
   if (phase === "installing") {
     return {
-      status: t("Installing update… Clash for Mac will reopen automatically."),
+      status: t(platform.updateInstalling),
       primary: null, cancel: false, busy: true, offerDownloadPage: false,
     };
   }
   if (phase === "ready") {
     return {
-      status: failureStatus ?? t("v{version} is ready to install. Clash for Mac will stop the core, quit, and reopen.", { version }),
+      status: failureStatus ?? t(platform.updateReady, { version }),
       primary: { action: "commit", label: t("Install and Relaunch") },
       cancel: true, busy: false, offerDownloadPage: false,
     };
@@ -112,7 +115,7 @@ export function updateInstallView(update, install) {
   const ended = failureStatus ?? (install.ended ? ENDED_TEXT[install.ended]() : null);
   if (ended !== null || (available && update.install?.code === UNAUTHENTIC_RELEASE)) {
     return {
-      status: ended ?? installFailureText({ code: UNAUTHENTIC_RELEASE, category: "authenticity" }),
+      status: ended ?? installFailureText({ code: UNAUTHENTIC_RELEASE, category: "authenticity" }, operatingSystem),
       primary: null, cancel: false, busy: false, offerDownloadPage: false,
     };
   }
@@ -175,7 +178,8 @@ export function createUpdateInstall({ state, invoke, appendLog, errorText, sleep
   // the replies that end it went to the page that started it.
   let followed = null;
 
-  const offered = () => updateInstallView(state.updateInfo, state.updateInstall);
+  const operatingSystem = () => state.payload.product.operating_system;
+  const offered = () => updateInstallView(state.updateInfo, state.updateInstall, operatingSystem());
   const shows = (held) => HELD_AS[state.updateInstall.phase] === held.phase
     && state.updateInstall.version === held.version;
 
@@ -190,7 +194,7 @@ export function createUpdateInstall({ state, invoke, appendLog, errorText, sleep
   /// The failure a rejection carries and the sentence the log records for it.
   function describe(error) {
     const failure = normalizeInstallFailure(error);
-    return { failure, text: installFailureText(failure, isHostFailure(error) ? null : errorText(error)) };
+    return { failure, text: installFailureText(failure, operatingSystem(), isHostFailure(error) ? null : errorText(error)) };
   }
 
   function endCancelled() {
@@ -282,7 +286,7 @@ export function createUpdateInstall({ state, invoke, appendLog, errorText, sleep
         : { phase: "ready", failure });
       return;
     }
-    appendLog("info", "updater", t("Installing update… Clash for Mac will reopen automatically."));
+    appendLog("info", "updater", t(platformPresentation(operatingSystem()).updateInstalling));
   }
 
   function onProgress(payload) {

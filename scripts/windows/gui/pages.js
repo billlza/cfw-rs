@@ -1,0 +1,99 @@
+// Consumed by `playwright-cli run-code --filename`. All IPC below is the
+// installed application's real IPC: observations plus explicit rejection tests
+// for Mac-only migration commands. No renderer state is injected.
+(async (page) => {
+  // Product identity is delivered by boot_payload below. The shared page has
+  // no #product-name element; wait for its actual navigation to be rendered.
+  await page.locator('#nav button[data-page="general"][aria-current="page"]').waitFor();
+  const backend = await page.evaluate(async () => {
+    if (typeof window.__TAURI_INTERNALS__?.invoke !== 'function') {
+      throw new Error('The page is not the native Tauri webview');
+    }
+    const invoke = window.__TAURI_INTERNALS__.invoke;
+    return {
+      boot: await invoke('boot_payload'),
+      engine: await invoke('engine_snapshot'),
+      platform: await invoke('current_platform_design'),
+    };
+  });
+  if (backend.boot.product.name !== 'Clash for Windows' ||
+      backend.boot.product.operating_system !== 'windows' ||
+      backend.engine.unavailable_reason !== null ||
+      backend.engine.capabilities.local_proxy !== true ||
+      backend.engine.capabilities.system_proxy !== true ||
+      backend.engine.snapshot.state.state !== 'off') {
+    throw new Error(`Installed desktop bootstrap did not admit the runtime: ${JSON.stringify(backend)}`);
+  }
+  const expected = ['general', 'proxies', 'profiles', 'providers', 'logs', 'connections', 'rules', 'settings', 'feedback'];
+  const actual = await page.locator('#nav button[data-page]').evaluateAll(nodes => nodes.map(node => node.dataset.page));
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+    throw new Error(`Shared page inventory differs: ${JSON.stringify(actual)}`);
+  }
+  const pages = [];
+  for (const id of expected) {
+    const checks = {};
+    await page.locator(`#nav button[data-page="${id}"]`).click();
+    await page.locator(`#nav button[data-page="${id}"][aria-current="page"]`).waitFor();
+    const heading = await page.locator('#page-title').innerText();
+    const content = await page.locator('#page').innerText();
+    if (!heading.trim() || !content.trim()) throw new Error(`Empty shared page: ${id}`);
+    if (id === 'general') {
+      const tunHelp = page.locator('[data-action="tun-info"]');
+      if ((await tunHelp.getAttribute('title')) !== 'TUN Mode routes device traffic through a Windows virtual network adapter.') {
+        throw new Error('Windows TUN help does not describe the host platform');
+      }
+      await tunHelp.click();
+      const dialog = page.getByRole('dialog', { name: 'Info', exact: true }).filter({
+        has: page.getByRole('heading', { name: 'TUN Mode', exact: true }),
+      });
+      await dialog.waitFor();
+      const help = await dialog.innerText();
+      if (!help.includes('Windows virtual network adapter') || /macOS|NetworkExtension|System Settings/u.test(help)) {
+        throw new Error('Windows TUN help contains foreign platform instructions');
+      }
+      checks.tun_help = help;
+      await page.screenshot({ path: 'windows-tun-help.png' });
+      await dialog.locator('button[data-glass-dismiss]').click();
+      await dialog.waitFor({ state: 'hidden' });
+    }
+    if (id === 'feedback' && !content.includes(backend.platform.startup_strategy)) {
+      throw new Error('Windows startup architecture is missing from the Feedback page');
+    }
+    if (id === 'profiles') {
+      if (await page.locator('[data-action="migrate-legacy-profiles"]').count()) {
+        throw new Error('First Windows release offers an inapplicable predecessor migration');
+      }
+      await page.locator('[data-action="import-profile-file"]:enabled').waitFor();
+      await page.locator('[data-action="import-profile"]:enabled').waitFor();
+      const migration = await page.evaluate(async () => {
+        const results = [];
+        for (const command of ['preview_legacy_cfw_profile_migration', 'commit_legacy_cfw_profile_migration']) {
+          try {
+            await window.__TAURI_INTERNALS__.invoke(command, {
+              previewId: '00000000-0000-4000-8000-000000000000', confirmed: true,
+            });
+            results.push({ command, rejected: false });
+          } catch (error) { results.push({ command, rejected: true, error: String(error) }); }
+        }
+        return results;
+      });
+      if (!migration.every(item => item.rejected && item.error.startsWith('Historical Mac profile migration does not apply'))) {
+        throw new Error(`Windows historical profile admission is incorrect: ${JSON.stringify(migration)}`);
+      }
+      checks.legacy_profile_migration_rejections = migration;
+    }
+    if (id === 'settings') {
+      const families = await page.locator('[data-font-family] option').evaluateAll(nodes => nodes.map(node => node.value));
+      if (JSON.stringify(families) !== JSON.stringify(['', 'Segoe UI', 'Consolas']) ||
+          content.includes('System Settings › Network') ||
+          !content.includes('Manage DNS for each active adapter in Windows Settings')) {
+        throw new Error('Fresh Windows preferences contain foreign font or DNS instructions');
+      }
+    }
+    await page.screenshot({ path: `${id}.png` });
+    pages.push({ id, heading, content, checks, snapshot: await page.locator('body').ariaSnapshot() });
+  }
+  await page.locator('#nav button[data-page="settings"]').click();
+  await page.locator('[data-action="quit-app"]').waitFor();
+  return { backend, pages, native_gui_exercised: true, network_mode_exercised: false, release_accepted: false };
+})

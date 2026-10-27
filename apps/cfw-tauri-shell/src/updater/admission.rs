@@ -1,14 +1,23 @@
+#[cfg(target_os = "macos")]
 use std::ffi::CString;
 use std::fs;
 use std::io::ErrorKind;
+#[cfg(target_os = "macos")]
 use std::os::unix::ffi::OsStrExt as _;
+#[cfg(target_os = "macos")]
 use std::os::unix::fs::MetadataExt as _;
-use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::path::Path;
+#[cfg(target_os = "macos")]
+use std::path::PathBuf;
 
+#[cfg(target_os = "macos")]
 use cfw_platform::ReleaseSignedComponent;
 use thiserror::Error;
 
+#[cfg(target_os = "macos")]
 pub(super) const BUNDLE_IDENTIFIER: &str = "com.bill.clashformac";
+#[cfg(target_os = "macos")]
 pub(super) const INFO_PLIST: &str = "Contents/Info.plist";
 
 /// Reasons this installation cannot be replaced in place. Each one is a
@@ -18,16 +27,24 @@ pub(super) const INFO_PLIST: &str = "Contents/Info.plist";
 pub(crate) enum InstallAdmissionError {
     #[error("cannot determine the running executable ({0:?})")]
     CurrentExecutableUnavailable(ErrorKind),
+    #[cfg(target_os = "macos")]
     #[error("in-app updates require the application to run from /Applications")]
     NotInApplications,
+    #[cfg(windows)]
+    #[error("the protected Windows installation could not be admitted: {0}")]
+    WindowsInstallationUnavailable(String),
+    #[cfg(target_os = "macos")]
     #[error("cannot inspect the installed application ({0:?})")]
     InstallMetadataUnavailable(ErrorKind),
+    #[cfg(target_os = "macos")]
     #[error("the installed application is not an ordinary bundle owned by this user")]
     BundleNotUserOwned,
+    #[cfg(target_os = "macos")]
     #[error("this user cannot replace items in the Applications folder")]
     ApplicationsNotWritable,
     #[error("the installed application does not describe a valid release identity")]
     InstalledIdentityInvalid,
+    #[cfg(target_os = "macos")]
     #[error("update staging is not on the same volume as the installed application")]
     StagingVolumeMismatch,
 }
@@ -36,17 +53,25 @@ impl InstallAdmissionError {
     pub(super) const fn code(&self) -> &'static str {
         match self {
             Self::CurrentExecutableUnavailable(_) => "executable_unavailable",
+            #[cfg(target_os = "macos")]
             Self::NotInApplications => "not_in_applications",
+            #[cfg(windows)]
+            Self::WindowsInstallationUnavailable(_) => "windows_installation_unavailable",
+            #[cfg(target_os = "macos")]
             Self::InstallMetadataUnavailable(_) => "install_metadata_unavailable",
+            #[cfg(target_os = "macos")]
             Self::BundleNotUserOwned => "bundle_not_user_owned",
+            #[cfg(target_os = "macos")]
             Self::ApplicationsNotWritable => "applications_not_writable",
             Self::InstalledIdentityInvalid => "installed_identity_invalid",
+            #[cfg(target_os = "macos")]
             Self::StagingVolumeMismatch => "staging_volume_mismatch",
         }
     }
 }
 
-/// Version and build of an application bundle as its Info.plist states them.
+/// Installed release claims, read from Info.plist on macOS or the protected
+/// installation manifest on Windows. This value grants no installation rights.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BundleIdentity {
     pub(crate) version: String,
@@ -55,11 +80,13 @@ pub(crate) struct BundleIdentity {
 
 /// The bundle an update replaces and the directory that contains it.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(target_os = "macos")]
 pub(super) struct InstallLocation {
     pub(super) bundle: PathBuf,
     pub(super) executable: PathBuf,
 }
 
+#[cfg(target_os = "macos")]
 impl InstallLocation {
     pub(super) fn canonical() -> Self {
         Self {
@@ -72,12 +99,56 @@ impl InstallLocation {
 /// Whether this process is the installed copy. Only that copy owns update
 /// records and staging; one run from a disk image or a build directory must
 /// neither judge nor remove what the installed application left.
-pub(super) fn runs_from_installed_location() -> bool {
-    std::env::current_exe().ok().as_deref() == Some(ReleaseSignedComponent::MainExecutable.path())
+#[cfg(target_os = "macos")]
+pub(super) fn runs_from_installed_location() -> Result<bool, InstallAdmissionError> {
+    std::env::current_exe()
+        .map(|path| path == ReleaseSignedComponent::MainExecutable.path())
+        .map_err(|error| InstallAdmissionError::CurrentExecutableUnavailable(error.kind()))
+}
+
+#[cfg(windows)]
+pub(super) fn runs_from_installed_location() -> Result<bool, InstallAdmissionError> {
+    use cfw_windows_engine::runtime_host::InstalledRuntime;
+    let current = std::env::current_exe()
+        .and_then(fs::canonicalize)
+        .map_err(|error| InstallAdmissionError::CurrentExecutableUnavailable(error.kind()))?;
+    let installed = InstalledRuntime::desktop_path().map_err(|error| {
+        InstallAdmissionError::WindowsInstallationUnavailable(error.to_string())
+    })?;
+    let installed = match fs::canonicalize(installed) {
+        Ok(path) => path,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(InstallAdmissionError::WindowsInstallationUnavailable(
+                error.to_string(),
+            ));
+        }
+    };
+    if current != installed {
+        return Ok(false);
+    }
+    admit_running_installation().map(|_| true)
+}
+
+#[cfg(windows)]
+pub(super) fn admit_running_installation() -> Result<BundleIdentity, InstallAdmissionError> {
+    use cfw_windows_engine::runtime_host::InstalledRuntime;
+    let installation = InstalledRuntime::open().map_err(|error| {
+        InstallAdmissionError::WindowsInstallationUnavailable(error.to_string())
+    })?;
+    installation.require_desktop_process().map_err(|error| {
+        InstallAdmissionError::WindowsInstallationUnavailable(error.to_string())
+    })?;
+    let identity = installation.release();
+    Ok(BundleIdentity {
+        version: identity.version,
+        build: identity.build,
+    })
 }
 
 /// Admits the running application as the one installed copy this user may
 /// replace, and returns the identity it currently has on disk.
+#[cfg(target_os = "macos")]
 pub(super) fn admit_running_installation() -> Result<BundleIdentity, InstallAdmissionError> {
     let executable = std::env::current_exe()
         .map_err(|error| InstallAdmissionError::CurrentExecutableUnavailable(error.kind()))?;
@@ -91,6 +162,7 @@ pub(super) fn admit_running_installation() -> Result<BundleIdentity, InstallAdmi
     )
 }
 
+#[cfg(target_os = "macos")]
 fn admit_installation(
     location: &InstallLocation,
     running_executable: &Path,
@@ -133,11 +205,13 @@ fn admit_installation(
     Ok(identity)
 }
 
+#[cfg(target_os = "macos")]
 fn inspect(path: &Path) -> Result<fs::Metadata, InstallAdmissionError> {
     fs::symlink_metadata(path)
         .map_err(|error| InstallAdmissionError::InstallMetadataUnavailable(error.kind()))
 }
 
+#[cfg(target_os = "macos")]
 fn writable(directory: &Path) -> Result<bool, InstallAdmissionError> {
     let path = CString::new(directory.as_os_str().as_bytes())
         .map_err(|_| InstallAdmissionError::InstallMetadataUnavailable(ErrorKind::InvalidInput))?;
@@ -154,6 +228,7 @@ fn writable(directory: &Path) -> Result<bool, InstallAdmissionError> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(target_os = "macos")]
 pub(super) enum BundleIdentityError {
     Unreadable,
     WrongIdentifier,
@@ -163,6 +238,7 @@ pub(super) enum BundleIdentityError {
 
 /// Reads the product identifier, marketing version and build number of an
 /// application bundle. The build must be a canonical positive decimal.
+#[cfg(target_os = "macos")]
 pub(super) fn read_bundle_identity(bundle: &Path) -> Result<BundleIdentity, BundleIdentityError> {
     let info = bundle.join(INFO_PLIST);
     let metadata = fs::symlink_metadata(&info).map_err(|_| BundleIdentityError::Unreadable)?;
@@ -196,7 +272,7 @@ pub(super) fn read_bundle_identity(bundle: &Path) -> Result<BundleIdentity, Bund
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 pub(super) mod tests {
     use std::os::unix::fs::PermissionsExt as _;
 

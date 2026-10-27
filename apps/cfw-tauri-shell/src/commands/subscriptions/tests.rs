@@ -750,7 +750,7 @@ fn local_imports_reject_directories_symlinks_and_relative_paths() {
     );
 
     let link = temporary.path().join("link.json");
-    std::os::unix::fs::symlink(&file, &link).expect("create symlink");
+    symlink_file(&file, &link);
     assert!(read_local_profile(&link).is_err());
     assert!(read_local_profile(temporary.path()).is_err());
     assert!(read_local_profile(Path::new("relative.json")).is_err());
@@ -765,15 +765,23 @@ fn opened_profile_inode_is_stable_across_path_replacement() {
     std::fs::write(&profile, PROFILE_JSON).expect("write original profile");
     std::fs::write(&replacement, "replacement").expect("write replacement");
 
-    let opened = open_local_profile(&profile).expect("open original profile once");
+    let opened = local_file::open(&profile).expect("open original profile once");
     std::fs::rename(&profile, &retained).expect("retain opened inode under another name");
-    std::os::unix::fs::symlink(&replacement, &profile).expect("replace original path");
+    symlink_file(&replacement, &profile);
 
     assert_eq!(
-        read_opened_local_profile(opened).expect("read the already-opened inode"),
+        local_file::read_opened(opened, MAX_SUBSCRIPTION_DOCUMENT_BYTES)
+            .expect("read the already-opened file"),
         PROFILE_JSON
     );
     assert!(read_local_profile(&profile).is_err());
+}
+
+fn symlink_file(original: &Path, link: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(original, link).expect("create symlink");
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_file(original, link).expect("create symlink");
 }
 
 #[test]

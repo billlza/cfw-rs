@@ -1,14 +1,14 @@
 use std::{
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
 
 use cfw_engine_api::{
     BackendError, BackendErrorKind, BackendFuture, EngineBackend, EngineCommandContext,
-    EngineGenerationStore, EngineLineage, EngineOwner, EngineSessionIdentity, EngineStartRequest,
+    EngineGenerationStore, EngineLineage, EngineSessionIdentity, EngineStartRequest,
     NativeEngineStatus, RuntimeIdentity, TunnelInstallOutcome,
 };
 use tokio::sync::Notify;
@@ -17,8 +17,12 @@ use crate::{CoordinatorOptions, EngineModeCoordinator};
 
 #[derive(Default)]
 pub(super) struct FakeBackend {
+    // Existing fixtures model macOS; Windows identity tests opt in explicitly.
+    windows_runtime: AtomicBool,
+    pub(super) wrong_proxy_platform: Mutex<bool>,
     pub(super) configuration_check_error: Mutex<Option<BackendErrorKind>>,
     pub(super) configuration_check_gate: Mutex<Option<Arc<Notify>>>,
+    pub(super) configuration_check_requests: Mutex<Vec<EngineStartRequest>>,
     pub(super) fail_proxy_start_once: Mutex<bool>,
     operations: Mutex<Vec<&'static str>>,
     proxy_requests: Mutex<Vec<EngineStartRequest>>,
@@ -61,6 +65,17 @@ pub(super) struct FakeBackend {
 }
 
 impl FakeBackend {
+    pub(super) fn windows() -> Self {
+        Self {
+            windows_runtime: AtomicBool::new(true),
+            ..Self::default()
+        }
+    }
+
+    pub(super) fn replace_reported_platform_for_test(&self, windows: bool) {
+        self.windows_runtime.store(windows, Ordering::Release);
+    }
+
     fn require_present_stop_owner(&self) -> Result<(), BackendError> {
         if *self
             .reject_stop_after_native_off
@@ -185,8 +200,20 @@ impl EngineGenerationStore for MemoryGenerationStore {
 }
 
 impl EngineBackend for FakeBackend {
-    fn check_configuration(&self, _request: EngineStartRequest) -> BackendFuture<'_, ()> {
+    fn runtime_platform(&self) -> cfw_engine_api::EngineRuntimePlatform {
+        if self.windows_runtime.load(Ordering::Acquire) {
+            cfw_engine_api::EngineRuntimePlatform::Windows
+        } else {
+            cfw_engine_api::EngineRuntimePlatform::MacOs
+        }
+    }
+
+    fn check_configuration(&self, request: EngineStartRequest) -> BackendFuture<'_, ()> {
         Box::pin(async move {
+            self.configuration_check_requests
+                .lock()
+                .expect("check requests lock")
+                .push(request);
             self.operations
                 .lock()
                 .expect("operations lock")
@@ -317,7 +344,7 @@ impl EngineBackend for FakeBackend {
                     *self.native_status.lock().expect("native status lock") =
                         NativeEngineStatus::SystemProxy {
                             runtime: RuntimeIdentity {
-                                owner: EngineOwner::ProxyAgent,
+                                owner: self.runtime_platform().proxy_owner(),
                                 context: request.context.clone(),
                                 config_digest: request.config_digest.clone(),
                                 ready: true,
@@ -339,9 +366,22 @@ impl EngineBackend for FakeBackend {
             let wrong_owner = *self.wrong_proxy_owner.lock().expect("wrong owner lock");
             let runtime = RuntimeIdentity {
                 owner: if wrong_owner {
-                    EngineOwner::PacketTunnelSystemExtension
+                    self.runtime_platform().tunnel_owner()
+                } else if *self
+                    .wrong_proxy_platform
+                    .lock()
+                    .expect("platform fault lock")
+                {
+                    match self.runtime_platform() {
+                        cfw_engine_api::EngineRuntimePlatform::MacOs => {
+                            cfw_engine_api::EngineRuntimePlatform::Windows.proxy_owner()
+                        }
+                        cfw_engine_api::EngineRuntimePlatform::Windows => {
+                            cfw_engine_api::EngineRuntimePlatform::MacOs.proxy_owner()
+                        }
+                    }
                 } else {
-                    EngineOwner::ProxyAgent
+                    self.runtime_platform().proxy_owner()
                 },
                 context: request.context,
                 config_digest: if wrong_digest {
@@ -480,7 +520,7 @@ impl EngineBackend for FakeBackend {
                 ));
             }
             let runtime = RuntimeIdentity {
-                owner: EngineOwner::PacketTunnelSystemExtension,
+                owner: self.runtime_platform().tunnel_owner(),
                 context: request.context,
                 config_digest: request.config_digest,
                 ready: true,

@@ -7,6 +7,7 @@ mod local_proxy;
 mod mode_cycle_integration;
 mod off_barrier;
 mod off_ordering_property;
+mod platform_owners;
 mod profile_change;
 mod restart_spec;
 mod support;

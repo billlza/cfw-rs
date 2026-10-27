@@ -151,7 +151,7 @@ const RUNNING_ENGINE = {
       },
     },
   },
-  capabilities: { system_proxy: true, tunnel: true, provider_management: false },
+  capabilities: { system_proxy: true, tunnel: true, tunnel_system_proxy: true, provider_management: false },
   cutover_ready: true,
   cutover_unavailable_reason: null,
   unavailable_reason: null,
@@ -159,7 +159,7 @@ const RUNNING_ENGINE = {
 
 const OFF_ENGINE = {
   snapshot: { desired_mode: "off", generation: 0, config_digest: null, state: { state: "off" } },
-  capabilities: { system_proxy: true, tunnel: true, provider_management: false },
+  capabilities: { system_proxy: true, tunnel: true, tunnel_system_proxy: true, provider_management: false },
   unavailable_reason: null,
 };
 
@@ -234,6 +234,14 @@ const DIAGNOSTICS = {
   unavailable: ["default_route_interface", "hardware_port", "bsd_device", "recommended_clash_proxy_services"],
 };
 
+const WINDOWS_PLATFORM_DESIGN = Object.freeze({
+  target: "windows-x64",
+  system_proxy_strategy: "Current-user Windows proxy with owned restoration",
+  helper_strategy: "Windows authority service and ordinary-user Agent",
+  startup_strategy: "Current-user sign-in registration; Windows controls startup approval",
+  tun_strategy: "Not available in this development build",
+});
+
 const responses = {
   boot_payload: {
     native_ui: { profile_menu: false, runtime_settings: false, general_switches: false, prompt_dialog: false, window_glass: false },
@@ -241,7 +249,8 @@ const responses = {
       name: "Clash for Mac",
       version: "0.4.0",
       license: "GPL-3.0-or-later",
-      minimum_macos: "15.0",
+      operating_system: "macos",
+      minimum_os_version: "15.0",
       architecture: "arm64",
     },
     migration_handoff: false,
@@ -807,12 +816,177 @@ test("overlay-only General dialogs hide native switches and restore fresh geomet
   }
 });
 
+test("General uses host identity and copies platform-appropriate commands without changing the engine", async () => {
+  const original = {
+    product: state.payload.product,
+    projection: state.projection,
+    writeText: navigator.clipboard.writeText,
+    page: state.activePage,
+    dialog: state.glassDialog,
+  };
+  const observedEngine = structuredClone(state.engine);
+  const commandsBefore = invoked.length;
+  const copies = [];
+  navigator.clipboard.writeText = async (value) => { copies.push(value); };
+  try {
+    state.projection = { ...state.projection, mixedPort: 7890 };
+    for (const [operatingSystem, name, expectedLabel, expectedCommands] of [
+      ["macos", "Clash for Mac", "Start with macOS", [
+        "export https_proxy=http://127.0.0.1:7890",
+        "export http_proxy=http://127.0.0.1:7890",
+        "export all_proxy=socks5://127.0.0.1:7890",
+      ].join("\n")],
+      ["windows", "Clash for Windows", "Start with Windows", [
+        '$env:https_proxy = "http://127.0.0.1:7890"',
+        '$env:http_proxy = "http://127.0.0.1:7890"',
+        '$env:all_proxy = "socks5://127.0.0.1:7890"',
+      ].join("\n")],
+    ]) {
+      state.payload.product = { ...original.product, name, operating_system: operatingSystem };
+      const html = await renderPage("general");
+      assert.ok(html.includes(`<span>${name}</span>`));
+      assert.ok(html.includes(expectedLabel));
+      assert.equal((html.match(/class="cfw-row"/gu) ?? []).length, 12);
+      if (operatingSystem === "windows") {
+        assert.doesNotMatch(html, /Clash for Mac|Start with macOS|NetworkExtension|System Extension|System Settings/u);
+        assert.match(html, /PowerShell/u);
+      }
+      await appModule.handleAction("tun-info");
+      if (operatingSystem === "windows") {
+        assert.match(glassRoot.innerHTML, /Windows virtual network adapter/u);
+        assert.doesNotMatch(glassRoot.innerHTML, /macOS|NetworkExtension|System Settings/u);
+      } else {
+        assert.match(glassRoot.innerHTML, /NetworkExtension/u);
+      }
+      await appModule.handleAction("copy-proxy-exports");
+      assert.equal(copies.at(-1), expectedCommands);
+    }
+    const copiedCount = copies.length;
+    state.projection = { ...state.projection, mixedPort: "7890; bad-command" };
+    await appModule.handleAction("copy-proxy-exports");
+    assert.equal(copies.length, copiedCount, "an invalid endpoint must never become clipboard shell code");
+    assert.deepEqual(state.engine, observedEngine);
+    assert.deepEqual(invoked.slice(commandsBefore), [], "rendering and copying do not invoke network commands");
+  } finally {
+    state.payload.product = original.product;
+    state.projection = original.projection;
+    state.glassDialog = original.dialog;
+    navigator.clipboard.writeText = original.writeText;
+    await renderPage(original.page);
+  }
+});
+
 test("General exposes IPv6 as a direct switch rather than a settings-dialog button", async () => {
   const html = await renderPage("general");
   const row = html.match(/<div class="cfw-row-left">IPv6 DNS<\/div>([\s\S]*?)<div class="cfw-row">/u)?.[1];
   assert.ok(row);
   assert.match(row, /data-toggle="ipv6DNS"/u);
   assert.doesNotMatch(row, /data-action="open-runtime-settings"/u);
+});
+
+test("Windows network details keep user proxy settings separate and escape adapter names", async () => {
+  const original = { response: responses.network_diagnostics, diagnostics: state.networkDiagnostics, dialog: state.glassDialog };
+  try {
+    responses.network_diagnostics = {
+      platform: "windows", adapters: [{ index: 5, display_name: "Office <adapter>", interface_type: 6, operational_status: 1 }],
+      user_proxy: { manual_proxy_enabled: true, auto_config_enabled: false, auto_detect_enabled: false },
+    };
+    await appModule.handleAction("show-network-interfaces");
+    assert.match(glassRoot.innerHTML, /Network adapters/u);
+    assert.match(glassRoot.innerHTML, /Current user proxy: Manual proxy/u);
+    assert.match(glassRoot.innerHTML, /Office &lt;adapter&gt;/u);
+    assert.doesNotMatch(glassRoot.innerHTML, /Office <adapter>|SystemConfiguration|<th>Order<\/th>|<th>Proxy<\/th>/u);
+    state.glassDialog = null;
+    const settings = await renderPage("settings");
+    assert.match(settings, /Current user proxy/u);
+    assert.match(settings, /Office &lt;adapter&gt;/u);
+  } finally {
+    responses.network_diagnostics = original.response;
+    state.networkDiagnostics = original.diagnostics;
+    state.glassDialog = original.dialog;
+  }
+});
+
+test("About and Feedback retain the host's Windows version and architecture", async () => {
+  const original = { product: state.payload.product, platform: state.platform, dialog: state.glassDialog, page: state.activePage };
+  try {
+    state.payload.product = {
+      ...original.product, name: "Clash for Windows", operating_system: "windows",
+      minimum_os_version: "10.0.26100", architecture: "x64",
+    };
+    state.platform = WINDOWS_PLATFORM_DESIGN;
+    state.glassDialog = { kind: "product-about", payload: { phase: "idle" } };
+    await renderPage("general");
+    assert.match(glassRoot.innerHTML, /aria-label="About Clash for Windows"/u);
+    assert.match(glassRoot.innerHTML, /class="product-about-name">Clash for Windows<\/div>/u);
+    assert.ok(glassRoot.innerHTML.includes("x64 · Windows 10.0.26100+"));
+    assert.doesNotMatch(glassRoot.innerHTML, /macOS 15\.0|Clash for Mac/u);
+    state.glassDialog = null;
+    const feedback = await renderPage("feedback");
+    assert.ok(feedback.includes(WINDOWS_PLATFORM_DESIGN.startup_strategy));
+    assert.match(feedback, /<dt>Start at Login<\/dt>/u);
+    assert.doesNotMatch(feedback, /<dt>launchd<\/dt>/u);
+    assert.ok(feedback.includes("x64 · Windows 10.0.26100 or later"));
+    assert.doesNotMatch(feedback, /ARM64 macOS only|macOS 15\.0/u);
+    state.payload.product = { ...state.payload.product, minimum_os_version: null };
+    state.glassDialog = { kind: "product-about", payload: { phase: "idle" } };
+    await renderPage("general");
+    assert.ok(glassRoot.innerHTML.includes("x64 · Windows</div>"));
+    assert.doesNotMatch(glassRoot.innerHTML, /null|undefined|Windows\s+15\.0|\d\+/u);
+    state.glassDialog = null;
+    const unqualified = await renderPage("feedback");
+    assert.ok(unqualified.includes("x64 · Windows</p>"));
+    assert.doesNotMatch(unqualified, /Windows.*(?:null|undefined|15\.0|or later)/u);
+  } finally {
+    state.payload.product = original.product;
+    state.platform = original.platform;
+    state.glassDialog = original.dialog;
+    await renderPage(original.page);
+  }
+});
+
+test("Windows omits Mac maintenance without showing a completed cleanup or dispatching cutover", async () => {
+  const original = {
+    product: state.payload.product, retirement: state.retirement,
+    maintenanceOpen: state.legacyMaintenanceOpen, page: state.activePage,
+    profiles: state.profiles, invalidProfiles: state.invalidProfiles,
+    profilesUnavailableReason: state.profilesUnavailableReason,
+  };
+  const commandsBefore = invoked.length;
+  try {
+    state.payload.product = {
+      ...original.product, name: "Clash for Windows", operating_system: "windows",
+      architecture: "x64", minimum_os_version: null,
+    };
+    state.retirement = { state: "not_applicable" };
+    state.legacyMaintenanceOpen = true;
+    const settings = await renderPage("settings");
+    assert.doesNotMatch(settings, /open-legacy-maintenance|Older Clash for Mac|Legacy maintenance/u);
+    const general = await renderPage("general");
+    assert.doesNotMatch(general, /begin-migration-handoff|prepare-cutover|confirm-cutover|recover-cutover|data-migration/u);
+    state.profiles = [];
+    state.invalidProfiles = [];
+    state.profilesUnavailableReason = null;
+    const profiles = await renderPage("profiles");
+    assert.doesNotMatch(profiles, /migrate-legacy-profiles|Migrate selected legacy subscription/u);
+    assert.match(profiles, /data-action="import-profile-file"/u);
+    assert.match(profiles, /data-action="import-profile"/u);
+    for (const action of [
+      "open-legacy-maintenance", "begin-migration-handoff", "prepare-cutover",
+      "confirm-cutover", "recover-cutover", "migrate-legacy-profiles",
+    ]) {
+      await assert.rejects(() => appModule.handleAction(action), /does not apply/u);
+    }
+    assert.deepEqual(invoked.slice(commandsBefore), []);
+  } finally {
+    state.payload.product = original.product;
+    state.retirement = original.retirement;
+    state.legacyMaintenanceOpen = original.maintenanceOpen;
+    state.profiles = original.profiles;
+    state.invalidProfiles = original.invalidProfiles;
+    state.profilesUnavailableReason = original.profilesUnavailableReason;
+    await renderPage(original.page);
+  }
 });
 
 test("a refreshed projection updates the inherited IPv6 switch", async () => {
@@ -1532,6 +1706,102 @@ test("unavailable network capabilities block every enable path but never trap an
   }
 });
 
+test("a host without the combined mode refuses the second integration with its own reason", async () => {
+  const original = {
+    product: state.payload.product, platform: state.platform, engine: responses.engine_snapshot,
+    hadSystemProxy: Object.hasOwn(responses, "set_system_proxy_enabled"), systemProxy: responses.set_system_proxy_enabled,
+    hadTun: Object.hasOwn(responses, "set_tun_enabled"), tun: responses.set_tun_enabled,
+  };
+  // Windows offers each integration on its own; the backend refuses the
+  // combined mode, so the capability payload says so separately.
+  const capabilities = { local_proxy: true, system_proxy: true, tunnel: true, tunnel_system_proxy: false, provider_management: false };
+  const reason = "TUN Mode and System Proxy cannot run together in this Windows build. Turn one off first.";
+  const offEngine = { snapshot: { desired_mode: "off", generation: 50, config_digest: null, state: { state: "off" } }, capabilities, unavailable_reason: null };
+  const switchAttributes = (html, key) => {
+    const match = html.match(new RegExp(`<input type="checkbox" data-toggle="${key}"([^>]*)>`, "u"));
+    assert.ok(match, `${key} input must render`);
+    return match[1];
+  };
+  try {
+    state.payload.product = { ...original.product, name: "Clash for Windows", operating_system: "windows", architecture: "x64", minimum_os_version: null };
+    state.platform = WINDOWS_PLATFORM_DESIGN;
+    await setEngine(offEngine);
+    const off = await renderPage("general");
+    assert.doesNotMatch(switchAttributes(off, "systemProxy"), /disabled/u);
+    assert.doesNotMatch(switchAttributes(off, "tunMode"), /disabled/u);
+    assert.equal(off.includes(reason), false);
+    for (const scenario of [
+      { active: "systemProxy", activeCommand: "set_system_proxy_enabled", mode: "system_proxy", stateTag: "proxy_active",
+        owner: "windows_user_agent", blocked: "tunMode", blockedCommand: "set_tun_enabled" },
+      { active: "tunMode", activeCommand: "set_tun_enabled", mode: "tunnel", stateTag: "tunnel_active",
+        owner: "windows_tunnel_service", blocked: "systemProxy", blockedCommand: "set_system_proxy_enabled" },
+    ]) {
+      await setEngine({
+        snapshot: {
+          desired_mode: scenario.mode, generation: 51, config_digest: "digest",
+          state: { state: scenario.stateTag, runtime: { owner: scenario.owner, context: { installation_id: "i", config_epoch: 1, generation: 51 }, config_digest: "digest", ready: true } },
+        },
+        capabilities,
+        unavailable_reason: null,
+      });
+      const html = await renderPage("general");
+      assert.match(switchAttributes(html, scenario.blocked), /disabled/u, `${scenario.blocked} must be refused beside ${scenario.active}`);
+      assert.doesNotMatch(switchAttributes(html, scenario.blocked), /checked/u);
+      assert.match(switchAttributes(html, scenario.active), /checked/u);
+      assert.doesNotMatch(switchAttributes(html, scenario.active), /disabled/u, `${scenario.active} must stay switchable off`);
+      assert.ok(html.includes(reason), "the refusal names the combination, not a general failure");
+
+      const blocked = interactiveElement("input");
+      blocked.dataset.toggle = scenario.blocked;
+      querySelectorAllElements.set("[data-toggle]", [blocked]);
+      await renderPage("general");
+      invoked.length = 0;
+      invocationDetails.length = 0;
+      blocked.checked = true;
+      await blocked.trigger("change");
+      assert.equal(invoked.includes(scenario.blockedCommand), false, `${scenario.blocked} enable must issue zero IPC`);
+
+      // The requested integration is never trapped: turning it off still
+      // reaches native admission.
+      const active = interactiveElement("input");
+      active.dataset.toggle = scenario.active;
+      querySelectorAllElements.set("[data-toggle]", [active]);
+      await renderPage("general");
+      responses[scenario.activeCommand] = offEngine;
+      invoked.length = 0;
+      invocationDetails.length = 0;
+      active.checked = false;
+      await active.trigger("change");
+      const disable = invocationDetails.find((entry) => entry.command === scenario.activeCommand);
+      assert.ok(disable, `${scenario.active} disable must reach native admission`);
+      assert.equal(disable.args.enabled, false);
+      querySelectorAllElements.clear();
+    }
+    // A failed System Proxy request still holds the switch, and the TUN row
+    // explains the combination, not the unrelated startup failure.
+    await setEngine({
+      snapshot: { desired_mode: "system_proxy", generation: 52, config_digest: null, state: { state: "failed", target: "system_proxy", error: "Earlier startup failed" } },
+      capabilities,
+      unavailable_reason: null,
+    });
+    const failed = await renderPage("general");
+    assert.match(switchAttributes(failed, "tunMode"), /disabled/u);
+    assert.ok(failed.includes(`title="${reason}"`), "the TUN row names the combination");
+    assert.equal(failed.includes('title="Earlier startup failed"'), false);
+  } finally {
+    querySelectorAllElements.clear();
+    if (original.hadSystemProxy) responses.set_system_proxy_enabled = original.systemProxy;
+    else delete responses.set_system_proxy_enabled;
+    if (original.hadTun) responses.set_tun_enabled = original.tun;
+    else delete responses.set_tun_enabled;
+    state.payload.product = original.product;
+    state.platform = original.platform;
+    responses.engine_snapshot = original.engine;
+    await setEngine(original.engine);
+    await reloadButton.click();
+  }
+});
+
 test("normal mode switches call the existing backend without preparing or cleaning legacy data", async () => {
   const originalEngine = responses.engine_snapshot;
   const originalRetirement = state.retirement;
@@ -1561,7 +1831,7 @@ test("normal mode switches call the existing backend without preparing or cleani
       assert.doesNotMatch(html, /cfw-migration-banner|Start Migration|Prepare cutover|Finish setup/u);
       responses[command] = {
         snapshot: { desired_mode: desired, generation: 1, config_digest: null, state: { state: status, generation: 1 } },
-        capabilities: { system_proxy: true, tunnel: true },
+        capabilities: { system_proxy: true, tunnel: true, tunnel_system_proxy: true },
         unavailable_reason: null,
       };
       invocationDetails.length = 0;
@@ -2747,6 +3017,135 @@ test("Start at Login reflects typed live macOS status without rewriting persiste
   }
 });
 
+test("Windows startup shows actual registration and preserves saved intent without claiming launch approval", async () => {
+  const original = structuredClone(responses.read_settings_snapshot);
+  const product = state.payload.product;
+  const hadOpen = Object.hasOwn(responses, "open_login_items_settings");
+  const open = responses.open_login_items_settings;
+  try {
+    state.payload.product = { ...product, name: "Clash for Windows", operating_system: "windows" };
+    for (const [intent, status, matches, checked, message] of [
+      [true, "registered", true, true, "registration does not confirm launch"],
+      [false, "registered", false, true, "saved preference says Off"],
+      [true, "not_registered", false, false, "startup registration is absent"],
+      [false, "not_registered", true, false, "saved preference is Off"],
+      [false, "checking", false, false, "Checking Windows startup registration"],
+    ]) {
+      const snapshot = {
+        ...original,
+        settings: { ...original.settings, launch_at_login: intent },
+        launch_at_login: { persisted_intent: intent, live_status: status, matches_persisted_intent: matches },
+      };
+      responses.read_settings_snapshot = snapshot;
+      await emit("cfw://settings-changed", snapshot);
+      const html = await renderPage("settings");
+      assert.equal(state.toggles.startAtLogin, checked);
+      assert.equal(state.settingsSnapshot.settings.launch_at_login, intent);
+      assert.ok(html.includes(message), status);
+      assert.doesNotMatch(html, /Checking macOS Login Item|Enabled by macOS|Disabled by macOS/u);
+      assert.match(html, /data-action="open-windows-startup-settings"/u);
+    }
+    responses.open_login_items_settings = null;
+    const before = invoked.length;
+    await appModule.handleAction("open-windows-startup-settings");
+    assert.deepEqual(invoked.slice(before), ["open_login_items_settings"]);
+    state.payload.product = product;
+    await appModule.handleAction("open-windows-startup-settings");
+    assert.equal(invoked.length, before + 1, "Windows action has no macOS dispatch");
+  } finally {
+    state.payload.product = product;
+    responses.read_settings_snapshot = original;
+    if (hadOpen) responses.open_login_items_settings = open;
+    else delete responses.open_login_items_settings;
+    await emit("cfw://settings-changed", original);
+  }
+});
+
+test("Windows settings use native platform descriptions and reject a macOS design payload", async () => {
+  const product = state.payload.product;
+  const platform = state.platform;
+  try {
+    state.payload.product = { ...product, name: "Clash for Windows", operating_system: "windows", architecture: "x64" };
+    state.platform = WINDOWS_PLATFORM_DESIGN;
+    const html = await renderPage("settings");
+    for (const text of ["Windows protected storage", "File Explorer", "system tray", "Not available in this development build"]) {
+      assert.ok(html.includes(text), text);
+    }
+    assert.doesNotMatch(html, /Minimum macOS|ARM64-only|Keychain vault|in Finder|Dock icon|launchd|NetworkExtension|System Settings › Network|legacy restore|Avenir Next|SF Mono/u);
+    assert.match(html, /Segoe UI/u);
+    assert.match(html, /Consolas/u);
+    assert.match(html, /Manage DNS for each active adapter in Windows Settings/u);
+    state.platform = platform;
+    const foreign = await renderPage("settings");
+    assert.ok(foreign.includes("The platform design could not be read."));
+    assert.doesNotMatch(foreign, /Minimum macOS|15\.0|NetworkExtension|launchd/u);
+    state.platform = { target: "windows-x64", tun_strategy: "" };
+    const incomplete = await renderPage("settings");
+    assert.ok(incomplete.includes("The platform design could not be read."));
+  } finally {
+    state.payload.product = product;
+    state.platform = platform;
+  }
+});
+
+test("Windows font selection saves its actual family and restores the native value after a refused save", async () => {
+  const product = state.payload.product;
+  const original = structuredClone(responses.read_settings_snapshot);
+  const originalWriter = responses.write_settings_snapshot;
+  const originalStyleWriter = document.documentElement.style.setProperty;
+  const styles = new Map();
+  const handlers = new Map();
+  const selector = "[data-theme-setting], [data-font-family], [data-language-setting]";
+  const input = element("select");
+  input.addEventListener = (type, handler) => handlers.set(type, handler);
+  querySelectorElements.set("[data-font-family]", input);
+  querySelectorAllElements.set(selector, [input]);
+  document.documentElement.style.setProperty = (name, value) => styles.set(name, value);
+  responses.write_settings_snapshot = ({ settings }) => {
+    const snapshot = { ...original, settings: structuredClone(settings) };
+    responses.read_settings_snapshot = snapshot;
+    return snapshot;
+  };
+  try {
+    state.payload.product = { ...product, name: "Clash for Windows", operating_system: "windows", architecture: "x64" };
+    await emit("cfw://settings-changed", original);
+    assert.equal(styles.get("--sans"), '"Segoe UI", system-ui, sans-serif');
+    for (const family of ["Segoe UI", "Consolas"]) {
+      input.value = family;
+      await renderPage("settings");
+      const before = invocationDetails.length;
+      await handlers.get("change")();
+      const writes = invocationDetails.slice(before).filter(({ command }) => command === "write_settings_snapshot");
+      assert.equal(writes.length, 1);
+      assert.equal(writes[0].args.settings.font_family, family);
+      assert.equal(state.settingsSnapshot.settings.font_family, family);
+      assert.ok(styles.get("--sans").startsWith(`"${family}", `));
+    }
+    rejected.write_settings_snapshot = "disk busy";
+    input.value = "Segoe UI";
+    await handlers.get("change")();
+    assert.equal(state.settingsSnapshot.settings.font_family, "Consolas");
+    assert.match(page.innerHTML, /value="Consolas" selected/u);
+    assert.ok(state.logs.some(({ message }) => message.includes("disk busy")));
+    delete rejected.write_settings_snapshot;
+    // A recognized saved family remains visible even if it was selected on a
+    // different host; changing another preference must not silently erase it.
+    const foreign = { ...original, settings: { ...original.settings, font_family: "SF Mono" } };
+    await emit("cfw://settings-changed", foreign);
+    assert.match(await renderPage("settings"), /value="SF Mono" selected/u);
+  } finally {
+    delete rejected.write_settings_snapshot;
+    state.payload.product = product;
+    if (originalWriter === undefined) delete responses.write_settings_snapshot;
+    else responses.write_settings_snapshot = originalWriter;
+    querySelectorElements.delete("[data-font-family]");
+    querySelectorAllElements.delete(selector);
+    responses.read_settings_snapshot = original;
+    await emit("cfw://settings-changed", original);
+    document.documentElement.style.setProperty = originalStyleWriter;
+  }
+});
+
 test("invalid settings events recover from native state or disable persistence", async () => {
   const original = structuredClone(responses.read_settings_snapshot);
   const invalid = structuredClone(original);
@@ -2911,7 +3310,7 @@ test("every glass dialog renders", async () => {
     ["delete", { kind: "delete", id: PROFILE_ID }, "Delete profile"],
     ["reset-settings", { kind: "reset-settings" }, "Reset all settings"],
     ["preview-config", { kind: "preview-config", payload: PROJECTION }, "Projected configuration"],
-    ["network-services", { kind: "network-services", payload: DIAGNOSTICS.services, unavailable: DIAGNOSTICS.unavailable }, "Network services"],
+    ["network-services", { kind: "network-services", payload: DIAGNOSTICS }, "Network services"],
     ["dns-query", { kind: "dns-query", payload: { name: "a.test", type: "A", result: "" } }, "Resolve through the running engine"],
     ["info", { kind: "info", payload: { title: "System DNS", body: "never written" } }, "System DNS"],
     ["product-about", { kind: "product-about", payload: { phase: "idle", update: { available: true, version: "0.4.1" } } }, "Open Download"],
@@ -4447,7 +4846,7 @@ test("network switches remain off while startup is pending or fails and cancella
       assert.match(starting, new RegExp(`data-toggle="${key}"\\s+disabled`, "u"));
       pending.resolve({
         snapshot: { desired_mode: mode, generation: 200, config_digest: null, state: { state: "failed", target: mode, error: "native startup failed" } },
-        capabilities: { system_proxy: true, tunnel: true },
+        capabilities: { system_proxy: true, tunnel: true, tunnel_system_proxy: true },
       });
       await operation;
       const failed = await renderPage("general");
@@ -4476,7 +4875,7 @@ test("engine status events do not discard a pending switch failure", async () =>
   const originalError = state.engineMutationError;
   const failure = {
     snapshot: { desired_mode: "system_proxy", generation: 201, config_digest: null, state: { state: "failed", target: "system_proxy", error: "Earlier startup failed" } },
-    capabilities: { system_proxy: true, tunnel: true },
+    capabilities: { system_proxy: true, tunnel: true, tunnel_system_proxy: true },
   };
   try {
     await setEngine(OFF_ENGINE);
@@ -4632,7 +5031,7 @@ test("startup recovery is asked for by the dashboard itself after an installatio
 test("the General page surfaces approval and capability reasons", async () => {
   await setEngine({
     snapshot: { desired_mode: "tunnel", generation: 1, config_digest: null, state: { state: "awaiting_approval", generation: 1 } },
-    capabilities: { system_proxy: true, tunnel: true },
+    capabilities: { system_proxy: true, tunnel: true, tunnel_system_proxy: true },
   });
   const awaitingApproval = await renderPage("general");
   assert.ok(awaitingApproval.includes("Needs approval"));
@@ -4654,7 +5053,7 @@ test("the General page surfaces approval and capability reasons", async () => {
       config_digest: "digest",
       state: { state: "failed", generation: 2, target: "system_proxy", error: "approval required" },
     },
-    capabilities: { system_proxy: true, tunnel: true },
+    capabilities: { system_proxy: true, tunnel: true, tunnel_system_proxy: true },
   });
   const failedProxy = await renderPage("general");
   assert.match(failedProxy, /data-action="retry-system-proxy">Retry/u);

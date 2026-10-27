@@ -1,5 +1,6 @@
 import { t } from "./i18n.js";
 import { escapeHtml, errorText } from "./format.js";
+import { platformPresentation } from "./platform-presentation.js";
 
 export const SHORTCUT_ACTIONS = Object.freeze([
   ["show_dashboard", "Show dashboard"], ["toggle_core", "Start / stop core"],
@@ -60,16 +61,23 @@ export function createAutomationSettingsUI({ state, invoke, renderPage, appendLo
     const { draft, snapshot, saving } = dialog;
     const disabled = saving ? " disabled" : "";
     const network = snapshot.network;
+    const operatingSystem = state.payload.product.operating_system;
+    const presentation = platformPresentation(operatingSystem);
+    // Windows refuses the complete network observation when SSID access fails;
+    // it does not return a Wi-Fi object with a missing name as macOS does.
+    // Keep that error visible while offering the existing settings entry point.
+    const showWifiHelp = (network?.kind === "wifi" && !network.ssid)
+      || (operatingSystem === "windows" && Boolean(snapshot.network_error));
     const networkLabel = snapshot.network_error ?? (network ? `${network.kind === "wifi" ? "Wi-Fi" : t("Wired")} · ${network.interface}${network.ssid ? ` · ${network.ssid}` : ""}` : t("No active physical network"));
     return `<div class="glass-dialog-backdrop" data-automation-dismiss></div>
       <section class="glass-dialog automation-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="automation-title">
         <h2 id="automation-title">${escapeHtml(t("Shortcuts & network rules"))}</h2>
-        <p class="glass-dialog-copy">${escapeHtml(t("Global shortcuts work while this app is in the background. Include Command, Option or Control; leave a field empty to disable it."))}</p>
-        ${SHORTCUT_ACTIONS.map(([action, label]) => `<label class="glass-input-label">${label}<input class="glass-input" data-shortcut-action="${action}" value="${escapeHtml(draft.shortcuts[action] ?? "")}" placeholder="${escapeHtml(t("Command+Option+P"))}"${disabled}></label>`).join("")}
+        <p class="glass-dialog-copy">${escapeHtml(t(presentation.globalShortcutHint))}</p>
+        ${SHORTCUT_ACTIONS.map(([action, label]) => `<label class="glass-input-label">${escapeHtml(t(label))}<input class="glass-input" data-shortcut-action="${action}" value="${escapeHtml(draft.shortcuts[action] ?? "")}" placeholder="${escapeHtml(t(presentation.shortcutExample))}"${disabled}></label>`).join("")}
         <label class="glass-input-label"><input type="checkbox" data-network-enabled${draft.enabled ? " checked" : ""}${disabled}> ${escapeHtml(t("Apply network rules automatically"))}</label>
-        <p class="glass-dialog-copy">${escapeHtml(t("The first matching rule applies after a network change or when enabled. Manual Stop stays stopped on the same network. Rules run while CFM is open."))}</p>
+        <p class="glass-dialog-copy">${escapeHtml(t(presentation.networkRuleHint))}</p>
         <p class="glass-dialog-copy">${escapeHtml(t("Current network: {network}", { network: networkLabel }))}</p>
-        ${network?.kind === "wifi" && !network.ssid ? `<p class="glass-dialog-copy">${escapeHtml(t("macOS is not providing the Wi-Fi name. Rules for a named Wi-Fi network cannot match until the name is available."))}</p><button type="button" class="glass-btn ghost" data-wifi-permission${disabled}>${escapeHtml(t("Allow Wi-Fi name access…"))}</button>` : ""}
+        ${showWifiHelp ? `<p class="glass-dialog-copy">${escapeHtml(t(presentation.wifiNameUnavailable))}</p><button type="button" class="glass-btn ghost" data-wifi-permission${disabled}>${escapeHtml(t(presentation.wifiAccessAction))}</button>` : ""}
         <button type="button" class="glass-btn ghost" data-network-refresh${disabled}>${escapeHtml(t("Refresh network status"))}</button>
         ${dialog.notice ? `<p class="glass-dialog-copy" role="status">${escapeHtml(dialog.notice)}</p>` : ""}
         <div class="automation-rule-list">${draft.rules.map((rule, index) => `<div class="automation-rule-row">
@@ -97,7 +105,7 @@ export function createAutomationSettingsUI({ state, invoke, renderPage, appendLo
     bind("[data-network-remove]", "click", (el) => { dialog.draft.rules.splice(Number(el.dataset.networkRemove), 1); renderPage(); });
     bind("[data-network-up]", "click", (el) => { const i = Number(el.dataset.networkUp); if (i > 0) [dialog.draft.rules[i - 1], dialog.draft.rules[i]] = [dialog.draft.rules[i], dialog.draft.rules[i - 1]]; renderPage(); });
     bind("[data-wifi-permission]", "click", async () => {
-      try { await invoke("request_wifi_name_access"); dialog.notice = t("Respond to the macOS permission prompt, then refresh network status."); }
+      try { await invoke("request_wifi_name_access"); dialog.notice = t(platformPresentation(state.payload.product.operating_system).wifiAccessNotice); }
       catch (error) { dialog.error = errorText(error); }
       renderPage();
     });

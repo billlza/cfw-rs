@@ -4,7 +4,7 @@ use std::str::FromStr;
 
 use crate::settings_storage::{FileIdentity, FilePolicy, SecureDirectory};
 use crate::{
-    AppearanceTheme, FontFamily, LEGACY_SETTINGS_FILE_NAME, MacOsAppPaths, SettingsStoreError,
+    AppPaths, AppearanceTheme, FontFamily, LEGACY_SETTINGS_FILE_NAME, SettingsStoreError,
     UiPreferences,
 };
 
@@ -31,7 +31,7 @@ pub struct LegacySettingsMigration {
 }
 
 impl LegacySettingsMigration {
-    pub fn read(paths: &MacOsAppPaths) -> Result<Option<Self>, SettingsStoreError> {
+    pub fn read(paths: &AppPaths) -> Result<Option<Self>, SettingsStoreError> {
         let Some(directory) = SecureDirectory::open_existing(&paths.app_home)? else {
             return Ok(None);
         };
@@ -58,7 +58,7 @@ impl LegacySettingsMigration {
         }))
     }
 
-    pub fn remove_source(&self, paths: &MacOsAppPaths) -> Result<(), SettingsStoreError> {
+    pub fn remove_source(&self, paths: &AppPaths) -> Result<(), SettingsStoreError> {
         SecureDirectory::open_or_create(&paths.app_home)?.remove_matching(
             LEGACY_SETTINGS_FILE_NAME,
             &self.source_identity,

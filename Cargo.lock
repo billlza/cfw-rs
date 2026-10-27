@@ -517,11 +517,15 @@ dependencies = [
 name = "cfw-core"
 version = "0.5.1"
 dependencies = [
+ "cfw-windows-storage",
  "libc",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.11.1",
  "thiserror 2.0.21",
+ "url",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 
@@ -555,6 +559,9 @@ dependencies = [
  "objc2-system-configuration",
  "serde",
  "serde_json",
+ "url",
+ "windows",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -562,6 +569,7 @@ name = "cfw-profiles"
 version = "0.5.1"
 dependencies = [
  "cfw-singbox-config",
+ "cfw-windows-storage",
  "libc",
  "serde",
  "serde_json",
@@ -607,6 +615,8 @@ dependencies = [
  "cfw-platform",
  "cfw-profiles",
  "cfw-singbox-config",
+ "cfw-windows-engine",
+ "cfw-windows-storage",
  "core-foundation",
  "dispatch2",
  "futures-util",
@@ -633,7 +643,59 @@ dependencies = [
  "tokio-tungstenite",
  "urlencoding",
  "uuid",
+ "windows-sys 0.61.2",
  "zeroize",
+]
+
+[[package]]
+name = "cfw-windows-credentials"
+version = "0.5.1"
+dependencies = [
+ "cfw-engine-api",
+ "cfw-singbox-config",
+ "cfw-windows-storage",
+ "serde",
+ "serde_json",
+ "subtle",
+ "tempfile",
+ "uuid",
+ "windows-sys 0.61.2",
+ "zeroize",
+]
+
+[[package]]
+name = "cfw-windows-engine"
+version = "0.5.1"
+dependencies = [
+ "cfw-application",
+ "cfw-core",
+ "cfw-engine-api",
+ "cfw-platform",
+ "cfw-singbox-config",
+ "cfw-windows-credentials",
+ "cfw-windows-storage",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "subtle",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "url",
+ "uuid",
+ "windows-sys 0.61.2",
+ "zeroize",
+]
+
+[[package]]
+name = "cfw-windows-storage"
+version = "0.5.1"
+dependencies = [
+ "sha2 0.11.1",
+ "tempfile",
+ "thiserror 2.0.21",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

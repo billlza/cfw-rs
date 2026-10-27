@@ -8,6 +8,7 @@ mod engine;
 mod engine_controls;
 mod i18n;
 mod launch;
+#[cfg(target_os = "macos")]
 mod legacy;
 mod lifecycle;
 #[cfg(target_os = "macos")]
@@ -17,10 +18,14 @@ mod native_components;
 mod native_dashboard;
 #[cfg(feature = "physical-release-evidence")]
 mod packet_evidence_transport;
+mod platform_maintenance;
+mod platform_runtime;
 mod private_store;
+mod process_identity;
 #[cfg(test)]
 mod profile_fixtures;
 mod release_observation;
+#[cfg(target_os = "macos")]
 mod service_maintenance;
 mod shell;
 mod startup;
@@ -33,10 +38,9 @@ mod window_state;
 #[cfg(feature = "physical-release-evidence")]
 pub use engine::{ManagedEngine, packet_evidence};
 
-use bootstrap::{
-    LaunchContext, acknowledge_migration_handoff_renderer_ready, boot_payload, reload_dashboard,
-    reopen_main_window,
-};
+use bootstrap::{LaunchContext, boot_payload, reload_dashboard};
+#[cfg(target_os = "macos")]
+use bootstrap::{acknowledge_migration_handoff_renderer_ready, reopen_main_window};
 use cfw_core::SettingsStore;
 use cfw_engine_api::EngineEvent;
 use commands::{
@@ -62,12 +66,14 @@ use commands::{
     update_geoip_database, update_profile, update_profile_info, update_proxy_provider,
     update_rule_provider, write_runtime_settings_snapshot, write_settings_snapshot,
 };
-use engine::{engine_snapshot, prepare_legacy_cutover};
+use engine::engine_snapshot;
+#[cfg(target_os = "macos")]
+use engine::prepare_legacy_cutover;
 use launch::{LaunchMode, STARTUP_ADMISSION_EXIT_CODE, STARTUP_USAGE_EXIT_CODE, parse_launch_mode};
-use legacy::{
-    ConsumedHandoffTicket, LegacyRetirementGate, MigrationHandoffLease, begin_migration_handoff,
-    disable_service_mode, legacy_retirement_status, recover_legacy_cutover,
-};
+#[cfg(target_os = "macos")]
+use legacy::{ConsumedHandoffTicket, MigrationHandoffLease};
+#[cfg(target_os = "macos")]
+use legacy::{begin_migration_handoff, disable_service_mode, recover_legacy_cutover};
 use lifecycle::{AppLifecycle, quit_app, request_shutdown};
 use native_components::general_switches::{
     dismiss_native_general_switches, focus_native_general_switch, sync_native_general_switches,
@@ -85,11 +91,14 @@ use native_components::window_glass::{
 use native_components::{
     dismiss_native_profile_menu, present_native_profile_menu, update_native_profile_menu,
 };
+use platform_maintenance::{PlatformMaintenanceGate, legacy_retirement_status};
 use shell::{TrayMenuState, build_app_menu, focus_main_window, handle_app_menu_event};
 use tauri::{Emitter, Manager, RunEvent, WindowEvent};
+#[cfg(target_os = "macos")]
+use updater::UpdateInstallLease;
 use updater::{
-    UpdateInstallLease, UpdaterSecurityState, cancel_update_install, check_for_updates,
-    commit_update_install, open_available_update, prepare_update_install, resolve_update_install,
+    UpdaterSecurityState, cancel_update_install, check_for_updates, commit_update_install,
+    open_available_update, prepare_update_install, resolve_update_install,
 };
 use window_state::{WindowBoundsManager, handle_window_bounds_event};
 
@@ -99,6 +108,7 @@ fn settings_store() -> Result<SettingsStore, String> {
 
 type AppInvokeHandler = Box<dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static>;
 
+#[cfg(target_os = "macos")]
 fn migration_handoff_command_allowed(command: &str) -> bool {
     matches!(
         command,
@@ -145,6 +155,34 @@ fn emit_startup_error(app: &tauri::AppHandle, kind: &str, message: String) {
     }
 }
 
+fn admit_dashboard_launch() -> LaunchContext {
+    let available = settings_store().and_then(|store| {
+        store.ensure_layout().map_err(|error| error.to_string())?;
+        #[cfg(target_os = "macos")]
+        MigrationHandoffLease::acquire(&store.paths().app_home).map(std::mem::drop)?;
+        // No dashboard may start underneath a platform installation. Windows
+        // also observes durable intent: a crashed finisher releases its lock
+        // while the system MSI transaction may still be running.
+        #[cfg(target_os = "macos")]
+        {
+            UpdateInstallLease::acquire(&store.paths().app_home)
+                .map(std::mem::drop)
+                .map_err(|error| error.to_string())
+        }
+        #[cfg(windows)]
+        {
+            updater::admit_dashboard_startup(&store.paths().app_home)
+        }
+    });
+    if let Err(error) = available {
+        eprintln!(
+            "dashboard launch blocked while a migration handoff or update installation is active: {error}"
+        );
+        std::process::exit(STARTUP_ADMISSION_EXIT_CODE);
+    }
+    LaunchContext::dashboard()
+}
+
 fn main() {
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     let launch_arguments = match parse_launch_mode(&arguments) {
@@ -155,25 +193,16 @@ fn main() {
         }
     };
     let launch = match launch_arguments {
-        LaunchMode::Dashboard => {
-            let available = settings_store().and_then(|store| {
-                store.ensure_layout().map_err(|error| error.to_string())?;
-                MigrationHandoffLease::acquire(&store.paths().app_home).map(std::mem::drop)?;
-                // The installer process holds this lease while it unregisters
-                // services and exchanges the bundles. No dashboard may start
-                // underneath that exchange.
-                UpdateInstallLease::acquire(&store.paths().app_home)
-                    .map(std::mem::drop)
-                    .map_err(|error| error.to_string())
-            });
-            if let Err(error) = available {
-                eprintln!(
-                    "dashboard launch blocked while a migration handoff or update installation is active: {error}"
-                );
+        LaunchMode::Dashboard => admit_dashboard_launch(),
+        #[cfg(windows)]
+        LaunchMode::ResumeAfterUpdate { transaction } => {
+            if let Err(error) = updater::wait_for_finisher_exit(&transaction) {
+                eprintln!("update restart admission failed: {error}");
                 std::process::exit(STARTUP_ADMISSION_EXIT_CODE);
             }
-            LaunchContext::dashboard()
+            admit_dashboard_launch()
         }
+        #[cfg(target_os = "macos")]
         LaunchMode::MigrationHandoff { token } => {
             let admitted = settings_store().and_then(|store| {
                 store.ensure_layout().map_err(|error| error.to_string())?;
@@ -197,6 +226,7 @@ fn main() {
                 }
             }
         }
+        #[cfg(target_os = "macos")]
         LaunchMode::ServiceMaintenance(action) => {
             if let Err(error) = service_maintenance::run(action) {
                 eprintln!("service maintenance failed: {error}");
@@ -207,7 +237,7 @@ fn main() {
         LaunchMode::FinishUpdate { transaction } => {
             std::process::exit(updater::run_update_finisher(&transaction));
         }
-        #[cfg(feature = "physical-release-evidence")]
+        #[cfg(all(target_os = "macos", feature = "physical-release-evidence"))]
         LaunchMode::PacketEvidence => {
             if let Err(error) = packet_evidence_transport::run_packet_evidence_proxy() {
                 eprintln!("physical Packet evidence Host control failed: {error}");
@@ -233,7 +263,7 @@ fn main() {
         .manage(i18n::NativeLanguage::default())
         .manage(startup_state::NativeStartup::default())
         .manage(launch)
-        .manage(LegacyRetirementGate::default())
+        .manage(PlatformMaintenanceGate::default())
         .manage(AppLifecycle::default())
         .manage(LiveStreams::default())
         .manage(commands::ManagedProviders::default())
@@ -243,6 +273,23 @@ fn main() {
         .manage(WindowBoundsManager::default())
         .manage(commands::UiSettingsMutations::default())
         .manage(UpdaterSecurityState::default());
+    // Observe the event loop before exit plugins run. The application callback
+    // runs after them, so its absence alone cannot locate a stalled shutdown.
+    #[cfg(target_os = "windows")]
+    let builder = builder.plugin(
+        tauri::plugin::Builder::<tauri::Wry, ()>::new("lifecycle-diagnostics")
+            .on_event(|app, event| {
+                if matches!(event, RunEvent::Exit) {
+                    diagnostics::record(
+                        app,
+                        cfw_core::DiagnosticTopic::Startup,
+                        "runtime_exit_before_plugins",
+                        "",
+                    );
+                }
+            })
+            .build(),
+    );
     // The explicit handoff instance must coexist with the still-running 0.3.5
     // GUI so it can validate 0.4.0 without asking the user to quit and trigger
     // old cleanup_runtime. Every destructive command still requires the full
@@ -257,6 +304,7 @@ fn main() {
         ))
     };
     let invoke_handler: AppInvokeHandler = Box::new(tauri::generate_handler![
+        #[cfg(target_os = "macos")]
         acknowledge_migration_handoff_renderer_ready,
         engine_snapshot,
         reconcile_startup_services,
@@ -272,9 +320,13 @@ fn main() {
         request_wifi_name_access,
         write_settings_snapshot,
         legacy_retirement_status,
+        #[cfg(target_os = "macos")]
         begin_migration_handoff,
+        #[cfg(target_os = "macos")]
         prepare_legacy_cutover,
+        #[cfg(target_os = "macos")]
         disable_service_mode,
+        #[cfg(target_os = "macos")]
         recover_legacy_cutover,
         set_launch_at_login_enabled,
         import_profile_text,
@@ -378,13 +430,15 @@ fn main() {
         .manage(native_components::window_glass::WindowGlassState::default());
     let application = builder
         .invoke_handler(move |invoke: tauri::ipc::Invoke<tauri::Wry>| {
+            #[cfg(target_os = "macos")]
             if migration_handoff && !migration_handoff_command_allowed(invoke.message.command()) {
                 let command = invoke.message.command().to_owned();
                 invoke.resolver.reject(format!(
                     "command {command} is unavailable during migration handoff"
                 ));
-                true
-            } else if !startup::command_available_before_ready(invoke.message.command())
+                return true;
+            }
+            if !startup::command_available_before_ready(invoke.message.command())
                 && let Err(error) = invoke
                     .message
                     .webview_ref()
@@ -473,12 +527,23 @@ fn main() {
 
     application.run(|app, event| match event {
         RunEvent::Exit => {
+            diagnostics::record(app, cfw_core::DiagnosticTopic::Startup, "exit_event", "");
             if let Err(error) = app.state::<Diagnostics>().flush() {
                 eprintln!("final diagnostic flush failed: {error}");
             }
         }
         RunEvent::ExitRequested { api, .. } => {
             let lifecycle = app.state::<AppLifecycle>();
+            diagnostics::record(
+                app,
+                cfw_core::DiagnosticTopic::Startup,
+                "exit_requested",
+                if lifecycle.exit_ready() {
+                    "ready=true"
+                } else {
+                    "ready=false"
+                },
+            );
             if !lifecycle.exit_ready() {
                 api.prevent_exit();
                 if let Err(error) = request_shutdown(app.clone(), 0) {
@@ -496,7 +561,7 @@ fn main() {
     });
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::migration_handoff_command_allowed;
 

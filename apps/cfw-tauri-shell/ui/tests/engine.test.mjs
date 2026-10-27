@@ -25,6 +25,30 @@ function proxyEnvelope(overrides = {}) {
   };
 }
 
+test("Windows runtime owners preserve mode and identity checks in the shared UI", () => {
+  for (const [mode, state, owner, wrongOwner] of [
+    ["local_proxy", "local_proxy_active", "windows_user_agent", "windows_tunnel_service"],
+    ["system_proxy", "proxy_active", "windows_user_agent", "windows_tunnel_service"],
+    ["tunnel", "tunnel_active", "windows_tunnel_service", "windows_user_agent"],
+    ["tunnel_system_proxy", "tunnel_system_proxy_active", "windows_tunnel_service", "windows_user_agent"],
+  ]) {
+    const envelope = proxyEnvelope();
+    envelope.snapshot.desired_mode = mode;
+    envelope.snapshot.state.state = state;
+    envelope.snapshot.state.runtime.owner = owner;
+    const active = normalizeEngineStatus(envelope);
+    assert.equal(active.active, true);
+    assert.equal(active.runtimeIdentity.owner, owner);
+    envelope.snapshot.state.runtime.owner = wrongOwner;
+    assert.throws(() => normalizeEngineStatus(envelope), /identity/u);
+    envelope.snapshot.state.runtime.owner = "unrecognized_windows_owner";
+    assert.throws(() => normalizeEngineStatus(envelope), /identity/u);
+    envelope.snapshot.state.runtime.owner = owner;
+    envelope.snapshot.state.runtime.context.generation += 1;
+    assert.throws(() => normalizeEngineStatus(envelope), /identity/u);
+  }
+});
+
 test("startup recovery requires the typed capability and a failed Off snapshot", () => {
   const failed = {
     snapshot: { desired_mode: "off", generation: 0, config_digest: null,
@@ -63,6 +87,17 @@ test("combined readiness checks both switches only after one ready tunnel attest
   assert.equal(failed.tunnelActive, false);
   assert.equal(systemProxyValueLabel(failed), "Failed");
   assert.equal(tunnelValueLabel(failed), "Failed");
+});
+
+test("the combined mode's capability is read on its own and only as an explicit true", () => {
+  for (const [value, expected] of [[true, true], [false, false], [undefined, false], ["true", false], [1, false], [null, false]]) {
+    const envelope = proxyEnvelope();
+    envelope.capabilities = { system_proxy: true, tunnel: true, tunnel_system_proxy: value };
+    const engine = normalizeEngineStatus(envelope);
+    assert.equal(engine.systemProxyAvailable, true);
+    assert.equal(engine.tunnelAvailable, true);
+    assert.equal(engine.tunnelSystemProxyAvailable, expected, String(value));
+  }
 });
 
 test("accepts an identity-bound active proxy snapshot", () => {
@@ -184,7 +219,7 @@ test("keeps the fail-closed capability reason and the tunnel lifecycle labels", 
       config_digest: null,
       state: { state: "awaiting_approval", generation: 2 },
     },
-    capabilities: { system_proxy: true, tunnel: true },
+    capabilities: { system_proxy: true, tunnel: true, tunnel_system_proxy: true },
   });
   assert.equal(awaiting.state, "AwaitingApproval");
   assert.equal(tunnelValueLabel(awaiting), "Needs approval");

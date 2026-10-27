@@ -1,3 +1,4 @@
+#[cfg(any(target_os = "macos", test))]
 use std::env;
 use std::path::{Path, PathBuf};
 
@@ -31,6 +32,10 @@ const RETIREMENT_MARKER_BYTES: &[u8] = b"{\"schema_version\":1,\"completed\":tru
 
 #[derive(Debug, Error)]
 pub enum SettingsStoreError {
+    #[error("Windows could not resolve the current user's data directory (HRESULT {0:#x})")]
+    UserDataDirectoryUnavailable(i32),
+    #[error("settings directory entry changed but its durability could not be confirmed: {0}")]
+    CommitUncertain(std::io::Error),
     #[error("runtime settings changed while the update was prepared")]
     RuntimeSettingsChanged,
     #[error("HOME is not available; cannot resolve Clash for Mac data directory")]
@@ -87,6 +92,10 @@ pub enum FontFamily {
     AvenirNext,
     #[serde(rename = "SF Mono")]
     SfMono,
+    #[serde(rename = "Segoe UI")]
+    SegoeUi,
+    #[serde(rename = "Consolas")]
+    Consolas,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -245,7 +254,7 @@ impl AppPreferences {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MacOsAppPaths {
+pub struct AppPaths {
     pub app_home: PathBuf,
     pub preferences_file: PathBuf,
     pub window_state_file: PathBuf,
@@ -258,12 +267,21 @@ pub struct MacOsAppPaths {
     pub legacy_helpers_dir: PathBuf,
 }
 
-impl MacOsAppPaths {
+impl AppPaths {
+    #[cfg(target_os = "macos")]
     pub fn default_for_current_user() -> Result<Self, SettingsStoreError> {
         let home = env::var_os("HOME").ok_or(SettingsStoreError::MissingHome)?;
         Ok(Self::for_user_home(home))
     }
 
+    #[cfg(windows)]
+    pub fn default_for_current_user() -> Result<Self, SettingsStoreError> {
+        Ok(Self::from_app_home(
+            crate::paths_windows::local_app_data()?.join(APP_HOME_DIR_NAME),
+        ))
+    }
+
+    #[cfg(target_os = "macos")]
     pub fn for_user_home(home: impl Into<PathBuf>) -> Self {
         Self::from_app_home(
             home.into()
@@ -373,19 +391,19 @@ pub struct SettingsSnapshot {
 
 #[derive(Debug, Clone)]
 pub struct SettingsStore {
-    paths: MacOsAppPaths,
+    paths: AppPaths,
 }
 
 impl SettingsStore {
     pub fn default_for_current_user() -> Result<Self, SettingsStoreError> {
-        Ok(Self::new(MacOsAppPaths::default_for_current_user()?))
+        Ok(Self::new(AppPaths::default_for_current_user()?))
     }
 
-    pub fn new(paths: MacOsAppPaths) -> Self {
+    pub fn new(paths: AppPaths) -> Self {
         Self { paths }
     }
 
-    pub fn paths(&self) -> &MacOsAppPaths {
+    pub fn paths(&self) -> &AppPaths {
         &self.paths
     }
 

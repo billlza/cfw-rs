@@ -32,9 +32,11 @@ pub(crate) use profiles::{
 pub(crate) use runtime::{
     apply_active_profile, geoip_database_status, read_runtime_config_text, update_geoip_database,
 };
+#[cfg(target_os = "macos")]
+pub(crate) use settings::sanitize_legacy_preferences;
 pub(crate) use settings::{
-    UiSettingsMutations, read_settings_snapshot, sanitize_legacy_preferences,
-    set_launch_at_login_enabled, write_settings_snapshot,
+    UiSettingsMutations, read_settings_snapshot, set_launch_at_login_enabled,
+    write_settings_snapshot,
 };
 pub(crate) use shell_ops::{
     NetworkDiagnosticsGate, force_quit_app, move_dashboard_to_nearest_monitor, network_diagnostics,

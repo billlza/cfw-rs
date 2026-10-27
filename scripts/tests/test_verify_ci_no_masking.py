@@ -17,6 +17,7 @@ from scripts.verify_ci_no_masking import (
     REQUIRED_SWIFT_TARGET_INFO_PROBE,
     REQUIRED_XCODE_OWNERSHIP_STEP,
     REQUIRED_XCODE_RECORD_STEP,
+    audit_macos_hosted_job,
     audit_shell_test_python_isolation,
     audit_workflow,
 )
@@ -1353,6 +1354,139 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
             pins_path.write_text(PINS, encoding="utf-8")
             with self.assertRaisesRegex(CiPolicyError, "workflow is missing"):
                 audit_workflow(Path(tmp) / "absent.yml", pins_path)
+
+
+GATE = (
+    "./scripts/run_release_ci_gate.sh --validation-python-executable "
+    "'${{ steps.validation-python.outputs.python-path }}'"
+)
+HOSTED_PREPARE_STEP = f"      - name: Prepare\n        run: {GATE} prepare-cargo-workspace-inputs\n"
+HOSTED_BOOTSTRAP_STEP = f"      - name: Bootstrap\n        run: {GATE} bootstrap-policy-tools\n"
+HOSTED_AUDIT_STEP = (
+    f"      - name: Audit\n        run: {GATE} rust-target-audit --target x86_64-pc-windows-msvc\n"
+)
+HOSTED_DENY_STEP = (
+    f"      - name: Deny\n        run: {GATE} cargo-deny --target x86_64-pc-windows-msvc\n"
+)
+HOSTED_JOB_BOUNDARY = (
+    "    defaults:\n"
+    "      run:\n"
+    f'        shell: "{REQUIRED_RUN_SHELL}"\n'
+)
+HOSTED_JOB_WORKFLOW = (
+    "name: Windows shared contracts\n\n"
+    "on:\n  pull_request:\n\n"
+    "jobs:\n"
+    "  contracts:\n"
+    "    name: Windows x64 shared Rust and UI contracts\n"
+    "    runs-on: windows-2025\n"
+    "    timeout-minutes: 30\n"
+    "    defaults:\n      run:\n        shell: pwsh\n"
+    "    steps:\n"
+    "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n"
+    "      - name: Check\n        run: cargo test --locked\n"
+    "  supply-chain:\n"
+    "    name: Windows x64 Rust supply-chain policy\n"
+    "    runs-on: xcode-27\n"
+    "    timeout-minutes: 45\n"
+    + HOSTED_JOB_BOUNDARY
+    + "    steps:\n"
+    + CHECKOUT_STEP
+    + SOURCE_ASSERTION_STEP
+    + "      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97\n"
+    "        id: validation-python\n"
+    "        with:\n"
+    '          python-version: "3.14.7"\n'
+    "          architecture: arm64\n"
+    "          update-environment: false\n"
+    + XCODE_OWNERSHIP_STEP
+    + REQUIRED_XCODE_RECORD_STEP
+    + "\n"
+    + "      - uses: dtolnay/rust-toolchain@stable\n"
+    "        with:\n"
+    '          toolchain: "1.98.1"\n'
+    + HOSTED_PREPARE_STEP
+    + HOSTED_BOOTSTRAP_STEP
+    + HOSTED_AUDIT_STEP
+    + HOSTED_DENY_STEP
+)
+
+
+class HostedJobAuditTests(unittest.TestCase):
+    def _audit(self, directory: Path, workflow: str) -> tuple[tuple[str, ...], ...]:
+        workflow_path = directory / "windows.yml"
+        pins_path = directory / "pins.env"
+        workflow_path.write_text(workflow, encoding="utf-8")
+        pins_path.write_text(PINS, encoding="utf-8")
+        return audit_macos_hosted_job(workflow_path, "supply-chain", pins_path)
+
+    def test_hosted_job_returns_its_gate_invocations_in_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(
+                self._audit(Path(tmp), HOSTED_JOB_WORKFLOW),
+                (
+                    ("prepare-cargo-workspace-inputs",),
+                    ("bootstrap-policy-tools",),
+                    ("rust-target-audit", "--target", "x86_64-pc-windows-msvc"),
+                    ("cargo-deny", "--target", "x86_64-pc-windows-msvc"),
+                ),
+            )
+
+    def test_hosted_job_rejects_each_fail_open_drift(self) -> None:
+        drifts = {
+            "masked gate": HOSTED_JOB_WORKFLOW.replace(
+                "prepare-cargo-workspace-inputs\n", "prepare-cargo-workspace-inputs || true\n"
+            ),
+            "conditional job": HOSTED_JOB_WORKFLOW.replace(
+                "    runs-on: xcode-27\n",
+                "    if: ${{ github.ref_protected }}\n    runs-on: xcode-27\n",
+            ),
+            "foreign runner": HOSTED_JOB_WORKFLOW.replace(
+                "    runs-on: xcode-27\n", "    runs-on: macos-15\n"
+            ),
+            "no job bound": HOSTED_JOB_WORKFLOW.replace("    timeout-minutes: 45\n", ""),
+            "loose shell": HOSTED_JOB_WORKFLOW.replace(
+                f'        shell: "{REQUIRED_RUN_SHELL}"\n', "        shell: bash\n"
+            ),
+            "no boundary": HOSTED_JOB_WORKFLOW.replace(HOSTED_JOB_BOUNDARY, ""),
+            "drifted Rust": HOSTED_JOB_WORKFLOW.replace(
+                'toolchain: "1.98.1"', 'toolchain: "1.99.0"'
+            ),
+            "drifted Python": HOSTED_JOB_WORKFLOW.replace(
+                'python-version: "3.14.7"', 'python-version: "3.14.8"'
+            ),
+            "no Xcode ownership": HOSTED_JOB_WORKFLOW.replace(XCODE_OWNERSHIP_STEP, ""),
+            "no source assertion": HOSTED_JOB_WORKFLOW.replace(SOURCE_ASSERTION_STEP, ""),
+            "bootstrap before inputs": HOSTED_JOB_WORKFLOW.replace(
+                HOSTED_PREPARE_STEP + HOSTED_BOOTSTRAP_STEP,
+                HOSTED_BOOTSTRAP_STEP + HOSTED_PREPARE_STEP,
+            ),
+            "raw cargo": HOSTED_JOB_WORKFLOW.replace(
+                HOSTED_DENY_STEP,
+                "      - name: Raw\n        run: cargo deny check\n" + HOSTED_DENY_STEP,
+            ),
+            "no gates": HOSTED_JOB_WORKFLOW.replace(
+                HOSTED_PREPARE_STEP + HOSTED_BOOTSTRAP_STEP + HOSTED_AUDIT_STEP + HOSTED_DENY_STEP,
+                "      - name: Nothing\n        run: /bin/true\n",
+            ),
+        }
+        for label, drifted in drifts.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                self.assertNotEqual(drifted, HOSTED_JOB_WORKFLOW)
+                with self.assertRaises(CiPolicyError):
+                    self._audit(Path(tmp), drifted)
+
+    def test_hosted_job_must_exist_in_the_workflow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow_path = Path(tmp) / "windows.yml"
+            pins_path = Path(tmp) / "pins.env"
+            workflow_path.write_text(
+                HOSTED_JOB_WORKFLOW.replace("  supply-chain:\n", "  policy:\n"),
+                encoding="utf-8",
+            )
+            pins_path.write_text(PINS, encoding="utf-8")
+            with self.assertRaisesRegex(CiPolicyError, "declares no job 'supply-chain'"):
+                audit_macos_hosted_job(workflow_path, "supply-chain", pins_path)
 
 
 if __name__ == "__main__":

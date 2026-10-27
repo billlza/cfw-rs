@@ -402,7 +402,9 @@ pub enum CredentialSlotError {
     NonEmptyPlaceholder,
 }
 
-pub(crate) fn validate_slots(
+/// Verify bounded, unique typed targets and empty placeholders. This validates
+/// template structure, not authority to read the referenced vault entries.
+pub fn validate_slots(
     root: &serde_json::Value,
     slots: &[CredentialSlot],
 ) -> Result<(), CredentialSlotError> {

@@ -5,13 +5,15 @@ import { createNativeGeneralSwitches } from "./native-general-switches.js";
 import { createNativePromptDialog, promptDialogFrame } from "./native-prompt-dialog.js";
 import { createWindowGlass } from "./window-glass.js";
 import { navIcon } from "./nav-icons.js";
+import { platformPresentation, platformStartupDesign, proxyEnvironmentCommands } from "./platform-presentation.js";
+import { FONT_OPTIONS, platformFontStyles } from "./font-preferences.js";
+import { networkDiagnosticsView } from "./network-diagnostics.js";
 import { t, setLocale, getLocale, SUPPORTED_LOCALES, LANGUAGE_OPTIONS } from "./i18n.js";
 import {
   PAGES,
   defaultEngineStatus,
   defaultSettings,
   defaultSettingsSnapshot,
-  FONT_OPTIONS,
   THEME_OPTIONS,
   state,
   primaryNavIds,
@@ -145,6 +147,7 @@ function dismissNativeProfileMenu() {
 const LOGIN_ITEM_LIVE_STATUSES = new Set([
   "checking",
   "enabled",
+  "registered",
   "not_registered",
   "not_found",
   "requires_approval",
@@ -170,7 +173,7 @@ const REASONS = Object.freeze({
   get mixin() { return t("Mixin is unavailable: the engine configuration is projected by the app, and an imported document may only describe routing and outbound policy."); },
   get geoip() { return t("Country rules use sing-box rule sets, downloaded on first start and refreshed daily while the engine runs. An existing Clash Country.mmdb file is not used."); },
   get mainlandChinaDirect() { return t("In Rule mode, traffic that no profile rule matches goes direct when it is bound for mainland China, and the app's own DNS answers mainland names through encrypted DNS in mainland China. The first start with each profile downloads the China rule sets through the proxy and waits for them; they then refresh daily while the core runs. It does not apply to a profile that routes directly. Existing connections may reconnect when this changes."); },
-  get restoreDns() { return t("This app never writes host DNS, because the legacy restore value carries no per-service ownership identity. Clear or set custom DNS per service in System Settings › Network › Details › DNS."); },
+  get restoreDns() { return t(platformPresentation(state.payload.product.operating_system).systemDns); },
   get engineNotOff() { return t("Stop the core before credential maintenance or legacy migration."); },
 });
 
@@ -197,7 +200,7 @@ const { renderConnections, scheduleConnectionsPatch, connectionFacets, bindConne
 import { createRulesView } from "./rules.js";
 const { renderRules, changePage: changeRulePage } = createRulesView({state,escapeHtml});
 import { createSettingsView } from "./settings-view.js";
-const { renderSettings, renderNetworkDiagnostics } = createSettingsView({ state, defaultSettingsSnapshot, defaultSettings, engineIsOff, launchAtLoginPresentation, escapeHtml, renderToggle, THEME_OPTIONS, FONT_OPTIONS, REASONS, engineStateLabel, serviceProxyLabel });
+const { renderSettings, renderNetworkDiagnostics } = createSettingsView({ state, defaultSettingsSnapshot, defaultSettings, engineIsOff, launchAtLoginPresentation, escapeHtml, renderToggle, THEME_OPTIONS, REASONS, engineStateLabel, serviceProxyLabel });
 
 import { createAutomationSettingsUI } from "./automation-settings.js";
 const automationSettingsUI = createAutomationSettingsUI({ state, invoke, renderPage, appendLog,
@@ -236,6 +239,7 @@ function applyPersistedSettings(snapshot) {
   state.settingsUnavailableReason = null;
   state.launchAtLogin = launchAtLogin;
   state.toggles.startAtLogin = launchAtLogin.liveStatus === "enabled"
+    || launchAtLogin.liveStatus === "registered"
     || launchAtLogin.liveStatus === "requires_approval";
   state.toggles.silentStart = Boolean(settings.silent_start);
   state.toggles.checkForUpdates = Boolean(settings.check_for_updates);
@@ -325,13 +329,19 @@ function normalizeLaunchAtLoginState(snapshot) {
   if (!LOGIN_ITEM_LIVE_STATUSES.has(value.live_status)) {
     throw new TypeError("Login Item live status is invalid");
   }
+  const windows = state.payload?.product?.operating_system === "windows";
+  if (windows
+    ? !["checking", "registered", "not_registered"].includes(value.live_status)
+    : value.live_status === "registered") {
+    throw new TypeError("startup status does not belong to the current platform");
+  }
   if (typeof value.matches_persisted_intent !== "boolean") {
     throw new TypeError("Login Item synchronization flag is not boolean");
   }
   if (value.persisted_intent !== snapshot.settings.launch_at_login) {
     throw new TypeError("Login Item persisted intent disagrees with settings");
   }
-  const expectedMatch = value.live_status === "enabled"
+  const expectedMatch = value.live_status === "enabled" || value.live_status === "registered"
     ? value.persisted_intent
     : value.live_status === "not_registered" || value.live_status === "not_found"
       ? !value.persisted_intent
@@ -354,15 +364,38 @@ function launchAtLoginPresentation() {
     };
   }
   const value = state.launchAtLogin;
+  const windows = state.payload?.product?.operating_system === "windows";
   if (value.observationError) {
     return { hint: value.observationError, reason: value.observationError };
   }
   if (value.liveStatus === "checking") {
-    const reason = t("Checking macOS Login Item status…");
+    const reason = windows ? t("Checking Windows startup registration…") : t("Checking macOS Login Item status…");
     return { hint: reason, reason };
   }
   if (value.liveStatus === "unknown") {
-    const reason = t("Start at Login is unavailable because macOS returned an unknown Login Item state.");
+    const reason = windows
+      ? t("Windows startup registration could not be verified. Reload to retry.")
+      : t("Start at Login is unavailable because macOS returned an unknown Login Item state.");
+    return { hint: reason, reason };
+  }
+  if (windows) {
+    if (value.liveStatus === "registered") {
+      return {
+        hint: value.matchesPersistedIntent
+          ? t("Registered for this user's sign-in. Windows Startup settings can disable or delay launch; registration does not confirm launch.")
+          : t("Windows has a startup registration while the saved preference says Off. Switching Off removes the registration."),
+        reason: null,
+      };
+    }
+    if (value.liveStatus === "not_registered") {
+      return {
+        hint: value.matchesPersistedIntent
+          ? t("No startup registration for this user; the saved preference is Off.")
+          : t("The saved preference says On, but the Windows startup registration is absent. Switching On retries registration."),
+        reason: null,
+      };
+    }
+    const reason = t("Windows startup registration could not be verified. Reload to retry.");
     return { hint: reason, reason };
   }
   if (value.liveStatus === "requires_approval") {
@@ -401,9 +434,10 @@ function persistedSettingsFromUi() {
   const fontFamily = document.querySelector("[data-font-family]")?.value ?? current.font_family ?? "";
   const language = document.querySelector("[data-language-setting]")?.value ?? current.language;
   if (!LANGUAGE_OPTIONS.some((option) => option.value === language)) throw new TypeError("Invalid language preference");
+  if (!FONT_OPTIONS.some((option) => option.value === fontFamily)) throw new TypeError("Invalid font preference");
   return {
     theme: THEME_OPTIONS.some((option) => option.value === theme) ? theme : "system",
-    font_family: FONT_OPTIONS.some((option) => option.value === fontFamily) ? fontFamily : "",
+    font_family: fontFamily,
     language,
     retain_window_bounds: state.toggles.retainWindowBounds,
     launch_at_login: Boolean(current.launch_at_login),
@@ -419,11 +453,9 @@ function applyAppearance(settings) {
     : requested;
   document.documentElement.dataset.theme = resolved;
   windowGlass.refresh();
-  const font = String(settings.font_family ?? "").trim();
-  document.documentElement.style.setProperty(
-    "--sans",
-    font ? `"${font}", "Avenir Next", "SF Pro Text", "Helvetica Neue", sans-serif` : '"Avenir Next", "SF Pro Text", "Helvetica Neue", sans-serif',
-  );
+  for (const [property, value] of Object.entries(platformFontStyles(state.payload.product.operating_system, settings.font_family))) {
+    document.documentElement.style.setProperty(property, value);
+  }
 }
 
 function localizeShell() {
@@ -1118,23 +1150,35 @@ function engineToggleCapability(key) {
     return {
       available: state.engine.localProxyAvailable === true,
       label: t("Core"),
-      reason: state.engine.availabilityReason ?? t("The signed ProxyAgent has not reported local proxy capability."),
+      reason: state.engine.availabilityReason ?? t(platformPresentation(state.payload.product.operating_system).localProxyUnavailable),
     };
   }
+  // Turning one integration on while the other is requested asks for the
+  // combined mode, which has its own capability and its own reason; it is not
+  // the engine's general availability or an earlier failure.
+  const presentation = () => platformPresentation(state.payload.product.operating_system);
+  const combinationRefused = (alone, otherRequested) => alone && otherRequested
+    && state.engine.tunnelSystemProxyAvailable !== true;
   if (key === "systemProxy") {
+    const alone = state.engine.systemProxyAvailable === true;
+    const refused = combinationRefused(alone, modeHasTunnel(state.engine.desiredMode));
     return {
-      available: state.engine.systemProxyAvailable === true,
+      available: alone && !refused,
       get label() { return t("System Proxy"); },
-      reason: state.engine.availabilityReason
-        ?? t("The signed ProxyAgent has not reported capability."),
+      reason: refused
+        ? t(presentation().combinedUnavailable)
+        : state.engine.availabilityReason ?? t(presentation().systemProxyUnavailable),
     };
   }
   if (key === "tunMode") {
+    const alone = state.engine.tunnelAvailable === true;
+    const refused = combinationRefused(alone, modeHasSystemProxy(state.engine.desiredMode));
     return {
-      available: state.engine.tunnelAvailable === true,
+      available: alone && !refused,
       get label() { return t("TUN Mode"); },
-      reason: state.engine.availabilityReason
-        ?? t("The signed Packet Tunnel System Extension has not reported capability."),
+      reason: refused
+        ? t(presentation().combinedUnavailable)
+        : state.engine.availabilityReason ?? t(presentation().tunnelUnavailable),
     };
   }
   return null;
@@ -1774,19 +1818,16 @@ function renderGlassOverlays() {
         </div>
       `);
     } else if (dialog.kind === "network-services") {
-      const rows = (dialog.payload ?? []).map((row) => `
-        <tr>
-          <td>${escapeHtml(row.display_name ?? row.service_id ?? "unknown")}</td>
-          <td>${escapeHtml(String(row.order ?? "—"))}</td>
-          <td>${escapeHtml(serviceProxyLabel(row))}</td>
-        </tr>`).join("");
+      const presentation = networkDiagnosticsView(dialog.payload, serviceProxyLabel);
+      const rows = presentation.rows.map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(cell)}</td>`).join("")}</tr>`).join("");
       parts.push(`
         <div class="glass-dialog-backdrop" data-glass-dismiss></div>
-        <div class="glass-dialog glass-dialog-wide" role="dialog" aria-label="${escapeHtml(t("Network services"))}">
-          <h3>${escapeHtml(t("Network services"))}</h3>
-          <p class="glass-dialog-copy">${escapeHtml(t("Read from SystemConfiguration only. The default-route interface, hardware port and BSD device are not reported: the child-process tools that supplied them are gone."))}</p>
-          <div class="glass-table-wrap"><table class="glass-table"><thead><tr><th>${escapeHtml(t("Service"))}</th><th>${escapeHtml(t("Order"))}</th><th>${escapeHtml(t("Proxy"))}</th></tr></thead><tbody>${rows || `<tr><td colspan="3">${escapeHtml(t("No services"))}</td></tr>`}</tbody></table></div>
-          ${dialog.unavailable?.length ? `<p class="glass-dialog-copy">${escapeHtml(t("Unavailable fields"))}: ${escapeHtml(dialog.unavailable.join(", "))}</p>` : ""}
+        <div class="glass-dialog glass-dialog-wide" role="dialog" aria-label="${escapeHtml(presentation.title)}">
+          <h3>${escapeHtml(presentation.title)}</h3>
+          <p class="glass-dialog-copy">${escapeHtml(presentation.description)}</p>
+          ${dialog.payload.platform === "windows" ? `<p class="glass-dialog-copy">${escapeHtml(presentation.summary[0][0])}: ${escapeHtml(presentation.summary[0][1])}</p>` : ""}
+          <div class="glass-table-wrap"><table class="glass-table"><thead><tr>${presentation.columns.map((column) => `<th>${escapeHtml(column)}</th>`).join("")}</tr></thead><tbody>${rows || `<tr><td colspan="3">${escapeHtml(presentation.empty)}</td></tr>`}</tbody></table></div>
+          ${presentation.unavailable.length ? `<p class="glass-dialog-copy">${escapeHtml(t("Unavailable fields"))}: ${escapeHtml(presentation.unavailable.join(", "))}</p>` : ""}
           <div class="glass-dialog-actions"><button type="button" class="glass-btn ghost" data-glass-dismiss>${escapeHtml(t("Close"))}</button></div>
         </div>
       `);
@@ -1879,10 +1920,11 @@ function renderGlassOverlays() {
       `);
     } else if (dialog.kind === "product-about") {
       const product = state.payload.product;
+      const presentation = platformPresentation(product.operating_system);
       const version = product.version ?? "—";
       const update = dialog.payload?.update;
       const phase = dialog.payload?.phase ?? (dialog.payload?.checking ? "checking" : "idle");
-      const installView = updateInstallView(update, state.updateInstall);
+      const installView = updateInstallView(update, state.updateInstall, product.operating_system);
       const status = phase === "checking" ? productAboutStatusText(dialog.payload)
         : installView.status ?? productAboutStatusText(dialog.payload);
       const busy = phase === "checking" || installView.busy;
@@ -1896,13 +1938,13 @@ function renderGlassOverlays() {
           : "";
       parts.push(`
         <div class="glass-dialog-backdrop" data-glass-dismiss></div>
-        <div class="glass-dialog product-about" role="dialog" aria-label="${escapeHtml(t("About Clash for Mac"))}">
+        <div class="glass-dialog product-about" role="dialog" aria-label="${escapeHtml(t("About {product}", { product: product.name }))}">
           <div class="product-about-icon">${renderCatLogo()}</div>
-          <div class="product-about-name">Clash for Mac</div>
+          <div class="product-about-name">${escapeHtml(product.name)}</div>
           <div class="product-about-sub">${escapeHtml(t("Powered by sing-box"))}</div>
           <div class="product-about-meta">
             <div>版本 ${escapeHtml(String(version))}</div>
-            <div>${escapeHtml(String(product.architecture ?? "arm64"))} · macOS ${escapeHtml(String(product.minimum_macos ?? "15.0"))}+</div>
+            <div>${escapeHtml(product.architecture)} · ${presentation.name}${product.minimum_os_version === null ? "" : ` ${escapeHtml(product.minimum_os_version)}+`}</div>
           </div>
           <div class="product-about-status">${escapeHtml(status)}</div>
           ${notes}
@@ -1914,7 +1956,7 @@ function renderGlassOverlays() {
             <button type="button" class="glass-btn ghost" data-glass-check-update ${busy ? "disabled" : ""}>${phase === "checking" ? "Checking…" : t("Check for Update")}</button>
             <button type="button" class="glass-btn ghost" data-glass-dismiss ${busy ? "disabled" : ""}>${escapeHtml(t("Close"))}</button>
           </div>
-          <div class="product-about-copy">© Clash for Mac · ${escapeHtml(String(product.license ?? "GPL-3.0-or-later"))}</div>
+          <div class="product-about-copy">© ${escapeHtml(product.name)} · ${escapeHtml(product.license)}</div>
         </div>
       `);
     }
@@ -2396,7 +2438,7 @@ function renderProfiles() {
             <i></i>
             <div class="profile-card-main">
               <h3>${escapeHtml(profile.name)}</h3>
-              <p title="${escapeHtml(t("Time since this profile was saved in Clash for Mac"))}">${escapeHtml(profileSourceLabel(profile))} (${escapeHtml(profile.updated)})</p>
+              <p title="${escapeHtml(t("Time since this profile was saved in {product}", { product: state.payload.product.name }))}">${escapeHtml(profileSourceLabel(profile))} (${escapeHtml(profile.updated)})</p>
             </div>
             <div class="profile-card-primary">
               <button data-profile-action="edit" data-profile-id="${escapeHtml(profile.id)}" title="${escapeHtml(t("Open this profile"))}">‹›</button>
@@ -2405,7 +2447,8 @@ function renderProfiles() {
         `).join("") + state.invalidProfiles.map(renderInvalidProfileCard).join("") : `
           <div class="empty-profile-state">
             <p>${escapeHtml(t("No profiles found in the managed profiles directory."))}</p>
-            <button data-action="migrate-legacy-profiles">${escapeHtml(t("Migrate selected legacy subscription"))}</button>
+            ${state.payload.product.operating_system === "macos"
+              ? `<button data-action="migrate-legacy-profiles">${escapeHtml(t("Migrate selected legacy subscription"))}</button>` : ""}
           </div>
         `}
       </section>
@@ -2548,21 +2591,25 @@ function renderLogs() {
 
 function renderFeedback() {
   const product = state.payload.product;
+  const presentation = platformPresentation(product.operating_system);
   const version = product.version ?? "—";
   const update = state.updateInfo;
   const updateLine = update?.available && update?.version
     ? t("New version available: v{value1} (current v{value2}).", { value1: escapeHtml(String(update.version)), value2: escapeHtml(String(update.current ?? version)) })
-    : t("Current build v{value1} — the menu bar Clash for Mac → Check for Update… also works.", { value1: escapeHtml(String(version)) });
+    : product.operating_system === "macos"
+      ? t("Current build v{value1} — the menu bar Clash for Mac → Check for Update… also works.", { value1: escapeHtml(String(version)) })
+      : t("Current build v{value1} — check for updates from the tray menu.", { value1: escapeHtml(String(version)) });
   const platform = state.platform;
+  const startupDesign = platform ? platformStartupDesign(product.operating_system, platform) : null;
   return `
     <div class="feedback-layout">
       <section class="panel hero-panel">
         <div>
           <p class="label">${escapeHtml(t("About"))}</p>
-          <h3>${escapeHtml(product.name ?? "Clash for Mac")} v${escapeHtml(String(version))}${update?.available && update?.version ? ` → v${escapeHtml(String(update.version))}` : ""}</h3>
-          <p class="muted">${escapeHtml(product.license ?? "GPL-3.0-or-later")} · ${escapeHtml(product.architecture ?? "arm64")} · macOS ${escapeHtml(product.minimum_macos ?? "15.0")} or later</p>
+          <h3>${escapeHtml(product.name)} v${escapeHtml(String(version))}${update?.available && update?.version ? ` → v${escapeHtml(String(update.version))}` : ""}</h3>
+          <p class="muted">${escapeHtml(product.license)} · ${escapeHtml(product.architecture)} · ${presentation.name}${product.minimum_os_version === null ? "" : ` ${escapeHtml(product.minimum_os_version)} or later`}</p>
         </div>
-        <span class="badge">${escapeHtml(t("ARM64 macOS only"))}</span>
+        <span class="badge">${escapeHtml(product.operating_system === "macos" ? t("ARM64 macOS only") : `${presentation.name} ${product.architecture}`)}</span>
       </section>
 
       <section class="panel">
@@ -2579,10 +2626,10 @@ function renderFeedback() {
         <h3>${escapeHtml(t("How this build runs the network"))}</h3>
         ${platform ? `
           <dl class="ports-list feedback-list">
-            <div><dt>${escapeHtml(t("system proxy"))}</dt><dd>${escapeHtml(platform.system_proxy_strategy ?? "")}</dd></div>
-            <div><dt>tunnel</dt><dd>${escapeHtml(platform.tun_strategy ?? "")}</dd></div>
-            <div><dt>helper</dt><dd>${escapeHtml(platform.helper_strategy ?? "")}</dd></div>
-            <div><dt>launchd</dt><dd>${escapeHtml(platform.launchd_strategy ?? "")}</dd></div>
+            <div><dt>${escapeHtml(t("system proxy"))}</dt><dd>${escapeHtml(t(platform.system_proxy_strategy ?? ""))}</dd></div>
+            <div><dt>tunnel</dt><dd>${escapeHtml(t(platform.tun_strategy ?? ""))}</dd></div>
+            <div><dt>helper</dt><dd>${escapeHtml(t(platform.helper_strategy ?? ""))}</dd></div>
+            <div><dt>${escapeHtml(t(startupDesign.label))}</dt><dd>${escapeHtml(t(startupDesign.value))}</dd></div>
           </dl>
         ` : `<p class="muted">${escapeHtml(t("Platform design is unavailable."))}</p>`}
       </section>
@@ -2636,7 +2683,7 @@ function renderPageContent() {
   }
   document.title = "";
   const productName = document.getElementById("product-name");
-  if (productName) productName.textContent = state.payload.product?.name ?? "Clash for Mac";
+  if (productName) productName.textContent = state.payload.product.name;
   const statusTitle = document.getElementById("status-title");
   if (statusTitle) statusTitle.textContent = state.mode ? t("{title} - {mode} Mode", { title: t(page.title), mode: t(state.mode) }) : t(page.title);
   document.getElementById("page-title").textContent = t(page.title);
@@ -3414,7 +3461,16 @@ async function reconcileStartupServices() {
   }
 }
 
+const MACOS_MAINTENANCE_ACTIONS = new Set([
+  "open-legacy-maintenance", "close-legacy-maintenance", "begin-migration-handoff",
+  "prepare-cutover", "confirm-cutover", "recover-cutover",
+  "migrate-legacy-profiles",
+]);
+
 export async function handleAction(action) {
+  if (MACOS_MAINTENANCE_ACTIONS.has(action) && state.payload.product.operating_system !== "macos") {
+    throw new Error("Historical Mac maintenance does not apply to this platform");
+  }
   if (action === "reconcile-startup-services") return reconcileStartupServices();
   if (action === "open-automation-settings") { await automationSettingsUI.open(); return; }
   if (action === "open-runtime-settings") { await runtimeSettingsUI.open(); return; }
@@ -3636,14 +3692,10 @@ export async function handleAction(action) {
       renderPage();
       return;
     }
-    const exports = [
-      `export https_proxy=http://127.0.0.1:${port}`,
-      `export http_proxy=http://127.0.0.1:${port}`,
-      `export all_proxy=socks5://127.0.0.1:${port}`,
-    ].join("\n");
     try {
+      const exports = proxyEnvironmentCommands(state.payload.product.operating_system, port);
       await navigator.clipboard.writeText(exports);
-      appendLog("info", "shell", t("Copied proxy export commands for Terminal"));
+      appendLog("info", "shell", t(platformPresentation(state.payload.product.operating_system).copiedProxyCommands));
     } catch (error) {
       appendLog("warning", "clipboard", errorText(error));
     }
@@ -3662,11 +3714,11 @@ export async function handleAction(action) {
   if (action === "show-network-interfaces") {
     try {
       const diagnostics = await invoke("network_diagnostics");
+      networkDiagnosticsView(diagnostics, serviceProxyLabel);
       state.networkDiagnostics = diagnostics;
       state.glassDialog = {
         kind: "network-services",
-        payload: diagnostics?.services ?? [],
-        unavailable: diagnostics?.unavailable ?? [],
+        payload: diagnostics,
       };
       renderGlassOverlays();
       return;
@@ -3695,7 +3747,7 @@ export async function handleAction(action) {
       kind: "info",
       payload: {
         title: t("TUN Mode"),
-        body: t("TUN Mode runs the packet tunnel as a signed NetworkExtension System Extension. macOS asks for approval once, under System Settings › General › Login Items & Extensions; until it is approved the switch stays unavailable."),
+        body: t(platformPresentation(state.payload.product.operating_system).tunnelInfo),
       },
     };
     renderGlassOverlays();
@@ -3715,9 +3767,18 @@ export async function handleAction(action) {
   if (action === "open-home-directory") {
     try {
       await invoke("reveal_home_directory");
-      appendLog("info", "shell", t("Home Directory opened in Finder"));
+      appendLog("info", "shell", state.payload.product.operating_system === "windows"
+        ? t("Home Directory opened in File Explorer") : t("Home Directory opened in Finder"));
     } catch (error) {
       appendLog("error", "shell", t("Open Folder failed: {error}", { error: errorText(error) }));
+    }
+  }
+  if (action === "open-windows-startup-settings" && state.payload?.product?.operating_system === "windows") {
+    try {
+      await invoke("open_login_items_settings");
+      appendLog("info", "shell", t("Opened Windows Startup settings"));
+    } catch (error) {
+      appendLog("error", "shell", t("Windows Startup settings could not be opened: {error}", { error: errorText(error) }));
     }
   }
   if (action === "retry-system-proxy") {
@@ -3977,7 +4038,8 @@ export async function handleAction(action) {
   if (action === "reveal-logs") {
     try {
       await invoke("reveal_logs_directory");
-      appendLog("info", "logs", t("Logs folder opened in Finder"));
+      appendLog("info", "logs", state.payload.product.operating_system === "windows"
+        ? t("Logs folder opened in File Explorer") : t("Logs folder opened in Finder"));
     } catch (error) {
       appendLog("error", "logs", t("Open Folder failed: {error}", { error: errorText(error) }));
     }
@@ -4254,7 +4316,9 @@ async function loadEngineStatus() {
 /// visible rather than being represented as completed cleanup.
 async function loadRetirementStatus() {
   try {
-    state.retirement = normalizeRetirementStatus(await invoke("legacy_retirement_status"));
+    state.retirement = normalizeRetirementStatus(
+      await invoke("legacy_retirement_status"), state.payload.product.operating_system,
+    );
   } catch (error) {
     state.retirement = unverifiableRetirementStatus(errorText(error));
     appendLog("error", "engine", t("Unable to read the legacy retirement state: {error}", { error: errorText(error) }));
@@ -4263,7 +4327,9 @@ async function loadRetirementStatus() {
 
 async function loadPlatformDesign() {
   try {
-    state.platform = await invoke("current_platform_design");
+    const platform = await invoke("current_platform_design");
+    platformStartupDesign(state.payload.product.operating_system, platform);
+    state.platform = platform;
   } catch (error) {
     state.platform = null;
     appendLog("error", "shell", t("Unable to read the platform design: {error}", { error: errorText(error) }));
@@ -4346,7 +4412,9 @@ async function refreshStartupLoginItemStatus(expectedSettings) {
     if (state.settingsSnapshot === expectedSettings) applyPersistedSettings(snapshot);
   } catch {
     if (state.settingsSnapshot === expectedSettings) {
-      state.launchAtLogin.observationError = "macOS Login Item status could not be read. Reload to retry; the failure is recorded in local diagnostics.";
+      state.launchAtLogin.observationError = state.payload?.product?.operating_system === "windows"
+        ? t("Windows startup registration could not be read. Reload to retry; the failure is recorded in local diagnostics.")
+        : "macOS Login Item status could not be read. Reload to retry; the failure is recorded in local diagnostics.";
       appendLog("warning", "settings", state.launchAtLogin.observationError);
     }
   }
@@ -4355,10 +4423,12 @@ async function refreshStartupLoginItemStatus(expectedSettings) {
 
 async function loadNetworkDiagnostics() {
   try {
-    state.networkDiagnostics = await invoke("network_diagnostics");
+    const diagnostics = await invoke("network_diagnostics");
+    networkDiagnosticsView(diagnostics, serviceProxyLabel);
+    state.networkDiagnostics = diagnostics;
   } catch (error) {
     state.networkDiagnostics = null;
-    appendLog("error", "network", t("Unable to inspect macOS network services: {error}", { error: errorText(error) }));
+    appendLog("error", "network", t("Unable to inspect network settings: {error}", { error: errorText(error) }));
   }
 }
 
@@ -4827,7 +4897,7 @@ export function renderFatalBootstrap() {
     window.__CFM_STARTUP__.fail();
     return;
   }
-  document.body.innerHTML = `<pre class="fatal">${escapeHtml(t("Clash for Mac could not start safely (startup_state_unverifiable). Review the application log before retrying."))}</pre>`;
+  document.body.innerHTML = `<pre class="fatal">${escapeHtml(t("The application could not start safely (startup_state_unverifiable). Review the application log before retrying."))}</pre>`;
 }
 
 bootstrap().catch(() => {

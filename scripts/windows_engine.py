@@ -3,6 +3,8 @@
 The source is created in an absent, task-owned directory. We reuse the existing
 upstream, patch, module and combined-diff pins rather than accepting a second
 definition of the CFM engine. No existing checkout or global tool is modified.
+Before the engine is built, the pinned vulnerability scanner checks the exact
+linked graph of both programs against the official Go vulnerability database.
 """
 from __future__ import annotations
 
@@ -26,6 +28,13 @@ PATCHES = ("SECURITY", "RAW_PACKET", "DNS_FAILOVER", "ENDPOINT_CONFLICT", "PROFI
 WINDOWS_TEST_OVERLAY = "native/windows/engine-tests/dns-response-lifecycle.patch"
 WINDOWS_TEST_FILE = "dns/runtime_policy_test.go"
 WINTUN_PACKAGE = "github.com/sagernet/sing-tun/internal/wintun"
+# The two programs this lane links: the engine and our process entry point.
+ENGINE_MODULE = "github.com/sagernet/sing-box"
+ENGINE_PACKAGE = "./cmd/sing-box"
+HOST_PACKAGE = "./cmd/cfw-engine-host"
+SCANNER_MODULE = "golang.org/x/vuln"
+SCANNER_PACKAGE = "golang.org/x/vuln/cmd/govulncheck"
+VULNERABILITY_DATABASE = "https://vuln.go.dev"
 DIFF_OPTIONS = [
     "-c", "diff.interHunkContext=0", "-c", "diff.suppressBlankEmpty=false",
     "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--binary",
@@ -79,7 +88,10 @@ def read_pins(repository: Path) -> dict[str, str]:
     require(bool(re.fullmatch(r"[a-f0-9]{40}", pins["SING_BOX_COMMIT"])), "invalid engine commit")
     require(bool(re.fullmatch(r"v\d+\.\d+\.\d+", pins["SING_BOX_VERSION"])), "invalid engine version")
     require(bool(re.fullmatch(r"[a-z0-9_,]+", pins["LIBBOX_BUILD_TAGS"])), "invalid engine build tags")
+    require(bool(re.fullmatch(r"v\d+\.\d+\.\d+", pins["GOVULNCHECK_VERSION"])), "invalid scanner version")
+    require(bool(re.fullmatch(r"h1:[A-Za-z0-9+/]{43}=", pins["GOVULNCHECK_MODULE_SUM"])), "invalid scanner module sum")
     for key in ["GO_WINDOWS_AMD64_SHA256", "LIBBOX_MODULE_CACHE_CONTRACT_SHA256",
+                "GO_RELEASE_TOOLS_GO_MOD_SHA256", "GO_RELEASE_TOOLS_GO_SUM_SHA256",
                 "WINTUN_ARCHIVE_SHA256", "WINTUN_WINDOWS_AMD64_SHA256", "WINTUN_BINARY_LICENSE_SHA256",
                 "SING_BOX_COMBINED_DIFF_SHA256", "SING_BOX_PATCHED_DIFF_SHA256",
                 "SING_BOX_UPSTREAM_GO_MOD_SHA256", "SING_BOX_UPSTREAM_GO_SUM_SHA256",
@@ -188,7 +200,7 @@ def bundle_wintun_notice(repository: Path, package: dict[str, object], root: Pat
 def bundle_notices(repository: Path, go: Path, source: Path, output: Path,
                    environment: dict[str, str], pins: dict[str, str]) -> dict[str, object]:
     packages = json_objects(command([str(go), "list", "-deps", "-json", "-tags", pins["LIBBOX_BUILD_TAGS"],
-                                     "./cmd/sing-box", "./cmd/cfw-engine-host"], cwd=source, env=environment))
+                                     ENGINE_PACKAGE, HOST_PACKAGE], cwd=source, env=environment))
     roots: dict[tuple[str, str], Path] = {("Go", pins["GO_VERSION"]): go.parent.parent.resolve()}
     embedded = []
     for package in packages:
@@ -390,6 +402,113 @@ def test_packages(repository: Path, pins: dict[str, str]) -> list[str]:
     return packages
 
 
+def hermetic_go_environment(root: Path) -> dict[str, str]:
+    """One Go phase owns one tree for its workspace, modules and build cache.
+
+    Ambient Go and cgo settings are dropped. Modules resolve through the public
+    proxy and checksum database, read-only against the module files, until the
+    caller switches the phase offline.
+    """
+    environment = {key: value for key, value in os.environ.items()
+                   if not key.upper().startswith(("GO", "CGO"))}
+    environment.update({"GOENV": "off", "GOWORK": "off", "GOTOOLCHAIN": "local",
+                        "GOTELEMETRY": "off", "CGO_ENABLED": "0", "GOPATH": str(root / "gopath"),
+                        "GOMODCACHE": str(root / "modules"), "GOCACHE": str(root / "cache"),
+                        "GOPROXY": "https://proxy.golang.org", "GOSUMDB": "sum.golang.org",
+                        "GONOSUMDB": "", "GOPRIVATE": "", "GONOPROXY": "",
+                        "GOFLAGS": "-mod=readonly"})
+    return environment
+
+
+def verify_release_tools_source(tools: Path, pins: dict[str, str]) -> None:
+    """The release tools module files are the only inputs that select the scanner's graph."""
+    for name, key in (("go.mod", "GO_RELEASE_TOOLS_GO_MOD_SHA256"), ("go.sum", "GO_RELEASE_TOOLS_GO_SUM_SHA256")):
+        path = tools / name
+        regular_file(path)
+        require(sha256(path) == pins[key], f"release tools {name} digest mismatch")
+
+
+def require_scanner_identity(build_info: str, pins: dict[str, str]) -> None:
+    """`go version -m` must name the pinned Go, the scanner package and its pinned module."""
+    lines = build_info.splitlines()
+    require(bool(lines) and lines[0].endswith(f": go{pins['GO_VERSION']}"), "scanner was not built by the pinned Go")
+    require(f"\tpath\t{SCANNER_PACKAGE}" in lines[1:], "scanner package identity mismatch")
+    require(f"\tmod\t{SCANNER_MODULE}\t{pins['GOVULNCHECK_VERSION']}\t{pins['GOVULNCHECK_MODULE_SUM']}" in lines[1:],
+            "scanner module identity mismatch")
+
+
+def prepare_scanner(repository: Path, work: Path, go: Path, pins: dict[str, str]) -> Path:
+    """Install the pinned scanner from the release tools module into its own tree.
+
+    The scanner's graph never enters the engine's module cache, and this install
+    is the scan's only networked module resolution: the scan itself reads the
+    engine's verified cache offline.
+    """
+    tools = repository / "tools/go-release-tools"
+    verify_release_tools_source(tools, pins)
+    root = work / "scanner"
+    require(not root.exists(), "refusing to overwrite a scanner tree")
+    environment = hermetic_go_environment(root)
+    environment["GOBIN"] = str(root / "bin")
+    command([str(go), "-C", str(tools), "install", "-mod=readonly", SCANNER_PACKAGE], env=environment, timeout=1200)
+    verify_release_tools_source(tools, pins)
+    suffix = command([str(go), "env", "GOEXE"], env=environment).decode("utf-8").strip()
+    scanner = root / "bin" / f"govulncheck{suffix}"
+    regular_file(scanner)
+    require_scanner_identity(command([str(go), "version", "-m", str(scanner)], env=environment).decode("utf-8"), pins)
+    return scanner
+
+
+def scan_report(text: str, pins: dict[str, str]) -> dict[str, object]:
+    """Bind the scanner's verbose text report to the pinned Go, scanner, database and program roots."""
+    lines = text.splitlines()
+    require(lines[:3] == [f"Go: go{pins['GO_VERSION']}", f"Scanner: govulncheck@{pins['GOVULNCHECK_VERSION']}",
+                          f"DB: {VULNERABILITY_DATABASE}"],
+            "vulnerability scan did not report the pinned Go, scanner and database")
+    require(len(lines) > 3 and lines[3].startswith("DB updated: ") and lines[3] != "DB updated: ",
+            "vulnerability scan did not report the database modification time")
+    roots = re.search(r"^The package pattern matched the following (\d+) root packages:\n((?:  \S+\n)+)", text, re.MULTILINE)
+    require(roots is not None, "vulnerability scan did not list its root packages")
+    root_packages = roots[2].split()
+    require(len(root_packages) == int(roots[1])
+            and root_packages == [f"{ENGINE_MODULE}/{package[2:]}" for package in (ENGINE_PACKAGE, HOST_PACKAGE)],
+            "vulnerability scan did not cover exactly the engine and host programs")
+    modules = re.search(r"^Govulncheck scanned the following (\d+) modules and the (go\S+) standard library:\n((?:  \S+\n)+)",
+                        text, re.MULTILINE)
+    require(modules is not None and modules[2] == f"go{pins['GO_VERSION']}",
+            "vulnerability scan did not list the scanned modules of the pinned Go")
+    scanned = modules[3].split()
+    require(len(scanned) == int(modules[1]) and scanned[0] == ENGINE_MODULE, "vulnerability scan module list is inconsistent")
+    affected = re.search(r"^Your code is affected by (\d+) vulnerabilit(?:y|ies)", text, re.MULTILINE)
+    if affected is None:
+        require("No vulnerabilities found." in lines, "vulnerability scan did not conclude")
+    called = 0 if affected is None else int(affected[1])
+    require(called == 0, "vulnerability scan reported called vulnerabilities without its exit code")
+    return {"scanner": {"package": SCANNER_PACKAGE, "version": pins["GOVULNCHECK_VERSION"],
+                        "module_sum": pins["GOVULNCHECK_MODULE_SUM"]},
+            "go_version": lines[0].removeprefix("Go: "), "database": VULNERABILITY_DATABASE,
+            "database_updated": lines[3].removeprefix("DB updated: "), "mode": "source", "level": "symbol",
+            "root_packages": root_packages, "scanned_modules": len(scanned), "called_vulnerabilities": called,
+            "uncalled_advisories": re.findall(r"^Vulnerability #\d+: (GO-\d{4}-\d+)$", text, re.MULTILINE)}
+
+
+def scan_vulnerabilities(scanner: Path, go: Path, source: Path, environment: dict[str, str], tags: str,
+                         pins: dict[str, str], output: Path) -> dict[str, object]:
+    """Fail when the linked engine graph calls known vulnerable code; keep the scanner's own report."""
+    # The scanner resolves `go` through PATH, both for the toolchain it reports
+    # and for loading packages, so the pinned toolchain goes first.
+    require(bool(environment.get("PATH")), "the scan environment has no PATH")
+    scan_environment = {**environment, "PATH": os.pathsep.join([str(go.parent), environment["PATH"]])}
+    arguments = [str(scanner), "-C", str(source), "-db", VULNERABILITY_DATABASE, "-mode", "source",
+                 "-scan", "symbol", "-show", "version,verbose", "-tags", tags, ENGINE_PACKAGE, HOST_PACKAGE]
+    result = subprocess.run(arguments, env=scan_environment, capture_output=True, timeout=1200)
+    (output / "vulnerability-scan.txt").write_bytes(result.stdout)
+    (output / "vulnerability-scan.stderr.txt").write_bytes(result.stderr)
+    require(result.returncode != 3, "the linked Windows engine calls known vulnerable code; inspect vulnerability-scan.txt")
+    require(result.returncode == 0, f"vulnerability scan failed ({result.returncode}); inspect vulnerability-scan.stderr.txt")
+    return scan_report(result.stdout.decode("utf-8"), pins)
+
+
 def prepare_go(work: Path, pins: dict[str, str]) -> Path:
     version = pins["GO_VERSION"]
     archive = work / f"go{version}.windows-amd64.zip"
@@ -425,6 +544,8 @@ def build(repository: Path, work: Path, pins: dict[str, str]) -> None:
     work.mkdir(parents=False)
     print("Preparing the hash-pinned Windows Go toolchain", flush=True)
     go = prepare_go(work, pins)
+    print("Installing the pinned vulnerability scanner from the release tools module", flush=True)
+    scanner = prepare_scanner(repository, work, go, pins)
     baseline_source = work / "source"
     print("Materializing the unchanged CFM GA engine source and six patches", flush=True)
     prepare_source(repository, baseline_source, pins)
@@ -450,21 +571,14 @@ def build(repository: Path, work: Path, pins: dict[str, str]) -> None:
         regular_file(path)
         require(path.stat().st_size > 0, f"missing Rust projection fixture: {name}")
         fixture_hashes[name] = sha256(path)
-    environment = {key: value for key, value in os.environ.items()
-                   if not key.upper().startswith(("GO", "CGO"))}
-    environment.update({"GOENV": "off", "GOWORK": "off", "GOTOOLCHAIN": "local",
-                        "GOTELEMETRY": "off", "GOOS": "windows", "GOARCH": "amd64",
-                        "CGO_ENABLED": "0", "GOPATH": str(work / "gopath"),
-                        "GOMODCACHE": str(work / "modules"), "GOCACHE": str(work / "cache"),
-                        "GOPROXY": "https://proxy.golang.org", "GOSUMDB": "sum.golang.org",
-                        "GONOSUMDB": "", "GOPRIVATE": "", "GONOPROXY": "",
-                        "GOFLAGS": "-mod=readonly"})
+    environment = hermetic_go_environment(work)
+    environment.update({"GOOS": "windows", "GOARCH": "amd64"})
     environment["CFW_DNS_PROJECTED_FIXTURE_DIR"] = str(fixture_directory)
     tags = pins["LIBBOX_BUILD_TAGS"]
     packages = test_packages(repository, pins)
-    packages.append("./cmd/cfw-engine-host")
+    packages.append(HOST_PACKAGE)
     print("Resolving the locked Windows build and test package closure", flush=True)
-    command([str(go), "list", "-deps", "-test", "-tags", tags, "./cmd/sing-box", *packages],
+    command([str(go), "list", "-deps", "-test", "-tags", tags, ENGINE_PACKAGE, *packages],
             cwd=source, env=environment, timeout=1200)
     # Package pruning does not necessarily fetch the go.mod metadata needed by
     # `go mod verify` for the complete selected graph. Resolve it explicitly
@@ -476,20 +590,22 @@ def build(repository: Path, work: Path, pins: dict[str, str]) -> None:
     require_unchanged(source_files(source), expected_files, "module resolution changed engine source bytes")
     environment.update({"GOPROXY": "off", "GOSUMDB": "off"})
     command([str(go), "mod", "verify"], cwd=source, env=environment)
+    print("Scanning the linked Windows engine graph for known vulnerabilities", flush=True)
+    vulnerability_scan = scan_vulnerabilities(scanner, go, source, environment, tags, pins, output)
     executable = output / "cfw-engine.exe"
     flags = f"-s -w -buildid= -checklinkname=0 -X github.com/sagernet/sing-box/constant.Version={pins['SING_BOX_VERSION'][1:]} -X internal/godebug.defaultGODEBUG=multipathtcp=0"
     arguments = [str(go), "build", "-mod=readonly", "-trimpath", "-buildvcs=false", "-tags", tags, "-ldflags", flags]
     print("Building the native Windows engine without network resolution", flush=True)
-    command([*arguments, "-o", str(executable), "./cmd/sing-box"], cwd=source, env=environment, timeout=1200)
+    command([*arguments, "-o", str(executable), ENGINE_PACKAGE], cwd=source, env=environment, timeout=1200)
     host_executable = output / "cfw-engine-host.exe"
-    command([*arguments, "-o", str(host_executable), "./cmd/cfw-engine-host"], cwd=source, env=environment, timeout=1200)
+    command([*arguments, "-o", str(host_executable), HOST_PACKAGE], cwd=source, env=environment, timeout=1200)
     print("Checking an independent build cache produces identical bytes", flush=True)
     environment["GOCACHE"] = str(work / "second-cache")
     second = work / "second-engine.exe"
-    command([*arguments, "-o", str(second), "./cmd/sing-box"], cwd=source, env=environment, timeout=1200)
+    command([*arguments, "-o", str(second), ENGINE_PACKAGE], cwd=source, env=environment, timeout=1200)
     require(sha256(executable) == sha256(second), "Windows engine build is not reproducible across caches")
     second_host = work / "second-engine-host.exe"
-    command([*arguments, "-o", str(second_host), "./cmd/cfw-engine-host"], cwd=source, env=environment, timeout=1200)
+    command([*arguments, "-o", str(second_host), HOST_PACKAGE], cwd=source, env=environment, timeout=1200)
     require(sha256(host_executable) == sha256(second_host), "Windows host build is not reproducible across caches")
     print("Running the GA engine test package union on Windows (without race instrumentation)", flush=True)
     # Match the GA engine's Go linker contract; the Mac-only external clang
@@ -547,6 +663,7 @@ def build(repository: Path, work: Path, pins: dict[str, str]) -> None:
                "wintun_artifact": {"filename": wintun.name, "size": wintun.stat().st_size,
                                    "sha256": sha256(wintun), "version": pins["WINTUN_VERSION"]},
                "module_graph_sha256": sha256(output / "module-graph.json"),
+               "vulnerability_scan": vulnerability_scan,
                "rust_version": pins["RUST_VERSION"], "rust_dns_fixture_sha256": fixture_hashes,
                "race_instrumentation": False, "version_output": version,
                "artifact": {"filename": executable.name, "size": executable.stat().st_size, "sha256": sha256(executable)},

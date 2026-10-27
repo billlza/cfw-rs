@@ -3,7 +3,9 @@ from __future__ import annotations
 import importlib.util
 import hashlib
 import json
+import os
 from pathlib import Path
+import re
 import sys
 import tempfile
 import unittest
@@ -16,6 +18,39 @@ sys.path.insert(0, str(REPOSITORY / "scripts"))
 SPEC = importlib.util.spec_from_file_location("windows_engine", REPOSITORY / "scripts/windows_engine.py")
 engine = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(engine)
+
+ENGINE_ROOTS = ("github.com/sagernet/sing-box/cmd/sing-box", "github.com/sagernet/sing-box/cmd/cfw-engine-host")
+AFFECTED_BY_NONE = ("Your code is affected by 0 vulnerabilities.\n"
+                    "This scan also found 0 vulnerabilities in packages you import and 1\n"
+                    "vulnerability in modules you require, but your code doesn't appear to call these\n"
+                    "vulnerabilities.\n")
+
+
+def scan_report_text(pins: dict[str, str], *, go: str | None = None, scanner: str | None = None,
+                     database: str = "https://vuln.go.dev", updated: str = "DB updated: 2026-10-21 00:27:29 +0000 UTC",
+                     roots: tuple[str, ...] = ENGINE_ROOTS, root_count: int | None = None,
+                     modules: tuple[str, ...] = ("github.com/sagernet/sing-box", "filippo.io/age@v1.3.2",
+                                                 "golang.org/x/crypto@v0.58.0"),
+                     module_count: int | None = None, module_go: str | None = None,
+                     conclusion: str = AFFECTED_BY_NONE, advisories: tuple[str, ...] = ("GO-2026-5932",)) -> str:
+    """The govulncheck 1.9.0 text report of a verbose symbol scan, as the engine lane captures it."""
+    go = go or f"go{pins['GO_VERSION']}"
+    scanner = scanner or f"govulncheck@{pins['GOVULNCHECK_VERSION']}"
+    root_count = len(roots) if root_count is None else root_count
+    module_count = len(modules) if module_count is None else module_count
+    module_go = module_go or go
+    findings = "".join(f"Vulnerability #{index}: {advisory}\n    The golang.org/x/crypto/openpgp package is unmaintained\n"
+                       f"  More info: https://pkg.go.dev/vuln/{advisory}\n  Module: golang.org/x/crypto\n"
+                       "    Found in: golang.org/x/crypto@v0.58.0\n    Fixed in: N/A\n\n"
+                       for index, advisory in enumerate(advisories, 1))
+    return (f"Go: {go}\nScanner: {scanner}\nDB: {database}\n{updated}\n\n"
+            "Fetching vulnerabilities from the database...\n\nChecking the code against the vulnerabilities...\n\n"
+            f"The package pattern matched the following {root_count} root packages:\n"
+            + "".join(f"  {root}\n" for root in roots)
+            + f"Govulncheck scanned the following {module_count} modules and the {module_go} standard library:\n"
+            + "".join(f"  {module}\n" for module in modules)
+            + "\n=== Symbol Results ===\n\nNo vulnerabilities found.\n\n=== Package Results ===\n\n"
+            "No other vulnerabilities found.\n\n=== Module Results ===\n\n" + findings + conclusion)
 
 
 class WindowsEngineContractTests(unittest.TestCase):
@@ -255,6 +290,179 @@ class WindowsEngineContractTests(unittest.TestCase):
         for path in ("../outside.patch", "/tmp/outside.patch", "native\\patch.patch"):
             with self.subTest(path=path), self.assertRaises(RuntimeError):
                 engine.pinned_path(REPOSITORY, path)
+
+    def test_pins_bind_the_scanner_and_its_release_tools_module(self) -> None:
+        pins = engine.read_pins(REPOSITORY)
+        self.assertRegex(pins["GOVULNCHECK_VERSION"], r"^v\d+\.\d+\.\d+$")
+        self.assertRegex(pins["GOVULNCHECK_MODULE_SUM"], r"^h1:[A-Za-z0-9+/]{43}=$")
+        tools = REPOSITORY / "tools/go-release-tools"
+        engine.verify_release_tools_source(tools, pins)
+        for key in ("GO_RELEASE_TOOLS_GO_MOD_SHA256", "GO_RELEASE_TOOLS_GO_SUM_SHA256"):
+            with self.subTest(key=key), self.assertRaisesRegex(RuntimeError, "digest mismatch"):
+                engine.verify_release_tools_source(tools, {**pins, key: "0" * 64})
+        original = (REPOSITORY / "scripts/dependency_pins.env").read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary)
+            (repository / "scripts").mkdir()
+            for key, value, message in (("GOVULNCHECK_VERSION", "1.9.0", "invalid scanner version"),
+                                        ("GOVULNCHECK_MODULE_SUM", "h1:short=", "invalid scanner module sum"),
+                                        ("GO_RELEASE_TOOLS_GO_SUM_SHA256", "abc", "invalid GO_RELEASE_TOOLS_GO_SUM_SHA256")):
+                text, count = re.subn(rf"(?m)^{key}=.*$", f"{key}={value}", original)
+                self.assertEqual(count, 1, key)
+                (repository / "scripts/dependency_pins.env").write_text(text, encoding="utf-8")
+                with self.subTest(key=key), self.assertRaisesRegex(RuntimeError, message):
+                    engine.read_pins(repository)
+
+    def test_hermetic_go_environment_owns_one_tree_and_drops_ambient_go_settings(self) -> None:
+        ambient = {"GOFLAGS": "-mod=vendor", "GOPROXY": "direct", "CGO_ENABLED": "1", "GOOS": "linux",
+                   "PATH": "ambient-path", "TMP": "ambient-tmp"}
+        with patch.dict(engine.os.environ, ambient, clear=True):
+            environment = engine.hermetic_go_environment(Path("/work"))
+        self.assertEqual(environment, {
+            "PATH": "ambient-path", "TMP": "ambient-tmp", "GOENV": "off", "GOWORK": "off", "GOTOOLCHAIN": "local",
+            "GOTELEMETRY": "off", "CGO_ENABLED": "0", "GOPATH": str(Path("/work/gopath")),
+            "GOMODCACHE": str(Path("/work/modules")), "GOCACHE": str(Path("/work/cache")),
+            "GOPROXY": "https://proxy.golang.org", "GOSUMDB": "sum.golang.org", "GONOSUMDB": "", "GOPRIVATE": "",
+            "GONOPROXY": "", "GOFLAGS": "-mod=readonly"})
+
+    def test_scanner_identity_requires_the_pinned_go_scanner_and_module(self) -> None:
+        pins = engine.read_pins(REPOSITORY)
+        version, module_sum = pins["GOVULNCHECK_VERSION"], pins["GOVULNCHECK_MODULE_SUM"]
+        info = (f"C:\\work\\scanner\\bin\\govulncheck.exe: go{pins['GO_VERSION']}\n"
+                f"\tpath\t{engine.SCANNER_PACKAGE}\n"
+                f"\tmod\t{engine.SCANNER_MODULE}\t{version}\t{module_sum}\n"
+                "\tdep\tgolang.org/x/mod\tv0.42.0\th1:ICeL3t2L30ljSPHHxDnR4fqVcBt/zR2zJAb9juavmQg=\n"
+                "\tbuild\t-buildmode=exe\n")
+        engine.require_scanner_identity(info, pins)
+        for broken, message in (
+            (info.replace(f": go{pins['GO_VERSION']}", ": go1.26.0"), "not built by the pinned Go"),
+            (info.replace(f"\t{version}\t", "\tv1.8.0\t"), "scanner module identity mismatch"),
+            (info.replace(module_sum, "h1:" + "A" * 43 + "="), "scanner module identity mismatch"),
+            (info.replace(f"\tpath\t{engine.SCANNER_PACKAGE}\n", "\tpath\tgolang.org/x/vuln/cmd/other\n"),
+             "scanner package identity mismatch"),
+            ("", "not built by the pinned Go"),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(RuntimeError, message):
+                engine.require_scanner_identity(broken, pins)
+
+    def test_scanner_installs_from_the_release_tools_module_into_its_own_tree(self) -> None:
+        pins = engine.read_pins(REPOSITORY)
+        tools = REPOSITORY / "tools/go-release-tools"
+        calls: list[tuple[list[str], dict[str, str]]] = []
+
+        def fake_command(arguments, *, cwd=None, env=None, timeout=900, module_sum=pins["GOVULNCHECK_MODULE_SUM"]):
+            calls.append((arguments, env))
+            if arguments[1:] == ["-C", str(tools), "install", "-mod=readonly", engine.SCANNER_PACKAGE]:
+                Path(env["GOBIN"]).mkdir(parents=True)
+                (Path(env["GOBIN"]) / "govulncheck.exe").write_bytes(b"MZ")
+                return b""
+            if arguments[1:] == ["env", "GOEXE"]:
+                return b".exe\n"
+            if arguments[1:3] == ["version", "-m"]:
+                return (f"{arguments[3]}: go{pins['GO_VERSION']}\n\tpath\t{engine.SCANNER_PACKAGE}\n"
+                        f"\tmod\t{engine.SCANNER_MODULE}\t{pins['GOVULNCHECK_VERSION']}\t{module_sum}\n").encode()
+            raise AssertionError(arguments)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary).resolve()
+            go = work / "go/bin/go.exe"
+            with patch.object(engine, "command", fake_command):
+                scanner = engine.prepare_scanner(REPOSITORY, work, go, pins)
+            self.assertEqual(scanner, work / "scanner/bin/govulncheck.exe")
+            self.assertEqual([arguments[1:3] for arguments, _ in calls], [["-C", str(tools)], ["env", "GOEXE"], ["version", "-m"]])
+            self.assertEqual(calls[0][0][0], str(go))
+            self.assertEqual(calls[2][0][3], str(scanner))
+            environment = calls[0][1]
+            self.assertEqual(environment["GOBIN"], str(work / "scanner/bin"))
+            self.assertEqual(environment["GOMODCACHE"], str(work / "scanner/modules"))
+            self.assertEqual(environment["GOCACHE"], str(work / "scanner/cache"))
+            self.assertEqual(environment["GOPROXY"], "https://proxy.golang.org")
+            self.assertEqual(environment["GOSUMDB"], "sum.golang.org")
+            self.assertEqual(environment["GOFLAGS"], "-mod=readonly")
+            self.assertNotIn("GOOS", environment)
+            with patch.object(engine, "command", fake_command), \
+                    self.assertRaisesRegex(RuntimeError, "refusing to overwrite a scanner tree"):
+                engine.prepare_scanner(REPOSITORY, work, go, pins)
+            wrong_sum = lambda *arguments, **keywords: fake_command(*arguments, **keywords, module_sum="h1:" + "A" * 43 + "=")
+            with patch.object(engine, "command", wrong_sum), \
+                    self.assertRaisesRegex(RuntimeError, "scanner module identity mismatch"):
+                engine.prepare_scanner(REPOSITORY, work / "second", go, pins)
+            with patch.object(engine, "command", fake_command), \
+                    self.assertRaisesRegex(RuntimeError, "release tools go.sum digest mismatch"):
+                engine.prepare_scanner(REPOSITORY, work / "third", go, {**pins, "GO_RELEASE_TOOLS_GO_SUM_SHA256": "0" * 64})
+            self.assertFalse((work / "third").exists())
+
+    def test_scan_report_binds_the_pinned_scanner_database_and_program_roots(self) -> None:
+        pins = engine.read_pins(REPOSITORY)
+        self.assertEqual(engine.scan_report(scan_report_text(pins), pins), {
+            "scanner": {"package": "golang.org/x/vuln/cmd/govulncheck", "version": pins["GOVULNCHECK_VERSION"],
+                        "module_sum": pins["GOVULNCHECK_MODULE_SUM"]},
+            "go_version": f"go{pins['GO_VERSION']}", "database": "https://vuln.go.dev",
+            "database_updated": "2026-10-21 00:27:29 +0000 UTC", "mode": "source", "level": "symbol",
+            "root_packages": list(ENGINE_ROOTS), "scanned_modules": 3, "called_vulnerabilities": 0,
+            "uncalled_advisories": ["GO-2026-5932"]})
+        sbom_only = scan_report_text(pins).split("\n=== Symbol Results ===")[0]
+        clean = engine.scan_report(sbom_only + "\nNo vulnerabilities found.\n", pins)
+        self.assertEqual((clean["called_vulnerabilities"], clean["uncalled_advisories"]), (0, []))
+        for broken, message in (
+            (scan_report_text(pins, go="go1.26.0"), "pinned Go, scanner and database"),
+            (scan_report_text(pins, scanner="govulncheck@v1.8.0"), "pinned Go, scanner and database"),
+            (scan_report_text(pins, database="https://example.invalid"), "pinned Go, scanner and database"),
+            ("", "pinned Go, scanner and database"),
+            (scan_report_text(pins, updated="DB updated: "), "database modification time"),
+            (scan_report_text(pins, updated=""), "database modification time"),
+            (scan_report_text(pins, roots=ENGINE_ROOTS[:1]), "exactly the engine and host programs"),
+            (scan_report_text(pins, roots=ENGINE_ROOTS[::-1]), "exactly the engine and host programs"),
+            (scan_report_text(pins, root_count=3), "exactly the engine and host programs"),
+            (scan_report_text(pins, module_go="go1.26.0"), "scanned modules of the pinned Go"),
+            (scan_report_text(pins, module_count=4), "module list is inconsistent"),
+            (scan_report_text(pins, modules=("filippo.io/age@v1.3.2", "github.com/sagernet/sing-box")),
+             "module list is inconsistent"),
+            (scan_report_text(pins, conclusion="Your code is affected by 1 vulnerability from 1 module.\n"),
+             "called vulnerabilities without its exit code"),
+            (sbom_only, "did not conclude"),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(RuntimeError, message):
+                engine.scan_report(broken, pins)
+
+    def test_scan_fails_closed_on_the_scanner_exit_code_and_keeps_its_report(self) -> None:
+        pins = engine.read_pins(REPOSITORY)
+        tags = pins["LIBBOX_BUILD_TAGS"]
+        outcome = {"code": 0, "stdout": scan_report_text(pins).encode()}
+        runs: list[tuple[list[str], dict[str, str]]] = []
+
+        def fake_run(arguments, *, env, capture_output, timeout):
+            self.assertTrue(capture_output)
+            runs.append((arguments, env))
+            return engine.subprocess.CompletedProcess(arguments, outcome["code"], outcome["stdout"], b"scanner stderr\n")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            output, scanner, go, source = root / "artifacts", root / "scanner/bin/govulncheck.exe", root / "go/bin/go.exe", root / "host-source"
+            output.mkdir()
+            environment = {"PATH": "ambient-path", "GOOS": "windows", "GOPROXY": "off", "GOFLAGS": "-mod=readonly"}
+            with patch.object(engine.subprocess, "run", fake_run):
+                report = engine.scan_vulnerabilities(scanner, go, source, environment, tags, pins, output)
+            self.assertEqual((report["called_vulnerabilities"], report["scanned_modules"]), (0, 3))
+            arguments, env = runs[0]
+            self.assertEqual(arguments, [str(scanner), "-C", str(source), "-db", "https://vuln.go.dev", "-mode", "source",
+                                         "-scan", "symbol", "-show", "version,verbose", "-tags", tags,
+                                         "./cmd/sing-box", "./cmd/cfw-engine-host"])
+            self.assertEqual(env, {**environment, "PATH": os.pathsep.join([str(go.parent), "ambient-path"])})
+            self.assertEqual((output / "vulnerability-scan.txt").read_bytes(), outcome["stdout"])
+            self.assertEqual((output / "vulnerability-scan.stderr.txt").read_bytes(), b"scanner stderr\n")
+            outcome.update(code=3, stdout=b"Your code is affected by 1 vulnerability from 1 module.\n")
+            with patch.object(engine.subprocess, "run", fake_run), \
+                    self.assertRaisesRegex(RuntimeError, "calls known vulnerable code; inspect vulnerability-scan.txt"):
+                engine.scan_vulnerabilities(scanner, go, source, environment, tags, pins, output)
+            self.assertEqual((output / "vulnerability-scan.txt").read_bytes(), outcome["stdout"])
+            outcome.update(code=1, stdout=b"")
+            with patch.object(engine.subprocess, "run", fake_run), \
+                    self.assertRaisesRegex(RuntimeError, r"vulnerability scan failed \(1\); inspect vulnerability-scan.stderr.txt"):
+                engine.scan_vulnerabilities(scanner, go, source, environment, tags, pins, output)
+            with patch.object(engine.subprocess, "run", fake_run), self.assertRaisesRegex(RuntimeError, "no PATH"):
+                engine.scan_vulnerabilities(scanner, go, source, {"GOOS": "windows"}, tags, pins, output)
+            self.assertEqual(len(runs), 3)
 
 
 if __name__ == "__main__":

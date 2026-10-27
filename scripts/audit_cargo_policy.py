@@ -11,6 +11,12 @@ Each shipped program has its own policy file naming its exact target graph:
 ``--target`` selects the program and defaults to the macOS program
 (``deny.toml``); the Windows program's policy is
 ``deny.x86_64-pc-windows-msvc.toml``.
+
+The live phase can fail only on data it fetches: the advisory database clone,
+the crates fetch and the yank-check index entries that fetch populates. Such a
+registry fetch failure is retried a fixed number of times, each in a fresh
+private Cargo home and all inside one time budget, and every retry is printed.
+A policy finding or any other outcome is never retried.
 """
 
 from __future__ import annotations
@@ -22,6 +28,7 @@ from pathlib import Path
 import stat
 import subprocess
 import tempfile
+import time
 import tomllib
 from typing import Any, Mapping, Sequence
 
@@ -46,6 +53,14 @@ SUMMARY_STAT_NAMES = ("errors", "helps", "notes", "warnings")
 METADATA_TIMEOUT_SECONDS = 300
 OFFLINE_POLICY_TIMEOUT_SECONDS = 300
 ONLINE_POLICY_TIMEOUT_SECONDS = 900
+ONLINE_POLICY_ATTEMPTS = 3
+ONLINE_POLICY_RETRY_PAUSE_SECONDS = 30
+TRANSIENT_FETCH_LOG_PREFIXES = (
+    "failed to fetch advisory database ",
+    "failed to fetch crates: ",
+)
+TRANSIENT_FETCH_DIAGNOSTIC_CODES = ("index-failure",)
+TRIGGER_RENDER_LIMIT = 1000
 OUTPUT_LIMIT_BYTES = 64 * 1024 * 1024
 # A failed check names its cargo-deny records in the gate output, bounded so
 # a hosted log stays readable when every crate reports the same failure.
@@ -112,6 +127,16 @@ def _render_policy_record(record: Any) -> str:
     return _bounded_text(f"{kind}: {json.dumps(fields, sort_keys=True)}")
 
 
+def _policy_records(encoded: bytes) -> list[Any]:
+    """Decode cargo-deny's JSON lines; every non-blank line must be strict JSON."""
+
+    records: list[Any] = []
+    for line in encoded.splitlines():
+        if line.strip():
+            records.append(_decode_json(line, "cargo-deny output line"))
+    return records
+
+
 def parse_policy_result(encoded: bytes, expected_checks: Sequence[str]) -> dict[str, dict[str, int]]:
     """Accept exactly one clean cargo-deny JSON summary and no diagnostics.
 
@@ -121,10 +146,7 @@ def parse_policy_result(encoded: bytes, expected_checks: Sequence[str]) -> dict[
 
     if not expected_checks or any(name not in POLICY_NAMES for name in expected_checks):
         raise CargoPolicyError("cargo-deny expected check set is invalid")
-    records = []
-    for line in encoded.splitlines():
-        if line.strip():
-            records.append(_decode_json(line, "cargo-deny output line"))
+    records = _policy_records(encoded)
     if len(records) != 1:
         rendered = [
             _render_policy_record(record) for record in records[:RENDERED_RECORD_LIMIT]
@@ -170,6 +192,56 @@ def parse_policy_result(encoded: bytes, expected_checks: Sequence[str]) -> dict[
                 f"and {values['notes']} notes"
             )
     return parsed
+
+
+def _render_trigger(prefix: str, message: object) -> str:
+    return (prefix + " ".join(str(message).split()))[:TRIGGER_RENDER_LIMIT]
+
+
+def _transient_fetch_failure(encoded: bytes) -> str | None:
+    """Name the registry fetch failure that explains cargo-deny's output, or None.
+
+    Only the records cargo-deny emits when live data could not be fetched count:
+    the ERROR log of the advisory database clone or of the crates fetch, and the
+    per-crate index-failure diagnostics of the yank check. One record of any
+    other kind, a policy finding included, means the output is not a fetch
+    failure and the strict result checks report it. Output that is not strict
+    JSON is never a retry reason either; those checks reject it as well.
+    """
+
+    try:
+        records = _policy_records(encoded)
+    except CargoPolicyError:
+        return None
+    trigger: str | None = None
+    for record in records:
+        if not isinstance(record, dict) or not isinstance(record.get("fields"), dict):
+            return None
+        fields = record["fields"]
+        kind = record.get("type")
+        if kind == "summary":
+            continue
+        if kind == "log":
+            message = fields.get("message")
+            if (
+                fields.get("level") != "ERROR"
+                or not isinstance(message, str)
+                or not message.startswith(TRANSIENT_FETCH_LOG_PREFIXES)
+            ):
+                return None
+            rendered = _render_trigger("log ERROR: ", message)
+        elif kind == "diagnostic":
+            code = fields.get("code")
+            if code not in TRANSIENT_FETCH_DIAGNOSTIC_CODES:
+                return None
+            rendered = _render_trigger(
+                f"diagnostic {fields.get('severity')} {code}: ", fields.get("message")
+            )
+        else:
+            return None
+        if trigger is None:
+            trigger = rendered
+    return trigger
 
 
 def _require_executable(value: str | None, label: str) -> Path:
@@ -237,7 +309,7 @@ def _bounded(
     *,
     repository: Path,
     environment: Mapping[str, str],
-    timeout: int,
+    timeout: float,
     label: str,
 ) -> subprocess.CompletedProcess[bytes]:
     try:
@@ -300,6 +372,56 @@ def _cargo_deny_command(
         "check",
         *checks,
     ]
+
+
+def _run_online_advisory_policy(
+    command: Sequence[str],
+    *,
+    repository: Path,
+    environment: Mapping[str, str],
+    temporary_root: Path,
+) -> subprocess.CompletedProcess[bytes]:
+    """Run the live advisory check, once per fresh private Cargo home.
+
+    A registry fetch failure is retried up to ONLINE_POLICY_ATTEMPTS times, all
+    attempts and pauses inside the one ONLINE_POLICY_TIMEOUT_SECONDS budget. The
+    last result, retried or not, goes back to the caller's strict checks, so a
+    fetch failure that persists fails exactly as a single attempt would.
+    """
+
+    label = "online cargo-deny advisory policy"
+    deadline = time.monotonic() + ONLINE_POLICY_TIMEOUT_SECONDS
+    attempt = 0
+    while True:
+        attempt += 1
+        cargo_home = temporary_root / f"cargo-home-{attempt}"
+        cargo_home.mkdir(mode=0o700)
+        _require_private_directory(cargo_home, "Cargo policy private directory")
+        result = _bounded(
+            command,
+            repository=repository,
+            environment={**environment, "CARGO_HOME": str(cargo_home)},
+            timeout=deadline - time.monotonic(),
+            label=label,
+        )
+        trigger = _transient_fetch_failure(result.stdout + result.stderr)
+        if trigger is None or attempt == ONLINE_POLICY_ATTEMPTS:
+            return result
+        progress = (
+            f"{label} attempt {attempt} of {ONLINE_POLICY_ATTEMPTS}"
+            " failed on a registry fetch"
+        )
+        if deadline - time.monotonic() <= ONLINE_POLICY_RETRY_PAUSE_SECONDS:
+            print(
+                f"{progress} and no time budget remains for another attempt: {trigger}",
+                flush=True,
+            )
+            return result
+        print(
+            f"{progress}; retrying in {ONLINE_POLICY_RETRY_PAUSE_SECONDS} s: {trigger}",
+            flush=True,
+        )
+        time.sleep(ONLINE_POLICY_RETRY_PAUSE_SECONDS)
 
 
 def run(repository: Path, target: str) -> int:
@@ -389,14 +511,12 @@ def run(repository: Path, target: str) -> int:
         )
 
         policy_home = temporary_root / "home"
-        policy_cargo_home = temporary_root / "cargo-home"
         policy_tmp = temporary_root / "tmp"
-        for directory in (policy_home, policy_cargo_home, policy_tmp):
+        for directory in (policy_home, policy_tmp):
             directory.mkdir(mode=0o700)
             _require_private_directory(directory, "Cargo policy private directory")
         online_environment = {
             "CARGO": str(cargo),
-            "CARGO_HOME": str(policy_cargo_home),
             "CARGO_NET_OFFLINE": "false",
             "CARGO_TERM_COLOR": "never",
             "GIT_ASKPASS": "/usr/bin/false",
@@ -411,7 +531,7 @@ def run(repository: Path, target: str) -> int:
             "PATH": os.environ.get("PATH", ""),
             "TMPDIR": str(policy_tmp),
         }
-        online_result = _bounded(
+        online_result = _run_online_advisory_policy(
             _cargo_deny_command(
                 cargo_deny,
                 metadata_path,
@@ -421,8 +541,7 @@ def run(repository: Path, target: str) -> int:
             ),
             repository=repository,
             environment=online_environment,
-            timeout=ONLINE_POLICY_TIMEOUT_SECONDS,
-            label="online cargo-deny advisory policy",
+            temporary_root=temporary_root,
         )
         _require_success(online_result, "online cargo-deny advisory policy")
         parse_policy_result(

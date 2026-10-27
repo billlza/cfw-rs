@@ -3,8 +3,10 @@
 The source is created in an absent, task-owned directory. We reuse the existing
 upstream, patch, module and combined-diff pins rather than accepting a second
 definition of the CFM engine. No existing checkout or global tool is modified.
-Before the engine is built, the pinned vulnerability scanner checks the exact
-linked graph of both programs against the official Go vulnerability database.
+Both programs are built from a private workspace that carries the sing
+packet-address correction of every macOS build, and before the build the pinned
+vulnerability scanner checks the exact linked graph, pinned and corrected,
+against the official Go vulnerability database.
 """
 from __future__ import annotations
 
@@ -32,6 +34,13 @@ WINTUN_PACKAGE = "github.com/sagernet/sing-tun/internal/wintun"
 ENGINE_MODULE = "github.com/sagernet/sing-box"
 ENGINE_PACKAGE = "./cmd/sing-box"
 HOST_PACKAGE = "./cmd/cfw-engine-host"
+# The socks-lifecycle patch adds this tool to the engine source; it copies the
+# source into a workspace whose sing module carries the packet-address
+# correction through one relative replacement, as every macOS build does.
+WORKSPACE_TOOL = "./cmd/cfm-build-workspace"
+WORKSPACE_MODULE = "github.com/sagernet/sing"
+WORKSPACE_DEPENDENCIES = "cfw-dependencies"
+WORKSPACE_REPLACEMENT = f"./{WORKSPACE_DEPENDENCIES}/sing"
 SCANNER_MODULE = "golang.org/x/vuln"
 SCANNER_PACKAGE = "golang.org/x/vuln/cmd/govulncheck"
 VULNERABILITY_DATABASE = "https://vuln.go.dev"
@@ -140,16 +149,28 @@ def json_objects(data: bytes) -> list[dict[str, object]]:
     return result
 
 
-def module_graph(data: bytes) -> list[dict[str, object]]:
+def module_graph(data: bytes, *, local_replacement: tuple[str, str] | None = None) -> list[dict[str, object]]:
+    """Module identities of `go list -m -json all`.
+
+    A versioned replacement keeps its checksums. A replacement without a version
+    is a local directory with neither checksum nor advisory version: only the
+    build workspace's own relative replacement is admitted, by module and path,
+    and only when the caller names it.
+    """
     result = []
     for module in json_objects(data):
         require(isinstance(module.get("Path"), str), "invalid Go module metadata")
         identity = {key: module[key] for key in ("Path", "Version", "Sum", "GoModSum", "Main") if key in module}
         if "Replace" in module:
             replacement = module["Replace"]
-            require(isinstance(replacement, dict) and bool(replacement.get("Version")),
-                    "unversioned local module replacement is not admitted")
-            identity["Replace"] = {key: replacement[key] for key in ("Path", "Version", "Sum", "GoModSum") if key in replacement}
+            require(isinstance(replacement, dict), "invalid module replacement")
+            if "Version" not in replacement:
+                require(local_replacement is not None and (module["Path"], replacement.get("Path")) == local_replacement,
+                        "unversioned local module replacement is not admitted")
+                identity["Replace"] = {"Path": replacement["Path"]}
+            else:
+                require(bool(replacement["Version"]), "unversioned local module replacement is not admitted")
+                identity["Replace"] = {key: replacement[key] for key in ("Path", "Version", "Sum", "GoModSum") if key in replacement}
         result.append(identity)
     return result
 
@@ -202,20 +223,30 @@ def bundle_notices(repository: Path, go: Path, source: Path, output: Path,
     packages = json_objects(command([str(go), "list", "-deps", "-json", "-tags", pins["LIBBOX_BUILD_TAGS"],
                                      ENGINE_PACKAGE, HOST_PACKAGE], cwd=source, env=environment))
     roots: dict[tuple[str, str], Path] = {("Go", pins["GO_VERSION"]): go.parent.parent.resolve()}
+    main_root = source.resolve()
+    workspace_copy = (source / WORKSPACE_REPLACEMENT).resolve()
     embedded = []
     for package in packages:
         module = package.get("Module")
         if module is None:
             continue
-        require(isinstance(module, dict) and "Replace" not in module, "unexpected linked module replacement")
+        require(isinstance(module, dict), "invalid linked module metadata")
         name = module.get("Path")
         version = pins["SING_BOX_VERSION"] if module.get("Main") is True else module.get("Version")
         directory = module.get("Dir")
         require(isinstance(name, str) and isinstance(version, str) and isinstance(directory, str),
                 "linked module lacks a source identity for license collection")
         root = Path(directory).resolve(strict=True)
-        allowed = source.resolve() if module.get("Main") is True else Path(environment["GOMODCACHE"]).resolve()
-        require(root.is_relative_to(allowed), "linked module source escaped the verified build inputs")
+        if "Replace" in module:
+            # The workspace replaces one module with its corrected copy; its
+            # license texts are that copy's, under the upstream version.
+            replacement = module["Replace"]
+            require(isinstance(replacement, dict) and (name, replacement.get("Path")) == (WORKSPACE_MODULE, WORKSPACE_REPLACEMENT),
+                    "unexpected linked module replacement")
+            require(root == workspace_copy, "linked module replacement escaped the build workspace")
+        else:
+            allowed = main_root if module.get("Main") is True else Path(environment["GOMODCACHE"]).resolve()
+            require(root.is_relative_to(allowed), "linked module source escaped the verified build inputs")
         key = (name, version)
         require(key not in roots or roots[key] == root, "linked module has conflicting source roots")
         roots[key] = root
@@ -227,7 +258,9 @@ def bundle_notices(repository: Path, go: Path, source: Path, output: Path,
         # Keep actual upstream license/notice files, including nested vendored
         # notices. This preserves texts; SPDX resolution and final distribution
         # review remain part of the full Windows release publication boundary.
-        files = candidate_license_files(root, maximum_depth=12)
+        # The replaced copy under the main module is its own component above.
+        files = [path for path in candidate_license_files(root, maximum_depth=12)
+                 if root != main_root or path.relative_to(root).parts[:1] != (WORKSPACE_DEPENDENCIES,)]
         require(bool(files), f"no source license texts found for {name} {version}")
         directory = hashlib.sha256(f"{name}@{version}".encode()).hexdigest()
         entries = []
@@ -402,6 +435,61 @@ def test_packages(repository: Path, pins: dict[str, str]) -> list[str]:
     return packages
 
 
+def sing_module(go: Path, directory: Path, environment: dict[str, str]) -> dict[str, object]:
+    """The sing module as the directory's go.mod resolves it."""
+    modules = json_objects(command([str(go), "list", "-m", "-json", WORKSPACE_MODULE], cwd=directory, env=environment))
+    require(len(modules) == 1 and modules[0].get("Path") == WORKSPACE_MODULE, "sing module resolution is ambiguous")
+    return modules[0]
+
+
+def prepare_build_workspace(go: Path, source: Path, environment: dict[str, str],
+                            output: Path) -> tuple[Path, dict[str, object], dict[str, str]]:
+    """Copy the verified source into a private workspace whose sing module carries the packet-address correction.
+
+    The engine source's own tool validates the module's bytes, rewrites the
+    corrected files and adds one relative replacement; it runs on the host with
+    the given environment. This binds its result: the workspace is the source
+    plus that go.mod line and the corrected module copy, and nothing else.
+    Returns the workspace, its receipt record and its file digests.
+    """
+    require(not output.exists(), "refusing to overwrite a build workspace")
+    pinned = sing_module(go, source, environment)
+    require("Replace" not in pinned and isinstance(pinned.get("Version"), str) and isinstance(pinned.get("Dir"), str),
+            "the engine source does not require the sing module from the verified cache")
+    version = pinned["Version"]
+    module_dir = Path(pinned["Dir"]).resolve()
+    require(module_dir == (Path(environment["GOMODCACHE"]) / f"{WORKSPACE_MODULE}@{version}").resolve(),
+            "sing module is not the verified cache copy")
+    printed = command([str(go), "run", WORKSPACE_TOOL, "-module-source", str(module_dir), "-output", str(output)],
+                      cwd=source, env=environment, timeout=600).decode("utf-8").strip()
+    require(printed == str(output) and output.is_dir() and not output.is_symlink(), "build workspace did not produce its exact output")
+    corrected = sing_module(go, output, environment)
+    replacement = corrected.get("Replace")
+    require(isinstance(replacement, dict) and replacement.get("Path") == WORKSPACE_REPLACEMENT and corrected.get("Version") == version
+            and Path(str(replacement.get("Dir", ""))).resolve() == (output / WORKSPACE_REPLACEMENT).resolve(),
+            "build workspace resolved an unexpected sing replacement")
+    expected_go_mod = (source / "go.mod").read_bytes() + f"\nreplace {WORKSPACE_MODULE} {version} => {WORKSPACE_REPLACEMENT}\n".encode()
+    require((output / "go.mod").read_bytes() == expected_go_mod, "build workspace changed go.mod beyond the relative replacement")
+    files = source_files(output)
+    dependencies = WORKSPACE_DEPENDENCIES + "/"
+    prefix = WORKSPACE_REPLACEMENT[2:] + "/"
+    copied = {name: digest for name, digest in files.items() if name != "go.mod" and not name.startswith(dependencies)}
+    expected = {name: digest for name, digest in source_files(source).items() if name != "go.mod"}
+    require_unchanged(copied, expected, "build workspace changed engine source bytes")
+    require(all(name.startswith(prefix) for name in files if name.startswith(dependencies)),
+            "build workspace added unexpected dependencies")
+    original = source_files(module_dir)
+    copy = {name[len(prefix):]: digest for name, digest in files.items() if name.startswith(prefix)}
+    require(copy.keys() == original.keys(), "build workspace changed the sing module's membership")
+    corrections = {name: {"before_sha256": original[name], "after_sha256": copy[name]}
+                   for name in sorted(copy) if copy[name] != original[name]}
+    require(bool(corrections), "build workspace applied no correction")
+    record = {"module": WORKSPACE_MODULE, "version": version, "replacement": WORKSPACE_REPLACEMENT,
+              "corrected_files": corrections,
+              "files_sha256": hashlib.sha256(json.dumps(files, sort_keys=True, separators=(",", ":")).encode()).hexdigest()}
+    return output, record, files
+
+
 def hermetic_go_environment(root: Path) -> dict[str, str]:
     """One Go phase owns one tree for its workspace, modules and build cache.
 
@@ -493,8 +581,15 @@ def scan_report(text: str, pins: dict[str, str]) -> dict[str, object]:
 
 
 def scan_vulnerabilities(scanner: Path, go: Path, source: Path, environment: dict[str, str], tags: str,
-                         pins: dict[str, str], output: Path) -> dict[str, object]:
-    """Fail when the linked engine graph calls known vulnerable code; keep the scanner's own report."""
+                         pins: dict[str, str], output: Path, graph: str) -> dict[str, object]:
+    """Fail when the linked engine graph calls known vulnerable code; keep the scanner's own report.
+
+    `graph` names the report: the pinned graph of the verified source, or the
+    corrected build workspace, whose local replacement carries no advisory
+    version and so needs the pinned graph scanned as well.
+    """
+    report = output / f"vulnerability-scan-{graph}.txt"
+    errors = output / f"vulnerability-scan-{graph}.stderr.txt"
     # The scanner resolves `go` through PATH, both for the toolchain it reports
     # and for loading packages, so the pinned toolchain goes first.
     require(bool(environment.get("PATH")), "the scan environment has no PATH")
@@ -502,10 +597,10 @@ def scan_vulnerabilities(scanner: Path, go: Path, source: Path, environment: dic
     arguments = [str(scanner), "-C", str(source), "-db", VULNERABILITY_DATABASE, "-mode", "source",
                  "-scan", "symbol", "-show", "version,verbose", "-tags", tags, ENGINE_PACKAGE, HOST_PACKAGE]
     result = subprocess.run(arguments, env=scan_environment, capture_output=True, timeout=1200)
-    (output / "vulnerability-scan.txt").write_bytes(result.stdout)
-    (output / "vulnerability-scan.stderr.txt").write_bytes(result.stderr)
-    require(result.returncode != 3, "the linked Windows engine calls known vulnerable code; inspect vulnerability-scan.txt")
-    require(result.returncode == 0, f"vulnerability scan failed ({result.returncode}); inspect vulnerability-scan.stderr.txt")
+    report.write_bytes(result.stdout)
+    errors.write_bytes(result.stderr)
+    require(result.returncode != 3, f"the linked Windows engine calls known vulnerable code; inspect {report.name}")
+    require(result.returncode == 0, f"vulnerability scan failed ({result.returncode}); inspect {errors.name}")
     return scan_report(result.stdout.decode("utf-8"), pins)
 
 
@@ -571,12 +666,13 @@ def build(repository: Path, work: Path, pins: dict[str, str]) -> None:
         regular_file(path)
         require(path.stat().st_size > 0, f"missing Rust projection fixture: {name}")
         fixture_hashes[name] = sha256(path)
-    environment = hermetic_go_environment(work)
-    environment.update({"GOOS": "windows", "GOARCH": "amd64"})
-    environment["CFW_DNS_PROJECTED_FIXTURE_DIR"] = str(fixture_directory)
+    # The workspace tool runs on the host; everything else targets Windows.
+    host_environment = hermetic_go_environment(work)
+    environment = {**host_environment, "GOOS": "windows", "GOARCH": "amd64",
+                   "CFW_DNS_PROJECTED_FIXTURE_DIR": str(fixture_directory)}
     tags = pins["LIBBOX_BUILD_TAGS"]
     packages = test_packages(repository, pins)
-    packages.append(HOST_PACKAGE)
+    packages.extend((HOST_PACKAGE, WORKSPACE_TOOL))
     print("Resolving the locked Windows build and test package closure", flush=True)
     command([str(go), "list", "-deps", "-test", "-tags", tags, ENGINE_PACKAGE, *packages],
             cwd=source, env=environment, timeout=1200)
@@ -588,30 +684,39 @@ def build(repository: Path, work: Path, pins: dict[str, str]) -> None:
     verify_source(repository, baseline_source, pins, patched=True)
     require_unchanged(source_files(baseline_source), baseline_files, "GA baseline source bytes changed")
     require_unchanged(source_files(source), expected_files, "module resolution changed engine source bytes")
-    environment.update({"GOPROXY": "off", "GOSUMDB": "off"})
+    for phase in (host_environment, environment):
+        phase.update({"GOPROXY": "off", "GOSUMDB": "off"})
     command([str(go), "mod", "verify"], cwd=source, env=environment)
-    print("Scanning the linked Windows engine graph for known vulnerabilities", flush=True)
-    vulnerability_scan = scan_vulnerabilities(scanner, go, source, environment, tags, pins, output)
+    print("Scanning the pinned Windows engine graph for known vulnerabilities", flush=True)
+    pinned_scan = scan_vulnerabilities(scanner, go, source, environment, tags, pins, output, "pinned")
+    print("Preparing the build workspace with the source-bound sing correction", flush=True)
+    workspace, workspace_record, workspace_files = prepare_build_workspace(go, source, host_environment, work / "workspace")
+    command([str(go), "mod", "verify"], cwd=workspace, env=environment)
+    corrected_modules = module_graph(command([str(go), "list", "-m", "-json", "all"], cwd=workspace, env=environment),
+                                     local_replacement=(WORKSPACE_MODULE, WORKSPACE_REPLACEMENT))
+    (output / "workspace-module-graph.json").write_text(json.dumps(corrected_modules, indent=2) + "\n", encoding="utf-8")
+    print("Scanning the corrected Windows engine graph for known vulnerabilities", flush=True)
+    corrected_scan = scan_vulnerabilities(scanner, go, workspace, environment, tags, pins, output, "corrected")
     executable = output / "cfw-engine.exe"
     flags = f"-s -w -buildid= -checklinkname=0 -X github.com/sagernet/sing-box/constant.Version={pins['SING_BOX_VERSION'][1:]} -X internal/godebug.defaultGODEBUG=multipathtcp=0"
     arguments = [str(go), "build", "-mod=readonly", "-trimpath", "-buildvcs=false", "-tags", tags, "-ldflags", flags]
-    print("Building the native Windows engine without network resolution", flush=True)
-    command([*arguments, "-o", str(executable), ENGINE_PACKAGE], cwd=source, env=environment, timeout=1200)
+    print("Building the native Windows engine from the workspace without network resolution", flush=True)
+    command([*arguments, "-o", str(executable), ENGINE_PACKAGE], cwd=workspace, env=environment, timeout=1200)
     host_executable = output / "cfw-engine-host.exe"
-    command([*arguments, "-o", str(host_executable), HOST_PACKAGE], cwd=source, env=environment, timeout=1200)
+    command([*arguments, "-o", str(host_executable), HOST_PACKAGE], cwd=workspace, env=environment, timeout=1200)
     print("Checking an independent build cache produces identical bytes", flush=True)
     environment["GOCACHE"] = str(work / "second-cache")
     second = work / "second-engine.exe"
-    command([*arguments, "-o", str(second), ENGINE_PACKAGE], cwd=source, env=environment, timeout=1200)
+    command([*arguments, "-o", str(second), ENGINE_PACKAGE], cwd=workspace, env=environment, timeout=1200)
     require(sha256(executable) == sha256(second), "Windows engine build is not reproducible across caches")
     second_host = work / "second-engine-host.exe"
-    command([*arguments, "-o", str(second_host), HOST_PACKAGE], cwd=source, env=environment, timeout=1200)
+    command([*arguments, "-o", str(second_host), HOST_PACKAGE], cwd=workspace, env=environment, timeout=1200)
     require(sha256(host_executable) == sha256(second_host), "Windows host build is not reproducible across caches")
     print("Running the GA engine test package union on Windows (without race instrumentation)", flush=True)
     # Match the GA engine's Go linker contract; the Mac-only external clang
     # linker is omitted because this Windows component does not use CGO.
     result = subprocess.run([str(go), "test", "-json", "-count=1", "-timeout=5m", "-ldflags=-checklinkname=0", "-tags", tags, *packages],
-                            cwd=source, env=environment, capture_output=True, timeout=1200)
+                            cwd=workspace, env=environment, capture_output=True, timeout=1200)
     (output / "go-tests.jsonl").write_bytes(result.stdout)
     (output / "go-tests.stderr.txt").write_bytes(result.stderr)
     require(result.returncode == 0, "native Windows engine tests failed; inspect go-tests.jsonl and go-tests.stderr.txt")
@@ -625,7 +730,7 @@ def build(repository: Path, work: Path, pins: dict[str, str]) -> None:
     stress_name = "TestRuntimeDNSPoolRetriesSERVFAILButPreservesNegativeAnswers"
     stress = subprocess.run([str(go), "test", "-json", "-count=200", "-timeout=5m",
                              "-ldflags=-checklinkname=0", "-tags", tags, "./dns", "-run", f"^{stress_name}$"],
-                            cwd=source, env=environment, capture_output=True, timeout=360)
+                            cwd=workspace, env=environment, capture_output=True, timeout=360)
     (output / "dns-fixture-stress.jsonl").write_bytes(stress.stdout)
     (output / "dns-fixture-stress.stderr.txt").write_bytes(stress.stderr)
     require(stress.returncode == 0, "Windows DNS fixture stress failed; inspect dns-fixture-stress.jsonl")
@@ -636,15 +741,16 @@ def build(repository: Path, work: Path, pins: dict[str, str]) -> None:
     verify_source(repository, baseline_source, pins, patched=True)
     require_unchanged(source_files(baseline_source), baseline_files, "GA baseline source bytes changed")
     require_unchanged(source_files(source), expected_files, "build or tests changed engine source bytes")
+    require_unchanged(source_files(workspace), workspace_files, "build or tests changed workspace bytes")
     version = command([str(executable), "version"]).decode("utf-8")
     info = command([str(go), "version", "-m", str(executable)], env=environment).decode("utf-8")
     (output / "build-info.txt").write_text(info, encoding="utf-8")
     host_info = command([str(go), "version", "-m", str(host_executable)], env=environment).decode("utf-8")
     (output / "host-build-info.txt").write_text(host_info, encoding="utf-8")
-    shutil.copyfile(source / "LICENSE", output / "LICENSE")
-    command([str(go), "mod", "verify"], cwd=source, env=environment)
+    shutil.copyfile(workspace / "LICENSE", output / "LICENSE")
+    command([str(go), "mod", "verify"], cwd=workspace, env=environment)
     print("Collecting source license and notice texts for the linked Windows engine", flush=True)
-    notices = bundle_notices(repository, go, source, output, environment, pins)
+    notices = bundle_notices(repository, go, workspace, output, environment, pins)
     require(notices["embedded_binaries"] == 1, "fixed Windows engine omitted its embedded Wintun notice")
     wintun = output / "wintun.dll"
     receipt = {"schema_version": 1, "product_source": git(repository, "rev-parse", "HEAD").decode().strip(),
@@ -663,7 +769,9 @@ def build(repository: Path, work: Path, pins: dict[str, str]) -> None:
                "wintun_artifact": {"filename": wintun.name, "size": wintun.stat().st_size,
                                    "sha256": sha256(wintun), "version": pins["WINTUN_VERSION"]},
                "module_graph_sha256": sha256(output / "module-graph.json"),
-               "vulnerability_scan": vulnerability_scan,
+               "build_workspace": workspace_record,
+               "workspace_module_graph_sha256": sha256(output / "workspace-module-graph.json"),
+               "vulnerability_scans": {"pinned": pinned_scan, "corrected": corrected_scan},
                "rust_version": pins["RUST_VERSION"], "rust_dns_fixture_sha256": fixture_hashes,
                "race_instrumentation": False, "version_output": version,
                "artifact": {"filename": executable.name, "size": executable.stat().st_size, "sha256": sha256(executable)},

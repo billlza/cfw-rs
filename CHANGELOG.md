@@ -21,6 +21,28 @@
   starts was held to the same deadline, so a large profile tested at a short
   timeout on a busy Mac could fail as a whole while that engine was still
   starting. The timeout now runs from when the engine has started.
+- Let a latency test run on a profile whose DNS rules or DNS policies name a
+  rule set. The test's engine keeps no rule-set cache, and declaring the
+  remote sets would fetch them through the node under test before every
+  measurement, so the test now leaves out the DNS rules that name any rule set
+  other than an inline one, together with a response rule that depended on one
+  of them, and declares the inline sets the remaining rules name; the queries
+  those rules matched fall through to the rules after them. The profile the
+  core runs is unchanged. Before this, every node of such a profile failed its
+  test with `rule-set not found`.
+- Start a profile whose DNS policy names a rule set declared after an inline
+  one. The engine registers rule sets one by one and checked every DNS policy
+  while an inline set registered, before the sets declared after it existed,
+  so such a profile was refused with `rule-set not found` for a set it does
+  declare. The policies are now checked once every rule set is registered, and
+  a policy that names an undeclared set is still refused.
+- Refuse a runtime settings change while a legacy cleanup is pending, and say
+  to finish the cleanup first. Until the cleanup completes, the cutover
+  journal's replacement settings govern every start, so a change made in that
+  phase was saved and shown but ignored at the next launch, and recovery then
+  stopped because the engine's settings differed from the journal's.
+  Appearance, language and Login Item are not engine settings and can still be
+  changed.
 
 ### Supply chain
 

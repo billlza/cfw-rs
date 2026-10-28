@@ -2,6 +2,15 @@
 
 ## 0.5.1 - Unreleased
 
+### Interface
+
+- Say, in the TUN Mode row, what to do once the extension is allowed. The row
+  showed `Needs approval` with the `Approve…` button, but the start does not
+  continue by itself after the extension is allowed under System Settings ›
+  General › Login Items & Extensions, so a user who had allowed it saw nothing
+  happen. The row now says to click `Approve…` again, and its note carries the
+  full instruction.
+
 ### Profiles
 
 - Add the `tailscale` node. The Mac joins a tailnet with an auth key kept in

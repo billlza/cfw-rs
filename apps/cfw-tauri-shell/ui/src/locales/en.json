@@ -873,5 +873,7 @@
   "TUN Mode routes device traffic through a Windows virtual network adapter.": "TUN Mode routes device traffic through a Windows virtual network adapter.",
   "TUN Mode uses a Windows virtual network adapter to route traffic. The switch is available only when Windows tunnel support is ready.": "TUN Mode uses a Windows virtual network adapter to route traffic. The switch is available only when Windows tunnel support is ready.",
   "TUN Mode and System Proxy cannot run together until both report capability.": "TUN Mode and System Proxy cannot run together until both report capability.",
-  "TUN Mode and System Proxy cannot run together in this Windows build. Turn one off first.": "TUN Mode and System Proxy cannot run together in this Windows build. Turn one off first."
+  "TUN Mode and System Proxy cannot run together in this Windows build. Turn one off first.": "TUN Mode and System Proxy cannot run together in this Windows build. Turn one off first.",
+  "Then click Approve… again": "Then click Approve… again",
+  "Allow the extension under System Settings › General › Login Items & Extensions, then come back and click Approve… again.": "Allow the extension under System Settings › General › Login Items & Extensions, then come back and click Approve… again."
 }

@@ -873,5 +873,7 @@
   "TUN Mode routes device traffic through a Windows virtual network adapter.": "TUN 模式通过 Windows 虚拟网络适配器转发设备流量。",
   "TUN Mode uses a Windows virtual network adapter to route traffic. The switch is available only when Windows tunnel support is ready.": "TUN 模式使用 Windows 虚拟网络适配器转发流量。只有 Windows 隧道功能就绪后，才能使用此开关。",
   "TUN Mode and System Proxy cannot run together until both report capability.": "在两者都报告能力之前，TUN 模式与系统代理不能同时运行。",
-  "TUN Mode and System Proxy cannot run together in this Windows build. Turn one off first.": "当前 Windows 版应用中 TUN 模式与系统代理不能同时运行。请先关闭其中一项。"
+  "TUN Mode and System Proxy cannot run together in this Windows build. Turn one off first.": "当前 Windows 版应用中 TUN 模式与系统代理不能同时运行。请先关闭其中一项。",
+  "Then click Approve… again": "批准后再点一次「批准…」",
+  "Allow the extension under System Settings › General › Login Items & Extensions, then come back and click Approve… again.": "在「系统设置 › 通用 › 登录项与扩展」中允许扩展后，回到这里再点一次「批准…」。"
 }

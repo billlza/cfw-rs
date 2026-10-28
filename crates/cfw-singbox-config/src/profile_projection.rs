@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 
 use serde_json::{Map, Value, json};
@@ -36,11 +36,65 @@ pub(crate) struct RuntimeOutboundProjection {
 
 const APP_SELECTOR_TAG: &str = "cfw-proxy-selector";
 
+/// The selector the app puts in front of a profile that names no final route
+/// and starts with a remote node: every remote node is a member and the
+/// profile's effective final route is the default. It exists only in the
+/// projection, never in the saved document, so a choice made in it lives in
+/// the profile's proxy selections.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AppSelector {
+    pub(crate) tag: String,
+    pub(crate) members: Vec<String>,
+    pub(crate) default: String,
+}
+
 impl ProfileDocument {
+    pub(crate) fn app_selector(&self) -> Option<AppSelector> {
+        let has_explicit_final = self
+            .route
+            .as_ref()
+            .and_then(|route| route.final_tag.as_ref())
+            .is_some();
+        if has_explicit_final || !self.outbounds[0].is_remote() {
+            return None;
+        }
+        let members = self
+            .outbounds
+            .iter()
+            .filter(|outbound| outbound.is_remote())
+            .map(|outbound| outbound.tag().to_owned())
+            .collect::<Vec<_>>();
+        if members.len() < 2 {
+            return None;
+        }
+        Some(AppSelector {
+            tag: self.unused_tag(APP_SELECTOR_TAG),
+            members,
+            default: self.effective_final_outbound_tag().to_owned(),
+        })
+    }
+
+    /// The nodes a choice for `group` may name: a saved selector's members, or
+    /// the app selector's remote nodes. `None` when no selector has that tag.
+    pub(crate) fn selectable_members(&self, group: &str) -> Option<Vec<String>> {
+        let saved = self.outbounds.iter().find_map(|outbound| match outbound {
+            ProfileOutbound::Selector { tag, outbounds, .. } if tag == group => {
+                Some(outbounds.clone())
+            }
+            _ => None,
+        });
+        saved.or_else(|| {
+            self.app_selector()
+                .filter(|selector| selector.tag == group)
+                .map(|selector| selector.members)
+        })
+    }
+
     pub(crate) fn runtime_outbounds(
         &self,
         profile_id: &str,
         bootstrap_resolver: DomainResolverTags<'_>,
+        proxy_selections: &BTreeMap<String, String>,
     ) -> Result<RuntimeOutboundProjection, ConfigError> {
         let proxy_tags = self
             .dns
@@ -132,15 +186,27 @@ impl ProfileDocument {
             .as_ref()
             .and_then(|route| route.final_tag.as_ref())
             .is_some();
-        let inject_selector =
-            !has_explicit_final && self.outbounds[0].is_remote() && remote_tags.len() >= 2;
-        let injected_route_final = inject_selector.then(|| self.unused_tag(APP_SELECTOR_TAG));
-        if let Some(selector_tag) = injected_route_final.as_ref() {
+        let app_selector = self.app_selector();
+        let injected_route_final = app_selector.as_ref().map(|selector| selector.tag.clone());
+        if let Some(selector) = app_selector {
+            let default = match proxy_selections.get(&selector.tag) {
+                Some(chosen) if selector.members.contains(chosen) => chosen.clone(),
+                Some(chosen) => {
+                    return Err(ConfigError::UnsupportedPolicyShape {
+                        path: "$.outbounds".into(),
+                        reason: format!(
+                            "the saved choice {chosen} is not a node of {}",
+                            selector.tag
+                        ),
+                    });
+                }
+                None => selector.default,
+            };
             outbounds.push(json!({
                 "type": "selector",
-                "tag": selector_tag,
-                "outbounds": remote_tags,
-                "default": profile_final,
+                "tag": selector.tag,
+                "outbounds": selector.members,
+                "default": default,
                 "interrupt_exist_connections": false,
             }));
         }

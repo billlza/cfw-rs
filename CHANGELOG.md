@@ -43,6 +43,14 @@
   stopped because the engine's settings differed from the journal's.
   Appearance, language and Login Item are not engine settings and can still be
   changed.
+- Keep the node chosen on a profile that declares no selector group. The app
+  runs such a profile behind a selector of its own, but a choice made there
+  was refused with `selection requires a saved selector group` before it
+  reached the core, so an outbounds-only profile could only use its first
+  node. The choice is now applied to the running core, saved with the
+  profile, and used as that selector's default at every later start; a saved
+  choice that names a node the profile no longer declares is reset and
+  reported, as for a saved group.
 
 ### Supply chain
 

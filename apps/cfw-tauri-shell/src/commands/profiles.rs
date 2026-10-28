@@ -627,6 +627,48 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    fn saved_selection_persists_the_app_selector_choice_of_a_profile_without_a_group() {
+        let directory = TempDir::new().expect("profile directory");
+        let repository = ProfileRepository::new(directory.path().join("profiles"));
+        let profile = ValidatedSingBoxProfile::parse(&serde_json::json!({
+            "outbounds": [
+                {"type": "socks5", "tag": "first", "server": "first.example.com", "server_port": 1080},
+                {"type": "socks5", "tag": "second", "server": "second.example.com", "server_port": 1080}
+            ]
+        }).to_string()).expect("profile without a selector group");
+        let imported = repository.import(Some("Nodes"), &profile).expect("import");
+        repository.select(&imported.id).expect("select profile");
+        persist_saved_proxy_selection(&repository, &imported.id, "cfw-proxy-selector", "second")
+            .expect("save the app selector choice");
+        let selected = repository
+            .load_selected()
+            .expect("reload")
+            .expect("selected profile");
+        assert_eq!(
+            selected.profile.proxy_selections()["cfw-proxy-selector"],
+            "second"
+        );
+        assert_eq!(selected.profile.as_json(), profile.as_json());
+        assert_eq!(selected.profile.digest(), profile.digest());
+        let refused = persist_saved_proxy_selection(
+            &repository,
+            &imported.id,
+            "cfw-proxy-selector",
+            "absent",
+        )
+        .expect_err("a node the profile does not declare is refused");
+        assert!(refused.contains("member"), "{refused}");
+        let unchanged = repository
+            .load_selected()
+            .expect("reload")
+            .expect("selected profile");
+        assert_eq!(
+            unchanged.profile.proxy_selections()["cfw-proxy-selector"],
+            "second"
+        );
+    }
+
+    #[test]
     fn saved_selection_updates_only_the_selected_profile_and_preserves_credentials() {
         let directory = TempDir::new().expect("profile directory");
         let repository = ProfileRepository::new(directory.path().join("profiles"));

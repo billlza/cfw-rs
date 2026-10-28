@@ -1,4 +1,5 @@
 mod advanced;
+mod app_selector;
 mod datasets;
 mod dns_policy;
 mod goldens;

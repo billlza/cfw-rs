@@ -161,31 +161,33 @@ impl ValidatedSingBoxProfile {
         &self.proxy_selections
     }
 
-    /// Changes only a validated selector's runtime default. Neither the imported
+    /// Changes only a selector's runtime default: a saved group's, or the app's
+    /// own selector's on a profile that declares none. Neither the imported
     /// JSON nor its digest changes when choosing another already-declared node.
     pub fn with_selected_outbound(&self, group: &str, selected: &str) -> Result<Self, ConfigError> {
         let mut profile = self.clone();
-        let selector = profile
-            .document
-            .outbounds
-            .iter_mut()
-            .find(|outbound| outbound.tag() == group);
-        let Some(crate::profile::ProfileOutbound::Selector {
-            outbounds, default, ..
-        }) = selector
-        else {
+        let Some(members) = profile.document.selectable_members(group) else {
             return Err(ConfigError::UnsupportedPolicyShape {
                 path: "$.outbounds".into(),
-                reason: "selection requires a saved selector group".into(),
+                reason: "selection requires a selector group".into(),
             });
         };
-        if !outbounds.iter().any(|tag| tag == selected) {
+        if !members.iter().any(|tag| tag == selected) {
             return Err(ConfigError::UnsupportedPolicyShape {
                 path: "$.outbounds".into(),
                 reason: "selection must name a member of the group".into(),
             });
         }
-        *default = Some(selected.to_owned());
+        // A saved group carries the choice as its default; the app selector
+        // exists only in the projection, which reads the choice from the map.
+        if let Some(crate::profile::ProfileOutbound::Selector { default, .. }) = profile
+            .document
+            .outbounds
+            .iter_mut()
+            .find(|outbound| outbound.tag() == group)
+        {
+            *default = Some(selected.to_owned());
+        }
         profile
             .proxy_selections
             .insert(group.to_owned(), selected.to_owned());
@@ -201,13 +203,10 @@ impl ValidatedSingBoxProfile {
         let mut profile = self.clone();
         let mut reset_groups = Vec::new();
         for (group, selected) in previous.proxy_selections() {
-            let supported = profile.document.outbounds.iter().any(|outbound| {
-                matches!(
-                    outbound,
-                    crate::profile::ProfileOutbound::Selector { tag, outbounds, .. }
-                        if tag == group && outbounds.contains(selected)
-                )
-            });
+            let supported = profile
+                .document
+                .selectable_members(group)
+                .is_some_and(|members| members.contains(selected));
             if supported {
                 profile = profile.with_selected_outbound(group, selected)?;
             } else {

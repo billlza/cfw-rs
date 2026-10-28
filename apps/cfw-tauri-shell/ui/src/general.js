@@ -47,6 +47,12 @@ export function createGeneralView({ state, escapeHtml, engineStateLabel, engineT
     : engine.state === "Failed" && modeHasTunnel(engine.desiredMode)
       ? `<button class="cfw-text-button" data-action="retry-tun-mode"${tunnelRetryDisabled}>${escapeHtml(t("Retry"))}</button>`
       : "";
+  // Only the macOS System Extension install reports AwaitingApproval. The app
+  // does not continue by itself once the extension is allowed in System
+  // Settings: the start has to be asked for again, so the row says so.
+  const tunnelApprovalNote = engine.state === "AwaitingApproval"
+    ? renderRowNote(t("Then click Approve… again"), t("Allow the extension under System Settings › General › Login Items & Extensions, then come back and click Approve… again."))
+    : "";
   const proxyRecoveryAction = engine.state === "Failed" && modeHasSystemProxy(engine.desiredMode)
     ? `<button class="cfw-text-button" data-action="retry-system-proxy"${proxyRetryDisabled}>${escapeHtml(t("Retry"))}</button>`
     : "";
@@ -176,6 +182,7 @@ export function createGeneralView({ state, escapeHtml, engineStateLabel, engineT
             <span class="cfw-link-value">${escapeHtml(tunnelValueLabel(engine))}</span>
             ${tunnelRecoveryAction}
             ${tunnelCancellationAction}
+            ${tunnelApprovalNote}
             ${tunnelReason ? renderRowNote(t("Unavailable"), tunnelReason) : ""}
             ${renderInlineSwitch("tunMode", t("TUN Mode"), {
               reason: tunnelReason,

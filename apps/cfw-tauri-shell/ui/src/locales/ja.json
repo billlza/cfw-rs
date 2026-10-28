@@ -873,5 +873,7 @@
   "TUN Mode routes device traffic through a Windows virtual network adapter.": "TUN モードは Windows の仮想ネットワークアダプターを通してデバイスの通信を転送します。",
   "TUN Mode uses a Windows virtual network adapter to route traffic. The switch is available only when Windows tunnel support is ready.": "TUN モードは Windows の仮想ネットワークアダプターを使用して通信を転送します。Windows のトンネル機能が利用可能になると、このスイッチを操作できます。",
   "TUN Mode and System Proxy cannot run together until both report capability.": "TUN モードとシステムプロキシは、両方の機能が報告されるまで同時に実行できません。",
-  "TUN Mode and System Proxy cannot run together in this Windows build. Turn one off first.": "このアプリの Windows 版では TUN モードとシステムプロキシを同時に実行できません。先にどちらかをオフにしてください。"
+  "TUN Mode and System Proxy cannot run together in this Windows build. Turn one off first.": "このアプリの Windows 版では TUN モードとシステムプロキシを同時に実行できません。先にどちらかをオフにしてください。",
+  "Then click Approve… again": "承認後にもう一度「承認…」",
+  "Allow the extension under System Settings › General › Login Items & Extensions, then come back and click Approve… again.": "システム設定 › 一般 › ログイン項目と機能拡張で機能拡張を許可してから、ここに戻ってもう一度「承認…」をクリックしてください。"
 }

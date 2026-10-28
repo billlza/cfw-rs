@@ -571,6 +571,7 @@ impl ValidatedSingBoxProfile {
                 server: &bootstrap_tags[0],
                 fallback_servers: &bootstrap_tags[1..],
             },
+            self.proxy_selections(),
         )?;
         let selected_outbound = runtime_outbounds.selected_outbound.clone();
         let direct_outbound = runtime_outbounds.direct_outbound.clone();

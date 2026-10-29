@@ -1660,10 +1660,11 @@ never adopted.
    Before collection, the evidence VMs `packet-dns-primary-v040` (DNS
    resolver) and `packet-transport-v040` (TCP/UDP endpoint) must be running
    and reachable from this Mac's current public address. Keep the Mac awake
-   and on mains power for the whole collection, for example under
-   `caffeinate -i`: the collector's timeouts use a clock that stops while the
-   Mac sleeps, but its receipts record wall-clock times, so a step that spans
-   a sleep fails its duration check.
+   for the whole collection, for example under `caffeinate -i`: the
+   collector's timeouts use a clock that stops while the Mac sleeps, but its
+   receipts record wall-clock times, so a step that spans a sleep fails its
+   duration check. The power source is not checked; on battery, the charge
+   has to last the collection.
 
    When the collector waits for macOS approval and Tunnel mode, approve the
    System Extension and select Tunnel mode with IPv6 enabled in the installed

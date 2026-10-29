@@ -192,13 +192,6 @@ def require_system_extensions(context: Context) -> None:
         raise DriverError(f"the collector's system extension check can never pass: {problem}", MACHINE)
 
 
-def require_mains_power(context: Context) -> None:
-    power = context.machine.read(["/usr/bin/pmset", "-g", "batt"])
-    first = power.stdout.splitlines()[0] if power.stdout else ""
-    if "'AC Power'" not in first:
-        raise DriverError(f"connect the Mac to mains power first ({first or power.reason()})", MACHINE)
-
-
 def require_direct_egress(context: Context, instances: Sequence[EvidenceInstance]) -> None:
     for instance in instances:
         route = context.machine.read(["/sbin/route", "-n", "get", instance.address])
@@ -286,8 +279,8 @@ def wait_until_reachable(context: Context, instances: Sequence[EvidenceInstance]
 
 def _confirm_collect() -> None:
     print(
-        "Collect (about two hours). Keep this Terminal open, the Mac on mains power and awake, and the\n"
-        "network unchanged. When asked:\n"
+        "Collect (about two hours). Keep this Terminal open, the Mac awake, and the network unchanged.\n"
+        "When asked:\n"
         "  - 'Authorize bounded CFM packet capture:' -> your administrator password (not echoed);\n"
         "  - 'waiting for macOS approval and Tunnel mode' -> within 10 minutes approve the system\n"
         "    extension if asked and turn on TUN Mode only, then leave the dashboard alone;\n"
@@ -342,7 +335,6 @@ def _collect(context: Context) -> int:
     require_tunnel_disconnected(context)
     require_no_loopback_system_proxy(context)
     require_system_extensions(context)
-    require_mains_power(context)
     instances = evidence_instances(context.repository)
     require_direct_egress(context, instances)
     failure: BaseException | None = None

@@ -580,6 +580,20 @@ class AcceptanceTests(DriverFixture):
         self.assertEqual(actions.count("stop"), 2)
         self.assertEqual(self.machine.executed, [])
 
+    def test_collect_does_not_require_mains_power(self) -> None:
+        # The power source is the operator's business: a battery report must
+        # not stop the collection, and the driver does not even ask for it.
+        self.prepare_collect()
+        self.machine.answer(("/usr/bin/pmset",), stdout="Now drawing from 'Battery Power'\n")
+        self.machine.answer(("/usr/bin/dig",), stdout="")
+        with patch.object(release_driver_acceptance, "REACHABILITY_ATTEMPTS", 1), \
+                patch.object(release_driver_acceptance.time, "sleep"), \
+                contextlib.redirect_stdout(io.StringIO()), \
+                self.assertRaisesRegex(DriverError, "UDP 53"):
+            release_driver_acceptance._collect(self.context())
+        self.assertEqual([argv[3] for argv in self.gcloud_calls()].count("start"), 2)
+        self.assertNotIn("/usr/bin/pmset", [argv[0] for argv in self._calls])
+
     def test_a_failed_stop_is_reported_without_hiding_the_collect_failure(self) -> None:
         self.prepare_collect()
         self.machine.answer(("/usr/bin/dig",), stdout="")
@@ -623,7 +637,6 @@ class AcceptanceTests(DriverFixture):
         self.machine.answer(("/usr/sbin/scutil", "--nc", "list"), stdout="")
         self.machine.answer(("/usr/sbin/scutil", "--proxy"), stdout="<dictionary> {\n}\n")
         self.machine.answer(("/usr/bin/systemextensionsctl", "list"), stdout="")
-        self.machine.answer(("/usr/bin/pmset",), stdout="Now drawing from 'AC Power'\n")
         self.machine.answer(("/sbin/route",), stdout="   interface: en0\n")
         self.machine.answer((release_driver_acceptance.GCLOUD, "compute", "instances", "start"))
         self.machine.answer((release_driver_acceptance.GCLOUD, "compute", "instances", "stop"))

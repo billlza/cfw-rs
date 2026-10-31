@@ -29,6 +29,9 @@ pub(crate) struct RuntimeSettingsEffective {
     /// The user's choice, always present. Whether it applies to the selected
     /// profile (its selected route must be remote) is the projection's.
     mainland_china_direct: bool,
+    /// The user's choice, always present. It applies in Tunnel mode only,
+    /// which is the projection's to decide.
+    dns_leak_protection: bool,
 }
 
 impl RuntimeSettingsEffective {
@@ -41,6 +44,7 @@ impl RuntimeSettingsEffective {
             ipv6_dns_enabled,
             lan_proxy: value.lan_proxy,
             mainland_china_direct: value.mainland_china_direct,
+            dns_leak_protection: value.dns_leak_protection,
         }
     }
 }
@@ -150,5 +154,28 @@ mod tests {
         // renderer must accept its absence there.
         let stored = serde_json::to_value(RuntimePreferences::default()).expect("preferences");
         assert!(stored.get("mainland_china_direct").is_none());
+    }
+
+    #[test]
+    fn the_effective_view_always_reports_dns_leak_protection() {
+        let profile = ValidatedSingBoxProfile::direct();
+        let view = |settings: EngineSettings| {
+            serde_json::to_value(RuntimeSettingsEffective::for_profile(settings, &profile))
+                .expect("effective view")
+        };
+        assert_eq!(
+            view(EngineSettings::default())["dns_leak_protection"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            view(EngineSettings {
+                dns_leak_protection: true,
+                ..EngineSettings::default()
+            })["dns_leak_protection"],
+            serde_json::json!(true)
+        );
+        // Off is absent from the stored preferences, as for the mainland switch.
+        let stored = serde_json::to_value(RuntimePreferences::default()).expect("preferences");
+        assert!(stored.get("dns_leak_protection").is_none());
     }
 }

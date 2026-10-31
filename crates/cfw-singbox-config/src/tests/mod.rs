@@ -1,6 +1,7 @@
 mod advanced;
 mod app_selector;
 mod datasets;
+mod dns_leak;
 mod dns_policy;
 mod goldens;
 mod mainland;

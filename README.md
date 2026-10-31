@@ -54,7 +54,10 @@ downloads, at most 256 distinct datasets per profile. Settings › Engine ›
 Mainland China direct adds, in Rule mode, direct routes for mainland China
 destinations after a profile's own rules when the selected route is a proxy,
 and, for a profile without its own DNS policy, encrypted DNS in mainland China
-for mainland names; it is off by default. Persistent JSON contains canonical credential references,
+for mainland names; it is off by default. Settings › Engine › DNS leak
+protection refuses, in TUN Mode, every connection to port 853 (DNS over TLS and
+DNS over QUIC), so no resolver an app carries itself passes names around the
+core's DNS; it is off by default. Persistent JSON contains canonical credential references,
 never passwords, UUID values, private keys, or other secrets. TUIC keeps its
 UUID and password in two independently typed references. Projection emits only
 empty credential placeholders and closed injection slots. DNS outside the
@@ -160,9 +163,10 @@ Tunnel, numeric direct bootstrap servers are referenced only while resolving a
 domain-named proxy endpoint. Every ordinary engine query and route-level
 destination lookup uses certificate-verified DoH detoured through the selected
 outbound; Tunnel additionally hijacks packet-flow port 53 into that same
-authenticated path. While Mainland China direct applies, mainland names in Rule
-mode instead use DoH in mainland China dialled directly, as Settings › Engine
-describes. This is acyclic because authenticated DoH endpoints are
+authenticated path, and refuses port 853 (DNS over TLS and DNS over QUIC)
+while DNS leak protection is on. While Mainland China direct applies, mainland
+names in Rule mode instead use DoH in mainland China dialled directly, as
+Settings › Engine describes. This is acyclic because authenticated DoH endpoints are
 numeric and the selected outbound's own domain endpoint has an explicit direct
 bootstrap pair. The pinned source patch gives both roles one bounded fallback
 for rejected responses or transport errors. Each resolver is attempted at most

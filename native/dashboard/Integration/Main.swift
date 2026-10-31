@@ -473,6 +473,7 @@ private final class IntegrationHost: NSObject, NSApplicationDelegate, NSWindowDe
         "ipv6_dns_enabled": settings["ipv6_dns_enabled"] ?? true,
         "lan_proxy": settings["lan_proxy"] ?? NSNull(),
         "mainland_china_direct": settings["mainland_china_direct"] ?? false,
+        "dns_leak_protection": settings["dns_leak_protection"] ?? false,
       ]
       fixtures["read_runtime_settings_snapshot"] = snapshot
       return snapshot

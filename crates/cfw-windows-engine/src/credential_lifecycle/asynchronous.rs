@@ -101,6 +101,13 @@ struct Worker {
     admission: Arc<Admission>,
     completion_deadline: Instant,
 }
+/// What one blocking task owns until it retires: the operation with its
+/// buffers, then the capacity permit. Field order is drop order, so a task
+/// retired before it ran releases its capacity only after its buffers are gone.
+struct Queued<F> {
+    operation: F,
+    permit: OwnedSemaphorePermit,
+}
 impl Worker {
     fn reserve(capacity: &Arc<Semaphore>) -> std::result::Result<Self, VaultError> {
         let runtime = Handle::try_current().map_err(|_| VaultError::Unavailable)?;
@@ -128,10 +135,15 @@ impl Worker {
             tokio::time::sleep_until(tokio::time::Instant::from_std(self.completion_deadline));
         tokio::pin!(watchdog);
         let admission = Arc::clone(&self.admission);
+        let queued = Queued {
+            operation,
+            permit: self.permit,
+        };
         let mut worker = self.runtime.spawn_blocking(move || {
             // Capacity is held by the real worker until its buffers and native
             // operation retire, even when the caller abandons its future.
-            let _permit = self.permit;
+            let Queued { operation, permit } = queued;
+            let _permit = permit;
             admission.check()?;
             operation(&admission)
         });

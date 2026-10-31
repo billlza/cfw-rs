@@ -88,6 +88,34 @@ fn without_route_rules(mut value: Value) -> Value {
     value
 }
 
+/// Whether any leaf of the document equals `leaf`. Leaves compare whole: a
+/// text search would also match the per-process controller secret, 64 random
+/// hex characters, whenever it happens to contain the digits of a port.
+fn carries(value: &Value, leaf: &Value) -> bool {
+    match value {
+        Value::Array(items) => items.iter().any(|item| carries(item, leaf)),
+        Value::Object(fields) => fields.values().any(|field| carries(field, leaf)),
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => value == leaf,
+    }
+}
+
+#[test]
+fn carries_compares_whole_leaves() {
+    let secret = format!("853{}", "0".repeat(61));
+    let document = json!({
+        "route": {"rules": [{"port": 853, "action": "reject"}]},
+        "experimental": {"clash_api": {"secret": secret}}
+    });
+    assert!(carries(&document, &json!(853)));
+    assert!(carries(&document, &json!("reject")));
+    assert!(carries(&document, &json!(secret.as_str())));
+    assert!(!carries(&document, &json!("853")));
+    assert!(!carries(&document, &json!(53)));
+    let secret_only = json!({"experimental": {"clash_api": {"secret": secret}}});
+    assert!(!carries(&secret_only, &json!(853)));
+    assert!(!carries(&secret_only, &json!("853")));
+}
+
 #[test]
 fn tunnel_projections_refuse_encrypted_dns_right_after_the_plain_dns_hijack() {
     for (label, profile) in profiles() {
@@ -224,7 +252,8 @@ fn proxy_modes_and_release_evidence_projections_ignore_the_switch() {
             default.credential_slots(),
             "{label} {mode:?}"
         );
-        assert!(!switched.as_json().contains("853"), "{label} {mode:?}");
+        let value: Value = serde_json::from_str(switched.as_json()).expect("runtime JSON");
+        assert!(!carries(&value, &json!(853)), "{label} {mode:?}");
     }
 }
 
@@ -243,9 +272,9 @@ fn the_latency_probe_never_carries_the_refusal() {
                 probe(&EngineSettings::default()),
                 "{label} {mode:?}"
             );
-            let json = switched.as_json();
-            for marker in ["853", "\"reject\"", "hijack-dns"] {
-                assert!(!json.contains(marker), "{label} {mode:?} {marker}: {json}");
+            let value: Value = serde_json::from_str(switched.as_json()).expect("probe JSON");
+            for leaf in [json!(853), json!("reject"), json!("hijack-dns")] {
+                assert!(!carries(&value, &leaf), "{label} {mode:?} {leaf}: {value}");
             }
         }
     }

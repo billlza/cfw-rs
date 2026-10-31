@@ -346,16 +346,17 @@ fn tunnel_data_plane_admits_only_the_exact_packet_fed_projection() {
     let fake_ip = serde_json::json!({"outbounds":[{"type":"socks5","tag":"proxy","server":"node.example.com","server_port":1080}],
         "dns":{"servers":[{"type":"udp","server":"1.1.1.1","server_port":53}],"fake_ip":{"exclude":["+.lan"]}}})
     .to_string();
-    for (case, mtu, ipv6, lan, mainland, source) in [
-        (0, 1280, false, false, false, MAINLAND_SOURCE),
-        (1, 1500, true, true, false, MAINLAND_SOURCE),
-        (2, 9000, true, false, true, MAINLAND_SOURCE),
-        (3, 1500, true, true, true, fake_ip.as_str()),
+    for (case, mtu, ipv6, lan, mainland, leak, source) in [
+        (0, 1280, false, false, false, false, MAINLAND_SOURCE),
+        (1, 1500, true, true, false, true, MAINLAND_SOURCE),
+        (2, 9000, true, false, true, false, MAINLAND_SOURCE),
+        (3, 1500, true, true, true, true, fake_ip.as_str()),
     ] {
         let settings = EngineSettings {
             tunnel_mtu: mtu,
             enable_ipv6: ipv6,
             mainland_china_direct: mainland,
+            dns_leak_protection: leak,
             lan_proxy: lan.then(|| LanProxySettings {
                 listen: Ipv4Addr::UNSPECIFIED,
                 port: 8081,
@@ -374,6 +375,14 @@ fn tunnel_data_plane_admits_only_the_exact_packet_fed_projection() {
         if case == 3 {
             assert_eq!(document["experimental"]["cache_file"]["store_fakeip"], true);
         }
+        // DNS leak protection follows the LAN access rule and the port 53
+        // hijack, so the LAN listener's first-rule admission is unchanged.
+        assert_eq!(
+            document["route"]["rules"][usize::from(lan) + 1]
+                == serde_json::json!({"port":853,"action":"reject"}),
+            leak,
+            "case {case}"
+        );
         let prepared = CheckedStartConfiguration::new(request)
             .unwrap()
             .prepare_tunnel_data_plane([])

@@ -90,3 +90,45 @@ Trade-offs:
   Google) are then dialled directly, which mainland networks may block;
 - an earlier build refuses a settings file saved with the switch on and does
   not start the core; turn the switch off before installing one.
+
+## Engine › DNS leak protection
+
+Off by default. It is a runtime setting, saved and applied like Mainland China
+direct: through the network settings transaction, with the same rollback when
+a candidate core fails to start.
+
+In TUN Mode the core already hijacks every port 53 flow into its own DNS,
+which for a profile without its own DNS policy is DNS-over-HTTPS through the
+selected route, so plain DNS never reaches the network's resolvers. The switch
+adds one route rule, right
+after that hijack and before the mode rules, so it holds in Rule, Global and
+Direct mode alike: every connection to port 853, the port DNS over TLS
+(RFC 7858) and DNS over QUIC (RFC 9250) use, is refused with a reset. An app
+or a system setting that carries its own encrypted resolver therefore fails at
+once and falls back to plain DNS, which is hijacked. The rule applies to every
+connection the core handles in TUN Mode, those of the System Proxy and LAN
+listeners included when they run beside the tunnel, whatever the selected
+route, a profile routed DIRECT included.
+
+What it does not cover:
+
+- DNS over HTTPS shares port 443 with ordinary traffic and cannot be told
+  apart without a list of resolvers, so a browser's own secure DNS still
+  reaches its provider, through the selected route;
+- a profile's own DNS policy: a profile that declares `dns` resolves through
+  the servers it declares, plain or encrypted, direct or through the route,
+  exactly as declared;
+- a query that leaves outside the tunnel's route coverage, such as one scoped
+  to a LAN interface whose resolver is a private address, because the
+  projection does not change what the tunnel captures;
+- the plain lookup of a proxy server's own host name before the core can
+  reach it, through the bootstrap servers; a server named by address needs
+  none;
+- System Proxy and Local Proxy mode, where the app never writes the system
+  DNS and the switch changes nothing;
+- release evidence projections, which never carry it.
+
+With Mainland China direct on, mainland names are still resolved by encrypted
+DNS in mainland China, dialled directly, as that switch describes: the two
+switches are independent. An earlier build refuses a settings file saved with
+the switch on and does not start the core; turn it off before installing one.

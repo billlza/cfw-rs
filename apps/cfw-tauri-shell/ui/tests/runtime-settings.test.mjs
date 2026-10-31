@@ -4,11 +4,11 @@ import { readFile } from "node:fs/promises";
 import { acceptNativeRuntimeDraft, createRuntimeSettingsUI, preferencesFromRuntimeDraft, runtimeDraft } from "../src/runtime-settings.js";
 
 const preferences = { preferred_mixed_port:null, log_level:"info", tunnel_mtu:1500, allow_lan:false, lan_proxy:null };
-const response = () => ({ settings:structuredClone(preferences), revision:null, effective:{mixed_port:7890,log_level:"info",tunnel_mtu:1500,ipv6_dns_enabled:true,lan_proxy:null,mainland_china_direct:false} });
+const response = () => ({ settings:structuredClone(preferences), revision:null, effective:{mixed_port:7890,log_level:"info",tunnel_mtu:1500,ipv6_dns_enabled:true,lan_proxy:null,mainland_china_direct:false,dns_leak_protection:false} });
 
 // The native form receives exactly the fields runtimeDialogFrame sends.
 function nativeDraft(draft, edits = {}) {
-  const { initialIPv6DNS, ipv6DNSInherited, mainlandChinaDirect, ...fields } = draft;
+  const { initialIPv6DNS, ipv6DNSInherited, mainlandChinaDirect, dnsLeakProtection, ...fields } = draft;
   return { ...fields, ipv6DNSEdited: !ipv6DNSInherited, ...edits };
 }
 
@@ -210,137 +210,156 @@ test("a rejected settings transaction retains the saved values and refreshes act
   assert.ok(messages.some(([level]) => level === "error"));
 });
 
-test("mainland China direct observations are strictly typed and an absent stored key means off", async () => {
-  const state = {toggles:{},engineMutationBusy:false,migrationHandoff:false};
-  let snapshot;
-  const ui = createRuntimeSettingsUI({state,invoke:async () => snapshot,appendLog(){},renderPage(){},refreshRuntime(){},dismissOtherDialogs(){}});
-  snapshot = response();
-  assert.equal(await ui.load(), true, "control: the stored key is absent while off");
-  assert.equal(state.toggles.mainlandChinaDirect, false);
-  for (const stored of [true, false]) {
-    snapshot = response();
-    snapshot.settings.mainland_china_direct = stored;
-    snapshot.effective.mainland_china_direct = stored;
-    assert.equal(await ui.load(), true, String(stored));
-    assert.equal(state.toggles.mainlandChinaDirect, stored);
-  }
-  for (const [where, value] of [["effective", undefined], ["effective", "true"], ["effective", 1], ["effective", null], ["settings", "true"], ["settings", 1], ["settings", null]]) {
-    snapshot = response();
-    if (value === undefined) delete snapshot[where].mainland_china_direct;
-    else snapshot[where].mainland_china_direct = value;
-    state.runtimeSettingsError = null;
-    assert.equal(await ui.load(), false, `${where}=${String(value)}`);
-    assert.match(state.runtimeSettingsError, /invalid/u);
-  }
-});
+// The two runtime switches share one transaction path; each is checked on
+// its own stored key, state field and toggle method.
+const SWITCHES = [
+  { key: "mainland_china_direct", toggle: "mainlandChinaDirect", method: "toggleMainlandChinaDirect", label: "mainland China direct" },
+  { key: "dns_leak_protection", toggle: "dnsLeakProtection", method: "toggleDnsLeakProtection", label: "DNS leak protection" },
+];
 
-test("mainland China direct uses one settings transaction and shows On only after success", async () => {
-  const state = {toggles:{mainlandChinaDirect:false},engineMutationBusy:false,migrationHandoff:false};
-  let snapshot = response();
-  snapshot.revision = "current-settings";
-  const calls = [];
-  let signalWrite, finishWrite;
-  const writeStarted = new Promise((resolve) => { signalWrite = resolve; });
-  const ui = createRuntimeSettingsUI({state,invoke:async (command, args) => {
-    calls.push({command,args});
-    if (command === "read_runtime_settings_snapshot") return structuredClone(snapshot);
-    assert.equal(command, "write_runtime_settings_snapshot");
-    signalWrite();
-    await new Promise((resolve) => { finishWrite = resolve; });
-    snapshot = { settings:args.settings, revision:"updated-settings", effective:{...snapshot.effective,mainland_china_direct:args.settings.mainland_china_direct} };
-    return structuredClone(snapshot);
-  },appendLog(){},renderPage(){},refreshRuntime(){},dismissOtherDialogs(){assert.fail("the switch opens no dialog");}});
-  const changing = ui.toggleMainlandChinaDirect(true);
-  await writeStarted;
-  assert.equal(state.toggles.mainlandChinaDirect, false);
-  assert.equal(state.engineMutationBusy, true);
-  assert.deepEqual(calls[1].args, { settings:{...preferences,mainland_china_direct:true}, revision:"current-settings" });
-  finishWrite();
-  assert.equal(await changing, true);
-  assert.equal(state.toggles.mainlandChinaDirect, true);
-  assert.equal(state.engineMutationBusy, false);
-  assert.equal(calls.length, 2);
-  const turningOff = ui.toggleMainlandChinaDirect(false);
-  await new Promise((resolve) => setImmediate(resolve));
-  finishWrite();
-  assert.equal(await turningOff, true);
-  assert.equal(calls.at(-1).args.settings.mainland_china_direct, false);
-  assert.equal(state.toggles.mainlandChinaDirect, false);
-});
-
-test("mainland China direct refuses concurrent mutations, non-boolean input and keeps the observed state after a rejected save", async () => {
-  const state = {toggles:{mainlandChinaDirect:false},engineMutationBusy:true,migrationHandoff:false};
-  const calls = [];
-  const messages = [];
-  const ui = createRuntimeSettingsUI({state,invoke:async (command) => {
-    calls.push(command);
-    if (command === "write_runtime_settings_snapshot") throw new Error("initialize rule-set: download failed; the previous runtime was restored");
-    return response();
-  },appendLog(...args){messages.push(args);},renderPage(){},refreshRuntime(){},dismissOtherDialogs(){}});
-  await assert.rejects(ui.toggleMainlandChinaDirect(true), /operation is in progress/u);
-  state.engineMutationBusy = false;
-  state.migrationHandoff = true;
-  await assert.rejects(ui.toggleMainlandChinaDirect(true), /operation is in progress/u);
-  state.migrationHandoff = false;
-  await assert.rejects(ui.toggleMainlandChinaDirect("true"), TypeError);
-  assert.deepEqual(calls, []);
-  assert.equal(await ui.toggleMainlandChinaDirect(true), false);
-  assert.equal(state.toggles.mainlandChinaDirect, false);
-  assert.ok(messages.some(([level, , text]) => level === "error" && /rule-set/u.test(text)));
-});
-
-test("saving any other setting never turns mainland China direct off", async () => {
-  globalThis.document = { documentElement: { dataset: { theme: "light" } } };
-  for (const path of ["web dialog", "native dialog", "LAN off"]) {
+for (const sw of SWITCHES) {
+  test(`${sw.label} observations are strictly typed and an absent stored key means off`, async () => {
     const state = {toggles:{},engineMutationBusy:false,migrationHandoff:false};
-    const switchedOn = () => {
-      const snapshot = response();
-      snapshot.revision = "on";
-      snapshot.settings.mainland_china_direct = true;
-      snapshot.effective.mainland_china_direct = true;
-      return snapshot;
-    };
-    const writes = [];
-    let callbacks;
-    const ui = createRuntimeSettingsUI({state,
-      invoke:async (command, args) => {
-        if (command === "read_runtime_settings_snapshot") return switchedOn();
-        writes.push(args);
-        return { ...switchedOn(), settings:args.settings };
-      },
-      nativeDialog: path === "native dialog" ? { enabled: () => true, sync: (dialog, frame, handlers) => { callbacks = handlers; return null; } } : undefined,
-      appendLog(){},renderPage(){},refreshRuntime(){},dismissOtherDialogs(){}});
-    if (path === "LAN off") {
-      assert.equal(await ui.toggleLAN(false), true);
-    } else {
-      await ui.open();
-      const dialog = state.runtimeSettingsDialog;
-      if (path === "web dialog") {
-        dialog.draft.level = "debug";
-        assert.equal(await ui.save(preferencesFromRuntimeDraft(dialog.draft), dialog.revision, dialog), true);
-      } else {
-        ui.renderDialog();
-        await callbacks.onSubmit(nativeDraft(dialog.draft, { level: "debug" }));
-      }
+    let snapshot;
+    const ui = createRuntimeSettingsUI({state,invoke:async () => snapshot,appendLog(){},renderPage(){},refreshRuntime(){},dismissOtherDialogs(){}});
+    snapshot = response();
+    assert.equal(await ui.load(), true, "control: the stored key is absent while off");
+    assert.equal(state.toggles[sw.toggle], false);
+    for (const stored of [true, false]) {
+      snapshot = response();
+      snapshot.settings[sw.key] = stored;
+      snapshot.effective[sw.key] = stored;
+      assert.equal(await ui.load(), true, String(stored));
+      assert.equal(state.toggles[sw.toggle], stored);
     }
-    assert.equal(writes.length, 1, path);
-    assert.equal(writes[0].settings.mainland_china_direct, true, path);
-  }
-});
+    for (const [where, value] of [["effective", undefined], ["effective", "true"], ["effective", 1], ["effective", null], ["settings", "true"], ["settings", 1], ["settings", null]]) {
+      snapshot = response();
+      if (value === undefined) delete snapshot[where][sw.key];
+      else snapshot[where][sw.key] = value;
+      state.runtimeSettingsError = null;
+      assert.equal(await ui.load(), false, `${where}=${String(value)}`);
+      assert.match(state.runtimeSettingsError, /invalid/u);
+    }
+  });
 
-test("the native settings draft stays closed to the mainland switch", async () => {
+  test(`${sw.label} uses one settings transaction and shows On only after success`, async () => {
+    const state = {toggles:{[sw.toggle]:false},engineMutationBusy:false,migrationHandoff:false};
+    let snapshot = response();
+    snapshot.revision = "current-settings";
+    const calls = [];
+    let signalWrite, finishWrite;
+    const writeStarted = new Promise((resolve) => { signalWrite = resolve; });
+    const ui = createRuntimeSettingsUI({state,invoke:async (command, args) => {
+      calls.push({command,args});
+      if (command === "read_runtime_settings_snapshot") return structuredClone(snapshot);
+      assert.equal(command, "write_runtime_settings_snapshot");
+      signalWrite();
+      await new Promise((resolve) => { finishWrite = resolve; });
+      snapshot = { settings:args.settings, revision:"updated-settings", effective:{...snapshot.effective,[sw.key]:args.settings[sw.key]} };
+      return structuredClone(snapshot);
+    },appendLog(){},renderPage(){},refreshRuntime(){},dismissOtherDialogs(){assert.fail("the switch opens no dialog");}});
+    const changing = ui[sw.method](true);
+    await writeStarted;
+    assert.equal(state.toggles[sw.toggle], false);
+    assert.equal(state.engineMutationBusy, true);
+    assert.deepEqual(calls[1].args, { settings:{...preferences,[sw.key]:true}, revision:"current-settings" });
+    finishWrite();
+    assert.equal(await changing, true);
+    assert.equal(state.toggles[sw.toggle], true);
+    assert.equal(state.engineMutationBusy, false);
+    assert.equal(calls.length, 2);
+    const turningOff = ui[sw.method](false);
+    await new Promise((resolve) => setImmediate(resolve));
+    finishWrite();
+    assert.equal(await turningOff, true);
+    assert.equal(calls.at(-1).args.settings[sw.key], false);
+    assert.equal(state.toggles[sw.toggle], false);
+  });
+
+  test(`${sw.label} refuses concurrent mutations, non-boolean input and keeps the observed state after a rejected save`, async () => {
+    const state = {toggles:{[sw.toggle]:false},engineMutationBusy:true,migrationHandoff:false};
+    const calls = [];
+    const messages = [];
+    const ui = createRuntimeSettingsUI({state,invoke:async (command) => {
+      calls.push(command);
+      if (command === "write_runtime_settings_snapshot") throw new Error("initialize rule-set: download failed; the previous runtime was restored");
+      return response();
+    },appendLog(...args){messages.push(args);},renderPage(){},refreshRuntime(){},dismissOtherDialogs(){}});
+    await assert.rejects(ui[sw.method](true), /operation is in progress/u);
+    state.engineMutationBusy = false;
+    state.migrationHandoff = true;
+    await assert.rejects(ui[sw.method](true), /operation is in progress/u);
+    state.migrationHandoff = false;
+    await assert.rejects(ui[sw.method]("true"), TypeError);
+    assert.deepEqual(calls, []);
+    assert.equal(await ui[sw.method](true), false);
+    assert.equal(state.toggles[sw.toggle], false);
+    assert.ok(messages.some(([level, , text]) => level === "error" && /rule-set/u.test(text)));
+  });
+
+  test(`saving any other setting never turns ${sw.label} off`, async () => {
+    globalThis.document = { documentElement: { dataset: { theme: "light" } } };
+    for (const path of ["web dialog", "native dialog", "LAN off"]) {
+      const state = {toggles:{},engineMutationBusy:false,migrationHandoff:false};
+      const switchedOn = () => {
+        const snapshot = response();
+        snapshot.revision = "on";
+        snapshot.settings[sw.key] = true;
+        snapshot.effective[sw.key] = true;
+        return snapshot;
+      };
+      const writes = [];
+      let callbacks;
+      const ui = createRuntimeSettingsUI({state,
+        invoke:async (command, args) => {
+          if (command === "read_runtime_settings_snapshot") return switchedOn();
+          writes.push(args);
+          return { ...switchedOn(), settings:args.settings };
+        },
+        nativeDialog: path === "native dialog" ? { enabled: () => true, sync: (dialog, frame, handlers) => { callbacks = handlers; return null; } } : undefined,
+        appendLog(){},renderPage(){},refreshRuntime(){},dismissOtherDialogs(){}});
+      if (path === "LAN off") {
+        assert.equal(await ui.toggleLAN(false), true);
+      } else {
+        await ui.open();
+        const dialog = state.runtimeSettingsDialog;
+        if (path === "web dialog") {
+          dialog.draft.level = "debug";
+          assert.equal(await ui.save(preferencesFromRuntimeDraft(dialog.draft), dialog.revision, dialog), true);
+        } else {
+          ui.renderDialog();
+          await callbacks.onSubmit(nativeDraft(dialog.draft, { level: "debug" }));
+        }
+      }
+      assert.equal(writes.length, 1, path);
+      assert.equal(writes[0].settings[sw.key], true, path);
+    }
+  });
+}
+
+test("the native settings draft stays closed to the runtime switches", async () => {
   const { runtimeDialogFrame } = await import("../src/native-runtime-settings.js");
   globalThis.document = { documentElement: { dataset: { theme: "light" } } };
-  const draft = runtimeDraft({ ...preferences, mainland_china_direct: true });
+  const draft = runtimeDraft({ ...preferences, mainland_china_direct: true, dns_leak_protection: true });
   assert.equal(draft.mainlandChinaDirect, true);
+  assert.equal(draft.dnsLeakProtection, true);
   assert.deepEqual(Object.keys(runtimeDialogFrame({ draft, saving:false, error:null }).draft).sort(),
     ["allow", "ipv6DNS", "ipv6DNSEdited", "lanAddress", "lanPort", "lanSources", "level", "mtu", "port"]);
-  assert.throws(() => acceptNativeRuntimeDraft(draft, { ...nativeDraft(draft), mainlandChinaDirect: false }), /draft is invalid/u);
-  assert.equal(preferencesFromRuntimeDraft(acceptNativeRuntimeDraft(draft, nativeDraft(draft))).mainland_china_direct, true);
+  for (const extra of [{ mainlandChinaDirect: false }, { dnsLeakProtection: false }]) {
+    assert.throws(() => acceptNativeRuntimeDraft(draft, { ...nativeDraft(draft), ...extra }), /draft is invalid/u);
+  }
+  const kept = preferencesFromRuntimeDraft(acceptNativeRuntimeDraft(draft, nativeDraft(draft)));
+  assert.equal(kept.mainland_china_direct, true);
+  assert.equal(kept.dns_leak_protection, true);
   const off = runtimeDraft(preferences);
-  assert.equal(Object.hasOwn(preferencesFromRuntimeDraft(off), "mainland_china_direct"), false, "off keeps the legacy shape");
-  off.mainlandChinaDirect = "true";
-  assert.throws(() => preferencesFromRuntimeDraft(off), TypeError);
+  for (const key of ["mainland_china_direct", "dns_leak_protection"]) {
+    assert.equal(Object.hasOwn(preferencesFromRuntimeDraft(off), key), false, `${key}: off keeps the legacy shape`);
+  }
+  for (const field of ["mainlandChinaDirect", "dnsLeakProtection"]) {
+    const invalid = runtimeDraft(preferences);
+    invalid[field] = "true";
+    assert.throws(() => preferencesFromRuntimeDraft(invalid), TypeError, field);
+  }
 });
 
 test("the component integration harness serves runtime snapshots the renderer accepts", async () => {
@@ -350,6 +369,7 @@ test("the component integration harness serves runtime snapshots the renderer ac
   const ui = createRuntimeSettingsUI({state,invoke:async () => structuredClone(fixture),appendLog(){},renderPage(){},refreshRuntime(){},dismissOtherDialogs(){}});
   assert.equal(await ui.load(), true, state.runtimeSettingsError);
   assert.equal(state.toggles.mainlandChinaDirect, false);
+  assert.equal(state.toggles.dnsLeakProtection, false);
   // Its write handler rebuilds the effective view, which must keep every field.
   const host = await readFile(new URL("Main.swift", integration), "utf8");
   const rebuilt = host.match(/case "write_runtime_settings_snapshot":[\s\S]*?snapshot\["effective"\] = \[([\s\S]*?)\n\s*\]/u)?.[1];

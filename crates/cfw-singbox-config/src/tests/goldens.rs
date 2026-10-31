@@ -1,9 +1,11 @@
 //! Byte-identity goldens for representative projections with the default
 //! settings. They were captured from the 0.5 line before GEOSITE rules and the
 //! mainland China direct switch existed, so every later change to routing, DNS
-//! or dataset resources must leave these bytes unchanged while the switch is
-//! off. A mismatch writes the actual output to `target/tmp/projection-goldens/`
-//! and fails; the goldens are never rewritten automatically.
+//! or dataset resources must leave these bytes unchanged while the switches
+//! are off; the one captured with DNS leak protection on binds that switch's
+//! rule. A mismatch writes the actual output to
+//! `target/tmp/projection-goldens/` and fails; the goldens are never rewritten
+//! automatically.
 
 use std::path::PathBuf;
 
@@ -186,6 +188,15 @@ fn cases() -> Vec<Case> {
             &shadowsocks(),
             ProjectionMode::TunnelSystemProxy,
             lan_settings(),
+        ),
+        case(
+            "shadowsocks-tunnel-dns-leak-protection",
+            &shadowsocks(),
+            ProjectionMode::Tunnel,
+            EngineSettings {
+                dns_leak_protection: true,
+                ..default()
+            },
         ),
         case(
             "outbound-only-pair-system-proxy",

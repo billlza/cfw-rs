@@ -110,6 +110,7 @@ function renderSettings() {
         renderSettingValue(t("Log level"), projection.logLevel ?? "info", REASONS.logLevel),
         renderToggle("allowLan", t("Allow LAN"), REASONS.allowLan, { reason: state.runtimeSettingsError, disabled: state.engineMutationBusy }),
         renderToggle("mainlandChinaDirect", t("Mainland China direct"), REASONS.mainlandChinaDirect, { reason: state.runtimeSettingsError, disabled: state.engineMutationBusy }),
+        renderToggle("dnsLeakProtection", t("DNS leak protection"), REASONS.dnsLeakProtection, { reason: state.runtimeSettingsError, disabled: state.engineMutationBusy }),
         renderToggle("mixin", t("Mixin"), "", { reason: REASONS.mixin }),
       ])}
 

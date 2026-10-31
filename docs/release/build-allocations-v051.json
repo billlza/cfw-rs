@@ -1,1 +1,1 @@
-{"active_ga":"51001","allocations":[{"build":"51001","role":"ga","status":"active_ga"}],"document":"cfm-release-build-allocation-v2","product_version":"0.5.1"}
+{"active_ga":"51002","allocations":[{"build":"51001","role":"ga","status":"retired_product_change_after_ga_runtime_acceptance_before_publication"},{"build":"51002","role":"ga","status":"active_ga"}],"document":"cfm-release-build-allocation-v2","product_version":"0.5.1"}

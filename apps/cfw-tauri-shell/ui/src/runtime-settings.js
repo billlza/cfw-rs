@@ -25,15 +25,18 @@ export function runtimeDraft(settings, effective = null) {
     lanAddress: settings.lan_proxy?.listen ?? "0.0.0.0",
     lanPort: String(settings.lan_proxy?.port ?? 7898),
     lanSources: settings.lan_proxy?.allowed_source_cidrs.join("\n") ?? "",
-    // Not an editable field: carried so saving the form keeps the switch.
+    // Not editable fields: carried so saving the form keeps the switches.
     mainlandChinaDirect: settings.mainland_china_direct === true,
+    dnsLeakProtection: settings.dns_leak_protection === true,
   };
 }
 
 export function preferencesFromRuntimeDraft(draft) {
   if (!RUNTIME_LOG_LEVELS.includes(draft.level)) throw new Error(t("Choose a supported log level"));
   if (typeof draft.ipv6DNS !== "boolean") throw new Error(t("Choose whether to enable IPv6 DNS"));
-  if (typeof draft.mainlandChinaDirect !== "boolean") throw new TypeError("Runtime settings draft is invalid");
+  if (typeof draft.mainlandChinaDirect !== "boolean" || typeof draft.dnsLeakProtection !== "boolean") {
+    throw new TypeError("Runtime settings draft is invalid");
+  }
   const sources = draft.lanSources.split(/[\n,]/u).map((value) => value.trim()).filter(Boolean);
   if (draft.allow && !sources.length) throw new Error(t("Enter the trusted LAN source ranges before enabling sharing"));
   const lan = sources.length ? {
@@ -53,8 +56,9 @@ export function preferencesFromRuntimeDraft(draft) {
     ...(draft.ipv6DNSInherited && draft.ipv6DNS === draft.initialIPv6DNS ? {} : { ipv6_dns_enabled: draft.ipv6DNS }),
     allow_lan: draft.allow === true,
     lan_proxy: lan,
-    // Absent means off, which keeps the bytes of settings saved before the switch.
+    // Absent means off, which keeps the bytes of settings saved before each switch.
     ...(draft.mainlandChinaDirect ? { mainland_china_direct: true } : {}),
+    ...(draft.dnsLeakProtection ? { dns_leak_protection: true } : {}),
   };
 }
 
@@ -80,6 +84,8 @@ export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, 
       || typeof snapshot.effective.ipv6_dns_enabled !== "boolean"
       || (snapshot.settings.mainland_china_direct !== undefined && typeof snapshot.settings.mainland_china_direct !== "boolean")
       || typeof snapshot.effective.mainland_china_direct !== "boolean"
+      || (snapshot.settings.dns_leak_protection !== undefined && typeof snapshot.settings.dns_leak_protection !== "boolean")
+      || typeof snapshot.effective.dns_leak_protection !== "boolean"
       || !(snapshot.revision === null || typeof snapshot.revision === "string")) {
       throw new TypeError("Runtime settings response is invalid");
     }
@@ -91,6 +97,7 @@ export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, 
     state.toggles.allowLan = snapshot.settings.allow_lan;
     state.toggles.ipv6DNS = snapshot.effective.ipv6_dns_enabled;
     state.toggles.mainlandChinaDirect = snapshot.effective.mainland_china_direct;
+    state.toggles.dnsLeakProtection = snapshot.effective.dns_leak_protection;
     state.logLevel = snapshot.effective.log_level;
   }
   async function load() {
@@ -152,23 +159,19 @@ export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, 
     if (!await load()) throw new Error(state.runtimeSettingsError);
     return save({ ...state.runtimeSettings.settings, allow_lan: false }, state.runtimeSettings.revision);
   }
-  async function toggleIPv6DNS(enabled) {
-    if (typeof enabled !== "boolean") throw new TypeError("IPv6 DNS must be enabled or disabled");
+  // One switch of the stored preferences. A background refresh cannot cancel
+  // a user's choice: the write is bound to the exact snapshot read for this
+  // action, and the backend enforces its revision.
+  async function toggleSwitch(field, label, enabled) {
+    if (typeof enabled !== "boolean") throw new TypeError(`${label} must be enabled or disabled`);
     if (state.engineMutationBusy || state.migrationHandoff) throw new Error(t("Another network operation is in progress"));
     const snapshot = await invoke("read_runtime_settings_snapshot");
     validateSnapshot(snapshot);
-    // A background refresh cannot cancel a user's choice. Bind the write to
-    // the exact snapshot read for this action; the backend enforces its revision.
-    return save({ ...snapshot.settings, ipv6_dns_enabled: enabled }, snapshot.revision);
+    return save({ ...snapshot.settings, [field]: enabled }, snapshot.revision);
   }
-  async function toggleMainlandChinaDirect(enabled) {
-    if (typeof enabled !== "boolean") throw new TypeError("Mainland China direct must be enabled or disabled");
-    if (state.engineMutationBusy || state.migrationHandoff) throw new Error(t("Another network operation is in progress"));
-    const snapshot = await invoke("read_runtime_settings_snapshot");
-    validateSnapshot(snapshot);
-    // Bound to the snapshot read for this action, as the IPv6 DNS switch is.
-    return save({ ...snapshot.settings, mainland_china_direct: enabled }, snapshot.revision);
-  }
+  const toggleIPv6DNS = (enabled) => toggleSwitch("ipv6_dns_enabled", "IPv6 DNS", enabled);
+  const toggleMainlandChinaDirect = (enabled) => toggleSwitch("mainland_china_direct", "Mainland China direct", enabled);
+  const toggleDnsLeakProtection = (enabled) => toggleSwitch("dns_leak_protection", "DNS leak protection", enabled);
   function renderDialog() {
     const dialog = state.runtimeSettingsDialog;
     if (!dialog) { nativeDialog?.sync(null); return ""; }
@@ -238,5 +241,5 @@ export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, 
       } catch (error) { appendLog("error", "settings", errorText(error)); renderPage(); }
     }));
   }
-  return { load, open, close, save, toggleLAN, toggleIPv6DNS, toggleMainlandChinaDirect, renderDialog, bindDialog, bindPage };
+  return { load, open, close, save, toggleLAN, toggleIPv6DNS, toggleMainlandChinaDirect, toggleDnsLeakProtection, renderDialog, bindDialog, bindPage };
 }

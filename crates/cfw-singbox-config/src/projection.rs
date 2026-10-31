@@ -839,6 +839,14 @@ impl ValidatedSingBoxProfile {
         );
         if mode.has_tunnel() {
             rules.insert(0, json!({ "port": 53, "action": "hijack-dns" }));
+            // DNS leak protection applies to every ordinary Tunnel projection,
+            // whatever the selected route, and never to release evidence.
+            if settings.dns_leak_protection
+                && self.dns_projection == DnsProjection::Ordinary
+                && self.release_packet_evidence_case.is_none()
+            {
+                rules.insert(1, crate::dns_leak::route_rule());
+            }
         }
         if let Some(lan) = &settings.lan_proxy {
             rules.insert(0, crate::lan::access_rule(lan));

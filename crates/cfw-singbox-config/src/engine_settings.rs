@@ -60,6 +60,16 @@ pub struct EngineSettings {
     /// written before the switch existed keep their bytes.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub mainland_china_direct: bool,
+    /// DNS leak protection. In Tunnel mode the core refuses every connection
+    /// to port 853 (DNS over TLS, DNS over QUIC), so a resolver an app or a
+    /// system setting carries itself falls back to plain DNS, which the Tunnel
+    /// always hijacks into the application's encrypted DNS (see
+    /// [`crate::dns_leak`]). It changes nothing in the proxy modes, where the
+    /// application never writes the host DNS, and never changes a release
+    /// evidence projection; absent means off, so files written before the
+    /// switch existed keep their bytes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dns_leak_protection: bool,
 }
 
 impl Default for EngineSettings {
@@ -91,6 +101,7 @@ impl Default for EngineSettings {
                 },
             ],
             mainland_china_direct: false,
+            dns_leak_protection: false,
         }
     }
 }
@@ -204,6 +215,9 @@ pub struct RuntimePreferences {
     /// See [`EngineSettings::mainland_china_direct`]. Absent means off.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub mainland_china_direct: bool,
+    /// See [`EngineSettings::dns_leak_protection`]. Absent means off.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dns_leak_protection: bool,
 }
 
 impl Default for RuntimePreferences {
@@ -216,6 +230,7 @@ impl Default for RuntimePreferences {
             allow_lan: false,
             lan_proxy: None,
             mainland_china_direct: false,
+            dns_leak_protection: false,
         }
     }
 }
@@ -251,6 +266,7 @@ impl RuntimePreferences {
         settings.ipv6_dns_enabled = self.ipv6_dns_enabled;
         settings.lan_proxy = self.lan_proxy.clone().filter(|_| self.allow_lan);
         settings.mainland_china_direct = self.mainland_china_direct;
+        settings.dns_leak_protection = self.dns_leak_protection;
         settings.validate_listener_settings()?;
         // The endpoint allocator chooses a distinct controller after applying
         // a user-selected mixed port; projection validates the final tuple.

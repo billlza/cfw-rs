@@ -261,7 +261,7 @@ const responses = {
   read_runtime_settings_snapshot: {
     settings: { preferred_mixed_port:null, log_level:"info", tunnel_mtu:1500, allow_lan:false, lan_proxy:null },
     revision: null,
-    effective: { mixed_port:7890, log_level:"info", tunnel_mtu:1500, ipv6_dns_enabled:true, lan_proxy:null, mainland_china_direct:false },
+    effective: { mixed_port:7890, log_level:"info", tunnel_mtu:1500, ipv6_dns_enabled:true, lan_proxy:null, mainland_china_direct:false, dns_leak_protection:false },
   },
   read_settings_snapshot: {
       resolved_locale: "en",
@@ -5432,57 +5432,66 @@ test("a missed observation of a leased core is explained as a recheck instead of
   }
 });
 
-test("Settings places the mainland China direct switch after Allow LAN and applies it as one runtime transaction", async () => {
-  await setEngine(RUNNING_ENGINE);
-  const original = structuredClone(responses.read_runtime_settings_snapshot);
-  const hadWrite = Object.hasOwn(responses, "write_runtime_settings_snapshot");
-  const previousWrite = responses.write_runtime_settings_snapshot;
-  const toggle = (html) => html.match(/<input type="checkbox" data-toggle="mainlandChinaDirect"([^>]*)\/>/u)?.[1];
-  try {
-    let html = await renderPage("settings");
-    const order = ["allowLan", "mainlandChinaDirect", "mixin"].map((key) => html.indexOf(`data-toggle="${key}"`));
-    assert.ok(order[0] >= 0 && order[0] < order[1] && order[1] < order[2], `row order ${order}`);
-    assert.ok(html.includes("<b>Mainland China direct</b>"));
-    assert.ok(html.includes("traffic that no profile rule matches goes direct when it is bound for mainland China"));
-    assert.doesNotMatch(toggle(html), /checked|disabled/u);
+const RUNTIME_SWITCHES = [
+  { key: "mainland_china_direct", toggle: "mainlandChinaDirect", label: "Mainland China direct",
+    reason: "traffic that no profile rule matches goes direct when it is bound for mainland China" },
+  { key: "dns_leak_protection", toggle: "dnsLeakProtection", label: "DNS leak protection",
+    reason: "every connection to port 853 is refused" },
+];
 
-    let written = null;
-    responses.write_runtime_settings_snapshot = (args) => {
-      written = args;
-      responses.read_runtime_settings_snapshot = { settings: args.settings, revision: "on",
-        effective: { ...original.effective, mainland_china_direct: args.settings.mainland_china_direct } };
-      return structuredClone(responses.read_runtime_settings_snapshot);
-    };
-    const input = interactiveElement("input");
-    input.dataset.toggle = "mainlandChinaDirect";
-    querySelectorAllElements.set("[data-toggle]", [input]);
-    await renderPage("settings");
-    invocationDetails.length = 0;
-    input.checked = true;
-    await input.trigger("change");
-    const commands = invocationDetails.map((entry) => entry.command);
-    assert.deepEqual(commands.filter((command) => command.startsWith("write_")), ["write_runtime_settings_snapshot"]);
-    assert.ok(commands.indexOf("read_runtime_settings_snapshot") < commands.indexOf("write_runtime_settings_snapshot"),
-      "the write is bound to a fresh read");
-    assert.deepEqual(written, { settings: { ...original.settings, mainland_china_direct: true }, revision: null });
-    assert.equal(state.toggles.mainlandChinaDirect, true);
-    html = await renderPage("settings");
-    assert.match(toggle(html), /checked/u);
+for (const sw of RUNTIME_SWITCHES) {
+  test(`Settings places the ${sw.label} switch after Allow LAN and applies it as one runtime transaction`, async () => {
+    await setEngine(RUNNING_ENGINE);
+    const original = structuredClone(responses.read_runtime_settings_snapshot);
+    const hadWrite = Object.hasOwn(responses, "write_runtime_settings_snapshot");
+    const previousWrite = responses.write_runtime_settings_snapshot;
+    const toggle = (html) => html.match(new RegExp(`<input type="checkbox" data-toggle="${sw.toggle}"([^>]*)\\/>`, "u"))?.[1];
+    try {
+      let html = await renderPage("settings");
+      const order = ["allowLan", "mainlandChinaDirect", "dnsLeakProtection", "mixin"].map((key) => html.indexOf(`data-toggle="${key}"`));
+      assert.ok(order.every((position, index) => position >= 0 && (index === 0 || order[index - 1] < position)), `row order ${order}`);
+      assert.ok(html.includes(`<b>${sw.label}</b>`));
+      assert.ok(html.includes(sw.reason));
+      assert.doesNotMatch(toggle(html), /checked|disabled/u);
 
-    // While the runtime settings are unknown the switch is disabled with the reason.
-    state.runtimeSettingsError = "runtime settings unavailable";
-    html = await renderPage("settings");
-    assert.match(toggle(html), /disabled/u);
-    assert.match(toggle(html), /title="runtime settings unavailable"/u);
-  } finally {
-    state.runtimeSettingsError = null;
-    responses.read_runtime_settings_snapshot = original;
-    if (hadWrite) responses.write_runtime_settings_snapshot = previousWrite;
-    else delete responses.write_runtime_settings_snapshot;
-    querySelectorAllElements.delete("[data-toggle]");
-    await emit("cfw://settings-changed", responses.read_settings_snapshot);
-  }
-});
+      let written = null;
+      responses.write_runtime_settings_snapshot = (args) => {
+        written = args;
+        responses.read_runtime_settings_snapshot = { settings: args.settings, revision: "on",
+          effective: { ...original.effective, [sw.key]: args.settings[sw.key] } };
+        return structuredClone(responses.read_runtime_settings_snapshot);
+      };
+      const input = interactiveElement("input");
+      input.dataset.toggle = sw.toggle;
+      querySelectorAllElements.set("[data-toggle]", [input]);
+      await renderPage("settings");
+      invocationDetails.length = 0;
+      input.checked = true;
+      await input.trigger("change");
+      const commands = invocationDetails.map((entry) => entry.command);
+      assert.deepEqual(commands.filter((command) => command.startsWith("write_")), ["write_runtime_settings_snapshot"]);
+      assert.ok(commands.indexOf("read_runtime_settings_snapshot") < commands.indexOf("write_runtime_settings_snapshot"),
+        "the write is bound to a fresh read");
+      assert.deepEqual(written, { settings: { ...original.settings, [sw.key]: true }, revision: null });
+      assert.equal(state.toggles[sw.toggle], true);
+      html = await renderPage("settings");
+      assert.match(toggle(html), /checked/u);
+
+      // While the runtime settings are unknown the switch is disabled with the reason.
+      state.runtimeSettingsError = "runtime settings unavailable";
+      html = await renderPage("settings");
+      assert.match(toggle(html), /disabled/u);
+      assert.match(toggle(html), /title="runtime settings unavailable"/u);
+    } finally {
+      state.runtimeSettingsError = null;
+      responses.read_runtime_settings_snapshot = original;
+      if (hadWrite) responses.write_runtime_settings_snapshot = previousWrite;
+      else delete responses.write_runtime_settings_snapshot;
+      querySelectorAllElements.delete("[data-toggle]");
+      await emit("cfw://settings-changed", responses.read_settings_snapshot);
+    }
+  });
+}
 
 test("an unknown switch is refused instead of reporting a saved change", async () => {
   await setEngine(RUNNING_ENGINE);

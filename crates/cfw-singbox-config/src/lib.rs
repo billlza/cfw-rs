@@ -11,6 +11,7 @@ pub use capacity::{
 };
 mod credentials;
 mod datasets;
+mod dns_leak;
 mod dns_policy;
 mod domain_pattern;
 mod engine_settings;

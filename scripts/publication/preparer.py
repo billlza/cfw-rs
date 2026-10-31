@@ -317,8 +317,8 @@ def _license_closure(record: dict[str, Any]) -> dict[str, Any]:
                 else "the installed Xcode license is a non-SPDX Apple EULA"
             ),
             "closure_action": (
-                "review the exact hashed Xcode 27.1 License.rtf/PDF once for build and "
-                "application-distribution rights; record LicenseRef-Apple-Xcode-27.1 "
+                "review the exact hashed Xcode 27.2 License.rtf/PDF once for build and "
+                "application-distribution rights; record LicenseRef-Apple-Xcode-27.2 "
                 "with a human-legal-review rationale bound to those files"
             ),
             "legal_question": (

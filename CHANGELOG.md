@@ -61,6 +61,21 @@
   choice that names a node the profile no longer declares is reset and
   reported, as for a saved group.
 
+### Security
+
+- Add Settings › Engine › DNS leak protection, off by default. In TUN Mode
+  the core refuses every connection to port 853, so DNS over TLS or DNS over
+  QUIC that an app or a system setting carries itself cannot pass names
+  around the core's DNS and falls back to plain DNS, which TUN Mode always
+  hands to the core: the app's encrypted DNS through the selected route, or
+  the profile's own DNS policy when it declares one. DNS over HTTPS shares
+  port 443 and is not covered. The switch changes nothing in System Proxy
+  mode, where the app never writes the system DNS, nothing in release
+  evidence projections, and nothing about Mainland China direct, whose
+  mainland names are still resolved by encrypted DNS in mainland China
+  dialled directly. Earlier builds refuse a settings file saved with it on,
+  so turn it off before installing one.
+
 ### Supply chain
 
 - Build the network engine from sing-box 1.14.4 instead of 1.14.2. The Go
@@ -69,6 +84,9 @@
   uTLS 1.8.8; sing-box's own modules stay at the versions released with it.
 - Build with Rust 1.99.1 instead of 1.98.1. Release builds accept only that
   exact toolchain.
+- Build the app, and the release copies of XcodeGen and the Tauri CLI, with
+  Xcode 27.2 (27B52) instead of Xcode 27.1 (27A9275). Release builds accept
+  only that exact Xcode.
 - Move the Rust crates to the newest releases their requirements allow,
   among them tokio 1.54.1, hyper 1.12.0, uuid 1.29.0, and the Tauri runtime
   2.12.2 with wry 0.57.1.

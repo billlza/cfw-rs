@@ -84,6 +84,9 @@
   uTLS 1.8.8; sing-box's own modules stay at the versions released with it.
 - Build with Rust 1.99.1 instead of 1.98.1. Release builds accept only that
   exact toolchain.
+- Build the app, and the release copies of XcodeGen and the Tauri CLI, with
+  Xcode 27.2 (27B52) instead of Xcode 27.1 (27A9275). Release builds accept
+  only that exact Xcode.
 - Move the Rust crates to the newest releases their requirements allow,
   among them tokio 1.54.1, hyper 1.12.0, uuid 1.29.0, and the Tauri runtime
   2.12.2 with wry 0.57.1.

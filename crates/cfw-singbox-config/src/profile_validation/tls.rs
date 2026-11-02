@@ -179,3 +179,43 @@ impl OutboundTls {
 fn is_valid_reality_public_key(value: &str) -> bool {
     matches!(URL_SAFE_NO_PAD.decode(value), Ok(key) if key.len() == 32)
 }
+
+pub(super) fn validate_optional_tls(
+    tls: Option<&OutboundTls>,
+    path: &str,
+) -> Result<(), ConfigError> {
+    match tls {
+        Some(tls) => tls.validate(path),
+        None => Ok(()),
+    }
+}
+
+pub(super) fn validate_required_tls(tls: &OutboundTls, path: &str) -> Result<(), ConfigError> {
+    tls.validate(path)?;
+    if !tls.enabled {
+        return Err(unsupported_shape(
+            format!("{path}.tls.enabled"),
+            "this protocol requires enabled TLS",
+        ));
+    }
+    Ok(())
+}
+
+/// Rejects the TLS adapters QUIC cannot carry. Callers run it before
+/// [`OutboundTls::validate`], so a QUIC Reality node reports that Reality is
+/// unavailable rather than a Reality requirement such as uTLS.
+pub(super) fn validate_quic_tls(tls: &OutboundTls, path: &str) -> Result<(), ConfigError> {
+    if tls.utls.is_some() {
+        return Err(unsupported_shape(
+            format!("{path}.tls.utls"),
+            "uTLS is unavailable for QUIC-based protocols",
+        ));
+    }
+    if tls.reality.is_some() {
+        return Err(unsupported_shape(
+            format!("{path}.tls.reality"),
+            "Reality is unavailable for QUIC-based protocols",
+        ));
+    }
+    Ok(())
+}

@@ -209,6 +209,9 @@ fn an_empty_batch_writes_nothing_and_each_topic_has_its_own_journal() {
     let mut journals = std::fs::read_dir(root.join("diagnostics"))
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        // The Windows store keeps its persistent lock file beside the files
+        // it writes; macOS storage has none.
+        .filter(|name| !cfg!(windows) || name != ".cfw-storage-lock-v1")
         .collect::<Vec<_>>();
     journals.sort();
     assert_eq!(

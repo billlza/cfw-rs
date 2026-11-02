@@ -33,10 +33,20 @@ async fn retired(capacity: &Semaphore) {
     .await
     .unwrap();
 }
-struct Dropped(Arc<AtomicBool>);
+/// A payload that records when it retires and whether its task still held
+/// its capacity permit at that moment.
+struct Dropped {
+    dropped: Arc<AtomicBool>,
+    capacity: Arc<Semaphore>,
+    capacity_held_at_drop: Arc<AtomicBool>,
+}
 impl Drop for Dropped {
     fn drop(&mut self) {
-        self.0.store(true, Ordering::Release);
+        self.capacity_held_at_drop.store(
+            self.capacity.available_permits() < MAX_OPERATIONS,
+            Ordering::Release,
+        );
+        self.dropped.store(true, Ordering::Release);
     }
 }
 
@@ -90,7 +100,12 @@ fn cancelled_queued_work_drops_its_payload_and_never_reaches_the_vault() {
         let changed = Arc::new(AtomicBool::new(false));
         let wrote = Arc::clone(&changed);
         let dropped = Arc::new(AtomicBool::new(false));
-        let payload = Dropped(Arc::clone(&dropped));
+        let capacity_held_at_drop = Arc::new(AtomicBool::new(false));
+        let payload = Dropped {
+            dropped: Arc::clone(&dropped),
+            capacity: Arc::clone(&capacity),
+            capacity_held_at_drop: Arc::clone(&capacity_held_at_drop),
+        };
         let worker = Worker::reserve(&capacity).unwrap();
         let mut request = Box::pin(worker.run(move |admission| {
             let _payload = payload;
@@ -106,7 +121,10 @@ fn cancelled_queued_work_drops_its_payload_and_never_reaches_the_vault() {
         blocker.await.unwrap();
         retired(&capacity).await;
         assert!(!changed.load(Ordering::Acquire));
+        // The payload retires before the task's capacity permit, so capacity
+        // returning is proof that the buffers are gone.
         assert!(dropped.load(Ordering::Acquire));
+        assert!(capacity_held_at_drop.load(Ordering::Acquire));
     });
 }
 

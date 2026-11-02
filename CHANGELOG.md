@@ -10,6 +10,13 @@
   General › Login Items & Extensions, so a user who had allowed it saw nothing
   happen. The row now says to click `Approve…` again, and its note carries the
   full instruction.
+- Keep a page where it was scrolled when it refreshes. Every refresh rebuilt
+  the page together with the list that scrolls inside it, so switching a
+  setting, a status update or opening a dialog sent Settings, Profiles, Rules
+  and the other long pages back to the top. A page now keeps its scroll
+  position across refreshes and dialogs, and an open dialog keeps its own
+  while it stays open; another page, or a dialog opened again, still starts at
+  the top.
 
 ### Profiles
 

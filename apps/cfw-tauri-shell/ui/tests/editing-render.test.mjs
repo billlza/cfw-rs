@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createEditingRender } from "../src/editing-render.js";
+import { createEditingRender, createScrollKeeper } from "../src/editing-render.js";
 
 function fixture() {
   const events = new Map();
@@ -86,4 +86,76 @@ test("final input or deliberate navigation cancels a redundant composition redra
 test("render exceptions remain observable", () => {
   const f = fixture();
   assert.throws(() => f.editing.render(["proxies"], () => { throw new Error("render failed"); }), /render failed/u);
+});
+
+function region(tag, attributes) {
+  const values = new Map(Object.entries(attributes));
+  return { tagName: tag, scrollTop: 0, scrollLeft: 0,
+    getAttributeNames: () => [...values.keys()], getAttribute: (name) => values.get(name) ?? null };
+}
+
+/// A container whose markup assignment builds fresh elements, as a parser
+/// would: anything kept across a replacement comes from the keeper.
+function container(build) {
+  let markup = "";
+  const root = { elements: [], replacements: 0,
+    querySelectorAll: (selector) => selector === "*" ? root.elements
+      : root.elements.filter((element) => element.tagName.toLowerCase() === selector) };
+  Object.defineProperty(root, "innerHTML", {
+    get: () => markup,
+    set: (value) => { markup = value; root.replacements += 1; root.elements = build(value); },
+  });
+  return root;
+}
+
+test("a refresh of the same view returns each identified scrolled region to its offsets", () => {
+  const keep = createScrollKeeper();
+  const root = container(() => [
+    region("DIV", { class: "settings-layout" }),
+    region("PRE", { "data-log-view": "engine" }),
+    region("SECTION", { class: "panel" }),
+  ]);
+  keep(root, "first", ["settings"]);
+  const [list, log] = root.elements;
+  list.scrollTop = 480; list.scrollLeft = 2; log.scrollLeft = 30;
+  keep(root, "second", ["settings"]);
+  assert.equal(root.innerHTML, "second");
+  assert.notEqual(root.elements[0], list, "the markup was replaced");
+  assert.deepEqual(root.elements.map(({ scrollTop, scrollLeft }) => [scrollTop, scrollLeft]), [[480, 2], [0, 30], [0, 0]]);
+});
+
+test("another view starts at the top, as navigation and a new dialog do", () => {
+  for (const [before, after] of [[["settings"], ["rules"]], [[null, {}], [null, {}]], [["settings"], ["settings", null]]]) {
+    const keep = createScrollKeeper();
+    const root = container(() => [region("DIV", { class: "list" })]);
+    keep(root, "first", before);
+    root.elements[0].scrollTop = 99;
+    keep(root, "second", after);
+    assert.equal(root.elements[0].scrollTop, 0, JSON.stringify([before, after]));
+  }
+});
+
+test("an ambiguous or unidentifiable region is replaced at the top", () => {
+  const keep = createScrollKeeper();
+  let duplicates = 1;
+  const root = container(() => [
+    ...Array.from({ length: duplicates }, () => region("UL", { class: "glass-list" })),
+    region("DIV", {}),
+    region("TEXTAREA", { style: "height: 80px" }),
+  ]);
+  keep(root, "first", ["dialog"]);
+  for (const element of root.elements) element.scrollTop = 40;
+  duplicates = 2;
+  keep(root, "second", ["dialog"]);
+  assert.deepEqual(root.elements.map(({ scrollTop }) => scrollTop), [0, 0, 0, 0]);
+});
+
+test("markup is replaced exactly once whether or not anything was scrolled", () => {
+  const keep = createScrollKeeper();
+  const root = container(() => [region("DIV", { class: "settings-layout" })]);
+  keep(root, "first", ["settings"]);
+  keep(root, "second", ["settings"]);
+  keep(root, "third", ["rules"]);
+  assert.equal(root.replacements, 3);
+  assert.equal(root.innerHTML, "third");
 });

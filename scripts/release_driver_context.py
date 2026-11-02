@@ -298,22 +298,24 @@ class Machine:
                     check=False,
                 ).returncode
             # Prompts and operator instructions must reach the terminal; the
-            # log receives the same bytes.
-            process = subprocess.Popen(
+            # log receives the same bytes. The pipe's reader is closed with
+            # the process once the child has finished; left open, Python
+            # reports it when the driver exits.
+            with subprocess.Popen(
                 command,
                 cwd=cwd,
                 env=environment,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 umask=0o022,
-            )
-            assert process.stdout is not None
-            for chunk in iter(lambda: process.stdout.read1(4096), b""):
-                sys.stdout.buffer.write(chunk)
-                sys.stdout.buffer.flush()
-                stream.write(chunk)
-                stream.flush()
-            return process.wait()
+            ) as process:
+                assert process.stdout is not None
+                for chunk in iter(lambda: process.stdout.read1(4096), b""):
+                    sys.stdout.buffer.write(chunk)
+                    sys.stdout.buffer.flush()
+                    stream.write(chunk)
+                    stream.flush()
+                return process.wait()
 
     def free_gib(self) -> float:
         usage = shutil.disk_usage("/")

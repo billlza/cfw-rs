@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import gc
 import io
 import json
 from pathlib import Path
@@ -11,6 +12,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+import warnings
 
 from scripts import release_driver, release_driver_acceptance
 from scripts.release_driver import (
@@ -323,6 +325,35 @@ class MachineTests(unittest.TestCase):
             with self.assertRaisesRegex(DriverError, "cannot start") as raised:
                 Machine(Path(directory)).read([str(Path(directory) / "absent-tool"), "--version"])
         self.assertEqual(raised.exception.status, PREREQUISITE)
+
+    def test_an_attached_terminal_run_copies_the_output_and_closes_its_pipe(self) -> None:
+        # The build, dmg and updater stages attach the terminal: the child's
+        # output reaches the terminal and the log through a pipe, which must
+        # be closed once the child has finished. The first build through the
+        # driver left it open, and Python reported the reader as it exited.
+        terminal = io.BytesIO()
+        wrapper = io.TextIOWrapper(terminal, encoding="utf-8", write_through=True)
+        with tempfile.TemporaryDirectory() as directory, \
+                warnings.catch_warnings(record=True) as caught, \
+                contextlib.redirect_stdout(wrapper):
+            warnings.simplefilter("always", ResourceWarning)
+            log = Path(directory) / "stage.log"
+            status = Machine(Path(directory)).execute(
+                ["/bin/sh", "-c", "printf 'one\\ntwo\\n'; exit 3"],
+                cwd=Path(directory),
+                log=log,
+                attach_terminal=True,
+                keep_awake=False,
+            )
+            gc.collect()
+            written = log.read_bytes()
+            shown = terminal.getvalue()
+        wrapper.detach()
+        self.assertEqual(status, 3)
+        self.assertEqual(shown, b"one\ntwo\n")
+        self.assertTrue(written.startswith(b"$ /bin/sh -c "), written)
+        self.assertTrue(written.endswith(b"  (cwd " + str(Path(directory)).encode() + b")\none\ntwo\n"), written)
+        self.assertEqual([str(entry.message) for entry in caught if issubclass(entry.category, ResourceWarning)], [])
 
 
 class LedgerTests(unittest.TestCase):

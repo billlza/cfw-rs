@@ -17,15 +17,12 @@ use crate::{
     validation::{DnsProjection, canonicalize},
 };
 
-mod dns_servers;
+pub(crate) mod dns;
+mod inbounds;
 mod probe;
 mod projector;
-
-pub(crate) use dns_servers::validate_authenticated_dns_pool;
+mod route;
 pub use probe::ProxyProbe;
-
-const AUTHENTICATED_DNS_PRIMARY_TAG: &str = "cfw-authenticated-dns-0";
-const AUTHENTICATED_DNS_SECONDARY_TAG: &str = "cfw-authenticated-dns-1";
 
 /// Schema of the configuration identity document shared with the macOS engine
 /// owner protocol. This changes whenever fields that cross that boundary gain

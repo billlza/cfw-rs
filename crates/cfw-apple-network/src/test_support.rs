@@ -1,7 +1,9 @@
-//! Command contexts and start requests shared by the crate's unit tests.
+//! Command contexts, start requests and the cutover request shared by the
+//! crate's unit tests.
 
 use cfw_engine_api::{
-    DirectIpv4HostRoutes, EngineCommandContext, EngineStartRequest, TunnelNetworkOptions,
+    CutoverPreflightRequest, DirectIpv4HostRoutes, EngineCommandContext, EngineMode,
+    EngineStartMode, EngineStartRequest, TunnelNetworkOptions,
 };
 
 pub(crate) fn context() -> EngineCommandContext {
@@ -33,4 +35,17 @@ pub(crate) fn tunnel_request() -> EngineStartRequest {
             system_proxy_port: None,
         }),
     }
+}
+
+/// A cutover to the Tunnel whose System Proxy projection is the tunnel
+/// request without tunnel options.
+pub(crate) fn cutover_request() -> CutoverPreflightRequest {
+    let tunnel = tunnel_request();
+    let system_proxy = EngineStartRequest {
+        mode: EngineStartMode::SystemProxy,
+        tunnel_options: None,
+        ..tunnel.clone()
+    };
+    CutoverPreflightRequest::new(EngineMode::Tunnel, system_proxy, tunnel)
+        .expect("cutover preflight request")
 }

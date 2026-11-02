@@ -1,10 +1,13 @@
 use std::sync::Mutex;
 
-use cfw_engine_api::{BackendErrorKind, EngineOwner, TunnelApprovalWait};
+use cfw_engine_api::{
+    BackendErrorKind, CutoverPreflightOutcome, EngineMode, EngineOwner, EngineRuntimePlatform,
+    TunnelApprovalWait,
+};
 
 use super::*;
-use crate::NativeBridgeFuture;
-use crate::test_support::{context, tunnel_request};
+use crate::test_support::{context, cutover_request, tunnel_request};
+use crate::{NativeBridgeErrorCode, NativeBridgeFuture};
 
 #[derive(Default)]
 struct RecordingBridge {
@@ -235,4 +238,185 @@ async fn adapter_preserves_tunnel_runtime_attestation() {
     assert_eq!(runtime.context, request.context);
     assert_eq!(runtime.config_digest, request.config_digest);
     assert!(runtime.ready);
+}
+
+/// Fails every call with one native error.
+struct FailingBridge(NativeBridgeError);
+
+impl FailingBridge {
+    fn fail<T>(&self) -> NativeBridgeFuture<'_, T> {
+        let error = self.0.clone();
+        Box::pin(async move { Err(error) })
+    }
+}
+
+impl NativeBridge for FailingBridge {
+    fn authorize_system_proxy(&self, _restoration_only: bool) -> NativeBridgeFuture<'_, ()> {
+        self.fail()
+    }
+
+    fn query_status(&self) -> NativeBridgeFuture<'_, NativeEngineStatus> {
+        self.fail()
+    }
+
+    fn check_configuration(&self, _request: EngineStartRequest) -> NativeBridgeFuture<'_, ()> {
+        self.fail()
+    }
+
+    fn start_local_proxy(
+        &self,
+        _request: EngineStartRequest,
+    ) -> NativeBridgeFuture<'_, RuntimeIdentity> {
+        self.fail()
+    }
+
+    fn stop_local_proxy(&self, _context: EngineCommandContext) -> NativeBridgeFuture<'_, ()> {
+        self.fail()
+    }
+
+    fn start_system_proxy(
+        &self,
+        _request: EngineStartRequest,
+    ) -> NativeBridgeFuture<'_, RuntimeIdentity> {
+        self.fail()
+    }
+
+    fn stop_system_proxy(&self, _context: EngineCommandContext) -> NativeBridgeFuture<'_, ()> {
+        self.fail()
+    }
+
+    fn install_tunnel(
+        &self,
+        _context: EngineCommandContext,
+    ) -> NativeBridgeFuture<'_, TunnelInstallOutcome> {
+        self.fail()
+    }
+
+    fn await_tunnel_approval(
+        &self,
+        _context: EngineCommandContext,
+    ) -> NativeBridgeFuture<'_, TunnelApprovalWait> {
+        self.fail()
+    }
+
+    fn cancel_tunnel_install(&self, _context: EngineCommandContext) -> NativeBridgeFuture<'_, ()> {
+        self.fail()
+    }
+
+    fn authorize_tunnel_configuration(
+        &self,
+        _request: EngineStartRequest,
+    ) -> NativeBridgeFuture<'_, ()> {
+        self.fail()
+    }
+
+    fn start_tunnel(
+        &self,
+        _request: EngineStartRequest,
+    ) -> NativeBridgeFuture<'_, RuntimeIdentity> {
+        self.fail()
+    }
+
+    fn stop_tunnel(&self, _context: EngineCommandContext) -> NativeBridgeFuture<'_, ()> {
+        self.fail()
+    }
+
+    fn preflight_cutover(
+        &self,
+        _request: CutoverPreflightRequest,
+    ) -> NativeBridgeFuture<'_, CutoverPreflightOutcome> {
+        self.fail()
+    }
+}
+
+#[tokio::test]
+async fn every_adapter_call_reaches_the_bridge_with_its_exact_request() {
+    let backend = AppleNetworkBackend::new(RecordingBridge::default());
+    let request = tunnel_request();
+    assert_eq!(backend.runtime_platform(), EngineRuntimePlatform::MacOs);
+    backend
+        .check_configuration(request.clone())
+        .await
+        .expect("configuration check");
+    for runtime in [
+        backend.start_local_proxy(request.clone()).await,
+        backend.start_system_proxy(request.clone()).await,
+    ] {
+        let runtime = runtime.expect("proxy runtime");
+        assert_eq!(runtime.owner, EngineOwner::ProxyAgent);
+        assert_eq!(runtime.context, request.context);
+        assert_eq!(runtime.config_digest, request.config_digest);
+    }
+    backend
+        .stop_local_proxy(context())
+        .await
+        .expect("local proxy stop");
+    backend
+        .stop_system_proxy(context())
+        .await
+        .expect("system proxy stop");
+    assert_eq!(
+        backend.install_tunnel(context()).await,
+        Ok(TunnelInstallOutcome::AwaitingApproval)
+    );
+    backend
+        .cancel_tunnel_install(context())
+        .await
+        .expect("install cancellation");
+    backend
+        .authorize_tunnel_configuration(request.clone())
+        .await
+        .expect("tunnel authorization");
+    assert!(matches!(
+        backend.preflight_cutover(cutover_request()).await,
+        Ok(CutoverPreflightOutcome::AwaitingApproval { target: EngineMode::Tunnel, context, .. })
+            if context == request.context
+    ));
+    // Seven of the calls carry the context; each reached the bridge with it.
+    assert_eq!(
+        *backend.bridge().calls.lock().expect("calls lock"),
+        vec![request.context; 7]
+    );
+}
+
+#[tokio::test]
+async fn every_adapter_call_reports_a_native_failure_as_its_kind() {
+    let backend = AppleNetworkBackend::new(FailingBridge(NativeBridgeError::new(
+        NativeBridgeErrorCode::CredentialConflict,
+        "native failure",
+    )));
+    let request = tunnel_request();
+    let outcomes = [
+        backend.check_configuration(request.clone()).await,
+        backend.query_status().await.map(|_| ()),
+        backend.start_local_proxy(request.clone()).await.map(|_| ()),
+        backend.stop_local_proxy(context()).await,
+        backend
+            .start_system_proxy(request.clone())
+            .await
+            .map(|_| ()),
+        backend.stop_system_proxy(context()).await,
+        backend.install_tunnel(context()).await.map(|_| ()),
+        backend.cancel_tunnel_install(context()).await,
+        backend
+            .authorize_tunnel_configuration(request.clone())
+            .await,
+        backend.start_tunnel(request).await.map(|_| ()),
+        backend.stop_tunnel(context()).await,
+        backend.authorize_system_proxy(false).await,
+        backend
+            .preflight_cutover(cutover_request())
+            .await
+            .map(|_| ()),
+        backend.await_tunnel_approval(context()).await.map(|_| ()),
+    ];
+    for outcome in outcomes {
+        assert_eq!(
+            outcome,
+            Err(BackendError::new(
+                BackendErrorKind::CredentialConflict,
+                "native failure"
+            ))
+        );
+    }
 }

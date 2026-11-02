@@ -13,6 +13,9 @@ mod platform;
 #[cfg(not(any(target_os = "macos", windows)))]
 compile_error!("profile storage supports macOS and Windows");
 
+#[cfg(test)]
+mod tests;
+
 #[cfg(target_os = "macos")]
 pub(crate) use platform::relative_c_string;
 pub(crate) use platform::{RepositoryDirectory, private_metadata};

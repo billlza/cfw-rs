@@ -1,15 +1,21 @@
-//! Live SCPreferences sessions and the network services they hold.
+//! The live SCPreferences session behind the proxy store.
+//!
+//! Nothing here decides anything. Every check lives in the steps this session
+//! is handed to, and the tests run those against an in-memory store.
 
 use anyhow::{Context, Result, bail};
-use objc2_core_foundation::{CFArray, CFRetained, CFString};
-use objc2_system_configuration::{SCNetworkService, SCNetworkSet, SCPreferences};
+use objc2_core_foundation::{CFArray, CFDictionary, CFRetained, CFString};
+use objc2_system_configuration::{
+    SCNetworkService, SCNetworkSet, SCPreferences, kSCNetworkProtocolTypeProxies,
+};
 
-use crate::legacy_proxy::LegacyProxyServiceIdentity;
-use crate::sysproxy_sc::{MAX_IDENTITY_BYTES, MAX_SERVICES, PREFS_NAME};
+use crate::sysproxy_sc::PREFS_NAME;
+use crate::sysproxy_sc::store::{ProxyConfiguration, ProxyPreferences, ProxyService};
 
+/// A session on this Mac's network preferences.
 pub(crate) struct PreferencesSession {
-    pub(super) preferences: CFRetained<SCPreferences>,
-    pub(super) locked: bool,
+    preferences: CFRetained<SCPreferences>,
+    locked: bool,
 }
 
 impl PreferencesSession {
@@ -22,8 +28,12 @@ impl PreferencesSession {
             locked: false,
         })
     }
+}
 
-    pub(crate) fn lock(&mut self) -> Result<()> {
+impl ProxyPreferences for PreferencesSession {
+    type Service = CFRetained<SCNetworkService>;
+
+    fn lock(&mut self) -> Result<()> {
         if !self.preferences.lock(true) {
             bail!("SCPreferencesLock failed")
         }
@@ -31,7 +41,18 @@ impl PreferencesSession {
         Ok(())
     }
 
-    pub(crate) fn commit_apply(&self) -> Result<()> {
+    fn services(&self) -> Result<Vec<Self::Service>> {
+        let set =
+            SCNetworkSet::current(&self.preferences).context("SCNetworkSetCopyCurrent failed")?;
+        let services = set.services().context("SCNetworkSetCopyServices failed")?;
+        // SAFETY: SCNetworkSetCopyServices returns an array of SCNetworkService refs.
+        let typed = unsafe { CFRetained::cast_unchecked::<CFArray<SCNetworkService>>(services) };
+        Ok((0..typed.len())
+            .filter_map(|index| typed.get(index))
+            .collect())
+    }
+
+    fn commit_apply(&self) -> Result<()> {
         if !self.preferences.commit_changes() {
             bail!("SCPreferencesCommitChanges failed")
         }
@@ -50,75 +71,27 @@ impl Drop for PreferencesSession {
     }
 }
 
-pub(crate) fn current_services(prefs: &SCPreferences) -> Result<Vec<CFRetained<SCNetworkService>>> {
-    let set = SCNetworkSet::current(prefs).context("SCNetworkSetCopyCurrent failed")?;
-    let services = set.services().context("SCNetworkSetCopyServices failed")?;
-    // SAFETY: SCNetworkSetCopyServices returns an array of SCNetworkService refs.
-    let typed = unsafe { CFRetained::cast_unchecked::<CFArray<SCNetworkService>>(services) };
-    if typed.len() > MAX_SERVICES {
-        bail!("current network service count exceeds the cutover safety bound")
+impl ProxyService for CFRetained<SCNetworkService> {
+    fn identifier(&self) -> Option<String> {
+        self.service_id().map(|id| id.to_string())
     }
-    let mut result = Vec::with_capacity(typed.len());
-    for index in 0..typed.len() {
-        if let Some(service) = typed.get(index) {
-            result.push(service);
+
+    fn display_name(&self) -> Option<String> {
+        self.name().map(|name| name.to_string())
+    }
+
+    fn proxy_configuration(&self) -> ProxyConfiguration {
+        match self.protocol(unsafe { kSCNetworkProtocolTypeProxies }) {
+            None => ProxyConfiguration::NoProtocol,
+            Some(protocol) => protocol.configuration().map_or(
+                ProxyConfiguration::Unconfigured,
+                ProxyConfiguration::Configured,
+            ),
         }
     }
-    Ok(result)
-}
 
-pub(crate) fn service_id(service: &SCNetworkService) -> Result<String> {
-    let value = service
-        .service_id()
-        .context("SC network service has no stable identifier")?
-        .to_string();
-    validate_identity_text("service identifier", &value)?;
-    Ok(value)
-}
-
-pub(crate) fn service_name(service: &SCNetworkService, id: &str) -> Result<String> {
-    let value = service
-        .name()
-        .map(|name| name.to_string())
-        .unwrap_or_else(|| id.to_owned());
-    validate_identity_text("service display name", &value)?;
-    Ok(value)
-}
-
-pub(crate) fn validate_identity_text(label: &str, value: &str) -> Result<()> {
-    if value.is_empty()
-        || value.len() > MAX_IDENTITY_BYTES
-        || value.trim() != value
-        || value.chars().any(char::is_control)
-    {
-        bail!("SC network {label} is invalid")
+    fn stage_proxy_configuration(&self, configuration: &CFDictionary) -> bool {
+        self.protocol(unsafe { kSCNetworkProtocolTypeProxies })
+            .is_some_and(|protocol| unsafe { protocol.set_configuration(Some(configuration)) })
     }
-    Ok(())
-}
-
-pub(crate) fn find_service<'a>(
-    services: &'a [CFRetained<SCNetworkService>],
-    identity: &LegacyProxyServiceIdentity,
-) -> Result<&'a SCNetworkService> {
-    let service = services
-        .iter()
-        .find(|service| {
-            service
-                .service_id()
-                .is_some_and(|id| id.to_string() == identity.service_id)
-        })
-        .map(AsRef::as_ref)
-        .with_context(|| {
-            format!(
-                "SC network service identity disappeared: {}",
-                identity.service_id
-            )
-        })?;
-    if service_name(service, &identity.service_id)? != identity.display_name {
-        bail!(
-            "SC network service {} changed display identity during cutover",
-            identity.service_id
-        )
-    }
-    Ok(service)
 }

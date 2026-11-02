@@ -38,7 +38,7 @@ impl LegacyServiceRetirement for MacOsPlatformService {
     fn service_mode_status(&self) -> ServiceModeStatus {
         #[cfg(target_os = "macos")]
         {
-            sm_legacy_service::status()
+            service_management::status()
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -69,24 +69,13 @@ impl LegacyServiceRetirement for MacOsPlatformService {
             // has no authority to mutate the system launchd domain or unlink
             // /Library/LaunchDaemons directly; those are verification-only
             // boundaries here, not unreliable privileged fallbacks.
-            let status = sm_legacy_service::status();
+            let status = service_management::status();
             let job = self.legacy_service_job_observation()?;
-            match (status, job) {
-                (
-                    ServiceModeStatus::Enabled,
-                    LegacyServiceJobObservation::LoadedInactive {
-                        program:
-                            LegacyServiceJobProgram::LegacyHelper
-                            | LegacyServiceJobProgram::RetirementTombstone,
-                    },
-                ) => sm_legacy_service::unregister().map_err(anyhow::Error::msg)?,
-                (
-                    ServiceModeStatus::NotRegistered | ServiceModeStatus::NotFound,
-                    LegacyServiceJobObservation::Unloaded,
-                ) => {}
-                _ => bail!(
-                    "legacy helper unregister boundary is partial, active, untrusted, or has the wrong fixed program identity: status={status:?}, job={job:?}"
-                ),
+            match retirement_step(status, job)? {
+                RetirementStep::Unregister => {
+                    service_management::unregister().map_err(anyhow::Error::msg)?;
+                }
+                RetirementStep::AlreadyRetired => {}
             }
             self.verify_legacy_service_retired()
         }
@@ -99,37 +88,81 @@ impl LegacyServiceRetirement for MacOsPlatformService {
     fn verify_legacy_service_retired(&self) -> Result<()> {
         #[cfg(target_os = "macos")]
         {
-            let plist = std::path::Path::new(LEGACY_HELPER_PLIST_PATH);
-            let mut errors = Vec::new();
-            collect_error(
-                &mut errors,
-                "verify fixed launchd job is unloaded",
+            retirement_verdict(
                 launchctl::ensure_unloaded(LEGACY_HELPER_TARGET),
-            );
-            collect_error(
-                &mut errors,
-                "verify fixed daemon plist is absent",
-                ensure_path_absent(plist),
-            );
-            let final_status = sm_legacy_service::status();
-            if !matches!(
-                final_status,
-                ServiceModeStatus::NotRegistered | ServiceModeStatus::NotFound
-            ) {
-                errors.push(format!(
-                    "verify SMAppService retirement: legacy Service Mode remains registered: {final_status:?}"
-                ));
-            }
-            if errors.is_empty() {
-                Ok(())
-            } else {
-                bail!("legacy helper retirement incomplete: {}", errors.join("; "))
-            }
+                ensure_path_absent(std::path::Path::new(LEGACY_HELPER_PLIST_PATH)),
+                service_management::status(),
+            )
         }
         #[cfg(not(target_os = "macos"))]
         {
             bail!("legacy Service Mode verification is only available on macOS")
         }
+    }
+}
+
+/// What retiring the helper does from its observed registration and job.
+#[derive(Debug, PartialEq, Eq)]
+enum RetirementStep {
+    Unregister,
+    AlreadyRetired,
+}
+
+/// Only an enabled registration whose fixed job is loaded but idle is
+/// unregistered; only an absent registration without a job is already retired.
+/// Anything else is partial, active or untrusted, and is left alone.
+fn retirement_step(
+    status: ServiceModeStatus,
+    job: LegacyServiceJobObservation,
+) -> Result<RetirementStep> {
+    match (status, job) {
+        (
+            ServiceModeStatus::Enabled,
+            LegacyServiceJobObservation::LoadedInactive {
+                program:
+                    LegacyServiceJobProgram::LegacyHelper | LegacyServiceJobProgram::RetirementTombstone,
+            },
+        ) => Ok(RetirementStep::Unregister),
+        (
+            ServiceModeStatus::NotRegistered | ServiceModeStatus::NotFound,
+            LegacyServiceJobObservation::Unloaded,
+        ) => Ok(RetirementStep::AlreadyRetired),
+        _ => bail!(
+            "legacy helper unregister boundary is partial, active, untrusted, or has the wrong fixed program identity: status={status:?}, job={job:?}"
+        ),
+    }
+}
+
+/// Retired means the fixed job is unloaded, its plist is gone and the
+/// registration is absent; every unmet condition is reported.
+fn retirement_verdict(
+    unloaded: Result<()>,
+    plist_absent: Result<()>,
+    final_status: ServiceModeStatus,
+) -> Result<()> {
+    let mut errors = Vec::new();
+    collect_error(
+        &mut errors,
+        "verify fixed launchd job is unloaded",
+        unloaded,
+    );
+    collect_error(
+        &mut errors,
+        "verify fixed daemon plist is absent",
+        plist_absent,
+    );
+    if !matches!(
+        final_status,
+        ServiceModeStatus::NotRegistered | ServiceModeStatus::NotFound
+    ) {
+        errors.push(format!(
+            "verify SMAppService retirement: legacy Service Mode remains registered: {final_status:?}"
+        ));
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        bail!("legacy helper retirement incomplete: {}", errors.join("; "))
     }
 }
 
@@ -219,91 +252,7 @@ fn collect_error(errors: &mut Vec<String>, operation: &str, result: Result<()>) 
 }
 
 #[cfg(target_os = "macos")]
-mod sm_legacy_service {
-    use objc2::rc::Retained;
-    use objc2_foundation::NSString;
-    use objc2_service_management::SMAppService;
-
-    use crate::{ServiceModeStatus, map_service_status};
-
-    use super::LEGACY_HELPER_PLIST_NAME;
-
-    fn service() -> Retained<SMAppService> {
-        let name = NSString::from_str(LEGACY_HELPER_PLIST_NAME);
-        // SAFETY: this creates a descriptor for one compile-time plist name.
-        unsafe { SMAppService::daemonServiceWithPlistName(&name) }
-    }
-
-    pub(super) fn status() -> ServiceModeStatus {
-        // SAFETY: status is a read-only query.
-        map_service_status(unsafe { service().status() })
-    }
-
-    pub(super) fn unregister() -> Result<(), String> {
-        // SAFETY: the service descriptor is fixed and this path only unregisters it.
-        unsafe { service().unregisterAndReturnError() }
-            .map_err(|error| format!("SMAppService legacy helper unregister failed: {error:?}"))
-    }
-}
+mod service_management;
 
 #[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-
-    use super::*;
-
-    #[test]
-    fn privileged_identity_is_compile_time_fixed() {
-        assert_eq!(LEGACY_HELPER_LABEL, "com.bill.clashformac.helper");
-        assert_eq!(
-            PathBuf::from(LEGACY_HELPER_PLIST_PATH),
-            PathBuf::from("/Library/LaunchDaemons/com.bill.clashformac.helper.plist")
-        );
-    }
-
-    #[test]
-    fn retirement_error_collection_keeps_every_failure() {
-        let mut errors = Vec::new();
-        collect_error(&mut errors, "first", Err(anyhow::anyhow!("one")));
-        collect_error(&mut errors, "second", Ok(()));
-        collect_error(&mut errors, "third", Err(anyhow::anyhow!("three")));
-        assert_eq!(errors, ["first: one", "third: three"]);
-    }
-
-    #[test]
-    fn launchd_parser_accepts_only_exact_owned_inactive_or_active_jobs() {
-        let inactive = launchd_fixture("0", "not running", "cfw-helper");
-        assert_eq!(
-            parse_legacy_service_job(&inactive).expect("inactive"),
-            LegacyServiceJobObservation::LoadedInactive {
-                program: LegacyServiceJobProgram::LegacyHelper
-            }
-        );
-        let active = launchd_fixture("1", "running", "cfw-helper-tombstone");
-        assert_eq!(
-            parse_legacy_service_job(&active).expect("active"),
-            LegacyServiceJobObservation::LoadedActive {
-                program: LegacyServiceJobProgram::RetirementTombstone
-            }
-        );
-        assert!(parse_legacy_service_job(&inactive.replace("YKUPL7Z869", "ATTACKER00")).is_err());
-        assert!(
-            parse_legacy_service_job(&inactive.replace("active count = 0", "active count = 2"))
-                .is_err()
-        );
-        assert!(
-            parse_legacy_service_job(&inactive.replace("domain = system", "domain = gui")).is_err()
-        );
-    }
-
-    fn launchd_fixture(active_count: &str, state: &str, program: &str) -> String {
-        let path = if program == "cfw-helper" {
-            "Contents/Resources/resources/helpers/cfw-helper"
-        } else {
-            "Contents/Library/HelperTools/cfw-helper-tombstone"
-        };
-        format!(
-            "system/{LEGACY_HELPER_LABEL} = {{\n\tactive count = {active_count}\n\ttype = Submitted\n\tmanaged_by = com.apple.xpc.ServiceManagement\n\tstate = {state}\n\tprogram identifier = {path} (mode: 2)\n\tparent bundle identifier = {LEGACY_PARENT_BUNDLE_IDENTIFIER}\n\tLWCR = {{\n\t\t\"team-identifier\" => \"{LEGACY_TEAM_IDENTIFIER}\"\n\t}}\n\tdomain = system\n}}"
-        )
-    }
-}
+mod tests;

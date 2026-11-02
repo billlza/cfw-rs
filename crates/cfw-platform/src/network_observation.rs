@@ -14,6 +14,8 @@ use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::MacOsPlatformService;
+#[cfg(target_os = "macos")]
+use crate::sysproxy_sc::{self, PreferencesSession};
 
 const NETWORK_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_NETWORK_OBSERVATION_BYTES: usize = 1024 * 1024;
@@ -94,7 +96,7 @@ impl MacOsPlatformService {
     pub fn observe_network_services(&self) -> Result<Vec<NetworkServiceObservation>> {
         #[cfg(target_os = "macos")]
         {
-            crate::sysproxy_sc::observe_network_services()
+            sysproxy_sc::observe_network_services(PreferencesSession::open)
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -134,51 +136,4 @@ fn run_network_observation(program: &str, args: &[&str]) -> Result<String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn observation_reports_any_enabled_proxy_mode() {
-        let base = NetworkServiceObservation {
-            service_id: "service-uuid".into(),
-            display_name: "Wi-Fi".into(),
-            order: 0,
-            web: NetworkProxyProtocolObservation::default(),
-            secure_web: NetworkProxyProtocolObservation::default(),
-            socks: NetworkProxyProtocolObservation::default(),
-            pac_enabled: false,
-            wpad_enabled: false,
-        };
-        assert!(!base.any_proxy_enabled());
-
-        for mutate in [
-            (|observation: &mut NetworkServiceObservation| observation.web.enabled = true)
-                as fn(&mut NetworkServiceObservation),
-            |observation| observation.secure_web.enabled = true,
-            |observation| observation.socks.enabled = true,
-            |observation| observation.pac_enabled = true,
-            |observation| observation.wpad_enabled = true,
-        ] {
-            let mut observation = base.clone();
-            mutate(&mut observation);
-            assert!(observation.any_proxy_enabled());
-        }
-    }
-
-    #[test]
-    fn observation_payload_has_a_closed_shape() {
-        let error = serde_json::from_value::<NetworkServiceObservation>(serde_json::json!({
-            "service_id": "service-uuid",
-            "display_name": "Wi-Fi",
-            "order": 0,
-            "web": { "enabled": false, "server": null, "port": null },
-            "secure_web": { "enabled": false, "server": null, "port": null },
-            "socks": { "enabled": false, "server": null, "port": null },
-            "pac_enabled": false,
-            "wpad_enabled": false,
-            "pac_url": "http://attacker.example/proxy.pac",
-        }))
-        .expect_err("unexpected diagnostics fields must be rejected");
-        assert!(error.to_string().contains("pac_url"));
-    }
-}
+mod tests;

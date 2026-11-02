@@ -46,6 +46,8 @@ pub use windows::shell::{
 
 #[cfg(target_os = "macos")]
 mod sysproxy_sc;
+#[cfg(all(test, target_os = "macos"))]
+mod test_support;
 
 #[cfg(target_os = "macos")]
 pub use app_update::{
@@ -104,3 +106,6 @@ pub(crate) fn map_service_status(
         ServiceModeStatus::Unknown
     }
 }
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests;

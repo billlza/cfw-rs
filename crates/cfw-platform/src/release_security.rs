@@ -94,23 +94,13 @@ impl ReleaseSecurityCommandOutput {
 pub fn verify_release_signature(
     component: ReleaseSignedComponent,
 ) -> Result<ReleaseSecurityCommandOutput> {
-    let path = component.path().to_str().expect("fixed path is UTF-8");
-    run_security_command(
-        "code signature verification",
-        CODESIGN,
-        &["--verify", "--strict", "--verbose=4", path],
-    )
+    verify_signature_at(fixed_path(component))
 }
 
 pub fn inspect_release_signature(
     component: ReleaseSignedComponent,
 ) -> Result<ReleaseSecurityCommandOutput> {
-    let path = component.path().to_str().expect("fixed path is UTF-8");
-    run_security_command(
-        "code signature identity inspection",
-        CODESIGN,
-        &["--display", "--verbose=4", path],
-    )
+    inspect_signature_at(fixed_path(component))
 }
 
 pub fn observe_gatekeeper_status() -> Result<ReleaseSecurityCommandOutput> {
@@ -118,10 +108,30 @@ pub fn observe_gatekeeper_status() -> Result<ReleaseSecurityCommandOutput> {
 }
 
 pub fn assess_release_application() -> Result<ReleaseSecurityCommandOutput> {
-    let path = ReleaseSignedComponent::Application
-        .path()
-        .to_str()
-        .expect("fixed path is UTF-8");
+    assess_application_at(fixed_path(ReleaseSignedComponent::Application))
+}
+
+fn fixed_path(component: ReleaseSignedComponent) -> &'static str {
+    component.path().to_str().expect("fixed path is UTF-8")
+}
+
+fn verify_signature_at(path: &str) -> Result<ReleaseSecurityCommandOutput> {
+    run_security_command(
+        "code signature verification",
+        CODESIGN,
+        &["--verify", "--strict", "--verbose=4", path],
+    )
+}
+
+fn inspect_signature_at(path: &str) -> Result<ReleaseSecurityCommandOutput> {
+    run_security_command(
+        "code signature identity inspection",
+        CODESIGN,
+        &["--display", "--verbose=4", path],
+    )
+}
+
+fn assess_application_at(path: &str) -> Result<ReleaseSecurityCommandOutput> {
     run_security_command(
         "Gatekeeper assessment",
         SPCTL,
@@ -164,48 +174,4 @@ fn finish_security_command(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn signed_component_paths_are_closed_and_canonical() {
-        for component in [ReleaseSignedComponent::Application]
-            .into_iter()
-            .chain(ReleaseSignedComponent::NESTED)
-        {
-            let path = component.path();
-            assert!(path.is_absolute());
-            assert!(path.starts_with(ReleaseSignedComponent::Application.path()));
-            assert!(
-                !path
-                    .components()
-                    .any(|part| matches!(part, std::path::Component::ParentDir))
-            );
-        }
-    }
-
-    #[test]
-    fn release_security_propagates_timeout_and_output_bounds() {
-        let timeout = finish_security_command(
-            "Gatekeeper assessment",
-            Err(BoundedCommandError::TimedOut {
-                program: SPCTL.into(),
-                timeout: COMMAND_TIMEOUT,
-                cleanup: "terminated and reaped".into(),
-            }),
-        )
-        .expect_err("timeout");
-        assert!(timeout.to_string().contains("exceeded its 15000ms timeout"));
-
-        let oversized = finish_security_command(
-            "code signature identity inspection",
-            Err(BoundedCommandError::OutputExceeded {
-                program: CODESIGN.into(),
-                stream: "stderr",
-                limit: MAX_STDERR_BYTES,
-            }),
-        )
-        .expect_err("oversized output");
-        assert!(oversized.to_string().contains("1048576-byte safety bound"));
-    }
-}
+mod tests;

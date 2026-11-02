@@ -70,6 +70,7 @@ async fn initialize(app: AppHandle) -> Result<(), String> {
     let worker = app.clone();
     prepare_off_main(move || {
         crate::engine::start_engine_event_forwarder(worker.clone());
+        crate::tunnel_approval::start(worker.clone())?;
         #[cfg(target_os = "macos")]
         worker
             .state::<Diagnostics>()

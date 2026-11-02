@@ -201,6 +201,33 @@ extension NativeBridgeCoordinator {
     }
   }
 
+  /// Waits for the answer to the approval that the exact pending installation
+  /// asked for. It takes no mutation, so a stop or the installation's own
+  /// retry proceeds meanwhile, and the answer stays with the request for that
+  /// retry to read.
+  func awaitTunnelApproval(_ context: EngineCommandContext) async throws
+    -> NativeTunnelApprovalWait
+  {
+    try Task.checkCancellation()
+    guard let pending = pendingTunnelInstallation, pending.context == context,
+      pending.state == .retryable
+    else {
+      return .noPendingRequest
+    }
+    let wait: SystemExtensionApprovalWait
+    do {
+      wait = try await tunnel.awaitTunnelInstallationApproval()
+      try Task.checkCancellation()
+    } catch {
+      throw Self.map(error)
+    }
+    switch wait {
+    case .resolved: return .resolved
+    case .stillAwaiting: return .stillAwaiting
+    case .noPendingRequest: return .noPendingRequest
+    }
+  }
+
   func cancelTunnelInstall(_ context: EngineCommandContext) async throws {
     let mutationID = try await beginMutation()
     defer { endMutation(mutationID) }

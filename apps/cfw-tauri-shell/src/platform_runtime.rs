@@ -6,7 +6,7 @@ use std::{path::Path, sync::Arc};
 use cfw_application::{CoordinatorTask, EngineModeCoordinator};
 use cfw_engine_api::{
     CredentialVaultProvisioner, CutoverPreflightBackend, EngineBackend, EngineGenerationStore,
-    ProfileDelayBackend, SystemProxyAuthorization,
+    ProfileDelayBackend, SystemProxyAuthorization, TunnelApprovalBackend,
 };
 
 pub(crate) struct PlatformRuntime {
@@ -15,6 +15,8 @@ pub(crate) struct PlatformRuntime {
     pub(crate) authorization: Arc<dyn SystemProxyAuthorization>,
     pub(crate) probes: Arc<dyn ProfileDelayBackend>,
     pub(crate) legacy_preflight: Option<Arc<dyn CutoverPreflightBackend>>,
+    /// Present where a Tunnel installation can await the person's approval.
+    pub(crate) tunnel_approval: Option<Arc<dyn TunnelApprovalBackend>>,
     pub(crate) proxy_available: bool,
     pub(crate) tunnel_available: bool,
     /// Whether one run may carry both Tunnel and System Proxy. Windows routes
@@ -101,6 +103,7 @@ mod tests {
             backend: backend.clone(),
             authorization: backend.clone(),
             probes: bridge,
+            tunnel_approval: Some(backend.clone()),
             legacy_preflight: Some(backend),
             proxy_available: true,
             tunnel_available: true,
@@ -167,6 +170,7 @@ impl PlatformRuntime {
             backend: backend.clone(),
             authorization: backend.clone(),
             probes: Arc::new(bridge),
+            tunnel_approval: Some(backend.clone()),
             legacy_preflight: Some(backend),
             proxy_available: available,
             tunnel_available: available,
@@ -207,6 +211,8 @@ impl PlatformRuntime {
             // The CFM legacy handoff attestation is not a Windows capability.
             // Absence is explicit; callers must reject before any migration.
             legacy_preflight: None,
+            // A Windows Tunnel installation never awaits a person's approval.
+            tunnel_approval: None,
             proxy_available: true,
             // SYSTEM owns a Tunnel run's adapter, routes and resolvers; the
             // backend refuses the combined mode, so it is not offered.

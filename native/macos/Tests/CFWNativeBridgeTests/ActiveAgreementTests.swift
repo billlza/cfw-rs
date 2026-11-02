@@ -228,6 +228,10 @@ private actor StubTunnelHost: TunnelHostBridging {
     self.recoveryStatus = recoveryStatus
   }
   func installTunnel() throws -> SystemExtensionInstallResult { .completed }
+  func awaitTunnelInstallationApproval() -> SystemExtensionApprovalWait {
+    Issue.record("this fixture never awaits an approval")
+    return .noPendingRequest
+  }
   func cancelTunnelInstallationWait() {}
   func authorizeTunnelConfiguration(_ descriptor: ConfigurationDescriptor) throws {
     throw AppleNetworkError.providerDidNotRespond

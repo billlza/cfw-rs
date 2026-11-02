@@ -1098,6 +1098,84 @@ async fn engine_start_timeout_stops_the_owner_and_fails_without_quarantine_or_au
 }
 
 #[tokio::test]
+async fn only_an_awaited_extension_approval_names_its_pending_installation() {
+    let backend = Arc::new(FakeBackend::default());
+    let coordinator = coordinator(backend.clone());
+    let start = || {
+        coordinator.set_mode(
+            EngineMode::Tunnel,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            ValidatedSingBoxProfile::direct(),
+            EngineSettings::default(),
+        )
+    };
+    let off = coordinator.snapshot();
+    assert_eq!(
+        coordinator.pending_tunnel_approval(off.clone()).await,
+        Ok(None)
+    );
+
+    *backend.awaiting_approval.lock().expect("approval lock") = true;
+    let awaiting = start().await.expect("approval is a stable pending state");
+    let context = coordinator
+        .pending_tunnel_approval(awaiting.clone())
+        .await
+        .expect("query")
+        .expect("the installation awaits approval");
+    assert_eq!(backend.tunnel_install_contexts(), [context]);
+    assert_eq!(
+        coordinator.pending_tunnel_approval(off).await,
+        Ok(None),
+        "a stale observation names nothing"
+    );
+
+    *backend.awaiting_approval.lock().expect("approval lock") = false;
+    let active = start().await.expect("the approved retry starts");
+    assert!(matches!(active.state, EngineState::TunnelActive { .. }));
+    assert_eq!(
+        coordinator.pending_tunnel_approval(awaiting).await,
+        Ok(None)
+    );
+    assert_eq!(coordinator.pending_tunnel_approval(active).await, Ok(None));
+}
+
+#[test]
+fn a_start_waiting_for_the_vpn_consent_names_no_pending_installation() {
+    use crate::runtime::{CoordinatorState, NativeLease, NativeLeaseKind, pending_tunnel_approval};
+    let snapshot = EngineSnapshot {
+        desired_mode: EngineMode::Tunnel,
+        state: EngineState::AwaitingApproval { generation: 5 },
+        generation: 5,
+        config_digest: Some("ab".repeat(32)),
+    };
+    let context = cfw_engine_api::EngineCommandContext::new(&test_session(), 5);
+    let state = |kind, generation| CoordinatorState {
+        runtime_platform: cfw_engine_api::EngineRuntimePlatform::MacOs,
+        snapshot: snapshot.clone(),
+        native_lease: Some(NativeLease {
+            kind,
+            context: cfw_engine_api::EngineCommandContext::new(&test_session(), generation),
+        }),
+        quarantine: None,
+        restart_spec: None,
+        status_recheck: None,
+        missed_observations: 0,
+    };
+    assert_eq!(
+        pending_tunnel_approval(&state(NativeLeaseKind::TunnelInstallation, 5), &snapshot),
+        Some(context)
+    );
+    assert_eq!(
+        pending_tunnel_approval(&state(NativeLeaseKind::TunnelRuntime, 5), &snapshot),
+        None
+    );
+    assert_eq!(
+        pending_tunnel_approval(&state(NativeLeaseKind::TunnelInstallation, 4), &snapshot),
+        None
+    );
+}
+
+#[tokio::test]
 async fn approved_system_extension_retry_cancels_old_wait_before_starting_new_generation() {
     let backend = Arc::new(FakeBackend::default());
     *backend.awaiting_approval.lock().expect("approval lock") = true;

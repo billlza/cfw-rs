@@ -1066,6 +1066,30 @@ pub enum TunnelInstallOutcome {
     AwaitingApproval,
 }
 
+/// What a bounded wait for the person's System Extension approval found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TunnelApprovalWait {
+    /// The activation request reached its terminal callback. The next
+    /// `install_tunnel` of the same context reads its outcome.
+    Resolved,
+    /// The request was still waiting for the person when the wait ended.
+    StillAwaiting,
+    /// No activation request of that context is waiting for approval.
+    NoPendingRequest,
+}
+
+pub type TunnelApprovalFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<TunnelApprovalWait, BackendError>> + Send + 'a>>;
+
+/// Waits for the answer to a Tunnel installation that returned
+/// `AwaitingApproval`. The wait changes nothing: it neither takes the
+/// activation request over nor consumes its outcome, and it holds no native
+/// mutation, so a stop never waits behind it.
+pub trait TunnelApprovalBackend: Send + Sync + 'static {
+    fn await_tunnel_approval(&self, context: EngineCommandContext) -> TunnelApprovalFuture<'_>;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackendErrorKind {
@@ -1566,6 +1590,9 @@ pub enum NativeBridgeCommand {
     InstallTunnel {
         context: EngineCommandContext,
     },
+    AwaitTunnelApproval {
+        context: EngineCommandContext,
+    },
     CancelTunnelInstall {
         context: EngineCommandContext,
     },
@@ -1632,6 +1659,10 @@ impl fmt::Debug for NativeBridgeCommand {
                 .finish(),
             Self::InstallTunnel { context } => formatter
                 .debug_struct("InstallTunnel")
+                .field("context", context)
+                .finish(),
+            Self::AwaitTunnelApproval { context } => formatter
+                .debug_struct("AwaitTunnelApproval")
                 .field("context", context)
                 .finish(),
             Self::CancelTunnelInstall { context } => formatter
@@ -1701,6 +1732,7 @@ pub enum NativeBridgeResult {
     Status(NativeEngineStatus),
     Runtime(RuntimeIdentity),
     TunnelInstall(TunnelInstallOutcome),
+    TunnelApproval(TunnelApprovalWait),
     Acknowledged,
     CredentialReceipt(CredentialVaultReceipt),
     CredentialPresence(Vec<CredentialPresence>),
@@ -2044,6 +2076,42 @@ mod tests {
                 serde_json::from_value::<NativeBridgeCommand>(wire)
                     .expect("authorization command decoding"),
                 command
+            );
+        }
+    }
+
+    #[test]
+    fn the_tunnel_approval_wait_has_one_wire_shape() {
+        let context = EngineCommandContext {
+            installation_id: PROFILE_ID.into(),
+            config_epoch: 2,
+            generation: 7,
+        };
+        let command = NativeBridgeCommand::AwaitTunnelApproval { context };
+        let wire = serde_json::json!({
+            "opcode": "await_tunnel_approval",
+            "payload": {"context": {
+                "installation_id": PROFILE_ID, "config_epoch": 2, "generation": 7
+            }}
+        });
+        assert_eq!(serde_json::to_value(&command).expect("encode"), wire);
+        assert_eq!(
+            serde_json::from_value::<NativeBridgeCommand>(wire).expect("decode"),
+            command
+        );
+        for (wait, value) in [
+            (TunnelApprovalWait::Resolved, "resolved"),
+            (TunnelApprovalWait::StillAwaiting, "still_awaiting"),
+            (TunnelApprovalWait::NoPendingRequest, "no_pending_request"),
+        ] {
+            let wire = serde_json::json!({"kind": "tunnel_approval", "value": value});
+            assert_eq!(
+                serde_json::from_value::<NativeBridgeResult>(wire.clone()).expect("decode"),
+                NativeBridgeResult::TunnelApproval(wait)
+            );
+            assert_eq!(
+                serde_json::to_value(NativeBridgeResult::TunnelApproval(wait)).expect("encode"),
+                wire
             );
         }
     }

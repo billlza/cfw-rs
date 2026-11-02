@@ -484,6 +484,85 @@ private func preferenceValues(
   #expect(retryResult == 12)
 }
 
+/// Submits `request` and completes the caller's wait with the intermediate
+/// value, as `requestNeedsUserApproval` does, keeping the request.
+private func awaitingApproval(
+  _ gate: IdentityBoundContinuation<TestRequest, Int>, request: TestRequest
+) async throws {
+  let waitID = UUID()
+  let installed = OneShotLatch()
+  let wait = Task<Int, Error> {
+    try await withCheckedThrowingContinuation { continuation in
+      #expect(gate.install(request: request, waitID: waitID, continuation: continuation) == .submit)
+      #expect(gate.beginSubmission(request: request, waitID: waitID))
+      installed.signal()
+    }
+  }
+  await installed.wait()
+  #expect(gate.completeWaitKeepingRequest(request: request, value: 1))
+  #expect(try await wait.value == 1)
+}
+
+/// Starts a watch and returns once it is registered with the gate.
+private func watch(
+  _ gate: IdentityBoundContinuation<TestRequest, Int>, observerID: UUID = UUID()
+) async -> Task<IdentityBoundTerminalObservation, Never> {
+  let registered = OneShotLatch()
+  let task = Task<IdentityBoundTerminalObservation, Never> {
+    await withCheckedContinuation { continuation in
+      gate.observeTerminal(observerID: observerID, continuation: continuation)
+      registered.signal()
+    }
+  }
+  await registered.wait()
+  return task
+}
+
+@Test func identityBoundGateWatchSeesTheApprovalAndLeavesItsResultForTheRetry() async throws {
+  let gate = IdentityBoundContinuation<TestRequest, Int>()
+  let request = TestRequest()
+  try await awaitingApproval(gate, request: request)
+
+  let watching = await watch(gate)
+  gate.finish(request: request, result: .success(7))
+  #expect(await watching.value == .terminalArrived)
+
+  let retryResult: Int = try await withCheckedThrowingContinuation { continuation in
+    #expect(
+      gate.install(request: TestRequest(), waitID: UUID(), continuation: continuation)
+        == .completed)
+  }
+  #expect(retryResult == 7)
+}
+
+@Test func identityBoundGateWatchEndsAtOnceForAStoredResultOrNoRequest() async throws {
+  let empty = IdentityBoundContinuation<TestRequest, Int>()
+  #expect(await watch(empty).value == .noActiveRequest)
+
+  let gate = IdentityBoundContinuation<TestRequest, Int>()
+  let request = TestRequest()
+  try await awaitingApproval(gate, request: request)
+  gate.finish(request: request, result: .success(7))
+  #expect(await watch(gate).value == .terminalArrived)
+  #expect(await watch(gate).value == .terminalArrived, "a watch never consumes the result")
+}
+
+@Test func identityBoundGateWatchEndsByItsDeadlineAnExplicitCancelOrAnotherWatch() async throws {
+  let gate = IdentityBoundContinuation<TestRequest, Int>()
+  try await awaitingApproval(gate, request: TestRequest())
+
+  let observerID = UUID()
+  let first = await watch(gate, observerID: observerID)
+  #expect(await watch(gate).value == .alreadyObserved)
+  gate.finishObservation(observerID: observerID)
+  #expect(await first.value == .stillPending)
+
+  let second = await watch(gate)
+  gate.cancelActiveWait()
+  #expect(await second.value == .noActiveRequest)
+  #expect(await watch(gate).value == .noActiveRequest)
+}
+
 @Test func boundedCallbackReturnsFirstNormalResult() async throws {
   let deadlines = ManualDeadlineScheduler()
   let callback = CallbackRecorder<Int>()

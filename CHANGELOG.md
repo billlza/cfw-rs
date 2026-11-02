@@ -4,12 +4,15 @@
 
 ### Interface
 
-- Say, in the TUN Mode row, what to do once the extension is allowed. The row
-  showed `Needs approval` with the `Approve…` button, but the start does not
-  continue by itself after the extension is allowed under System Settings ›
-  General › Login Items & Extensions, so a user who had allowed it saw nothing
-  happen. The row now says to click `Approve…` again, and its note carries the
-  full instruction.
+- Continue a TUN Mode start by itself once the extension is allowed. The row
+  showed `Needs approval` with the `Approve…` button, and after the extension
+  was allowed under System Settings › General › Login Items & Extensions
+  nothing happened until `Approve…` was clicked again: macOS reports the
+  approval only to the activation request, which the start had already left.
+  The app now waits for that request's answer and repeats the start when the
+  extension is allowed, unless TUN Mode was turned off or the engine changed
+  in between. The wait lasts up to about an hour; `Approve…` still repeats the
+  start at once, and the row's note says so.
 - Keep a page where it was scrolled when it refreshes. Every refresh rebuilt
   the page together with the list that scrolls inside it, so switching a
   setting, a status update or opening a dialog sent Settings, Profiles, Rules

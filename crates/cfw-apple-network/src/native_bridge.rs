@@ -6,7 +6,7 @@ use cfw_engine_api::{
     CutoverPreflightOutcome, CutoverPreflightRequest, EngineCommandContext, EngineStartRequest,
     NativeBridgeCommand, NativeBridgeResult, NativeEngineStatus, NativeRequestEnvelope,
     NativeServiceMaintenanceAction, NativeServiceMaintenanceResult, RuntimeIdentity,
-    TunnelInstallOutcome,
+    TunnelApprovalWait, TunnelInstallOutcome,
 };
 use tokio::sync::oneshot;
 use tokio::time::{Instant, timeout_at};
@@ -24,6 +24,34 @@ const MAXIMUM_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 const NATIVE_BRIDGE_OPERATION_BUDGET_MILLISECONDS: u64 = 30_000;
 const NATIVE_BRIDGE_AUTHORIZATION_BUDGET_MILLISECONDS: u64 = 300_000;
 const NATIVE_BRIDGE_CLEANUP_GRACE_MILLISECONDS: u64 = 20_000;
+
+/// Commands that wait for a person to answer macOS get the authorization
+/// budget; every other command gets the operation budget.
+fn waits_for_person(command: &NativeBridgeCommand) -> bool {
+    match command {
+        NativeBridgeCommand::AuthorizeSystemProxy
+        | NativeBridgeCommand::AuthorizeSystemProxyRestoration
+        | NativeBridgeCommand::AuthorizeTunnelConfiguration { .. }
+        | NativeBridgeCommand::AwaitTunnelApproval { .. } => true,
+        NativeBridgeCommand::QueryStatus
+        | NativeBridgeCommand::CheckConfiguration { .. }
+        | NativeBridgeCommand::StartLocalProxy { .. }
+        | NativeBridgeCommand::StopLocalProxy { .. }
+        | NativeBridgeCommand::MaintainCurrentServices { .. }
+        | NativeBridgeCommand::StartSystemProxy { .. }
+        | NativeBridgeCommand::StopSystemProxy { .. }
+        | NativeBridgeCommand::InstallTunnel { .. }
+        | NativeBridgeCommand::CancelTunnelInstall { .. }
+        | NativeBridgeCommand::StartTunnel { .. }
+        | NativeBridgeCommand::StopTunnel { .. }
+        | NativeBridgeCommand::QueryCredentialPresence { .. }
+        | NativeBridgeCommand::RebindProfileCredentials { .. }
+        | NativeBridgeCommand::PreflightCutover { .. }
+        | NativeBridgeCommand::TestProfileDelays { .. }
+        | NativeBridgeCommand::PreviewCredentialGarbageCollection { .. }
+        | NativeBridgeCommand::CommitCredentialGarbageCollection { .. } => false,
+    }
+}
 const NATIVE_BRIDGE_OUTER_WATCHDOG_MILLISECONDS: u64 = 55_000;
 
 const _: () = assert!(
@@ -247,12 +275,7 @@ impl NativeFrameworkBridge {
     }
 
     fn invoke(&self, command: NativeBridgeCommand) -> NativeBridgeFuture<'_, NativeBridgeResult> {
-        let authorization = matches!(
-            command,
-            NativeBridgeCommand::AuthorizeSystemProxy
-                | NativeBridgeCommand::AuthorizeSystemProxyRestoration
-                | NativeBridgeCommand::AuthorizeTunnelConfiguration { .. }
-        );
+        let authorization = waits_for_person(&command);
         let request = NativeRequestEnvelope::new(command);
         let request_id = request.request_id;
         Box::pin(async move {
@@ -520,6 +543,24 @@ impl NativeBridge for NativeFrameworkBridge {
                 _ => Err(NativeBridgeError::new(
                     NativeBridgeErrorCode::Internal,
                     "native tunnel install returned the wrong result kind",
+                )),
+            }
+        })
+    }
+
+    fn await_tunnel_approval(
+        &self,
+        context: EngineCommandContext,
+    ) -> NativeBridgeFuture<'_, TunnelApprovalWait> {
+        Box::pin(async move {
+            match self
+                .invoke(NativeBridgeCommand::AwaitTunnelApproval { context })
+                .await?
+            {
+                NativeBridgeResult::TunnelApproval(wait) => Ok(wait),
+                _ => Err(NativeBridgeError::new(
+                    NativeBridgeErrorCode::Internal,
+                    "native tunnel approval wait returned the wrong result kind",
                 )),
             }
         })
@@ -1006,6 +1047,36 @@ mod tests {
                 .callback_count,
             1
         );
+    }
+
+    #[test]
+    fn only_waits_for_a_person_take_the_authorization_budget() {
+        let context = EngineCommandContext {
+            installation_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+            config_epoch: 1,
+            generation: 4,
+        };
+        assert!(waits_for_person(
+            &NativeBridgeCommand::AwaitTunnelApproval {
+                context: context.clone()
+            }
+        ));
+        assert!(waits_for_person(&NativeBridgeCommand::AuthorizeSystemProxy));
+        assert!(waits_for_person(
+            &NativeBridgeCommand::AuthorizeSystemProxyRestoration
+        ));
+        for command in [
+            NativeBridgeCommand::QueryStatus,
+            NativeBridgeCommand::InstallTunnel {
+                context: context.clone(),
+            },
+            NativeBridgeCommand::CancelTunnelInstall {
+                context: context.clone(),
+            },
+            NativeBridgeCommand::StopTunnel { context },
+        ] {
+            assert!(!waits_for_person(&command), "{command:?}");
+        }
     }
 
     #[test]

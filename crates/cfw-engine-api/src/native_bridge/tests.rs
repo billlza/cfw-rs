@@ -1,7 +1,10 @@
 use cfw_singbox_config::CredentialKind;
 
 use super::*;
-use crate::{NativeServiceOffProofProfile, test_support::PROFILE_ID};
+use crate::{
+    CredentialPresenceRequest, EngineMode, NativeServiceOffProofProfile, TunnelNetworkOptions,
+    test_support::{CREDENTIAL_ID, PROFILE_ID, VAULT_REVISION, audience, context, trojan_profile},
+};
 
 #[test]
 fn native_bridge_v10_contract_fixtures_decode_in_rust() {
@@ -184,4 +187,180 @@ fn native_public_query_json_contract_is_unchanged() {
         serde_json::to_value(request).expect("request value"),
         serde_json::from_slice::<serde_json::Value>(bytes).expect("fixture value")
     );
+}
+
+fn start_request() -> EngineStartRequest {
+    EngineStartRequest {
+        mode: cfw_singbox_config::ProjectionMode::SystemProxy,
+        context: context(),
+        credential_audience: audience(PROFILE_ID),
+        config_json: "never-print-this-config".into(),
+        config_content_digest: "01".repeat(32),
+        config_digest: "02".repeat(32),
+        credential_slots: Vec::new(),
+        tunnel_options: None,
+    }
+}
+
+#[test]
+fn every_command_debug_names_its_operation_and_never_the_configuration() {
+    let profile = trojan_profile(CREDENTIAL_ID, 443);
+    let settings = cfw_singbox_config::EngineSettings::default();
+    let snapshot =
+        CredentialGarbageCollectionRequest::new("ab".repeat(32), Vec::new()).expect("snapshot");
+    let preview = CredentialGarbageCollectionPreview {
+        snapshot_digest: "ab".repeat(32),
+        vault_revision: VAULT_REVISION.into(),
+        orphan_bindings: Vec::new(),
+        orphan_count: 0,
+    };
+    let mut tunnel = start_request();
+    tunnel.mode = cfw_singbox_config::ProjectionMode::Tunnel;
+    tunnel.tunnel_options = Some(TunnelNetworkOptions {
+        ipv6_enabled: false,
+        bypass_private_networks: true,
+        direct_ipv4_hosts: cfw_singbox_config::DirectIpv4HostRoutes::default(),
+        mtu: 1_500,
+        system_proxy_port: None,
+    });
+    let commands = [
+        (NativeBridgeCommand::QueryStatus, "QueryStatus"),
+        (
+            NativeBridgeCommand::CheckConfiguration {
+                request: start_request(),
+            },
+            "CheckConfiguration",
+        ),
+        (
+            NativeBridgeCommand::AuthorizeSystemProxy,
+            "AuthorizeSystemProxy",
+        ),
+        (
+            NativeBridgeCommand::AuthorizeSystemProxyRestoration,
+            "AuthorizeSystemProxyRestoration",
+        ),
+        (
+            NativeBridgeCommand::StartLocalProxy {
+                request: start_request(),
+            },
+            "StartLocalProxy",
+        ),
+        (
+            NativeBridgeCommand::StopLocalProxy { context: context() },
+            "StopLocalProxy",
+        ),
+        (
+            NativeBridgeCommand::MaintainCurrentServices {
+                action: NativeServiceMaintenanceAction::Status,
+            },
+            "MaintainCurrentServices",
+        ),
+        (
+            NativeBridgeCommand::StartSystemProxy {
+                request: start_request(),
+            },
+            "StartSystemProxy",
+        ),
+        (
+            NativeBridgeCommand::StopSystemProxy { context: context() },
+            "StopSystemProxy",
+        ),
+        (
+            NativeBridgeCommand::InstallTunnel { context: context() },
+            "InstallTunnel",
+        ),
+        (
+            NativeBridgeCommand::AwaitTunnelApproval { context: context() },
+            "AwaitTunnelApproval",
+        ),
+        (
+            NativeBridgeCommand::CancelTunnelInstall { context: context() },
+            "CancelTunnelInstall",
+        ),
+        (
+            NativeBridgeCommand::AuthorizeTunnelConfiguration {
+                request: tunnel.clone(),
+            },
+            "AuthorizeTunnelConfiguration",
+        ),
+        (
+            NativeBridgeCommand::StartTunnel {
+                request: tunnel.clone(),
+            },
+            "StartTunnel",
+        ),
+        (
+            NativeBridgeCommand::StopTunnel { context: context() },
+            "StopTunnel",
+        ),
+        (
+            NativeBridgeCommand::QueryCredentialPresence {
+                request: CredentialPresenceRequest::new(PROFILE_ID, &profile)
+                    .expect("query")
+                    .into(),
+            },
+            "QueryCredentialPresence",
+        ),
+        (
+            NativeBridgeCommand::RebindProfileCredentials {
+                request: CredentialRebindRequest::new(PROFILE_ID, &profile, &profile, &settings)
+                    .expect("rebind"),
+            },
+            "RebindProfileCredentials",
+        ),
+        (
+            NativeBridgeCommand::PreflightCutover {
+                request: Box::new(
+                    CutoverPreflightRequest::new(EngineMode::Tunnel, start_request(), tunnel)
+                        .expect("preflight"),
+                ),
+            },
+            "PreflightCutover",
+        ),
+        (
+            NativeBridgeCommand::TestProfileDelays {
+                request: ProfileDelayTestRequest {
+                    audience: audience(PROFILE_ID),
+                    config_json: "never-print-this-config".into(),
+                    credential_slots: Vec::new(),
+                    proxies: vec!["proxy".into()],
+                    timeout_ms: 5_000,
+                    target_url: None,
+                    expected_status: None,
+                },
+            },
+            "TestProfileDelays",
+        ),
+        (
+            NativeBridgeCommand::PreviewCredentialGarbageCollection {
+                request: snapshot.clone(),
+            },
+            "PreviewCredentialGarbageCollection",
+        ),
+        (
+            NativeBridgeCommand::CommitCredentialGarbageCollection {
+                request: CredentialGarbageCollectionCommitRequest::new(snapshot, &preview)
+                    .expect("commit"),
+            },
+            "CommitCredentialGarbageCollection",
+        ),
+    ];
+    for (command, name) in commands {
+        let debug = format!("{command:?}");
+        assert!(
+            debug == name || debug.starts_with(&format!("{name} {{")),
+            "{debug}"
+        );
+        assert!(!debug.contains("never-print-this-config"), "{debug}");
+    }
+}
+
+#[test]
+fn each_request_envelope_carries_the_protocol_version_and_a_fresh_id() {
+    let first = NativeRequestEnvelope::new(NativeBridgeCommand::QueryStatus);
+    let second = NativeRequestEnvelope::new(NativeBridgeCommand::QueryStatus);
+    assert_eq!(first.schema_version, ENGINE_PROTOCOL_VERSION);
+    assert_eq!(first.request_id.get_version_num(), 4);
+    assert_ne!(first.request_id, second.request_id);
+    assert_eq!(first.command, NativeBridgeCommand::QueryStatus);
 }

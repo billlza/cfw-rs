@@ -69,3 +69,6 @@ impl From<CredentialPresenceRequest> for CredentialPresenceWireRequest {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

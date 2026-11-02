@@ -128,3 +128,6 @@ impl EngineEvent {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

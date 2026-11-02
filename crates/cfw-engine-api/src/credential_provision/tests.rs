@@ -1,7 +1,7 @@
 use cfw_singbox_config::CredentialKind;
 
 use super::*;
-use crate::test_support::{CREDENTIAL_ID, PROFILE_ID};
+use crate::test_support::{CREDENTIAL_ID, PROFILE_ID, trojan_profile, trojan_reference};
 
 #[test]
 fn credential_provisioning_request_is_bounded_unique_and_redacted() {
@@ -135,4 +135,32 @@ fn credential_provisioning_request_canonicalizes_entry_order() {
         request.entries()[1].secret().expose_to_vault(),
         "second-secret"
     );
+}
+
+#[test]
+fn credential_provisioning_is_bound_to_a_canonical_audience_and_bounded() {
+    let profile = trojan_profile(CREDENTIAL_ID, 443);
+    let reference = trojan_reference(CREDENTIAL_ID);
+    let request = CredentialProvisionRequest::new(PROFILE_ID, &profile, Vec::new())
+        .expect("provision request");
+    assert_eq!(
+        request.audience(),
+        &CredentialAudience::new(PROFILE_ID, profile.digest()).expect("audience")
+    );
+    assert!(matches!(
+        CredentialProvisionRequest::new(PROFILE_ID.to_uppercase(), &profile, Vec::new()),
+        Err(CredentialProvisionRequestError::InvalidAudience)
+    ));
+    let entries = (0..=MAX_CREDENTIAL_SLOTS)
+        .map(|_| {
+            CredentialProvision::new(
+                &reference,
+                CredentialSecret::new("secret").expect("bounded secret"),
+            )
+        })
+        .collect();
+    assert!(matches!(
+        CredentialProvisionRequest::new(PROFILE_ID, &profile, entries),
+        Err(CredentialProvisionRequestError::TooManyEntries)
+    ));
 }

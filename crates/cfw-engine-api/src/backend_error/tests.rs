@@ -109,3 +109,216 @@ fn proxy_agent_approval_has_a_typed_registration_retry_contract() {
         "ProxyAgent approval is required in System Settings."
     );
 }
+
+/// Every kind with the directive the native boundary documents for it. The
+/// Authority kinds also come from the shared error fixture above.
+const RETRY_DIRECTIVES: [(BackendErrorKind, RetryDirective); 49] = [
+    (
+        BackendErrorKind::Busy,
+        RetryDirective::FreshSnapshotAfterOff,
+    ),
+    (
+        BackendErrorKind::ResourceExhausted,
+        RetryDirective::IdempotentReadOnly,
+    ),
+    (
+        BackendErrorKind::JournalCapacityExhausted,
+        RetryDirective::MaintenanceRequired,
+    ),
+    (BackendErrorKind::PermissionDenied, RetryDirective::Never),
+    (BackendErrorKind::ApprovalDenied, RetryDirective::Never),
+    (
+        BackendErrorKind::ConfigurationRejected,
+        RetryDirective::Never,
+    ),
+    (
+        BackendErrorKind::SystemExtensionValidationFailed,
+        RetryDirective::Never,
+    ),
+    (
+        BackendErrorKind::SystemProxyConfigurationFailed,
+        RetryDirective::Never,
+    ),
+    (
+        BackendErrorKind::SystemProxyRuntimeFailed,
+        RetryDirective::Never,
+    ),
+    (BackendErrorKind::EngineStartTimedOut, RetryDirective::Never),
+    (
+        BackendErrorKind::SystemProxyPreferencesFailed,
+        RetryDirective::Never,
+    ),
+    (
+        BackendErrorKind::SystemProxyJournalFailed,
+        RetryDirective::Never,
+    ),
+    (
+        BackendErrorKind::SystemProxyAuthorityFailed,
+        RetryDirective::Never,
+    ),
+    (BackendErrorKind::ExistingSystemProxy, RetryDirective::Never),
+    (
+        BackendErrorKind::CredentialsUnavailable,
+        RetryDirective::Never,
+    ),
+    (BackendErrorKind::CredentialConflict, RetryDirective::Never),
+    (
+        BackendErrorKind::CredentialVaultMissing,
+        RetryDirective::Never,
+    ),
+    (
+        BackendErrorKind::CredentialVaultCorrupt,
+        RetryDirective::Never,
+    ),
+    (
+        BackendErrorKind::CredentialMigrationRequired,
+        RetryDirective::Never,
+    ),
+    (
+        BackendErrorKind::CredentialGcConflict,
+        RetryDirective::Never,
+    ),
+    (
+        BackendErrorKind::ProxyAgentApprovalRequired,
+        RetryDirective::RegistrationStatusChange,
+    ),
+    (
+        BackendErrorKind::GlobalAuthorityUnavailable,
+        RetryDirective::RegistrationStatusChange,
+    ),
+    (
+        BackendErrorKind::GlobalAuthorityRegistrationRequired,
+        RetryDirective::RegistrationStatusChange,
+    ),
+    (
+        BackendErrorKind::GlobalAuthorityApprovalRequired,
+        RetryDirective::RegistrationStatusChange,
+    ),
+    (
+        BackendErrorKind::GlobalAuthorityIdentityRejected,
+        RetryDirective::Never,
+    ),
+    (
+        BackendErrorKind::GlobalAuthorityProtocolMismatch,
+        RetryDirective::CompatibleSoftwareUpdate,
+    ),
+    (
+        BackendErrorKind::GlobalAuthorityRecovering,
+        RetryDirective::ExplicitReconciliation,
+    ),
+    (
+        BackendErrorKind::GlobalAuthorityTimeout,
+        RetryDirective::IdempotentReadOnly,
+    ),
+    (
+        BackendErrorKind::GlobalAuthorityInterrupted,
+        RetryDirective::IdempotentReadOnly,
+    ),
+    (
+        BackendErrorKind::GlobalLeaseConflict,
+        RetryDirective::FreshSnapshotAfterOff,
+    ),
+    (
+        BackendErrorKind::ReplayRejected,
+        RetryDirective::FreshContext,
+    ),
+    (
+        BackendErrorKind::StaleOperation,
+        RetryDirective::FreshContext,
+    ),
+    (
+        BackendErrorKind::TicketExpired,
+        RetryDirective::FreshGenerationAfterOff,
+    ),
+    (
+        BackendErrorKind::TicketAlreadyRedeemed,
+        RetryDirective::FreshGenerationAfterOff,
+    ),
+    (BackendErrorKind::TicketInvalid, RetryDirective::Never),
+    (
+        BackendErrorKind::CompensationConflict,
+        RetryDirective::ExplicitReconciliation,
+    ),
+    (
+        BackendErrorKind::CleanupUnproven,
+        RetryDirective::ExplicitReconciliation,
+    ),
+    (
+        BackendErrorKind::Quarantined,
+        RetryDirective::ExplicitReconciliation,
+    ),
+    (BackendErrorKind::InvalidMessage, RetryDirective::Never),
+    (
+        BackendErrorKind::SecretBoundsExceeded,
+        RetryDirective::Never,
+    ),
+    (
+        BackendErrorKind::SecretLifecycleViolation,
+        RetryDirective::ExplicitReconciliation,
+    ),
+    (
+        BackendErrorKind::JournalCorrupt,
+        RetryDirective::ExplicitReconciliation,
+    ),
+    (
+        BackendErrorKind::OwnerUnresponsive,
+        RetryDirective::IdempotentReadOnly,
+    ),
+    (BackendErrorKind::IdentityRejected, RetryDirective::Never),
+    (
+        BackendErrorKind::Timeout,
+        RetryDirective::IdempotentReadOnly,
+    ),
+    (
+        BackendErrorKind::Unavailable,
+        RetryDirective::IdempotentReadOnly,
+    ),
+    (BackendErrorKind::MixedEndpointInUse, RetryDirective::Never),
+    (
+        BackendErrorKind::ControllerEndpointInUse,
+        RetryDirective::Never,
+    ),
+    (BackendErrorKind::Internal, RetryDirective::Never),
+];
+
+#[test]
+fn every_kind_has_one_wire_code_one_retry_directive_and_its_own_message() {
+    let mut codes = BTreeSet::new();
+    let mut messages = BTreeSet::new();
+    for (kind, directive) in RETRY_DIRECTIVES {
+        let code = serde_json::to_value(kind).expect("wire code");
+        assert!(
+            codes.insert(code.to_string()),
+            "{kind:?} shares a wire code"
+        );
+        assert_eq!(
+            serde_json::from_value::<BackendErrorKind>(code).expect("decode"),
+            kind
+        );
+        assert_eq!(kind.retry_directive(), directive, "{kind:?}");
+        let message = kind.stable_message();
+        assert!(message.ends_with('.'), "{kind:?}: {message}");
+        assert!(messages.insert(message), "{kind:?} shares its message");
+        assert_eq!(
+            kind.allows_automatic_retry(true),
+            directive == RetryDirective::IdempotentReadOnly
+        );
+        assert_eq!(
+            kind.allows_read_only_recheck(),
+            directive == RetryDirective::IdempotentReadOnly || kind == BackendErrorKind::Busy,
+            "{kind:?}"
+        );
+    }
+}
+
+#[test]
+fn a_backend_error_displays_its_kind_and_message() {
+    let error = BackendError::new(BackendErrorKind::Timeout, "status query timed out");
+    assert_eq!(error.kind, BackendErrorKind::Timeout);
+    assert_eq!(error.to_string(), "Timeout: status query timed out");
+    let wire = serde_json::to_value(&error).expect("error");
+    assert_eq!(
+        wire,
+        serde_json::json!({"kind": "timeout", "message": "status query timed out"})
+    );
+}

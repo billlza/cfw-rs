@@ -161,3 +161,6 @@ pub type CutoverPreflightFuture<'a> =
 pub trait CutoverPreflightBackend: Send + Sync + 'static {
     fn preflight_cutover(&self, request: CutoverPreflightRequest) -> CutoverPreflightFuture<'_>;
 }
+
+#[cfg(test)]
+mod tests;

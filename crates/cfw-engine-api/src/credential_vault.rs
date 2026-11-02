@@ -128,3 +128,6 @@ impl<T: CredentialVaultProvisioner + ?Sized> CredentialVaultProvisioner for std:
         (**self).commit_credential_garbage_collection(request)
     }
 }
+
+#[cfg(test)]
+mod tests;

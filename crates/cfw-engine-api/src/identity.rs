@@ -45,3 +45,6 @@ pub struct RuntimeIdentity {
     pub config_digest: String,
     pub ready: bool,
 }
+
+#[cfg(test)]
+mod tests;

@@ -1,11 +1,15 @@
 mod advanced;
 mod app_selector;
+mod credentials;
 mod datasets;
 mod dns_leak;
 mod dns_policy;
 mod goldens;
 mod mainland;
+mod outbound_checks;
 mod projection;
+mod projection_edges;
+mod providers;
 mod routing;
 mod runtime_settings;
 mod socks5;

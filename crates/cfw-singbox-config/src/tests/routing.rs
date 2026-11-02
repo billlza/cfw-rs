@@ -371,3 +371,107 @@ fn geo_dataset_budget_counts_distinct_route_provider_and_dns_datasets() {
         .to_string()
     );
 }
+
+fn rejection(profile: &Value) -> String {
+    match ValidatedSingBoxProfile::parse(&profile.to_string()) {
+        Err(crate::ConfigError::UnsupportedPolicyShape { reason, .. }) => reason,
+        Err(other) => panic!("unexpected error {other:?}"),
+        Ok(_) => panic!("{profile} was accepted"),
+    }
+}
+
+#[test]
+fn every_rule_kind_projects_its_runtime_condition() {
+    let mut profile = policy();
+    let process = "/Applications/Example.app/Contents/MacOS/Example";
+    profile["route"]["rules"] = json!([
+        {"type":"domain_keyword","value":"tracker","outbound":"DIRECT"},
+        {"type":"domain_regex","value":"^ads\\.","outbound":"DIRECT"},
+        {"type":"source_ip_cidr","value":"10.0.0.0/8","outbound":"DIRECT"},
+        {"type":"port","value":"443","outbound":"DIRECT"},
+        {"type":"source_port","value":"5353","outbound":"DIRECT"},
+        {"type":"network","value":"udp","outbound":"DIRECT"},
+        {"type":"process_path","value":process,"outbound":"DIRECT"}
+    ]);
+    let projected = ValidatedSingBoxProfile::parse(&profile.to_string())
+        .expect("every rule kind")
+        .project(
+            PROFILE_ID,
+            ProjectionMode::SystemProxy,
+            &EngineSettings::default(),
+        )
+        .expect("projection");
+    let config: Value = serde_json::from_str(projected.as_json()).expect("runtime JSON");
+    let rules = config["route"]["rules"].as_array().expect("route rules");
+    for expected in [
+        json!({"domain_keyword":"tracker","action":"route","outbound":"DIRECT"}),
+        json!({"domain_regex":"^ads\\.","action":"route","outbound":"DIRECT"}),
+        json!({"source_ip_cidr":"10.0.0.0/8","action":"route","outbound":"DIRECT"}),
+        json!({"port":443,"action":"route","outbound":"DIRECT"}),
+        json!({"source_port":5353,"action":"route","outbound":"DIRECT"}),
+        json!({"network":"udp","action":"route","outbound":"DIRECT"}),
+        json!({"process_path":process,"action":"route","outbound":"DIRECT"}),
+    ] {
+        assert!(
+            rules.contains(&expected),
+            "{expected} missing from {rules:?}"
+        );
+    }
+}
+
+#[test]
+fn rule_values_must_match_their_kind() {
+    for (kind, value) in [
+        ("port", "0"),
+        ("port", "65536"),
+        ("source_port", "http"),
+        ("network", "icmp"),
+        ("process_path", "relative/Example"),
+        ("domain_regex", "("),
+        ("source_ip_cidr", "10.0.0.0/33"),
+        ("source_ip_cidr", "10.0.0.0"),
+        ("domain_keyword", "two words"),
+    ] {
+        let mut profile = policy();
+        profile["route"]["rules"] = json!([{"type": kind, "value": value, "outbound": "DIRECT"}]);
+        assert_eq!(
+            rejection(&profile),
+            "rule value does not match its declared type",
+            "{kind} {value}"
+        );
+    }
+}
+
+#[test]
+fn route_rules_are_bounded_before_and_after_provider_expansion() {
+    let rule = json!({"type":"domain","value":"example.com","outbound":"DIRECT"});
+    let mut at_limit = policy();
+    at_limit["route"]["rules"] = json!(vec![rule.clone(); 8192]);
+    ValidatedSingBoxProfile::parse(&at_limit.to_string()).expect("8192 rules");
+    let mut over = policy();
+    over["route"]["rules"] = json!(vec![rule.clone(); 8193]);
+    assert_eq!(rejection(&over), "routing rule count exceeds 8192");
+
+    let mut undeclared = policy();
+    undeclared["route"]["rules"] =
+        json!([{"type":"rule_set","value":"missing","outbound":"DIRECT"}]);
+    assert_eq!(
+        rejection(&undeclared),
+        "rule references an undeclared provider"
+    );
+
+    let condition = json!({"type":"domain","value":"example.org"});
+    let mut expanded = policy();
+    expanded["providers"] = json!({"rules":[{"name":"lists","source":{"interval_seconds":0},
+        "format":"text","behavior":"domain","rules":vec![condition; 8192]}]});
+    expanded["route"]["rules"] = json!([{"type":"rule_set","value":"lists","outbound":"DIRECT"}]);
+    ValidatedSingBoxProfile::parse(&expanded.to_string()).expect("8192 expanded rules");
+    expanded["route"]["rules"]
+        .as_array_mut()
+        .unwrap()
+        .push(rule);
+    assert_eq!(
+        rejection(&expanded),
+        "expanded provider routing rule count exceeds 8192"
+    );
+}

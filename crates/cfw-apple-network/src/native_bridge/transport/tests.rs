@@ -294,15 +294,18 @@ fn a_response_of_another_shape_version_or_request_is_refused() {
             "native bridge returned a malformed response"
         ))
     );
-    let mut other_version = envelope(Some(NativeBridgeResult::Acknowledged), None);
-    other_version["schema_version"] = serde_json::json!(ENGINE_PROTOCOL_VERSION + 1);
-    assert_eq!(
-        parsed(other_version),
-        Err(NativeBridgeError::new(
-            NativeBridgeErrorCode::IdentityRejected,
-            "native bridge response schema does not match Rust"
-        ))
-    );
+    for version in [ENGINE_PROTOCOL_VERSION - 1, ENGINE_PROTOCOL_VERSION + 1] {
+        let mut other_version = envelope(Some(NativeBridgeResult::Acknowledged), None);
+        other_version["schema_version"] = serde_json::json!(version);
+        assert_eq!(
+            parsed(other_version),
+            Err(NativeBridgeError::new(
+                NativeBridgeErrorCode::IdentityRejected,
+                "native bridge response schema does not match Rust"
+            )),
+            "{version}"
+        );
+    }
     for shape in [
         envelope(Some(NativeBridgeResult::Acknowledged), Some(failure())),
         envelope(None, None),

@@ -1,7 +1,6 @@
 use cfw_singbox_config::{
-    MAX_PROVIDER_RULES, MAX_PROVIDERS, ProviderCatalog, ProviderFilter, ProviderHealthCheck,
-    ProviderMember, ProviderRule, ProviderRuleBehavior, ProviderRuleFormat, ProviderSource,
-    ProxyProvider, RuleKind, RuleProvider, UtlsFingerprint,
+    MAX_PROVIDERS, ProviderCatalog, ProviderRuleBehavior, ProviderRuleFormat, ProxyProvider,
+    RuleProvider, UtlsFingerprint,
 };
 use std::collections::BTreeMap;
 
@@ -10,6 +9,11 @@ use super::{
 };
 use crate::subscription_import::MAX_SUBSCRIPTION_DOCUMENT_BYTES;
 
+mod declaration;
+mod payload;
+
+use declaration::{filter, format, health, provider_mapping, source};
+use payload::{decode_payload, import_proxy_payload, import_rule_payload};
 #[cfg(test)]
 mod tests;
 
@@ -34,126 +38,6 @@ impl std::fmt::Debug for ProviderRequest {
             .field("kind", &self.kind)
             .field("name", &self.name)
             .finish_non_exhaustive()
-    }
-}
-
-fn provider_mapping(value: YamlValue, context: String) -> Result<ProxyFields, String> {
-    let YamlValue::Mapping(mapping) = value else {
-        return Err(format!("{context} must be a mapping"));
-    };
-    Ok(ProxyFields::new(mapping, context))
-}
-
-fn source(fields: &mut ProxyFields) -> Result<(ProviderSource, usize), String> {
-    let kind = fields.require_string("type")?;
-    let url = fields.take_string("url")?;
-    let interval = fields
-        .take_string("interval")?
-        .map(|value| value.parse::<u32>())
-        .transpose()
-        .map_err(|_| "provider interval must be an integer")?;
-    let maximum = fields
-        .take_string("size-limit")?
-        .map(|value| value.parse::<usize>())
-        .transpose()
-        .map_err(|_| "provider size-limit must be an integer")?
-        .filter(|value| *value > 0)
-        .unwrap_or(MAX_SUBSCRIPTION_DOCUMENT_BYTES)
-        .min(MAX_SUBSCRIPTION_DOCUMENT_BYTES);
-    // The application owns its cache location; a subscription cannot choose a
-    // filesystem write target. The cache hint does not change routing content.
-    fields.take_string("path")?;
-    if fields
-        .take_string("proxy")?
-        .is_some_and(|proxy| proxy != "DIRECT")
-    {
-        return Err(
-            "provider download via a named proxy requires the profile resource transport".into(),
-        );
-    }
-    let source = match (kind.as_str(), url) {
-        ("http", Some(url)) => {
-            let url = reqwest::Url::parse(&url).map_err(|_| "provider URL is invalid")?;
-            if url.scheme() != "https"
-                || url.host_str().is_none()
-                || !url.username().is_empty()
-                || url.password().is_some()
-                || url.fragment().is_some()
-            {
-                return Err(
-                    "provider downloads require HTTPS without userinfo or a fragment".into(),
-                );
-            }
-            let interval_seconds = interval.unwrap_or(3600);
-            if !(60..=604800).contains(&interval_seconds) {
-                return Err("provider interval must be 60..=604800 seconds".into());
-            }
-            ProviderSource {
-                url: Some(url.to_string()),
-                interval_seconds,
-            }
-        }
-        ("inline", None) if interval.is_none_or(|value| value == 0) => ProviderSource {
-            url: None,
-            interval_seconds: 0,
-        },
-        _ => {
-            return Err(
-                "provider requires type http with a URL, or type inline with a payload".into(),
-            );
-        }
-    };
-    Ok((source, maximum))
-}
-
-fn filter(fields: &mut ProxyFields) -> Result<ProviderFilter, String> {
-    let filter = ProviderFilter {
-        include: fields.take_string("filter")?,
-        exclude: fields.take_string("exclude-filter")?,
-    };
-    filter.accepts("").map_err(|error| error.to_string())?;
-    Ok(filter)
-}
-
-fn health(fields: &mut ProxyFields) -> Result<Option<ProviderHealthCheck>, String> {
-    let Some(value) = fields.take("health-check") else {
-        return Ok(None);
-    };
-    let mut fields = provider_mapping(value, "provider health-check".into())?;
-    let enabled = fields.take_bool("enable")?.unwrap_or(false);
-    let url = fields.take_string("url")?;
-    let interval = fields
-        .take_string("interval")?
-        .map(|value| value.parse::<u32>())
-        .transpose()
-        .map_err(|_| "health interval must be an integer")?
-        .unwrap_or(300);
-    let lazy = fields.take_bool("lazy")?.unwrap_or(true);
-    let timeout_ms = fields
-        .take_string("timeout")?
-        .map(|value| value.parse::<u16>())
-        .transpose()
-        .map_err(|_| "health timeout must be an integer")?
-        .unwrap_or(5000);
-    let expected_status = fields.take_string("expected-status")?;
-    fields.reject_leftovers()?;
-    if !enabled {
-        return Ok(None);
-    }
-    Ok(Some(ProviderHealthCheck {
-        url: url.ok_or("enabled provider health check requires a URL")?,
-        interval_seconds: interval,
-        lazy,
-        timeout_ms,
-        expected_status,
-    }))
-}
-
-fn format(fields: &mut ProxyFields) -> Result<ProviderRuleFormat, String> {
-    match fields.take_string("format")?.as_deref().unwrap_or("yaml") {
-        "yaml" => Ok(ProviderRuleFormat::Yaml),
-        "text" => Ok(ProviderRuleFormat::Text),
-        _ => Err("rule provider format must be yaml or text".into()),
     }
 }
 
@@ -229,33 +113,6 @@ pub(crate) fn materialize(
     root.render_document()
 }
 
-fn decode_payload(
-    kind: ProviderKind,
-    format: ProviderRuleFormat,
-    body: &str,
-) -> Result<YamlValue, String> {
-    if kind == ProviderKind::Rule && format == ProviderRuleFormat::Text {
-        return Ok(YamlValue::Sequence(
-            body.lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty() && !line.starts_with('#'))
-                .map(|line| YamlValue::Scalar(YamlScalar::string(line.into())))
-                .collect(),
-        ));
-    }
-    let YamlValue::Mapping(root) = load_single_document(body)? else {
-        return Err("provider response must be a mapping".into());
-    };
-    let key = if kind == ProviderKind::Proxy {
-        "proxies"
-    } else {
-        "payload"
-    };
-    root.get(key)
-        .cloned()
-        .ok_or_else(|| format!("provider response is missing {key}"))
-}
-
 /// Imports materialized providers. Proxy providers keep the document's
 /// `global_fingerprint` so that refreshing their members applies it again.
 pub(super) fn import_providers(
@@ -327,148 +184,6 @@ pub(super) fn import_providers(
         }
     }
     Ok(catalog)
-}
-
-fn provider_tag(provider: &str, name: &str) -> String {
-    format!(
-        "provider-{}",
-        cfw_singbox_config::sha256_hex(format!("cfm-provider\0{provider}\0{name}").as_bytes())
-    )
-}
-
-fn import_proxy_payload(
-    provider: &str,
-    payload: YamlValue,
-    filter: &ProviderFilter,
-    default_fingerprint: Option<UtlsFingerprint>,
-    collector: &mut OutboundCollector,
-    names: &mut BTreeMap<String, String>,
-) -> Result<Vec<ProviderMember>, String> {
-    let YamlValue::Sequence(nodes) = payload else {
-        return Err("proxy provider payload must be a sequence".into());
-    };
-    let filter = filter.compile().map_err(|error| error.to_string())?;
-    let mut members = Vec::new();
-    let mut local_names = BTreeMap::new();
-    for value in nodes {
-        let mut fields = provider_mapping(value, "provider node".into())?;
-        let name = fields.require_string("name")?;
-        if !filter.accepts(&name) {
-            continue;
-        }
-        let tag = provider_tag(provider, &name);
-        if local_names.insert(name.clone(), tag.clone()).is_some() {
-            return Err("provider node names must be unique".into());
-        }
-        fields.entries.insert(
-            0,
-            (
-                "name".into(),
-                YamlValue::Scalar(YamlScalar::string(tag.clone())),
-            ),
-        );
-        if collector.outbounds.len() >= cfw_singbox_config::MAX_OUTBOUNDS {
-            return Err("provider nodes exceed the supported outbound capacity".into());
-        }
-        let (_, outbound) = convert_proxy(collector, fields, default_fingerprint)?;
-        let actual = outbound["tag"]
-            .as_str()
-            .ok_or("converted provider node has no tag")?
-            .to_owned();
-        if actual != tag
-            && let Some(detour) = collector.detours.remove(&tag)
-        {
-            collector.detours.insert(actual.clone(), detour);
-        }
-        local_names.insert(name.clone(), actual.clone());
-        names.insert(actual.clone(), actual.clone());
-        collector.outbounds.push(outbound);
-        members.push(ProviderMember { tag: actual, name });
-    }
-    // Dialer-proxy references inside a provider retain that provider's scope.
-    for member in &members {
-        if let Some(target) = collector.detours.get_mut(&member.tag)
-            && let Some(resolved) = local_names.get(target)
-        {
-            *target = resolved.clone();
-        }
-    }
-    Ok(members)
-}
-
-fn import_rule_payload(
-    payload: YamlValue,
-    behavior: ProviderRuleBehavior,
-) -> Result<Vec<ProviderRule>, String> {
-    let YamlValue::Sequence(values) = payload else {
-        return Err("rule provider payload must be a sequence".into());
-    };
-    if values.len() > MAX_PROVIDER_RULES {
-        return Err("rule provider is too large".into());
-    }
-    values
-        .into_iter()
-        .map(|value| {
-            let YamlValue::Scalar(value) = value else {
-                return Err("provider rule must be a string".into());
-            };
-            let text = value.text().trim();
-            let (kind, value) = match behavior {
-                ProviderRuleBehavior::IpCidr => (RuleKind::IpCidr, text.to_owned()),
-                ProviderRuleBehavior::Domain => {
-                    match cfw_singbox_config::DomainPattern::parse(text)
-                        .map_err(|error| error.to_string())?
-                    {
-                        cfw_singbox_config::DomainPattern::Exact(value) => {
-                            (RuleKind::Domain, value)
-                        }
-                        cfw_singbox_config::DomainPattern::Suffix(value) => {
-                            (RuleKind::DomainSuffix, value)
-                        }
-                        cfw_singbox_config::DomainPattern::Regex(value) => {
-                            (RuleKind::DomainRegex, value)
-                        }
-                    }
-                }
-                ProviderRuleBehavior::Classical => {
-                    let (kind, value) = text
-                        .split_once(',')
-                        .ok_or("classical provider rule requires a type and value")?;
-                    if value.contains(',') {
-                        return Err(
-                            "classical provider rules cannot include an outbound target".into()
-                        );
-                    }
-                    let kind = match kind.trim() {
-                        "DOMAIN" => RuleKind::Domain,
-                        "DOMAIN-SUFFIX" => RuleKind::DomainSuffix,
-                        "DOMAIN-KEYWORD" => RuleKind::DomainKeyword,
-                        "DOMAIN-REGEX" => RuleKind::DomainRegex,
-                        "IP-CIDR" | "IP-CIDR6" => RuleKind::IpCidr,
-                        "SRC-IP-CIDR" => RuleKind::SourceIpCidr,
-                        "DST-PORT" => RuleKind::Port,
-                        "SRC-PORT" => RuleKind::SourcePort,
-                        "NETWORK" => RuleKind::Network,
-                        "PROCESS-NAME" => RuleKind::ProcessName,
-                        "PROCESS-PATH" => RuleKind::ProcessPath,
-                        "GEOIP" => RuleKind::GeoIp,
-                        "GEOSITE" => RuleKind::GeoSite,
-                        _ => return Err("unsupported classical provider rule".into()),
-                    };
-                    // Mihomo matches GEOSITE codes case-insensitively; the
-                    // published dataset names are lowercase.
-                    let value = value.trim();
-                    let value = if kind == RuleKind::GeoSite {
-                        value.to_ascii_lowercase()
-                    } else {
-                        value.to_owned()
-                    };
-                    (kind, value)
-                }
-            };
-            Ok(ProviderRule { kind, value })
-        })
-        .collect()
 }
 
 pub(crate) fn replacement(

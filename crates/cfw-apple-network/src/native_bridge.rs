@@ -62,3 +62,6 @@ impl NativeFrameworkBridge {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

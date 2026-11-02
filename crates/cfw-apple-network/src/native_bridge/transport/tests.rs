@@ -1,6 +1,81 @@
-use cfw_engine_api::BackendErrorKind;
+use cfw_engine_api::{
+    BackendErrorKind, CredentialAudience, CredentialGarbageCollectionReceipt, CredentialKind,
+    CredentialPresence, CredentialRef, CutoverPreflightAttestation, ENGINE_PROTOCOL_VERSION,
+    EngineCommandContext, NativeServiceMaintenanceAction, NativeServiceMaintenanceResult,
+    NativeServiceRegistrationStatus, ProfileProbeFailure, ProfileProxyDelay, TunnelApprovalWait,
+};
 
 use super::*;
+
+const REQUEST: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+
+fn request_id() -> uuid::Uuid {
+    uuid::Uuid::parse_str(REQUEST).expect("request UUID")
+}
+
+/// The wire form of a response to the request.
+fn envelope(
+    result: Option<NativeBridgeResult>,
+    failure: Option<NativeBridgeFailure>,
+) -> serde_json::Value {
+    serde_json::to_value(NativeResponseEnvelope {
+        schema_version: ENGINE_PROTOCOL_VERSION,
+        request_id: Some(request_id()),
+        result,
+        failure,
+    })
+    .expect("response wire")
+}
+
+fn parsed(envelope: serde_json::Value) -> Result<NativeBridgeResult, NativeBridgeError> {
+    parse_response(
+        request_id(),
+        &serde_json::to_vec(&envelope).expect("response bytes"),
+    )
+}
+
+/// What the bridge makes of a success response carrying `result`.
+fn answered(result: NativeBridgeResult) -> Result<NativeBridgeResult, NativeBridgeError> {
+    parsed(envelope(Some(result), None))
+}
+
+fn non_canonical() -> Result<NativeBridgeResult, NativeBridgeError> {
+    Err(NativeBridgeError::new(
+        NativeBridgeErrorCode::IdentityRejected,
+        "native bridge response contains a non-canonical identity",
+    ))
+}
+
+fn incomplete_runtime() -> Result<NativeBridgeResult, NativeBridgeError> {
+    Err(NativeBridgeError::new(
+        NativeBridgeErrorCode::IdentityRejected,
+        "native runtime attestation is incomplete or non-canonical",
+    ))
+}
+
+fn context() -> EngineCommandContext {
+    EngineCommandContext {
+        installation_id: "60fb4b30-53da-47ca-a933-e98268ce5703".to_owned(),
+        config_epoch: 4,
+        generation: 9,
+    }
+}
+
+fn runtime(owner: EngineOwner) -> RuntimeIdentity {
+    RuntimeIdentity {
+        owner,
+        context: context(),
+        config_digest: "a".repeat(64),
+        ready: true,
+    }
+}
+
+fn failure() -> NativeBridgeFailure {
+    NativeBridgeFailure {
+        code: BackendErrorKind::Busy,
+        message: "native detail".to_owned(),
+    }
+}
 
 #[test]
 fn unknown_wire_failure_maps_to_stable_internal_non_retryable_error() {
@@ -208,4 +283,360 @@ async fn callback_rejects_negative_response_length_without_reading_memory() {
         .expect("callback result")
         .expect_err("negative length must fail closed");
     assert_eq!(error.code, NativeBridgeErrorCode::Internal);
+}
+
+#[test]
+fn a_response_of_another_shape_version_or_request_is_refused() {
+    assert_eq!(
+        parse_response(request_id(), b"not json"),
+        Err(NativeBridgeError::new(
+            NativeBridgeErrorCode::Internal,
+            "native bridge returned a malformed response"
+        ))
+    );
+    let mut other_version = envelope(Some(NativeBridgeResult::Acknowledged), None);
+    other_version["schema_version"] = serde_json::json!(ENGINE_PROTOCOL_VERSION + 1);
+    assert_eq!(
+        parsed(other_version),
+        Err(NativeBridgeError::new(
+            NativeBridgeErrorCode::IdentityRejected,
+            "native bridge response schema does not match Rust"
+        ))
+    );
+    for shape in [
+        envelope(Some(NativeBridgeResult::Acknowledged), Some(failure())),
+        envelope(None, None),
+    ] {
+        assert_eq!(
+            parsed(shape),
+            Err(NativeBridgeError::new(
+                NativeBridgeErrorCode::Internal,
+                "native bridge response has an invalid result/failure shape"
+            ))
+        );
+    }
+
+    let other_request = serde_json::json!("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+    let mut failed_elsewhere = envelope(None, Some(failure()));
+    failed_elsewhere["request_id"] = other_request.clone();
+    assert_eq!(
+        parsed(failed_elsewhere),
+        Err(NativeBridgeError::new(
+            NativeBridgeErrorCode::IdentityRejected,
+            "native bridge failure response has a mismatched request identity"
+        ))
+    );
+    // A failure the bridge raised before it read the request id is reported.
+    let mut failed_unidentified = envelope(None, Some(failure()));
+    failed_unidentified["request_id"] = serde_json::Value::Null;
+    assert_eq!(
+        parsed(failed_unidentified),
+        Err(NativeBridgeError::new(
+            NativeBridgeErrorCode::Busy,
+            BackendErrorKind::Busy.stable_message()
+        ))
+    );
+    for request in [other_request, serde_json::Value::Null] {
+        let mut answered_elsewhere = envelope(Some(NativeBridgeResult::Acknowledged), None);
+        answered_elsewhere["request_id"] = request;
+        assert_eq!(
+            parsed(answered_elsewhere),
+            Err(NativeBridgeError::new(
+                NativeBridgeErrorCode::IdentityRejected,
+                "native bridge success response has a mismatched request identity"
+            ))
+        );
+    }
+}
+
+#[test]
+fn profile_delays_are_bounded_named_and_either_measured_or_failed() {
+    let delay = |name: &str, delay: Option<u32>, error_kind: Option<ProfileProbeFailure>| {
+        ProfileProxyDelay {
+            name: name.to_owned(),
+            delay,
+            error_kind,
+        }
+    };
+    let accepted = vec![
+        delay("Tokyo", Some(1), None),
+        delay("Osaka", None, Some(ProfileProbeFailure::NotFound)),
+    ];
+    assert_eq!(
+        answered(NativeBridgeResult::ProfileDelays(accepted.clone())),
+        Ok(NativeBridgeResult::ProfileDelays(accepted))
+    );
+    assert!(
+        answered(NativeBridgeResult::ProfileDelays(vec![
+            delay(
+                "Tokyo",
+                Some(1),
+                None
+            );
+            32
+        ]))
+        .is_ok()
+    );
+    for refused in [
+        vec![delay("Tokyo", Some(1), None); 33],
+        vec![delay("", Some(1), None)],
+        vec![delay(&"n".repeat(513), Some(1), None)],
+        vec![delay("Tokyo", Some(0), None)],
+        vec![delay("Tokyo", Some(1), Some(ProfileProbeFailure::Timeout))],
+        vec![delay("Tokyo", None, None)],
+    ] {
+        assert_eq!(
+            answered(NativeBridgeResult::ProfileDelays(refused)),
+            non_canonical()
+        );
+    }
+    assert!(
+        answered(NativeBridgeResult::ProfileDelays(vec![delay(
+            &"n".repeat(512),
+            Some(1),
+            None
+        )]))
+        .is_ok()
+    );
+}
+
+#[test]
+fn a_runtime_must_be_ready_attested_and_owned_by_its_mode() {
+    for (status, owner) in [
+        (
+            NativeEngineStatus::LocalProxy {
+                runtime: runtime(EngineOwner::ProxyAgent),
+            },
+            EngineOwner::ProxyAgent,
+        ),
+        (
+            NativeEngineStatus::SystemProxy {
+                runtime: runtime(EngineOwner::ProxyAgent),
+            },
+            EngineOwner::ProxyAgent,
+        ),
+        (
+            NativeEngineStatus::Tunnel {
+                runtime: runtime(EngineOwner::PacketTunnelSystemExtension),
+            },
+            EngineOwner::PacketTunnelSystemExtension,
+        ),
+    ] {
+        assert_eq!(
+            answered(NativeBridgeResult::Status(status.clone())),
+            Ok(NativeBridgeResult::Status(status)),
+            "{owner:?}"
+        );
+    }
+    for misowned in [
+        NativeEngineStatus::SystemProxy {
+            runtime: runtime(EngineOwner::PacketTunnelSystemExtension),
+        },
+        NativeEngineStatus::Tunnel {
+            runtime: runtime(EngineOwner::ProxyAgent),
+        },
+    ] {
+        assert_eq!(
+            answered(NativeBridgeResult::Status(misowned)),
+            incomplete_runtime()
+        );
+    }
+
+    let attested = runtime(EngineOwner::PacketTunnelSystemExtension);
+    assert!(answered(NativeBridgeResult::Runtime(attested.clone())).is_ok());
+    let broken: [fn(&mut RuntimeIdentity); 6] = [
+        |runtime| runtime.context.installation_id = "60FB4B30-53DA-47CA-A933-E98268CE5703".into(),
+        |runtime| runtime.context.config_epoch = 0,
+        |runtime| runtime.context.generation = 0,
+        |runtime| runtime.config_digest = "A".repeat(64),
+        |runtime| runtime.config_digest = "a".repeat(63),
+        |runtime| runtime.ready = false,
+    ];
+    for break_it in broken {
+        let mut runtime = attested.clone();
+        break_it(&mut runtime);
+        assert_eq!(
+            answered(NativeBridgeResult::Runtime(runtime)),
+            incomplete_runtime()
+        );
+    }
+}
+
+#[test]
+fn vault_and_service_results_are_bounded_and_canonical() {
+    let reference = CredentialRef::new(
+        "11111111-1111-4111-8111-111111111111",
+        CredentialKind::TrojanPassword,
+    )
+    .expect("credential reference");
+    let presence = CredentialPresence {
+        reference,
+        present: true,
+    };
+    assert!(
+        answered(NativeBridgeResult::CredentialPresence(vec![
+            presence.clone();
+            MAX_CREDENTIAL_SLOTS
+        ]))
+        .is_ok()
+    );
+    assert_eq!(
+        answered(NativeBridgeResult::CredentialPresence(vec![
+            presence;
+            MAX_CREDENTIAL_SLOTS
+                + 1
+        ])),
+        non_canonical()
+    );
+
+    let mut preview = match parse_response(
+        request_id(),
+        include_bytes!("../../../../../contracts/native-bridge-v10/gc-preview-response.json"),
+    ) {
+        Ok(NativeBridgeResult::CredentialGarbageCollectionPreview(preview)) => preview,
+        other => panic!("unexpected contract result {other:?}"),
+    };
+    preview.vault_revision = "not-a-revision".into();
+    assert_eq!(
+        answered(NativeBridgeResult::CredentialGarbageCollectionPreview(
+            preview
+        )),
+        non_canonical()
+    );
+    for (vault_revision, accepted) in [
+        ("cccccccc-cccc-4ccc-8ccc-cccccccccccc", true),
+        ("CCCCCCCC-CCCC-4CCC-8CCC-CCCCCCCCCCCC", false),
+    ] {
+        let receipt = NativeBridgeResult::CredentialGarbageCollectionReceipt(
+            CredentialGarbageCollectionReceipt {
+                vault_revision: vault_revision.into(),
+                deleted_count: 1,
+            },
+        );
+        assert_eq!(answered(receipt).is_ok(), accepted, "{vault_revision}");
+    }
+
+    let status = NativeServiceMaintenanceResult {
+        action: NativeServiceMaintenanceAction::Status,
+        engine_status: None,
+        global_authority: NativeServiceRegistrationStatus::Enabled,
+        off_proof_profile: None,
+        proxy_agent: NativeServiceRegistrationStatus::Enabled,
+    };
+    assert!(answered(NativeBridgeResult::ServiceMaintenance(status.clone())).is_ok());
+    let unproven_off = NativeServiceMaintenanceResult {
+        action: NativeServiceMaintenanceAction::ProveOff,
+        ..status
+    };
+    assert_eq!(
+        answered(NativeBridgeResult::ServiceMaintenance(unproven_off)),
+        non_canonical()
+    );
+    assert!(
+        answered(NativeBridgeResult::TunnelApproval(
+            TunnelApprovalWait::StillAwaiting
+        ))
+        .is_ok()
+    );
+}
+
+#[test]
+fn a_cutover_awaiting_approval_names_a_real_target_and_context() {
+    let awaiting = |target: EngineMode, context: EngineCommandContext, digest: String| {
+        NativeBridgeResult::CutoverPreflight(CutoverPreflightOutcome::AwaitingApproval {
+            target,
+            context,
+            system_proxy_config_digest: digest.clone(),
+            tunnel_config_digest: digest,
+            credential_audience: CredentialAudience::new(REQUEST, "c".repeat(64))
+                .expect("audience"),
+        })
+    };
+    assert!(answered(awaiting(EngineMode::Tunnel, context(), "a".repeat(64))).is_ok());
+    let mut uppercase = context();
+    uppercase.installation_id = uppercase.installation_id.to_uppercase();
+    let mut first_epoch = context();
+    first_epoch.config_epoch = 0;
+    let mut first_generation = context();
+    first_generation.generation = 0;
+    for refused in [
+        awaiting(EngineMode::Off, context(), "a".repeat(64)),
+        awaiting(EngineMode::Tunnel, uppercase, "a".repeat(64)),
+        awaiting(EngineMode::Tunnel, first_epoch, "a".repeat(64)),
+        awaiting(EngineMode::Tunnel, first_generation, "a".repeat(64)),
+        awaiting(EngineMode::Tunnel, context(), "not-a-digest".into()),
+    ] {
+        assert_eq!(answered(refused), non_canonical());
+    }
+}
+
+#[tokio::test]
+async fn the_callback_refuses_an_empty_oversized_or_missing_response_without_reading_it() {
+    let bytes = b"{}";
+    for (pointer, length, message) in [
+        (
+            bytes.as_ptr(),
+            0,
+            "native bridge returned an empty response",
+        ),
+        (
+            bytes.as_ptr(),
+            MAXIMUM_RESPONSE_BYTES as isize + 1,
+            "native bridge response exceeds the fixed bound",
+        ),
+        (
+            std::ptr::null(),
+            bytes.len() as isize,
+            "native bridge returned a null response pointer",
+        ),
+    ] {
+        let (sender, receiver) = oneshot::channel();
+        let context = Box::into_raw(Box::new(CallbackState {
+            sender: Some(sender),
+            _bridge: Arc::new(BridgeState::Unavailable("test".into())),
+        }))
+        .cast::<c_void>();
+        // SAFETY: context is one live CallbackState allocation; the length is
+        // checked before any byte is read.
+        unsafe {
+            bridge_completion(context, pointer, length);
+        }
+        assert_eq!(
+            receiver.await.expect("callback result"),
+            Err(NativeBridgeError::new(
+                NativeBridgeErrorCode::Internal,
+                message
+            ))
+        );
+    }
+}
+
+#[test]
+fn a_callback_without_its_context_is_ignored() {
+    let bytes = b"{}";
+    // SAFETY: a null context is the one input the callback must ignore.
+    unsafe {
+        bridge_completion(std::ptr::null_mut(), bytes.as_ptr(), bytes.len() as isize);
+    }
+}
+
+#[test]
+fn a_ready_cutover_carries_an_attestation_that_is_still_valid() {
+    let ready = |valid_for_millis: u32| {
+        NativeBridgeResult::CutoverPreflight(CutoverPreflightOutcome::Ready {
+            attestation: CutoverPreflightAttestation {
+                attestation_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd".to_owned(),
+                target: EngineMode::Tunnel,
+                context: context(),
+                system_proxy_config_digest: "a".repeat(64),
+                tunnel_config_digest: "b".repeat(64),
+                credential_audience: CredentialAudience::new(REQUEST, "c".repeat(64))
+                    .expect("audience"),
+                credential_references: Vec::new(),
+                valid_for_millis,
+            },
+        })
+    };
+    assert!(answered(ready(1_000)).is_ok());
+    assert_eq!(answered(ready(0)), non_canonical());
 }

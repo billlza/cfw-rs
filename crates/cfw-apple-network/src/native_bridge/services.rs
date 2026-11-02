@@ -77,3 +77,6 @@ impl cfw_engine_api::ProfileDelayBackend for NativeFrameworkBridge {
         })
     }
 }
+
+#[cfg(test)]
+mod tests;

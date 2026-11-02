@@ -7,8 +7,8 @@ use crate::{
         BridgeState,
         budget::InvocationTiming,
         fake_native::{
-            FakeCancelCompletion, complete_fake_native_late, fake_bridge, fake_native_state,
-            ffi_test_serialization, query_request, reset_fake_native,
+            FakeCancelCompletion, answer_fake_native, complete_fake_native_late, fake_bridge,
+            fake_native_state, ffi_test_serialization, query_request, reset_fake_native,
         },
     },
 };
@@ -227,4 +227,79 @@ async fn cleanup_grace_expiry_is_bounded_and_late_callback_releases_framework() 
             .callback_count,
         1
     );
+}
+
+#[tokio::test]
+async fn a_request_the_framework_does_not_admit_is_internal() {
+    let _serial = ffi_test_serialization().lock().await;
+    reset_fake_native(FakeCancelCompletion::None, false, 0);
+    let error = fake_bridge()
+        .invoke_bytes(uuid::Uuid::new_v4(), b"not a request".to_vec())
+        .await
+        .expect_err("the request is not admitted");
+    assert_eq!(
+        error,
+        NativeBridgeError::new(
+            NativeBridgeErrorCode::Internal,
+            "native bridge rejected request admission with status 2"
+        )
+    );
+    let state = fake_native_state().lock().expect("fake native lock");
+    assert!(state.context.is_none());
+    assert_eq!(state.callback_count, 0);
+}
+
+#[tokio::test]
+async fn an_empty_answer_is_an_internal_failure() {
+    let _serial = ffi_test_serialization().lock().await;
+    answer_fake_native(|_| Vec::new());
+    let request_id = uuid::Uuid::new_v4();
+    let error = fake_bridge()
+        .invoke_bytes(request_id, query_request(request_id))
+        .await
+        .expect_err("an empty answer");
+    assert_eq!(
+        error,
+        NativeBridgeError::new(
+            NativeBridgeErrorCode::Internal,
+            "native bridge returned an empty response"
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_dropped_invocation_whose_cancellation_fails_keeps_the_framework_until_the_late_callback()
+{
+    let _serial = ffi_test_serialization().lock().await;
+    reset_fake_native(FakeCancelCompletion::None, false, 2);
+    let bridge = fake_bridge();
+    let weak_state = Arc::downgrade(&bridge.state);
+    let request_id = uuid::Uuid::new_v4();
+    let mut invocation = bridge.invoke_bytes_with_timing(
+        request_id,
+        query_request(request_id),
+        InvocationTiming {
+            operation_budget: Duration::from_secs(60),
+            cleanup_grace: Duration::from_secs(1),
+        },
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1), &mut invocation)
+            .await
+            .is_err()
+    );
+    // The rejected cancellation can only be reported, since drop cannot fail.
+    drop(invocation);
+    {
+        let state = fake_native_state().lock().expect("fake native lock");
+        assert_eq!(
+            state.cancel_request_ids,
+            [request_id.hyphenated().to_string()]
+        );
+        assert!(state.context.is_some());
+    }
+    drop(bridge);
+    assert!(weak_state.upgrade().is_some());
+    complete_fake_native_late();
+    assert!(weak_state.upgrade().is_none());
 }

@@ -100,3 +100,16 @@ test("GEOSITE rules are labelled and are not country rules", () => {
   assert.deepEqual(policy.rules.map((rule) => rule.type), ["GEOSITE", "GEOIP", "DOMAIN-SUFFIX", "MATCH"]);
   assert.deepEqual(policy.geoipCountries, ["CN"]);
 });
+
+test("a malformed saved profile is refused, never shown as an empty policy", () => {
+  const refuse = (profile, message) => assert.throws(() => savedProfilePolicy(profile), { name: "TypeError", message });
+  refuse(null, "saved profile response is invalid");
+  refuse({ id: 7, body: "{}" }, "saved profile response is invalid");
+  refuse({ id: "profile", body: null }, "saved profile response is invalid");
+  refuse({ id: "profile", body: JSON.stringify({}) }, "saved profile has no outbound policy");
+  refuse({ id: "profile", body: JSON.stringify({ outbounds: [] }) }, "saved profile has no outbound policy");
+  refuse({ id: "profile", body: JSON.stringify({ outbounds: [{ type: "direct" }] }) }, "saved outbound is invalid");
+  refuse({ id: "profile", body: JSON.stringify({ outbounds: [{ tag: "x", type: 1 }] }) }, "saved outbound is invalid");
+  refuse({ id: "profile", body: JSON.stringify({ outbounds: [{ tag: "Proxy", type: "selector" }] }) }, "saved group has no members");
+  refuse({ id: "profile", body: JSON.stringify({ outbounds: [{ tag: "Proxy", type: "selector", outbounds: [] }] }) }, "saved group has no members");
+});

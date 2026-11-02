@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { engineStateLabel, normalizeEngineStatus, summarizeEngineEvent, systemProxyValueLabel, tunnelValueLabel } from "../src/format.js";
+import { engineStateLabel, normalizeEngineStatus, summarizeEngineEvent, systemProxyValueLabel, tunnelValueLabel } from "../src/engine-status-model.js";
 
 function proxyEnvelope(overrides = {}) {
   return {

@@ -1,5 +1,5 @@
 import { t } from "./i18n.js";
-import { escapeHtml, errorText } from "./format.js";
+import { escapeHtml, errorText } from "./text-format.js";
 import { runtimeDialogFrame } from "./native-runtime-settings.js";
 
 export const RUNTIME_LOG_LEVELS = Object.freeze(["trace", "debug", "info", "warn", "error", "fatal", "silent"]);

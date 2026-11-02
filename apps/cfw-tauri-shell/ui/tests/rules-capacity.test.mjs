@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createRulesView, RULE_PAGE_SIZE } from "../src/rules.js";
-import { escapeHtml } from "../src/format.js";
+import { escapeHtml } from "../src/text-format.js";
 import { getLocale, setLocale, SUPPORTED_LOCALES, t } from "../src/i18n.js";
 
 test("rule search distinguishes no matches from no source rules and preserves reported errors", () => {

@@ -485,7 +485,7 @@ test("migration CSS computes a non-clipping long action at the compact 850x603 b
 test("renderer ACK remains after first render and every critical migration listener", async () => {
   const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
   const start = source.indexOf("async function bootstrap()");
-  const end = source.indexOf("\nasync function importProfileFromPath", start);
+  const end = source.indexOf("\n}\n", start);
   assert.ok(start >= 0 && end > start, "bootstrap source boundary exists");
   const bootstrap = source.slice(start, end);
   const ordered = [
@@ -494,7 +494,7 @@ test("renderer ACK remains after first render and every critical migration liste
     "renderPage();",
     'await listen("cfw://engine-event"',
     'await listen("tauri://drag-drop"',
-    "criticalMigrationListenersBound = true;",
+    "markCriticalListenersBound();",
     "await loadRetirementStatus();",
     "renderPage();",
     "await acknowledgeMigrationHandoffRendererReady();",
@@ -506,8 +506,13 @@ test("renderer ACK remains after first render and every critical migration liste
     assert.ok(next > cursor, `${marker} stays after the prior readiness boundary`);
     cursor = next;
   }
+  const events = await readFile(new URL("../src/host-events.js", import.meta.url), "utf8");
+  const handlerStart = events.indexOf("const onEngineEvent = ");
+  const handler = events.slice(handlerStart, events.indexOf("\n  };\n", handlerStart));
+  assert.ok(handlerStart >= 0 && bootstrap.includes('await listen("cfw://engine-event", onEngineEvent);'),
+    "the engine event listener is the host event handler");
   assert.match(
-    bootstrap,
+    handler,
     /if \(!state\.migrationHandoff\) \{\s*try \{\s*await loadBootPayload\(\);/su,
     "handoff events never rotate the renderer challenge inside one JS lifetime",
   );

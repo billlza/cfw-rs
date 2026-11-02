@@ -1,5 +1,5 @@
 import { t } from "./i18n.js";
-import { escapeHtml, errorText } from "./format.js";
+import { escapeHtml, errorText } from "./text-format.js";
 import { platformPresentation } from "./platform-presentation.js";
 
 export const SHORTCUT_ACTIONS = Object.freeze([

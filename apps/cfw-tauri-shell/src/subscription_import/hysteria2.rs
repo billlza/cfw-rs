@@ -107,9 +107,8 @@ pub(super) fn normalize_hysteria2_server_ports(
         normalized.push(canonical);
         intervals.push(interval);
     }
-    if normalized.is_empty() {
-        return Err(format!("{label} is empty"));
-    }
+    // `split` yields at least one item and an empty item is refused, so the
+    // list is never empty here.
     Ok(normalized)
 }
 

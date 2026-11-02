@@ -174,12 +174,16 @@ const ASCENDING_PIN_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161
 const ASCENDING_PIN_BASE64: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
 
 mod clash_nodes;
+mod clash_refusals;
 mod clash_routing;
+mod clash_transports;
 mod client_fingerprints;
 mod credential_references;
 mod documents;
 mod hysteria2_links;
 mod shadowsocks_links;
 mod share_links;
+mod shared_helpers;
 mod sing_box_lists;
+mod sing_box_options;
 mod vmess_links;

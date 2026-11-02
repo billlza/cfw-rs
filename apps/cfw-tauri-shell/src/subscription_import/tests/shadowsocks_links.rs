@@ -213,3 +213,85 @@ fn shadowsocks_uri_decodes_each_plain_component_exactly_once() {
             .expect("base64 SIP002 credentials");
     assert_eq!(imported.credentials[0].secret, "literal%2Fvalue");
 }
+
+#[test]
+fn sip008_requires_version_one_and_a_bounded_list_of_usable_servers() {
+    let server = |key: &str, value: Value| {
+        let mut server = json!({
+            "id": "27b8a625-4f4b-4428-9f0f-8a2317db7c79",
+            "remarks": "Synthetic",
+            "server": "ss.example.com",
+            "server_port": 8388,
+            "password": "TopSecretValue!",
+            "method": "aes-256-gcm"
+        });
+        server[key] = value;
+        server
+    };
+    let valid = server("remarks", json!("Synthetic"));
+    for (document, expected) in [
+        (
+            json!({ "version": 2, "servers": [valid.clone()] }),
+            "SIP008 JSON version is unsupported".to_owned(),
+        ),
+        (
+            json!({ "version": 1, "servers": [] }),
+            "SIP008 JSON contains no servers".to_owned(),
+        ),
+        (
+            json!({
+                "version": 1,
+                "servers": vec![valid.clone(); cfw_singbox_config::MAX_OUTBOUNDS + 1],
+            }),
+            format!(
+                "SIP008 JSON has more than {} servers",
+                cfw_singbox_config::MAX_OUTBOUNDS
+            ),
+        ),
+        (
+            // At the bound the list is read, and its repeated ids are refused.
+            json!({
+                "version": 1,
+                "servers": vec![valid.clone(); cfw_singbox_config::MAX_OUTBOUNDS],
+            }),
+            "SIP008 server ids must be unique non-nil UUIDs".to_owned(),
+        ),
+        (
+            json!({ "version": 1, "servers": [server("server_port", json!(0))] }),
+            "SIP008 server port is invalid".to_owned(),
+        ),
+        (
+            json!({ "version": 1, "servers": [server("password", json!(""))] }),
+            "SIP008 server password is empty".to_owned(),
+        ),
+    ] {
+        assert_eq!(
+            import_subscription_document(&document.to_string()).map(|_| ()),
+            Err(expected)
+        );
+    }
+}
+
+#[test]
+fn shadowsocks_links_refuse_plugins_and_undecodable_credentials() {
+    for (uri, expected) in [
+        (
+            "ss://YWVzLTI1Ni1nY206VG9wU2VjcmV0VmFsdWUh@ss.example.com:8388?plugin=obfs-local#S",
+            "Shadowsocks plugins are unsupported in subscription imports",
+        ),
+        (
+            "ss://Top*Secret#S",
+            "Shadowsocks URI credentials are invalid base64: input is not valid base64",
+        ),
+        (
+            "ss://Top*Secret@ss.example.com:8388#S",
+            "Shadowsocks URI method/password envelope is invalid base64: input is not valid base64",
+        ),
+    ] {
+        assert_eq!(
+            import_subscription_document(uri).map(|_| ()),
+            Err(expected.into()),
+            "{uri}"
+        );
+    }
+}

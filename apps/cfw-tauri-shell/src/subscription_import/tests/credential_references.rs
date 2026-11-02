@@ -140,8 +140,13 @@ fn credential_kind_discriminants_are_append_only() {
             CredentialKind::TuicPassword,
             CredentialKind::Socks5Username,
             CredentialKind::Socks5Password,
+            CredentialKind::WireGuardPrivateKey,
+            CredentialKind::WireGuardPreSharedKey,
+            CredentialKind::HttpProxyUsername,
+            CredentialKind::HttpProxyPassword,
+            CredentialKind::TailscaleAuthKey,
         ]
         .map(credential_kind_discriminant),
-        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
     );
 }

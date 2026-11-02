@@ -1,5 +1,6 @@
-//! How a document is recognized, URI bundles and their limits, unsupported
-//! schemes, errors that never echo content, and the golden conversions.
+//! How a document is recognized, URI bundles with their limits and unique
+//! tags, unsupported schemes, errors that never echo content, and the golden
+//! conversions.
 
 use super::*;
 
@@ -109,6 +110,36 @@ fn rejects_unsupported_uri_schemes() {
     let error = import_subscription_document("shadowtls://token@example.com:443#ShadowTLS")
         .expect_err("unsupported scheme");
     assert!(error.contains("unsupported"));
+    // The collector refuses on its own what the bundle reader lets through.
+    assert_eq!(
+        OutboundCollector::default().push_entry("TopSecretValue123://host:443", 0),
+        Err("subscription URI scheme is unsupported: <redacted>".into())
+    );
+}
+
+#[test]
+fn a_taken_tag_suffix_is_skipped_and_the_tag_space_is_bounded() {
+    let mut collector = OutboundCollector::default();
+    assert_eq!(
+        collector.unique_tag("Node-2".into()).as_deref(),
+        Ok("Node-2")
+    );
+    assert_eq!(collector.unique_tag("Node".into()).as_deref(), Ok("Node"));
+    assert_eq!(collector.unique_tag("Node".into()).as_deref(), Ok("Node-3"));
+
+    let mut collector = OutboundCollector::default();
+    for _ in 0..cfw_singbox_config::MAX_OUTBOUNDS {
+        collector
+            .unique_tag("Node".into())
+            .expect("a tag within the limit");
+    }
+    assert_eq!(
+        collector.unique_tag("Node".into()),
+        Err(format!(
+            "subscription cannot assign a unique outbound tag within the {}-entry limit",
+            cfw_singbox_config::MAX_OUTBOUNDS
+        ))
+    );
 }
 
 #[test]
@@ -117,6 +148,55 @@ fn uri_bundle_errors_never_echo_line_content() {
         .expect_err("unrecognized document");
     assert!(!error.contains("TopSecretValue!"), "{error}");
     assert!(error.contains("subscription line 1"), "{error}");
+}
+
+#[test]
+fn a_json_document_selects_exactly_one_importer_by_its_root_keys() {
+    let clash = import_subscription_document(
+        r#"{"proxies":[{"name":"Node","type":"socks5","server":"a.example.com","port":1080}]}"#,
+    )
+    .expect("Clash in JSON syntax");
+    assert_eq!(imported_outbounds(&clash)[0]["tag"], "Node");
+    for (document, expected) in [
+        (
+            r#"{"proxies":[],"outbounds":[]}"#,
+            "subscription JSON has ambiguous profile formats",
+        ),
+        (
+            r#"{"proxy-providers":{},"servers":[]}"#,
+            "subscription JSON has ambiguous profile formats",
+        ),
+        (
+            r#"{"outbounds":[],"version":1}"#,
+            "subscription JSON ambiguously declares sing-box and SIP008 roots",
+        ),
+        (
+            r#"{"metadata":{}}"#,
+            "subscription JSON is neither a supported sing-box node list nor SIP008",
+        ),
+    ] {
+        assert_eq!(
+            import_subscription_document(document).map(|_| ()),
+            Err(expected.into()),
+            "{document}"
+        );
+    }
+}
+
+#[test]
+fn blank_lines_separate_uri_entries_and_a_blank_document_is_refused() {
+    let imported = import_subscription_document(
+        "socks5://a.example.com:1080#A\n\n  \nsocks5://b.example.com:1080#B\n",
+    )
+    .expect("two entries around blank lines");
+    assert_eq!(imported_outbounds(&imported).len(), 2);
+    assert_eq!(
+        import_subscription_document("\n  \n").map(|_| ()),
+        Err(
+            "subscription document is not a supported sing-box JSON document or supported node URI bundle"
+                .into()
+        )
+    );
 }
 
 /// Byte-identity goldens for stored imports, captured on the 0.5 line before

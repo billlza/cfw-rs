@@ -308,3 +308,103 @@ fn vmess_explicit_safe_metadata_is_consumed_and_unknown_fields_fail_closed() {
         assert!(!error.contains("TopSecretValue!"), "{label}: {error}");
     }
 }
+
+/// A base64 VMess payload with the given fields set over a minimal node.
+fn vmess_payload_uri(extra: Value) -> String {
+    let mut payload = json!({
+        "ps": "V",
+        "add": "vmess.example.com",
+        "port": 443,
+        "id": SYNTHETIC_VM_UUID,
+    });
+    for (key, value) in extra.as_object().expect("extra fields") {
+        payload[key] = value.clone();
+    }
+    format!("vmess://{}", STANDARD.encode(payload.to_string()))
+}
+
+#[test]
+fn vmess_payload_versions_booleans_and_tls_modes_accept_only_their_spellings() {
+    let imported = import_subscription_document(&vmess_payload_uri(
+        json!({ "v": 2, "insecure": 0, "scy": "aes-128-gcm" }),
+    ))
+    .expect("an integer version, an integer boolean and a cipher");
+    assert_eq!(imported_outbounds(&imported)[0]["security"], "aes-128-gcm");
+    for (extra, expected) in [
+        (
+            json!({ "v": "TopSecretValue123" }),
+            "vmess URI version is unsupported: <redacted>",
+        ),
+        (json!({ "v": 3 }), "vmess URI version is unsupported"),
+        (
+            json!({ "insecure": 1 }),
+            "vmess URI requires disabling TLS certificate verification",
+        ),
+        (
+            json!({ "insecure": 2 }),
+            "vmess URI field insecure must be a boolean",
+        ),
+        (
+            json!({ "tls": "TopSecretValue123" }),
+            "vmess TLS mode is unsupported: <redacted>",
+        ),
+        (
+            json!({ "net": "TopSecretValue123" }),
+            "subscription transport is unsupported: <redacted>",
+        ),
+    ] {
+        assert_eq!(
+            import_subscription_document(&vmess_payload_uri(extra.clone())).map(|_| ()),
+            Err(expected.into()),
+            "{extra}"
+        );
+    }
+}
+
+#[test]
+fn url_shaped_vmess_links_accept_only_their_declared_options() {
+    let link = |query: &str| format!("vmess://{SYNTHETIC_VM_UUID}@vm.example.com:443?{query}#V");
+    let imported =
+        import_subscription_document(&link("packetEncoding=xudp")).expect("a packet encoding");
+    assert_eq!(imported_outbounds(&imported)[0]["packet_encoding"], "xudp");
+    for (uri, expected) in [
+        (
+            format!("vmess://{SYNTHETIC_VM_UUID}:TopSecretValue123@vm.example.com:443"),
+            "VMess URI must encode its UUID as the single user-info component",
+        ),
+        (
+            link("encryption="),
+            "VMess URI encryption must not be empty",
+        ),
+        (
+            link("encryption=TopSecretValue123"),
+            "VMess URL-shaped encryption is unsupported: <redacted>",
+        ),
+        (
+            link("security=TopSecretValue123"),
+            "VMess URL-shaped security mode is unsupported: <redacted>",
+        ),
+        (
+            link("packetEncoding=xudp&packet-encoding=xudp"),
+            "VMess URI repeats packet encoding using multiple aliases",
+        ),
+        (
+            link("type=grpc&serviceName=api&service_name=api"),
+            "VMess URI repeats gRPC service name using multiple aliases",
+        ),
+        (
+            link("type=TopSecretValue123"),
+            "subscription transport is unsupported: <redacted>",
+        ),
+        (
+            format!("vmess://{SYNTHETIC_VM_UUID}@vm.example.com:443#%FF"),
+            "VMess URI fragment has invalid percent-encoding",
+        ),
+    ] {
+        assert_eq!(
+            import_subscription_document(&uri).map(|_| ()),
+            Err(expected.into()),
+            "{uri}"
+        );
+    }
+}

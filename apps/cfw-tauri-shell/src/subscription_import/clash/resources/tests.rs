@@ -295,3 +295,6 @@ fn classical_rule_providers_accept_geosite_conditions() {
         ]
     );
 }
+
+mod boundaries;
+mod refresh;

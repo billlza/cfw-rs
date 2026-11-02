@@ -423,6 +423,53 @@ cfw_build_tauri_host_skeleton() {
                 changed = {**rust, readiness.HOST_STARTUP_PATH: startup}
                 self.assertTrue(readiness._host_issues(self.cargo, self.build, changed)[1])
 
+    def test_transport_and_engine_reach_through_their_always_compiled_child_modules(self) -> None:
+        transport_app = "apps/cfw-tauri-shell/src/packet_evidence_transport/app.rs"
+        engine_staged = "apps/cfw-tauri-shell/src/engine/packet_evidence/staged/mod.rs"
+        rust = {
+            readiness.HOST_MAIN_PATH: "fn main() { packet_evidence_transport::run_packet_evidence_transaction(); }",
+            readiness.HOST_PACKET_TRANSPORT_PATH: (
+                "mod app; #[cfg(test)] mod tests; fn run_packet_evidence_transaction() { app::serve(); }"
+            ),
+            transport_app: "pub(super) fn serve() { connection(); } fn connection() { engine.run_packet_evidence_staged_transaction(); }",
+            "apps/cfw-tauri-shell/src/packet_evidence_transport/tests.rs": "fn run_packet_evidence_staged_transaction() {}",
+            readiness.HOST_PACKET_ENGINE_PATH: "pub(crate) mod staged; #[cfg(test)] mod tests;",
+            engine_staged: "pub fn run_packet_evidence_staged_transaction() {}",
+        }
+        self.assertEqual(readiness._host_issues(self.cargo, self.build, rust)[1], [])
+        for transport in (
+            "#[cfg(test)] mod app; fn run_packet_evidence_transaction() { app::serve(); }",
+            '#[cfg(feature = "x")] mod app; fn run_packet_evidence_transaction() { app::serve(); }',
+            "mod other; fn run_packet_evidence_transaction() { app::serve(); }",
+            "fn run_packet_evidence_transaction() { app::serve(); } #[cfg(test)] mod tests { mod app; }",
+            "fn nested() { mod app; } fn run_packet_evidence_transaction() { app::serve(); }",
+        ):
+            with self.subTest(transport=transport):
+                changed = {**rust, readiness.HOST_PACKET_TRANSPORT_PATH: transport}
+                self.assertTrue(readiness._host_issues(self.cargo, self.build, changed)[1])
+        for app in (
+            "pub(super) fn serve() {} fn connection() { engine.run_packet_evidence_staged_transaction(); }",
+            "pub(super) fn serve() { connection(); } #[cfg(test)] mod tests { fn connection() { engine.run_packet_evidence_staged_transaction(); } }",
+        ):
+            with self.subTest(app=app):
+                changed = {**rust, transport_app: app}
+                self.assertTrue(readiness._host_issues(self.cargo, self.build, changed)[1])
+        without_child = {path: source for path, source in rust.items() if path != transport_app}
+        self.assertTrue(readiness._host_issues(self.cargo, self.build, without_child)[1])
+        for engine in ("#[cfg(test)] mod staged;", "mod other;"):
+            with self.subTest(engine=engine):
+                changed = {**rust, readiness.HOST_PACKET_ENGINE_PATH: engine}
+                self.assertTrue(readiness._host_issues(self.cargo, self.build, changed)[1])
+
+    def test_child_module_walk_is_bounded(self) -> None:
+        levels = readiness.MAX_RUST_MODULE_DEPTH + 3
+        sources = {"src/m0.rs": "mod c1; fn f0() {}"}
+        for level in range(1, levels):
+            path = "src/m0/" + "/".join(f"c{index}" for index in range(1, level + 1)) + ".rs"
+            sources[path] = f"mod c{level + 1}; fn f{level}() {{}}"
+        functions = readiness._rust_module_tree_functions(sources, "src/m0.rs")
+        self.assertEqual(set(functions), {f"f{level}" for level in range(readiness.MAX_RUST_MODULE_DEPTH + 1)})
+
     def test_feature_build_argv_and_reachable_non_test_caller_pass(self) -> None:
         rust = {
             "apps/cfw-tauri-shell/src/main.rs": """

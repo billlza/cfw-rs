@@ -156,11 +156,20 @@ async fn transport_and_response_failures_keep_their_delay_kinds() {
         .timeout(Duration::from_millis(100))
         .build()
         .expect("probe client");
-    let closed = TcpListener::bind("127.0.0.1:0")
+    // A peer that accepts and closes before answering fails the same way on
+    // every platform. A released port does not: Windows loopback retries the
+    // refused connection past this client's timeout.
+    let hangs_up = TcpListener::bind("127.0.0.1:0")
         .await
-        .expect("bind a port to release")
-        .local_addr()
-        .expect("released port");
+        .expect("bind a peer that hangs up");
+    let hang_up_address = hangs_up.local_addr().expect("hang-up peer address");
+    let hang_up = tokio::spawn(async move {
+        let (stream, _) = hangs_up
+            .accept()
+            .await
+            .expect("accept the request connection");
+        drop(stream);
+    });
     let truncated_body = || async {
         http.get(fixture.url("/truncated"))
             .send()
@@ -177,12 +186,13 @@ async fn transport_and_response_failures_keep_their_delay_kinds() {
         .await
         .expect_err("the slow reply outlives the request timeout");
     assert!(timeout.is_timeout());
-    let refused = http
-        .get(format!("http://{closed}/"))
+    let closed = http
+        .get(format!("http://{hang_up_address}/"))
         .send()
         .await
-        .expect_err("nothing listens on a released port");
-    assert!(refused.is_connect());
+        .expect_err("the peer closes before it answers");
+    assert!(closed.is_request() && !closed.is_timeout(), "{closed:?}");
+    hang_up.await.expect("hang-up peer completes");
     // reqwest 0.13 reports a failed response body as a decode error; its
     // body-kind errors only come from polling a request `Body` directly.
     let truncated = truncated_body().await;
@@ -194,7 +204,7 @@ async fn transport_and_response_failures_keep_their_delay_kinds() {
             ProxyDelayFailureKind::Timeout,
         ),
         (
-            ControllerError::Http(refused),
+            ControllerError::Http(closed),
             ProxyDelayFailureKind::Transport,
         ),
         (

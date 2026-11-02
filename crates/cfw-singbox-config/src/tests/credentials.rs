@@ -138,6 +138,19 @@ fn slot_sets_are_bounded_unique_consistent_and_point_at_empty_placeholders() {
             "{template}"
         );
     }
+    let full_template =
+        json!({"outbounds": vec![json!({"username":"","password":""}); MAX_CREDENTIAL_SLOTS / 2]});
+    let full = (0..MAX_CREDENTIAL_SLOTS)
+        .map(|index| {
+            let target = if index % 2 == 0 {
+                CredentialTarget::Socks5Username
+            } else {
+                CredentialTarget::Socks5Password
+            };
+            slot(index as u128 + 10, target, index / 2)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(validate_credential_slots(&full_template, &full), Ok(()));
     let too_many = (0..=MAX_CREDENTIAL_SLOTS)
         .map(|index| slot(index as u128 + 10, CredentialTarget::Socks5Username, 0))
         .collect::<Vec<_>>();

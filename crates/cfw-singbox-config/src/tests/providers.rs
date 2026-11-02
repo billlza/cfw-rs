@@ -111,7 +111,7 @@ fn filters_are_bounded_regular_expressions() {
 
 #[test]
 fn expected_statuses_are_codes_and_ranges_of_three_digits() {
-    for valid in ["", "200", "204/301-302", "100-599"] {
+    for valid in ["", "200", "204/301-302", "100-599", "200-200"] {
         validate_expected_status(valid).unwrap_or_else(|error| panic!("{valid}: {error:?}"));
     }
     let long = "200/".repeat(32) + "2";

@@ -195,6 +195,8 @@ fn tls_pins_are_up_to_eight_distinct_canonical_sha256_values() {
 #[test]
 fn alpn_lists_are_short_lists_of_printable_tokens() {
     accepted(&trojan_tls("alpn", json!(["h2", "http/1.1"])));
+    accepted(&trojan_tls("alpn", json!(["a".repeat(32)])));
+    accepted(&trojan_tls("alpn", json!(vec!["h2"; 8])));
     let message = "ALPN list is oversized or contains an invalid token";
     for invalid in [
         json!(vec!["h2"; 9]),
@@ -287,6 +289,9 @@ fn http_transports_bound_their_path_and_host_list() {
         json!({"type":"http","path":"/tunnel","host":["cdn.example.com","[2606:4700::1111]:8443"]}),
     ));
     accepted(&transport(json!({"type":"http"})));
+    accepted(&transport(
+        json!({"type":"http","host":vec!["cdn.example.com"; 16]}),
+    ));
     assert_eq!(
         rejected(&transport(json!({"type":"http","path":"relative"}))),
         (

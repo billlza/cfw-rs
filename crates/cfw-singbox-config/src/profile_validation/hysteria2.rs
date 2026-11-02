@@ -134,3 +134,30 @@ pub(super) fn validate_hysteria2_server_ports(
     }
     Ok(())
 }
+
+/// Bandwidth hints, and no BBR profile beside an upload hint: up_mbps
+/// selects Brutal pacing, which would ignore it.
+pub(super) fn validate_hysteria2_bandwidth(
+    up_mbps: Option<u32>,
+    down_mbps: Option<u32>,
+    has_bbr_profile: bool,
+    path: &str,
+) -> Result<(), ConfigError> {
+    for (field, value) in [("up_mbps", up_mbps), ("down_mbps", down_mbps)] {
+        if value.is_some_and(|value| value == 0 || value > 1_000_000) {
+            return Err(unsupported_shape(
+                format!("{path}.{field}"),
+                "bandwidth must be between 1 and 1000000 Mbps",
+            ));
+        }
+    }
+    // up_mbps makes sing-quic pace uploads with Brutal, which
+    // would silently ignore the BBR profile.
+    if has_bbr_profile && up_mbps.is_some() {
+        return Err(unsupported_shape(
+            format!("{path}.bbr_profile"),
+            "bbr_profile is ignored when up_mbps selects Brutal",
+        ));
+    }
+    Ok(())
+}

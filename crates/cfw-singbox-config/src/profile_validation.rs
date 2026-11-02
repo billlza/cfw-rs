@@ -1,23 +1,28 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::net::IpAddr;
 
 mod endpoints;
+mod groups;
 mod hysteria2;
 mod tls;
 mod transport;
+mod wireguard;
 
 pub(crate) use endpoints::{remote_endpoint_ip_is_unusable, validate_server_name};
 use endpoints::{
     validate_remote_endpoint, validate_tailscale_control_server, validate_tailscale_hostname,
 };
+use groups::{has_unique_members, validate_group_timing, validate_health_check_url};
 use hysteria2::{
-    validate_hysteria2_hop_interval, validate_hysteria2_obfs_packet_sizes,
-    validate_hysteria2_server_ports,
+    validate_hysteria2_bandwidth, validate_hysteria2_hop_interval,
+    validate_hysteria2_obfs_packet_sizes, validate_hysteria2_server_ports,
 };
 use tls::{validate_optional_tls, validate_quic_tls, validate_required_tls};
 use transport::{
     validate_optional_transport, validate_transport_tls_compatibility,
     validate_vless_vision_compatibility,
+};
+use wireguard::{
+    validate_wireguard_allowed_ips, validate_wireguard_link, validate_wireguard_local_addresses,
 };
 
 use crate::profile::{MAX_OUTBOUNDS, ProfileDocument, ProfileOutbound};
@@ -134,19 +139,7 @@ impl ProfileOutbound {
                 persistent_keepalive_seconds,
                 ..
             } => {
-                if peer_allowed_ips.is_empty()
-                    || peer_allowed_ips.len() > 2
-                    || peer_allowed_ips
-                        .iter()
-                        .any(|prefix| !matches!(prefix.as_str(), "0.0.0.0/0" | "::/0"))
-                    || peer_allowed_ips.iter().collect::<BTreeSet<_>>().len()
-                        != peer_allowed_ips.len()
-                {
-                    return Err(unsupported_shape(
-                        path,
-                        "WireGuard peer requires unique IPv4 and/or IPv6 default routes",
-                    ));
-                }
+                validate_wireguard_allowed_ips(peer_allowed_ips, path)?;
                 validate_remote_endpoint(server, *server_port, path)?;
                 validate_reference_kind_at(
                     private_key_credential_ref,
@@ -162,46 +155,13 @@ impl ProfileOutbound {
                         "pre_shared_key_credential_ref",
                     )?;
                 }
-                if !crate::credentials::valid_wireguard_key(peer_public_key)
-                    || !(1280..=9000).contains(mtu)
-                    || *persistent_keepalive_seconds > 3600
-                {
-                    return Err(unsupported_shape(
-                        path,
-                        "WireGuard requires a 32-byte peer key, MTU 1280..=9000 and keepalive 0..=3600 seconds",
-                    ));
-                }
-                if local_addresses.is_empty() || local_addresses.len() > 2 {
-                    return Err(unsupported_shape(
-                        path,
-                        "WireGuard requires one IPv4 and/or one IPv6 address",
-                    ));
-                }
-                let mut families = BTreeSet::new();
-                for address in local_addresses {
-                    let (host, prefix) = address.split_once('/').ok_or_else(|| {
-                        unsupported_shape(path, "WireGuard address requires an IP prefix")
-                    })?;
-                    let host = host.parse::<IpAddr>().map_err(|_| {
-                        unsupported_shape(path, "WireGuard address must be numeric")
-                    })?;
-                    let prefix = prefix
-                        .parse::<u8>()
-                        .map_err(|_| unsupported_shape(path, "WireGuard prefix is invalid"))?;
-                    if host.is_unspecified()
-                        || host.is_multicast()
-                        || host.is_loopback()
-                        || prefix > if host.is_ipv4() { 32 } else { 128 }
-                        || !families.insert(host.is_ipv4())
-                        || format!("{host}/{prefix}") != *address
-                    {
-                        return Err(unsupported_shape(
-                            path,
-                            "WireGuard address is invalid, duplicated by family or noncanonical",
-                        ));
-                    }
-                }
-                Ok(())
+                validate_wireguard_link(
+                    peer_public_key,
+                    *mtu,
+                    *persistent_keepalive_seconds,
+                    path,
+                )?;
+                validate_wireguard_local_addresses(local_addresses, path)
             }
             Self::Tailscale {
                 auth_key_credential_ref,
@@ -228,9 +188,7 @@ impl ProfileOutbound {
             Self::Selector {
                 outbounds, default, ..
             } => {
-                if outbounds.is_empty()
-                    || outbounds.len() > MAX_OUTBOUNDS
-                    || outbounds.iter().collect::<BTreeSet<_>>().len() != outbounds.len()
+                if !has_unique_members(outbounds)
                     || default.as_ref().is_some_and(|tag| !outbounds.contains(tag))
                 {
                     return Err(unsupported_shape(
@@ -265,42 +223,14 @@ impl ProfileOutbound {
                     Self::UrlTest { tolerance_ms, .. } => *tolerance_ms,
                     _ => 0,
                 };
-                if outbounds.is_empty()
-                    || outbounds.len() > MAX_OUTBOUNDS
-                    || outbounds.iter().collect::<BTreeSet<_>>().len() != outbounds.len()
-                {
+                if !has_unique_members(outbounds) {
                     return Err(unsupported_shape(
                         path,
                         "automatic group requires unique members",
                     ));
                 }
-                let parsed = url::Url::parse(url)
-                    .map_err(|_| unsupported_shape(path, "invalid health-check URL"))?;
-                if url.len() > MAX_PATH_BYTES
-                    || url.chars().any(char::is_whitespace)
-                    || !matches!(parsed.scheme(), "http" | "https")
-                    || parsed.host_str().is_none()
-                    || !parsed.username().is_empty()
-                    || parsed.password().is_some()
-                    || parsed.fragment().is_some()
-                    || parsed.port() == Some(0)
-                {
-                    return Err(unsupported_shape(
-                        path,
-                        "health-check URL must be bounded HTTP(S) without credentials or a fragment",
-                    ));
-                }
-                if !(30..=86_400).contains(interval_seconds)
-                    || tolerance_ms > 10_000
-                    || *idle_timeout_seconds < *interval_seconds
-                    || *idle_timeout_seconds > 604_800
-                {
-                    return Err(unsupported_shape(
-                        path,
-                        "automatic group interval must be 30..=86400 seconds, tolerance at most 10000 ms, and idle timeout between interval and 604800 seconds",
-                    ));
-                }
-                Ok(())
+                validate_health_check_url(url, path)?;
+                validate_group_timing(*interval_seconds, tolerance_ms, *idle_timeout_seconds, path)
             }
             Self::Socks5 {
                 server,
@@ -437,22 +367,7 @@ impl ProfileOutbound {
                 validate_reference_kind(credential_ref, CredentialKind::Hysteria2Password, path)?;
                 validate_quic_tls(tls, path)?;
                 validate_required_tls(tls, path)?;
-                for (field, value) in [("up_mbps", up_mbps), ("down_mbps", down_mbps)] {
-                    if value.is_some_and(|value| value == 0 || value > 1_000_000) {
-                        return Err(unsupported_shape(
-                            format!("{path}.{field}"),
-                            "bandwidth must be between 1 and 1000000 Mbps",
-                        ));
-                    }
-                }
-                // up_mbps makes sing-quic pace uploads with Brutal, which
-                // would silently ignore the BBR profile.
-                if bbr_profile.is_some() && up_mbps.is_some() {
-                    return Err(unsupported_shape(
-                        format!("{path}.bbr_profile"),
-                        "bbr_profile is ignored when up_mbps selects Brutal",
-                    ));
-                }
+                validate_hysteria2_bandwidth(*up_mbps, *down_mbps, bbr_profile.is_some(), path)?;
                 if let Some(obfs) = obfs {
                     validate_reference_kind(
                         &obfs.credential_ref,

@@ -5053,7 +5053,7 @@ test("startup recovery is asked for by the dashboard itself after an installatio
   }
 });
 
-test("the TUN row says to press Approve again once the extension is allowed", async () => {
+test("the TUN row says the start continues once the extension is allowed", async () => {
   const originalEngine = responses.engine_snapshot;
   const priorLocale = getLocale();
   const capabilities = { system_proxy: true, tunnel: true, tunnel_system_proxy: true };
@@ -5064,17 +5064,17 @@ test("the TUN row says to press Approve again once the extension is allowed", as
     });
     // The note follows the Approve and Cancel buttons of the TUN row; the
     // short line is visible and the full instruction is its title.
-    const note = /data-action="retry-tun-mode">Approve…<\/button>\s*<button class="cfw-text-button" data-action="cancel-tun-mode">Cancel request<\/button>\s*<small class="cfw-row-note" title="Allow the extension under System Settings › General › Login Items &amp; Extensions, then come back and click Approve… again\.">Then click Approve… again<\/small>/u;
+    const note = /data-action="retry-tun-mode">Approve…<\/button>\s*<button class="cfw-text-button" data-action="cancel-tun-mode">Cancel request<\/button>\s*<small class="cfw-row-note" title="Allow the extension under System Settings › General › Login Items &amp; Extensions and the start continues by itself\. If it does not, click Approve… again\.">Continues once allowed<\/small>/u;
     assert.match(await renderPage("general"), note);
 
     setLocale("zh-Hans");
-    assert.match(await renderPage("general"), /<small class="cfw-row-note" title="在「系统设置 › 通用 › 登录项与扩展」中允许扩展后，回到这里再点一次「批准…」。">批准后再点一次「批准…」<\/small>/u);
+    assert.match(await renderPage("general"), /<small class="cfw-row-note" title="在「系统设置 › 通用 › 登录项与扩展」中允许扩展后，启动会自动继续。如果没有继续，再点一次「批准…」。">允许后自动继续<\/small>/u);
     setLocale(priorLocale);
 
     // No other tunnel state carries the note, a failed start included.
     for (const [generation, state] of [[2, "tunnel_installing"], [3, "tunnel_starting"], [4, "tunnel_active"]]) {
       await setEngine({ snapshot: { desired_mode: "tunnel", generation, config_digest: "digest", state: { state, generation } }, capabilities });
-      assert.doesNotMatch(await renderPage("general"), /Approve… again/u, state);
+      assert.doesNotMatch(await renderPage("general"), /Continues once allowed/u, state);
     }
     await setEngine({
       snapshot: { desired_mode: "tunnel", generation: 5, config_digest: "digest", state: { state: "failed", generation: 5, target: "tunnel", error: "extension refused" } },
@@ -5082,7 +5082,7 @@ test("the TUN row says to press Approve again once the extension is allowed", as
     });
     const failed = await renderPage("general");
     assert.match(failed, /data-action="retry-tun-mode">Retry</u);
-    assert.doesNotMatch(failed, /Approve… again/u);
+    assert.doesNotMatch(failed, /Continues once allowed/u);
   } finally {
     setLocale(priorLocale);
     await setEngine(originalEngine);

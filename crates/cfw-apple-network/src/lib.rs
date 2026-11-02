@@ -8,7 +8,8 @@
 use cfw_engine_api::{
     BackendError, BackendErrorKind, BackendFuture, CutoverPreflightBackend, CutoverPreflightFuture,
     CutoverPreflightRequest, EngineBackend, EngineCommandContext, EngineStartRequest,
-    NativeEngineStatus, RuntimeIdentity, SystemProxyAuthorization, TunnelInstallOutcome,
+    NativeEngineStatus, RuntimeIdentity, SystemProxyAuthorization, TunnelApprovalBackend,
+    TunnelApprovalFuture, TunnelApprovalWait, TunnelInstallOutcome,
 };
 
 mod generation_store;
@@ -259,6 +260,13 @@ pub trait NativeBridge: Send + Sync + 'static {
         context: EngineCommandContext,
     ) -> NativeBridgeFuture<'_, TunnelInstallOutcome>;
 
+    /// Waits for the answer to the approval that the installation of this
+    /// exact context asked for; see [`TunnelApprovalBackend`].
+    fn await_tunnel_approval(
+        &self,
+        context: EngineCommandContext,
+    ) -> NativeBridgeFuture<'_, TunnelApprovalWait>;
+
     fn cancel_tunnel_install(&self, context: EngineCommandContext) -> NativeBridgeFuture<'_, ()>;
 
     fn authorize_tunnel_configuration(
@@ -417,6 +425,17 @@ impl<B: NativeBridge> CutoverPreflightBackend for AppleNetworkBackend<B> {
     }
 }
 
+impl<B: NativeBridge> TunnelApprovalBackend for AppleNetworkBackend<B> {
+    fn await_tunnel_approval(&self, context: EngineCommandContext) -> TunnelApprovalFuture<'_> {
+        Box::pin(async move {
+            self.bridge
+                .await_tunnel_approval(context)
+                .await
+                .map_err(map_bridge_error)
+        })
+    }
+}
+
 fn map_bridge_error(error: NativeBridgeError) -> BackendError {
     BackendError::new(error.code.into(), error.message)
 }
@@ -475,6 +494,13 @@ impl NativeBridge for MissingNativeBridge {
         &self,
         _context: EngineCommandContext,
     ) -> NativeBridgeFuture<'_, TunnelInstallOutcome> {
+        Self::unavailable()
+    }
+
+    fn await_tunnel_approval(
+        &self,
+        _context: EngineCommandContext,
+    ) -> NativeBridgeFuture<'_, TunnelApprovalWait> {
         Self::unavailable()
     }
 
@@ -596,6 +622,16 @@ mod tests {
             Box::pin(async move {
                 self.calls.lock().expect("calls lock").push(context);
                 Ok(TunnelInstallOutcome::AwaitingApproval)
+            })
+        }
+
+        fn await_tunnel_approval(
+            &self,
+            context: EngineCommandContext,
+        ) -> NativeBridgeFuture<'_, TunnelApprovalWait> {
+            Box::pin(async move {
+                self.calls.lock().expect("calls lock").push(context);
+                Ok(TunnelApprovalWait::StillAwaiting)
             })
         }
 
@@ -735,6 +771,22 @@ mod tests {
             );
             assert!(backend.bridge().calls.lock().unwrap().is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn the_approval_wait_carries_the_exact_installation_context() {
+        let backend = AppleNetworkBackend::new(RecordingBridge::default());
+        let approval: &dyn TunnelApprovalBackend = &backend;
+        let context = EngineCommandContext {
+            installation_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+            config_epoch: 3,
+            generation: 9,
+        };
+        assert_eq!(
+            approval.await_tunnel_approval(context.clone()).await,
+            Ok(TunnelApprovalWait::StillAwaiting)
+        );
+        assert_eq!(*backend.bridge().calls.lock().unwrap(), [context]);
     }
 
     #[tokio::test]

@@ -183,6 +183,22 @@ enum NativeBridgeABITiming {
   static let operationBudgetMilliseconds = 30_000
   static let authorizationBudgetMilliseconds = 300_000
   static let operationBudget: Duration = .milliseconds(operationBudgetMilliseconds)
+
+  /// Commands that wait for a person to answer macOS get the authorization
+  /// budget; every other command gets the operation budget.
+  static func waitsForPerson(_ command: NativeBridgeCommand) -> Bool {
+    switch command {
+    case .authorizeSystemProxy, .authorizeSystemProxyRestoration, .authorizeTunnelConfiguration,
+      .awaitTunnelApproval:
+      true
+    case .queryStatus, .maintainCurrentServices, .checkConfiguration, .startLocalProxy,
+      .stopLocalProxy, .startSystemProxy, .stopSystemProxy, .installTunnel, .cancelTunnelInstall,
+      .startTunnel, .stopTunnel, .provisionCredentials, .rebindProfileCredentials,
+      .queryCredentialPresence, .preflightCutover, .testProfileDelays,
+      .previewCredentialGarbageCollection, .commitCredentialGarbageCollection:
+      false
+    }
+  }
 }
 
 private final class NativeBridgeABIRequest: @unchecked Sendable {
@@ -412,9 +428,7 @@ public func cfwNativeBridgeExecuteV1(
   let accepted = NativeBridgeABIRequestRegistry.shared.submit(
     requestID: envelope.requestID,
     admittedAt: admittedAt,
-    authorizationRequest: envelope.command == .authorizeSystemProxy
-      || envelope.command == .authorizeSystemProxyRestoration
-      || { if case .authorizeTunnelConfiguration = envelope.command { true } else { false } }(),
+    authorizationRequest: NativeBridgeABITiming.waitsForPerson(envelope.command),
     cancellationResponse: NativeBridgeABIExecutor.shared.cancellationResponse(
       requestID: envelope.requestID),
     completion: { data in completion.invoke(with: data) },

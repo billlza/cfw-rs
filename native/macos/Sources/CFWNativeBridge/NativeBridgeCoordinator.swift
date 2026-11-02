@@ -425,6 +425,8 @@ actor NativeBridgeCoordinator {
       return .acknowledged
     case .installTunnel(let context):
       return .tunnelInstall(try await installTunnel(context))
+    case .awaitTunnelApproval(let context):
+      return .tunnelApproval(try await awaitTunnelApproval(context))
     case .cancelTunnelInstall(let context):
       try await cancelTunnelInstall(context)
       return .acknowledged

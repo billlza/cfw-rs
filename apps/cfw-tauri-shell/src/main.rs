@@ -32,6 +32,7 @@ mod startup;
 mod startup_state;
 mod subscription_import;
 mod transport_security;
+mod tunnel_approval;
 mod updater;
 mod window_state;
 

@@ -171,6 +171,7 @@ pub struct ManagedEngine {
     preflight_backend: Option<Arc<dyn CutoverPreflightBackend>>,
     system_proxy_authorization: Arc<dyn SystemProxyAuthorization>,
     pub(crate) profile_delay_backend: Arc<dyn cfw_engine_api::ProfileDelayBackend>,
+    tunnel_approval: Option<Arc<dyn cfw_engine_api::TunnelApprovalBackend>>,
     #[cfg(target_os = "macos")]
     cutover: CutoverPreparationGate,
     maintenance: EngineMaintenanceGate,
@@ -208,6 +209,14 @@ impl ManagedEngine {
         self.preflight_backend
             .as_deref()
             .ok_or_else(|| "legacy service cutover is unavailable on this platform".into())
+    }
+
+    /// The platform's wait for a Tunnel installation's approval; `None` where
+    /// an installation never awaits one.
+    pub(crate) fn tunnel_approval(
+        &self,
+    ) -> Option<&Arc<dyn cfw_engine_api::TunnelApprovalBackend>> {
+        self.tunnel_approval.as_ref()
     }
 
     pub(crate) fn mode_intent_revision(&self) -> Result<u64, EngineMaintenanceError> {
@@ -497,6 +506,7 @@ pub(crate) fn prepare_managed_engine(
         preflight_backend: services.legacy_preflight,
         system_proxy_authorization: services.authorization,
         profile_delay_backend: services.probes,
+        tunnel_approval: services.tunnel_approval,
         #[cfg(target_os = "macos")]
         cutover: CutoverPreparationGate::default(),
         maintenance: EngineMaintenanceGate::default(),

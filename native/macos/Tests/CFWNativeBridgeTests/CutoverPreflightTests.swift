@@ -225,6 +225,11 @@ private actor RecordingTunnelHost: TunnelHostBridging {
     return installResults.removeFirst()
   }
 
+  func awaitTunnelInstallationApproval() -> SystemExtensionApprovalWait {
+    Issue.record("a cutover preflight never awaits an approval")
+    return .noPendingRequest
+  }
+
   func cancelTunnelInstallationWait() { cancelCalls += 1 }
 
   func authorizeTunnelConfiguration(_ descriptor: ConfigurationDescriptor) throws {

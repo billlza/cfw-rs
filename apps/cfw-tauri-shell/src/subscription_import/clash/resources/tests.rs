@@ -1,3 +1,5 @@
+use cfw_singbox_config::RuleKind;
+
 use super::*;
 use crate::subscription_import::import_subscription_document;
 

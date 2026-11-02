@@ -1,6 +1,6 @@
 import { t } from "./i18n.js";
 // Bounded rule rendering keeps every saved/live rule reachable by page/search.
-import { safeRegex } from "./format.js";
+import { safeRegex } from "./text-format.js";
 export const RULE_PAGE_SIZE = 256;
 export function createRulesView({state,escapeHtml}) {
 let page=0;let query=null;let previousSource=null;

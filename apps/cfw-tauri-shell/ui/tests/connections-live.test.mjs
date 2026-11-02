@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createConnectionsView } from "../src/connections.js";
-import { safeRegex } from "../src/format.js";
+import { safeRegex } from "../src/text-format.js";
 
 test("connection ordering remains stable, bounded and responsive to changed snapshots", () => {
   const connections = [

@@ -1,27 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  delayFailureLabel,
-  errorText,
-  formatBytes,
-  formatGeoipLabel,
-  formatRate,
-  formatRelativeUpdated,
-  formatRuntime,
-  invoke,
-  latestDelay,
-  listen,
-  logEntry,
-  normalizeLevel,
-  pageById,
-  providerBatchSummary,
-  providerBatchSucceeded,
-  redactDiagnosticText,
-  safeRegex,
-  withLogRow,
-  withLogRows,
-} from "../src/format.js";
+import { delayFailureLabel, latestDelay } from "../src/proxy-delay.js";
+import { errorText, formatBytes, formatRate, formatRelativeUpdated, formatRuntime, redactDiagnosticText, safeRegex } from "../src/text-format.js";
+import { formatGeoipLabel } from "../src/engine-status-model.js";
+import { invoke, listen } from "../src/ipc.js";
+import { logEntry, normalizeLevel, withLogRow, withLogRows } from "../src/app-log.js";
+import { pageById } from "../src/state.js";
+import { providerBatchSummary, providerBatchSucceeded } from "../src/provider-results.js";
 import { MAX_LOG_ROWS } from "../src/state.js";
 
 test("page lookup accepts declared ids and rejects unknown ids", () => {

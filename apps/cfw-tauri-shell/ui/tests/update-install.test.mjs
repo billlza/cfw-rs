@@ -3,7 +3,7 @@
 // shows and which command each action issues.
 import assert from "node:assert/strict";
 import nodeTest from "node:test";
-import { errorText } from "../src/format.js";
+import { errorText } from "../src/text-format.js";
 import { t } from "../src/i18n.js";
 import {
   IDLE_UPDATE_INSTALL, createUpdateInstall, installAfterCheck, installFailureText,

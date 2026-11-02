@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createConnectionsView } from "../src/connections.js";
-import { escapeHtml, formatBytes, safeRegex } from "../src/format.js";
+import { escapeHtml, formatBytes, safeRegex } from "../src/text-format.js";
 import { getLocale, setLocale, t, SUPPORTED_LOCALES } from "../src/i18n.js";
 
 test("connection sort buttons expose localized purpose, selection and current direction", () => {

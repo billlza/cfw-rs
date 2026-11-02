@@ -486,6 +486,8 @@ responses.profiles_snapshot = async () => {
   return initialProfilesSnapshot;
 };
 
+// The page loads the dashboard through its entry module.
+await import("../src/main.js");
 const appModule = await import("../src/app.js");
 const { PAGES, state, runtime } = await import("../src/state.js");
 // The dashboard's own startup recovery attempts are timed; the tests below
@@ -529,6 +531,12 @@ const setEngine = async (envelope) => {
   responses.engine_snapshot = envelope;
   await emit("cfw://settings-changed", responses.read_settings_snapshot);
 };
+
+test("an action nobody handles is refused, never silently rendered", async () => {
+  const before = invoked.length;
+  await assert.rejects(() => appModule.handleAction("no-such-action"), /Unknown dashboard action: no-such-action/u);
+  assert.equal(invoked.length, before, "a refused action reaches no host command");
+});
 
 test("status bar clock preserves changing values without rewriting unchanged DOM", async () => {
   const originalEngine = responses.engine_snapshot;
@@ -3050,7 +3058,7 @@ test("Windows startup shows actual registration and preserves saved intent witho
     await appModule.handleAction("open-windows-startup-settings");
     assert.deepEqual(invoked.slice(before), ["open_login_items_settings"]);
     state.payload.product = product;
-    await appModule.handleAction("open-windows-startup-settings");
+    await assert.rejects(() => appModule.handleAction("open-windows-startup-settings"), /do not apply to this platform/u);
     assert.equal(invoked.length, before + 1, "Windows action has no macOS dispatch");
   } finally {
     state.payload.product = product;
@@ -5718,5 +5726,56 @@ test("a refresh keeps an open dialog's scroll position while that dialog stays o
     if (automation === undefined) delete responses.read_automation_settings;
     else responses.read_automation_settings = automation;
     await renderPage("settings");
+  }
+});
+
+test("the navigation opens a page through the host and refreshes what that page shows", async () => {
+  const originalPage = state.activePage;
+  const buttons = ["proxies", "rules", "general"].map((id) => {
+    const button = interactiveElement();
+    button.dataset.page = id;
+    return button;
+  });
+  querySelectorAllElements.set("[data-page]", buttons);
+  responses.open_page = null;
+  const originalEngine = responses.engine_snapshot;
+  try {
+    await setEngine(RUNNING_ENGINE);
+    await renderPage("general");
+    for (const button of buttons) {
+      const before = invocationDetails.length;
+      await button.trigger("click");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const issued = invocationDetails.slice(before).map(({ command }) => command);
+      assert.equal(state.activePage, button.dataset.page);
+      assert.deepEqual(invocationDetails.slice(before).find(({ command }) => command === "open_page")?.args, { page: button.dataset.page });
+      if (button.dataset.page === "proxies") assert.ok(issued.includes("controller_snapshot"), "the proxy page reads the controller");
+      if (button.dataset.page === "rules") assert.ok(issued.includes("rules_snapshot"), "the rules page reads the rules");
+      if (button.dataset.page === "general") assert.ok(!issued.includes("rules_snapshot"));
+    }
+  } finally {
+    querySelectorAllElements.delete("[data-page]");
+    delete responses.open_page;
+    await setEngine(originalEngine);
+    await renderPage(originalPage);
+  }
+});
+
+test("the window's own actions reach the host", async () => {
+  responses.quit_app = null;
+  responses.force_quit_app = null;
+  try {
+    await appModule.handleAction("quit-app");
+    await appModule.handleAction("force-quit-app");
+    assert.deepEqual(invoked.slice(-2), ["quit_app", "force_quit_app"]);
+    const before = state.logs.length;
+    await appModule.handleAction("update-all-providers");
+    await appModule.handleAction("health-check-all");
+    assert.ok(state.logs.length >= before, "provider actions report through the log");
+    await appModule.handleAction("reload-dashboard");
+    assert.equal(state.logs[0].message, "Dashboard reloaded");
+  } finally {
+    delete responses.quit_app;
+    delete responses.force_quit_app;
   }
 });

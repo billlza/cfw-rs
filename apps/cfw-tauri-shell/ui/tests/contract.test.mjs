@@ -4,7 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { UI_COMMANDS, UI_EVENTS } from "../src/format.js";
+import { UI_COMMANDS, UI_EVENTS } from "../src/ipc.js";
 import pageDefinitions from "../src/pages.json" with { type: "json" };
 import { PAGES } from "../src/state.js";
 
@@ -174,19 +174,22 @@ test("every rendered action has a handler", () => {
   const rendered = new Set(
     [...app.matchAll(/data-action="([a-z0-9-]+)"/gu)].map((match) => match[1]),
   );
-  const handled = new Set(
-    [...app.matchAll(/action === "([a-z0-9-]+)"/gu)].map((match) => match[1]),
-  );
+  // Handlers are action-table entries (`"name": async () => {`) or, in a
+  // feature's own dispatcher, `action === "name"` comparisons.
+  const handled = new Set([
+    ...[...app.matchAll(/action === "([a-z0-9-]+)"/gu)].map((match) => match[1]),
+    ...[...app.matchAll(/^ {2,}"([a-z0-9-]+)": (?:async )?\(/gmu)].map((match) => match[1]),
+  ]);
   const dead = [...rendered].filter((action) => !handled.has(action)).sort();
   assert.deepEqual(dead, [], `rendered actions with no handler: ${dead.join(", ")}`);
 });
 
 test("every profile menu item has a handler", () => {
-  const app = dashboardSources.find(({ file }) => file.endsWith("app.js")).source;
-  const menuBlock = app.slice(
-    app.indexOf("const PROFILE_MENU_ACTIONS = ["),
-    app.indexOf("function profileMenuIcon"),
-  );
+  const owners = dashboardSources.filter(({ source }) => source.includes("const PROFILE_MENU_ACTIONS = ["));
+  assert.equal(owners.length, 1, "exactly one module declares the profile menu");
+  const app = owners[0].source;
+  const start = app.indexOf("const PROFILE_MENU_ACTIONS = [");
+  const menuBlock = app.slice(start, app.indexOf("\n];", start));
   const items = [...menuBlock.matchAll(/\{ id: "([a-z-]+)"/gu)].map((match) => match[1]);
   assert.ok(items.length >= 10, "the profile context menu keeps its 0.3.5 item set");
   const handled = new Set([...app.matchAll(/case "([a-z-]+)":/gu)].map((match) => match[1]));
@@ -203,9 +206,9 @@ test("direct controller mutations are guarded by verified engine activity", () =
   ]);
 
   for (const [command, maximumDistance] of guardedCommands) {
-    const owner = command === "close_connection" ? "connections.js" : "app.js";
-    const source = dashboardSources.find(({ file }) => file === path.join(uiRoot, "src", owner));
-    assert.ok(source, `${owner} must be present in the dashboard source inventory`);
+    const owners = dashboardSources.filter(({ source }) => source.includes(`invoke("${command}"`));
+    assert.equal(owners.length, 1, `${command} must be invoked from exactly one dashboard module`);
+    const [source] = owners;
     const app = source.source;
     // select_proxy has a separate saved-profile path while Off; the final
     // invocation is the live controller mutation and still requires its guard.

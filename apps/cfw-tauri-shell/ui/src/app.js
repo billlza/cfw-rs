@@ -186,9 +186,12 @@ import { createProviderUI } from "./providers.js";
 import { createRuntimeSettingsUI, RUNTIME_LOG_LEVELS } from "./runtime-settings.js";
 import { createGeneralView } from "./general.js";
 import { createProxyView } from "./proxies.js";
-import { createEditingRender } from "./editing-render.js";
+import { createEditingRender, createScrollKeeper } from "./editing-render.js";
 const editingRender = createEditingRender({ document,
   requestFrame: (callback) => window.requestAnimationFrame(callback), rerender: () => renderPage() });
+// A page keeps its scroll offsets across dialogs; a dialog keeps them while it stays open.
+const replacePageMarkup = createScrollKeeper();
+const replaceOverlayMarkup = createScrollKeeper();
 const proxyView = createProxyView({ state, runtime, escapeHtml, delayFailureLabel, engineStateLabel, engineIsOff });
 const { delayClass, delayLabel, delayConcurrency, cancelDelayTest, visibleProxyNodeNames, orderNamesVisibleFirst, applyDelayToProxyNodes, patchProxyDelayLabels, finalizeDelayTestNames, slugDomId, isManualProxyGroup, freshProxyControllerSnapshotAvailable, displayedProxyGroups, activeProxyGroup, hideTimedOutProxies, renderProxies, modeIcon, changePage: changeProxyPage, revealSelected: revealSelectedProxy } = proxyView;
 
@@ -1966,7 +1969,8 @@ function renderGlassOverlays() {
 
   parts.push(runtimeSettingsUI.renderDialog());
   parts.push(automationSettingsUI.renderDialog());
-  root.innerHTML = parts.join("");
+  replaceOverlayMarkup(root, parts.join(""),
+    [state.profileContextMenu, state.glassDialog, state.runtimeSettingsDialog, state.automationDialog]);
   runtimeSettingsUI.bindDialog();
   automationSettingsUI.bindDialog();
   positionGlassMenu();
@@ -2697,7 +2701,7 @@ function renderPageContent() {
   updateStatusBar();
 
   renderNav();
-  document.getElementById("page").innerHTML = renderer();
+  replacePageMarkup(document.getElementById("page"), renderer(), [page.id]);
   bindPageEvents();
   renderGlassOverlays();
   nativeGeneralSwitches.refresh();

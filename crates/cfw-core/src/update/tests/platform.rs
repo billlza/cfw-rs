@@ -271,11 +271,11 @@ fn metadata_redirects_cannot_cross_channels_or_extend_the_fixed_chain() {
 #[test]
 fn packaged_windows_endpoint_matches_the_runtime_contract_without_replacing_mac_latest() {
     let windows: Value = serde_json::from_str(include_str!(
-        "../../../../apps/cfw-tauri-shell/tauri.windows.conf.json"
+        "../../../../../apps/cfw-tauri-shell/tauri.windows.conf.json"
     ))
     .unwrap();
     let mac: Value = serde_json::from_str(include_str!(
-        "../../../../apps/cfw-tauri-shell/tauri.conf.json"
+        "../../../../../apps/cfw-tauri-shell/tauri.conf.json"
     ))
     .unwrap();
     assert_eq!(

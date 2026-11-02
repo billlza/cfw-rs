@@ -501,3 +501,134 @@ fn app_paths_separate_new_json_from_legacy_yaml() {
         Some(WINDOW_STATE_FILE_NAME)
     );
 }
+
+#[test]
+fn every_language_code_is_its_stored_name() {
+    for (language, code) in [
+        (UiLanguage::System, "system"),
+        (UiLanguage::English, "en"),
+        (UiLanguage::SimplifiedChinese, "zh-Hans"),
+        (UiLanguage::TraditionalChinese, "zh-Hant"),
+        (UiLanguage::Japanese, "ja"),
+    ] {
+        assert_eq!(language.code(), code);
+        assert_eq!(serde_json::to_value(language).unwrap(), code);
+    }
+}
+
+#[test]
+fn preferences_of_an_unknown_schema_are_refused() {
+    let (root, store) = test_store("unknown-schema");
+    store.ensure_layout().unwrap();
+    let current = format!(
+        r#"{{"schema_version":3,"preferences":{}}}"#,
+        serde_json::to_string(&UiPreferences::default()).unwrap()
+    );
+    write_private(&store.paths.preferences_file, current);
+    assert!(matches!(
+        store.snapshot(),
+        Err(SettingsStoreError::UnsupportedSchema(3))
+    ));
+    let first_shape = br#"{"schema_version":7,"preferences":{"theme":"dark","font_family":"SF Mono","retain_window_bounds":false,"launch_at_login":true,"silent_start":true,"check_for_updates":false}}"#;
+    write_private(&store.paths.preferences_file, first_shape);
+    assert!(matches!(
+        store.snapshot(),
+        Err(SettingsStoreError::UnsupportedSchema(7))
+    ));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn absent_files_are_defaults_that_were_never_persisted() {
+    let (root, store) = test_store("absent");
+    let snapshot = store.snapshot().unwrap();
+    assert!(!snapshot.persisted);
+    assert_eq!(snapshot.settings, UiPreferences::default());
+    assert_eq!(store.window_bounds().unwrap(), None);
+    assert!(!store.legacy_retirement_completed().unwrap());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn the_retirement_marker_must_hold_its_exact_bytes() {
+    let (root, store) = test_store("marker");
+    store.commit_legacy_retirement().unwrap();
+    assert!(store.legacy_retirement_completed().unwrap());
+    let marker = store.paths.app_home.join(RETIREMENT_MARKER_FILE_NAME);
+    let altered = br#"{"schema_version":1,"completed":tru3}"#;
+    assert_eq!(altered.len(), RETIREMENT_MARKER_BYTES.len());
+    write_private(&marker, altered);
+    assert!(matches!(
+        store.legacy_retirement_completed(),
+        Err(SettingsStoreError::NonCanonicalJson)
+    ));
+    write_private(&marker, br#"{"schema_version":1,"completed":false}"#);
+    assert!(matches!(
+        store.legacy_retirement_completed(),
+        Err(SettingsStoreError::TooLarge { .. })
+    ));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn the_default_paths_belong_to_the_current_user() {
+    let home = PathBuf::from(env::var_os("HOME").unwrap());
+    assert_eq!(
+        AppPaths::default_for_current_user().unwrap(),
+        AppPaths::for_user_home(&home)
+    );
+    assert_eq!(
+        SettingsStore::default_for_current_user().unwrap().paths(),
+        &AppPaths::for_user_home(home)
+    );
+}
+
+#[test]
+fn automation_settings_live_apart_from_runtime_settings() {
+    let (root, store) = test_store("automation");
+    let empty = store
+        .automation_settings::<std::collections::BTreeMap<String, u16>>()
+        .unwrap();
+    assert!(empty.settings.is_empty());
+    assert!(empty.revision.is_none());
+    let rules = std::collections::BTreeMap::from([("wifi".to_owned(), 1)]);
+    store
+        .compare_and_swap_automation_settings(None, &rules)
+        .unwrap();
+    let stored = store
+        .automation_settings::<std::collections::BTreeMap<String, u16>>()
+        .unwrap();
+    assert_eq!(stored.settings, rules);
+    assert!(stored.revision.is_some());
+    assert!(matches!(
+        store.compare_and_swap_automation_settings(None, &rules),
+        Err(SettingsStoreError::RuntimeSettingsChanged)
+    ));
+    assert!(
+        store
+            .runtime_settings::<std::collections::BTreeMap<String, u16>>()
+            .unwrap()
+            .revision
+            .is_none()
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn runtime_settings_of_another_schema_or_in_other_bytes_are_refused() {
+    let (root, store) = test_store("runtime-schema");
+    store.ensure_layout().unwrap();
+    let file = store.paths.app_home.join("cfw-runtime-settings.json");
+    write_private(&file, br#"{"schema_version":2,"settings":{}}"#);
+    assert!(matches!(
+        store.runtime_settings::<std::collections::BTreeMap<String, u16>>(),
+        Err(SettingsStoreError::UnsupportedSchema(2))
+    ));
+    write_private(&file, br#"{"schema_version":1, "settings":{}}"#);
+    assert!(matches!(
+        store.runtime_settings::<std::collections::BTreeMap<String, u16>>(),
+        Err(SettingsStoreError::NonCanonicalJson)
+    ));
+    fs::remove_dir_all(root).unwrap();
+}

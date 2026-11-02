@@ -62,31 +62,4 @@ fn finish_observation(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn typed_observations_propagate_timeout_and_output_bounds() {
-        let timeout = finish_observation(
-            "legacy process table",
-            Err(BoundedCommandError::TimedOut {
-                program: PROCESS_LIST.into(),
-                timeout: OBSERVATION_TIMEOUT,
-                cleanup: "terminated and reaped".into(),
-            }),
-        )
-        .expect_err("timeout");
-        assert!(timeout.to_string().contains("exceeded its 3000ms timeout"));
-
-        let oversized = finish_observation(
-            "legacy TCP listener table",
-            Err(BoundedCommandError::OutputExceeded {
-                program: TCP_LISTENERS.into(),
-                stream: "stdout",
-                limit: MAX_STDOUT_BYTES,
-            }),
-        )
-        .expect_err("oversized output");
-        assert!(oversized.to_string().contains("1048576-byte safety bound"));
-    }
-}
+mod tests;

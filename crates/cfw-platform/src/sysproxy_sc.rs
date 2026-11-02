@@ -10,6 +10,9 @@ use objc2_core_foundation::{CFDictionary, CFMutableDictionary, CFString, CFType}
 mod legacy;
 mod observation;
 mod preferences;
+mod store;
+#[cfg(test)]
+mod test_support;
 mod values;
 
 pub(crate) use legacy::{
@@ -17,6 +20,7 @@ pub(crate) use legacy::{
     verify_legacy_applied_proxy, verify_legacy_proxy_disabled, verify_no_legacy_owned_proxy,
 };
 pub(crate) use observation::observe_network_services;
+pub(crate) use preferences::PreferencesSession;
 
 pub(crate) const PREFS_NAME: &str = "com.bill.clashformac.legacy-cutover";
 pub(crate) const MAX_SERVICES: usize = 64;

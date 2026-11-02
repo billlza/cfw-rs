@@ -4,25 +4,34 @@
 use anyhow::{Context, Result, bail};
 use objc2_core_foundation::CFString;
 use objc2_system_configuration::{
-    SCNetworkService, kSCNetworkProtocolTypeProxies, kSCPropNetProxiesHTTPEnable,
-    kSCPropNetProxiesHTTPPort, kSCPropNetProxiesHTTPProxy, kSCPropNetProxiesHTTPSEnable,
-    kSCPropNetProxiesHTTPSPort, kSCPropNetProxiesHTTPSProxy,
+    kSCPropNetProxiesHTTPEnable, kSCPropNetProxiesHTTPPort, kSCPropNetProxiesHTTPProxy,
+    kSCPropNetProxiesHTTPSEnable, kSCPropNetProxiesHTTPSPort, kSCPropNetProxiesHTTPSProxy,
     kSCPropNetProxiesProxyAutoConfigEnable, kSCPropNetProxiesProxyAutoDiscoveryEnable,
     kSCPropNetProxiesSOCKSEnable, kSCPropNetProxiesSOCKSPort, kSCPropNetProxiesSOCKSProxy,
 };
 
 use crate::network_observation::{NetworkProxyProtocolObservation, NetworkServiceObservation};
 use crate::sysproxy_sc::ConfigDict;
-use crate::sysproxy_sc::preferences::{
-    PreferencesSession, current_services, service_id, service_name,
+use crate::sysproxy_sc::store::{
+    ProxyConfiguration, ProxyPreferences, ProxyService, current_services, service_id, service_name,
 };
 use crate::sysproxy_sc::values::{as_config_dict, enabled_flag, number_value, string_value};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ProxyProtocolState {
     pub(super) enabled: bool,
     pub(super) server: Option<String>,
     pub(super) port: Option<u16>,
+}
+
+impl From<ProxyProtocolState> for NetworkProxyProtocolObservation {
+    fn from(state: ProxyProtocolState) -> Self {
+        Self {
+            enabled: state.enabled,
+            server: state.server,
+            port: state.port,
+        }
+    }
 }
 
 pub(crate) fn read_protocol(
@@ -47,30 +56,18 @@ pub(crate) fn read_protocol(
     })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ProxyObservation {
-    pub(super) service_id: String,
-    pub(super) display_name: String,
-    pub(super) web: ProxyProtocolState,
-    pub(super) secure_web: ProxyProtocolState,
-    pub(super) socks: ProxyProtocolState,
-    pub(super) pac_enabled: bool,
-    pub(super) wpad_enabled: bool,
+/// The proxy settings one configuration dictionary holds.
+#[derive(Debug, Default)]
+struct ProxySettings {
+    web: ProxyProtocolState,
+    secure_web: ProxyProtocolState,
+    socks: ProxyProtocolState,
+    pac_enabled: bool,
+    wpad_enabled: bool,
 }
 
-pub(crate) fn read_observation(service: &SCNetworkService) -> Result<ProxyObservation> {
-    let id = service_id(service)?;
-    let display_name = service_name(service, &id)?;
-    let Some(protocol) = service.protocol(unsafe { kSCNetworkProtocolTypeProxies }) else {
-        bail!("network service {display_name} has no Proxies protocol")
-    };
-    let configuration = protocol
-        .configuration()
-        .with_context(|| format!("network service {display_name} has no proxy configuration"))?;
-    let configuration = as_config_dict(&configuration);
-    Ok(ProxyObservation {
-        service_id: id,
-        display_name,
+fn read_settings(configuration: &ConfigDict) -> Result<ProxySettings> {
+    Ok(ProxySettings {
         web: read_protocol(
             configuration,
             unsafe { kSCPropNetProxiesHTTPEnable },
@@ -105,89 +102,105 @@ pub(crate) fn read_observation(service: &SCNetworkService) -> Result<ProxyObserv
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProxyObservation {
+    pub(super) service_id: String,
+    pub(super) display_name: String,
+    pub(super) web: ProxyProtocolState,
+    pub(super) secure_web: ProxyProtocolState,
+    pub(super) socks: ProxyProtocolState,
+    pub(super) pac_enabled: bool,
+    pub(super) wpad_enabled: bool,
+}
+
+/// A service's live proxy settings.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ServiceProxies {
+    /// The service has no Proxies protocol, so it carries no proxy.
+    NoProtocol {
+        display_name: String,
+    },
+    Observed(ProxyObservation),
+}
+
+/// Reads a service's proxy settings. A Proxies protocol without a
+/// configuration dictionary is an error.
+pub(crate) fn observe_service(service: &impl ProxyService) -> Result<ServiceProxies> {
+    let id = service_id(service)?;
+    let display_name = service_name(service, &id)?;
+    let configuration = match service.proxy_configuration() {
+        ProxyConfiguration::NoProtocol => {
+            return Ok(ServiceProxies::NoProtocol { display_name });
+        }
+        ProxyConfiguration::Unconfigured => {
+            bail!("network service {display_name} has no proxy configuration")
+        }
+        ProxyConfiguration::Configured(configuration) => configuration,
+    };
+    let ProxySettings {
+        web,
+        secure_web,
+        socks,
+        pac_enabled,
+        wpad_enabled,
+    } = read_settings(as_config_dict(&configuration))?;
+    Ok(ServiceProxies::Observed(ProxyObservation {
+        service_id: id,
+        display_name,
+        web,
+        secure_web,
+        socks,
+        pac_enabled,
+        wpad_enabled,
+    }))
+}
+
+/// Reads a service's proxy settings; a service without a Proxies protocol is
+/// an error.
+pub(crate) fn read_observation(service: &impl ProxyService) -> Result<ProxyObservation> {
+    match observe_service(service)? {
+        ServiceProxies::Observed(observation) => Ok(observation),
+        ServiceProxies::NoProtocol { display_name } => {
+            bail!("network service {display_name} has no Proxies protocol")
+        }
+    }
+}
+
 /// Read-only diagnostics view of the current network set.
 ///
 /// Unlike [`read_observation`], a service that carries no Proxies protocol or no
 /// proxy configuration is reported as "nothing enabled" instead of failing, so a
 /// single unusual service cannot make diagnostics unavailable. Nothing here
 /// writes, commits, or applies preferences.
-pub(crate) fn observe_network_services() -> Result<Vec<NetworkServiceObservation>> {
-    let session = PreferencesSession::open()?;
-    let services = current_services(&session.preferences)?;
+pub(crate) fn observe_network_services<P: ProxyPreferences>(
+    open: impl FnOnce() -> Result<P>,
+) -> Result<Vec<NetworkServiceObservation>> {
+    let preferences = open()?;
+    let services = current_services(&preferences)?;
     let mut observations = Vec::with_capacity(services.len());
     for (order, service) in services.iter().enumerate() {
         let id = service_id(service)?;
         let display_name = service_name(service, &id)?;
-        let configuration = service
-            .protocol(unsafe { kSCNetworkProtocolTypeProxies })
-            .and_then(|protocol| protocol.configuration());
-        let Some(configuration) = configuration else {
-            observations.push(NetworkServiceObservation {
-                service_id: id,
-                display_name,
-                order,
-                web: NetworkProxyProtocolObservation::default(),
-                secure_web: NetworkProxyProtocolObservation::default(),
-                socks: NetworkProxyProtocolObservation::default(),
-                pac_enabled: false,
-                wpad_enabled: false,
-            });
-            continue;
+        let settings = match service.proxy_configuration() {
+            ProxyConfiguration::Configured(configuration) => {
+                read_settings(as_config_dict(&configuration))?
+            }
+            ProxyConfiguration::NoProtocol | ProxyConfiguration::Unconfigured => {
+                ProxySettings::default()
+            }
         };
-        let configuration = as_config_dict(&configuration);
         observations.push(NetworkServiceObservation {
             service_id: id,
             display_name,
             order,
-            web: observe_protocol(
-                configuration,
-                unsafe { kSCPropNetProxiesHTTPEnable },
-                unsafe { kSCPropNetProxiesHTTPProxy },
-                unsafe { kSCPropNetProxiesHTTPPort },
-                "HTTP proxy",
-            )?,
-            secure_web: observe_protocol(
-                configuration,
-                unsafe { kSCPropNetProxiesHTTPSEnable },
-                unsafe { kSCPropNetProxiesHTTPSProxy },
-                unsafe { kSCPropNetProxiesHTTPSPort },
-                "HTTPS proxy",
-            )?,
-            socks: observe_protocol(
-                configuration,
-                unsafe { kSCPropNetProxiesSOCKSEnable },
-                unsafe { kSCPropNetProxiesSOCKSProxy },
-                unsafe { kSCPropNetProxiesSOCKSPort },
-                "SOCKS proxy",
-            )?,
-            pac_enabled: enabled_flag(
-                configuration,
-                unsafe { kSCPropNetProxiesProxyAutoConfigEnable },
-                "PAC proxy configuration",
-            )?,
-            wpad_enabled: enabled_flag(
-                configuration,
-                unsafe { kSCPropNetProxiesProxyAutoDiscoveryEnable },
-                "proxy auto-discovery",
-            )?,
+            web: settings.web.into(),
+            secure_web: settings.secure_web.into(),
+            socks: settings.socks.into(),
+            pac_enabled: settings.pac_enabled,
+            wpad_enabled: settings.wpad_enabled,
         });
     }
     Ok(observations)
-}
-
-fn observe_protocol(
-    dict: &ConfigDict,
-    enable: &CFString,
-    host: &CFString,
-    port: &CFString,
-    label: &str,
-) -> Result<NetworkProxyProtocolObservation> {
-    let state = read_protocol(dict, enable, host, port, label)?;
-    Ok(NetworkProxyProtocolObservation {
-        enabled: state.enabled,
-        server: state.server,
-        port: state.port,
-    })
 }
 
 pub(crate) fn protocol_matches_product(protocol: &ProxyProtocolState, expected_port: u16) -> bool {

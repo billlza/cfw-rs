@@ -4,7 +4,7 @@
 
 use serde_json::{Value, json};
 
-use crate::{EngineSettings, ProjectionMode, ValidatedSingBoxProfile};
+use crate::{AppSelector, EngineSettings, ProjectionMode, ValidatedSingBoxProfile};
 
 const PROFILE_ID: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const APP_SELECTOR: &str = "cfw-proxy-selector";
@@ -183,4 +183,54 @@ fn a_saved_group_that_uses_the_app_selector_tag_keeps_its_own_rule() {
         json!({"type":"selector","tag":injected,"outbounds":["first","second"],
             "default":"second","interrupt_exist_connections":false})
     );
+}
+
+#[test]
+fn the_saved_profile_view_is_offered_the_selector_the_projection_injects() {
+    let profile = parse(&nodes_only());
+    let offered = profile
+        .app_selector()
+        .expect("a profile of remote nodes runs behind the app selector");
+    assert_eq!(
+        offered,
+        AppSelector {
+            tag: APP_SELECTOR.to_owned(),
+            members: vec!["first".to_owned(), "second".to_owned()],
+            default: "first".to_owned(),
+        }
+    );
+    let chosen = profile
+        .with_selected_outbound(APP_SELECTOR, "second")
+        .expect("choice");
+    assert_eq!(
+        chosen.app_selector(),
+        Some(offered),
+        "a choice is a saved selection, not another selector"
+    );
+
+    let mut beside_saved_group = nodes_only();
+    beside_saved_group["outbounds"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"type":"selector","tag":APP_SELECTOR,"outbounds":["first","second"]}));
+    let renamed = parse(&beside_saved_group);
+    assert_eq!(
+        renamed.app_selector().map(|selector| selector.tag),
+        Some("cfw-proxy-selector-2".to_owned())
+    );
+    for profile in [&profile, &renamed] {
+        let selector = profile.app_selector().expect("selector");
+        let projected = runtime(profile, ProjectionMode::SystemProxy);
+        assert_eq!(projected["route"]["final"], selector.tag.as_str());
+        let injected = outbound(&projected, &selector.tag);
+        assert_eq!(injected["outbounds"], json!(selector.members));
+        assert_eq!(injected["default"], selector.default.as_str());
+    }
+
+    let mut explicit_final = nodes_only();
+    explicit_final["route"] = json!({"final": "first"});
+    assert_eq!(parse(&explicit_final).app_selector(), None);
+    let mut single_node = nodes_only();
+    single_node["outbounds"].as_array_mut().unwrap().remove(1);
+    assert_eq!(parse(&single_node).app_selector(), None);
 }

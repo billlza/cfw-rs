@@ -42,10 +42,10 @@ const APP_SELECTOR_TAG: &str = "cfw-proxy-selector";
 /// projection, never in the saved document, so a choice made in it lives in
 /// the profile's proxy selections.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AppSelector {
-    pub(crate) tag: String,
-    pub(crate) members: Vec<String>,
-    pub(crate) default: String,
+pub struct AppSelector {
+    pub tag: String,
+    pub members: Vec<String>,
+    pub default: String,
 }
 
 impl ProfileDocument {

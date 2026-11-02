@@ -161,6 +161,13 @@ impl ValidatedSingBoxProfile {
         &self.proxy_selections
     }
 
+    /// The app's own selector of this profile, so that a view of the saved
+    /// profile offers the choice the running core offers. `None` when the
+    /// projection injects no selector.
+    pub fn app_selector(&self) -> Option<crate::AppSelector> {
+        self.document.app_selector()
+    }
+
     /// Changes only a selector's runtime default: a saved group's, or the app's
     /// own selector's on a profile that declares none. Neither the imported
     /// JSON nor its digest changes when choosing another already-declared node.

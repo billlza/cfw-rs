@@ -49,6 +49,7 @@ pub use credentials::{
 };
 pub use error::{ConfigError, ProfileParseError};
 pub use profile::{MAX_OUTBOUNDS, UtlsFingerprint};
+pub use profile_projection::AppSelector;
 pub use projection::{
     AuthenticatedDnsServer, CONFIGURATION_IDENTITY_SCHEMA_VERSION, DEFAULT_MIXED_PORT,
     EngineSettings, ProjectedConfig, ProjectionMode, ProxyProbe, ROUTING_CACHE_PATH,

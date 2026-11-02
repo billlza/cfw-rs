@@ -14,6 +14,11 @@ use crate::{
     TunnelApprovalWait, TunnelInstallOutcome,
 };
 
+/// Versioned command sent over the narrow Rust/Swift host boundary.
+///
+/// This is the only product-level native wire command. Swift maps it onto the
+/// already-versioned ProxyAgent and Packet Tunnel command envelopes; it does
+/// not expose an independent product state machine.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "opcode", content = "payload", rename_all = "snake_case")]
 pub enum NativeBridgeCommand {

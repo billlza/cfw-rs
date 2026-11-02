@@ -105,3 +105,6 @@ impl CredentialRebindRequest {
         &self.slots
     }
 }
+
+#[cfg(test)]
+mod tests;

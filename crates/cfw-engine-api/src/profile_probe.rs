@@ -51,3 +51,6 @@ pub enum ProfileProbeFailure {
     NotFound,
     ProbeFailed,
 }
+
+#[cfg(test)]
+mod tests;

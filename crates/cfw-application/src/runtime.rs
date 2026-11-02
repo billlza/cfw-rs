@@ -25,6 +25,28 @@ pub(crate) struct NativeLease {
     pub(crate) context: EngineCommandContext,
 }
 
+/// The context of the Tunnel installation whose System Extension approval the
+/// published `observed` state awaits. A start that is waiting for the VPN
+/// configuration consent holds a runtime lease instead and is not named.
+pub(crate) fn pending_tunnel_approval(
+    state: &CoordinatorState,
+    observed: &EngineSnapshot,
+) -> Option<EngineCommandContext> {
+    if &state.snapshot != observed {
+        return None;
+    }
+    let EngineState::AwaitingApproval { generation } = state.snapshot.state else {
+        return None;
+    };
+    match &state.native_lease {
+        Some(NativeLease {
+            kind: NativeLeaseKind::TunnelInstallation,
+            context,
+        }) if context.generation == generation => Some(context.clone()),
+        _ => None,
+    }
+}
+
 /// Consecutive read-only observations of an attested runtime that may miss
 /// before it is published as failed. The native lease is retained either way;
 /// the grace only keeps a transport hiccup shorter than three polls out of

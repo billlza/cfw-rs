@@ -57,6 +57,41 @@ struct NativeBridgeABIRequestRegistryTests {
     }
   }
 
+  @Test func tunnelApprovalWaitKeepsTheRustWireShapeAndWaitsForAPerson() throws {
+    let contextObject: [String: Any] = [
+      "installation_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "config_epoch": 2,
+      "generation": 7,
+    ]
+    let context = try JSONDecoder().decode(
+      EngineCommandContext.self, from: JSONSerialization.data(withJSONObject: contextObject))
+    let wire = try JSONSerialization.data(withJSONObject: [
+      "opcode": "await_tunnel_approval", "payload": ["context": contextObject],
+    ])
+    let command = try JSONDecoder().decode(NativeBridgeCommand.self, from: wire)
+    #expect(command == .awaitTunnelApproval(context))
+    #expect(
+      try JSONSerialization.jsonObject(with: JSONEncoder().encode(command)) as? NSDictionary
+        == JSONSerialization.jsonObject(with: wire) as? NSDictionary)
+    #expect(NativeBridgeABITiming.waitsForPerson(command))
+    #expect(NativeBridgeABITiming.waitsForPerson(.authorizeSystemProxy))
+    #expect(!NativeBridgeABITiming.waitsForPerson(.installTunnel(context)))
+    #expect(!NativeBridgeABITiming.waitsForPerson(.cancelTunnelInstall(context)))
+    for (wait, value) in [
+      (NativeTunnelApprovalWait.resolved, "resolved"), (.stillAwaiting, "still_awaiting"),
+      (.noPendingRequest, "no_pending_request"),
+    ] {
+      let result = try JSONSerialization.data(withJSONObject: [
+        "kind": "tunnel_approval", "value": value,
+      ])
+      #expect(
+        try JSONDecoder().decode(NativeBridgeResult.self, from: result) == .tunnelApproval(wait))
+      #expect(
+        try JSONSerialization.jsonObject(
+          with: JSONEncoder().encode(NativeBridgeResult.tunnelApproval(wait))) as? NSDictionary
+          == JSONSerialization.jsonObject(with: result) as? NSDictionary)
+    }
+  }
+
   @Test
   func swiftWatchdogBudgetMatchesReviewedCABIHeader() throws {
     let nativeRoot = URL(fileURLWithPath: #filePath)

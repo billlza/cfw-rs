@@ -116,6 +116,13 @@ public enum NativeTunnelInstallOutcome: String, Codable, Sendable {
   case awaitingApproval = "awaiting_approval"
 }
 
+/// What a wait for the approval of a pending Tunnel installation found.
+public enum NativeTunnelApprovalWait: String, Codable, Sendable {
+  case resolved
+  case stillAwaiting = "still_awaiting"
+  case noPendingRequest = "no_pending_request"
+}
+
 public enum NativeBridgeErrorCode: String, Codable, CaseIterable, Sendable {
   case busy
   case resourceExhausted = "resource_exhausted"
@@ -286,6 +293,7 @@ public enum NativeBridgeResult: Equatable, Sendable {
   case status(NativeEngineStatus)
   case runtime(NativeRuntimeIdentity)
   case tunnelInstall(NativeTunnelInstallOutcome)
+  case tunnelApproval(NativeTunnelApprovalWait)
   case acknowledged
   case credentialReceipt(NativeCredentialReceipt)
   case credentialPresence([NativeCredentialPresence])
@@ -306,6 +314,7 @@ extension NativeBridgeResult: Codable {
     case status
     case runtime
     case tunnelInstall = "tunnel_install"
+    case tunnelApproval = "tunnel_approval"
     case acknowledged
     case credentialReceipt = "credential_receipt"
     case credentialPresence = "credential_presence"
@@ -325,6 +334,10 @@ extension NativeBridgeResult: Codable {
     case .tunnelInstall:
       self = .tunnelInstall(
         try container.decode(NativeTunnelInstallOutcome.self, forKey: .value)
+      )
+    case .tunnelApproval:
+      self = .tunnelApproval(
+        try container.decode(NativeTunnelApprovalWait.self, forKey: .value)
       )
     case .acknowledged: self = .acknowledged
     case .credentialReceipt:
@@ -368,6 +381,9 @@ extension NativeBridgeResult: Codable {
     case .tunnelInstall(let outcome):
       try container.encode(Kind.tunnelInstall, forKey: .kind)
       try container.encode(outcome, forKey: .value)
+    case .tunnelApproval(let wait):
+      try container.encode(Kind.tunnelApproval, forKey: .kind)
+      try container.encode(wait, forKey: .value)
     case .acknowledged:
       try container.encode(Kind.acknowledged, forKey: .kind)
     case .credentialReceipt(let receipt):

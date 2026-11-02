@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import test from "node:test";
 import { catalogs, SUPPORTED_LOCALES, resolveLocale, setLocale, getLocale, t, formatDate } from "../src/i18n.js";
-import { escapeHtml, engineStateLabel, systemProxyValueLabel, tunnelValueLabel } from "../src/format.js";
+import { escapeHtml } from "../src/text-format.js";
+import { engineStateLabel, systemProxyValueLabel, tunnelValueLabel } from "../src/engine-status-model.js";
 import pages from "../src/pages.json" with { type: "json" };
 
 const parameters = (value) => [...value.matchAll(/\{([A-Za-z][A-Za-z0-9_]*)\}/gu)].map((match) => match[1]).sort();

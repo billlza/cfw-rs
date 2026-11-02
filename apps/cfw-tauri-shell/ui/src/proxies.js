@@ -20,6 +20,10 @@ export function indexProxyNodes(groups) {
   return index;
 }
 
+export function isManualProxyGroup(type) {
+  return ["selector", "relay"].includes(String(type ?? "").toLowerCase());
+}
+
 export function createProxyView({state, runtime, escapeHtml, delayFailureLabel, engineStateLabel, engineIsOff}) {
 let indexedGroups = null;
 let nodeIndex = new Map();
@@ -141,14 +145,6 @@ function finalizeDelayTestNames(names) {
 
 function slugDomId(value) {
   return String(value).replace(/[^a-z0-9_-]/gi, "-");
-}
-
-function proxyInitial(value) {
-  return String(value).trim().slice(0, 2).toUpperCase() || "?";
-}
-
-function isManualProxyGroup(type) {
-  return ["selector", "relay"].includes(String(type ?? "").toLowerCase());
 }
 
 function freshProxyControllerSnapshotAvailable() {

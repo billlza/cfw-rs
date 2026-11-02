@@ -449,7 +449,9 @@ private actor FailedStartProxyAgent: ProxyAgentTransporting {
 private actor StartableTunnelHost: TunnelHostBridging {
   private(set) var authorizationCalls = 0
   nonisolated let authorizationHandshake = NativeFixtureHandshake()
+  nonisolated let approvalHandshake = NativeFixtureHandshake()
   private let blocksAuthorization: Bool
+  private let blocksApprovalWait: Bool
   private let authorizationError: AppleNetworkError?
   func authorizeTunnelConfiguration(_ descriptor: ConfigurationDescriptor) async throws {
     #expect(descriptor == self.descriptor)
@@ -475,6 +477,8 @@ private actor StartableTunnelHost: TunnelHostBridging {
   private let snapshotHook: @Sendable (Int) -> Void
   private(set) var installCalls = 0
   private(set) var cancelInstallCalls = 0
+  private(set) var approvalWaitCalls = 0
+  private var approvalWait: SystemExtensionApprovalWait = .resolved
   private(set) var startCalls = 0
   private(set) var stopCalls = 0
   private var started = false
@@ -501,10 +505,12 @@ private actor StartableTunnelHost: TunnelHostBridging {
     compensationFailures: Int = 0,
     expectedInjectedConfiguration: Data? = nil,
     blocksAuthorization: Bool = false,
+    blocksApprovalWait: Bool = false,
     authorizationError: AppleNetworkError? = nil,
     snapshotHook: @escaping @Sendable (Int) -> Void = { _ in }
   ) {
     self.blocksAuthorization = blocksAuthorization
+    self.blocksApprovalWait = blocksApprovalWait
     self.authorizationError = authorizationError
     self.snapshotHook = snapshotHook
     self.expectedInjectedConfiguration = expectedInjectedConfiguration
@@ -528,6 +534,14 @@ private actor StartableTunnelHost: TunnelHostBridging {
     if let installError { throw installError }
     return installResult
   }
+  func awaitTunnelInstallationApproval() async throws -> SystemExtensionApprovalWait {
+    approvalWaitCalls += 1
+    if blocksApprovalWait {
+      try await approvalHandshake.enter()
+    }
+    return approvalWait
+  }
+  func answerApprovalWaits(with wait: SystemExtensionApprovalWait) { approvalWait = wait }
   func cancelTunnelInstallationWait() { cancelInstallCalls += 1 }
 
   func startTunnel(
@@ -682,6 +696,11 @@ private actor BlockingRetryableInstallationTunnelHost: TunnelHostBridging {
       throw AppleNetworkError.systemExtensionInstallationTimedOut
     }
     return .completed
+  }
+
+  func awaitTunnelInstallationApproval() -> SystemExtensionApprovalWait {
+    Issue.record("this fixture never awaits an approval")
+    return .noPendingRequest
   }
 
   func cancelTunnelInstallationWait() {}
@@ -2662,6 +2681,68 @@ struct NativeBridgeStartCommandIntegrationTests {
     #expect(
       await failureCode(coordinator, .cancelTunnelInstall(request.context))
         == .identityRejected)
+  }
+
+  @Test func approvalWaitAnswersOnlyTheExactPendingInstallationAndHoldsNoMutation()
+    async throws
+  {
+    let request = try startRequest(
+      tunnelOptions: try TunnelNetworkOptions(ipv6Enabled: true))
+    let descriptor = try request.descriptor(slot: .tunnel)
+    let wrongContext = try EngineCommandContext(
+      installationID: request.context.installationID,
+      configEpoch: request.context.configEpoch,
+      generation: request.context.generation + 1)
+
+    let answering = StartableTunnelHost(descriptor: descriptor, installResult: .awaitingApproval)
+    let answeringCoordinator = makeCoordinator(
+      proxy: StartableProxyAgent(descriptor: descriptor), tunnel: answering,
+      observation: AuthorityOwnershipObservation(state: .off, lease: nil))
+    #expect(
+      try await answeringCoordinator.execute(.awaitTunnelApproval(request.context))
+        == .tunnelApproval(.noPendingRequest))
+    #expect(
+      try await answeringCoordinator.execute(.installTunnel(request.context))
+        == .tunnelInstall(.awaitingApproval))
+    #expect(
+      try await answeringCoordinator.execute(.awaitTunnelApproval(wrongContext))
+        == .tunnelApproval(.noPendingRequest))
+    #expect(await answering.approvalWaitCalls == 0)
+    for (wait, expected) in [
+      (SystemExtensionApprovalWait.resolved, NativeTunnelApprovalWait.resolved),
+      (.stillAwaiting, .stillAwaiting),
+      (.noPendingRequest, .noPendingRequest),
+    ] {
+      await answering.answerApprovalWaits(with: wait)
+      #expect(
+        try await answeringCoordinator.execute(.awaitTunnelApproval(request.context))
+          == .tunnelApproval(expected))
+    }
+    #expect(await answering.approvalWaitCalls == 3)
+
+    let blocking = StartableTunnelHost(
+      descriptor: descriptor, installResult: .awaitingApproval, blocksApprovalWait: true)
+    let coordinator = makeCoordinator(
+      proxy: StartableProxyAgent(descriptor: descriptor), tunnel: blocking,
+      observation: AuthorityOwnershipObservation(state: .off, lease: nil))
+    #expect(
+      try await coordinator.execute(.installTunnel(request.context))
+        == .tunnelInstall(.awaitingApproval))
+    let answer = try await whileNativeFixtureBlocked(
+      at: blocking.approvalHandshake,
+      operation: { try await coordinator.execute(.awaitTunnelApproval(request.context)) },
+      body: {
+        // The open wait holds no mutation: the stop of that installation runs.
+        #expect(await coordinator.activeOperation == nil)
+        let stopped = try await coordinator.execute(.cancelTunnelInstall(request.context))
+        #expect(stopped == .acknowledged)
+      })
+    #expect(answer == .tunnelApproval(.resolved))
+    #expect(await blocking.cancelInstallCount() == 1)
+    #expect(
+      try await coordinator.execute(.awaitTunnelApproval(request.context))
+        == .tunnelApproval(.noPendingRequest))
+    #expect(await blocking.approvalWaitCalls == 1)
   }
 
   @Test func failedTunnelPreparationCancelsExactlyAndTheRustStopReceiptIsOneUse()

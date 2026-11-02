@@ -486,6 +486,8 @@ responses.profiles_snapshot = async () => {
   return initialProfilesSnapshot;
 };
 
+// The page loads the dashboard through its entry module.
+await import("../src/main.js");
 const appModule = await import("../src/app.js");
 const { PAGES, state, runtime } = await import("../src/state.js");
 // The dashboard's own startup recovery attempts are timed; the tests below
@@ -529,6 +531,12 @@ const setEngine = async (envelope) => {
   responses.engine_snapshot = envelope;
   await emit("cfw://settings-changed", responses.read_settings_snapshot);
 };
+
+test("an action nobody handles is refused, never silently rendered", async () => {
+  const before = invoked.length;
+  await assert.rejects(() => appModule.handleAction("no-such-action"), /Unknown dashboard action: no-such-action/u);
+  assert.equal(invoked.length, before, "a refused action reaches no host command");
+});
 
 test("status bar clock preserves changing values without rewriting unchanged DOM", async () => {
   const originalEngine = responses.engine_snapshot;
@@ -1135,6 +1143,31 @@ test("refreshing the same saved profile terminates the visible latency progress"
     responses.read_profile_text = originalText;
     if (originalDelays === undefined) delete responses.test_proxy_delays;
     else responses.test_proxy_delays = originalDelays;
+    await setEngine(originalEngine);
+  }
+});
+
+test("while the core is off, the nodes of a profile without a selector group can be chosen in the app selector", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalProfiles = responses.profiles_snapshot;
+  const originalText = responses.read_profile_text;
+  try {
+    responses.profiles_snapshot = { profiles: [{ id: "nodes-profile", name: "Nodes", active: true, bytes: 200, source_kind: "local", updated_epoch_secs: 1 }], invalid_profiles: [] };
+    responses.read_profile_text = { id: "nodes-profile", name: "Nodes", proxy_selections: { "cfw-proxy-selector": "Node B" },
+      app_selector: { tag: "cfw-proxy-selector", members: ["Node A", "Node B"], default: "Node A" },
+      body: JSON.stringify({ outbounds: [
+        { type: "socks5", tag: "Node A" }, { type: "socks5", tag: "Node B" }, { type: "direct", tag: "DIRECT" },
+      ] }) };
+    await setEngine(OFF_ENGINE);
+    await reloadButton.click();
+    state.activeProxyGroup = "cfw-proxy-selector";
+    const html = await renderPage("proxies");
+    assert.match(html, /data-proxy-node="Node A" data-group="cfw-proxy-selector" data-node="Node A"/u);
+    assert.match(html, /class="cfw-node-card selected[^"]*" data-proxy-node="Node B" data-group="cfw-proxy-selector"/u);
+    assert.doesNotMatch(html, /Configured nodes/u);
+  } finally {
+    responses.profiles_snapshot = originalProfiles;
+    responses.read_profile_text = originalText;
     await setEngine(originalEngine);
   }
 });
@@ -3050,7 +3083,7 @@ test("Windows startup shows actual registration and preserves saved intent witho
     await appModule.handleAction("open-windows-startup-settings");
     assert.deepEqual(invoked.slice(before), ["open_login_items_settings"]);
     state.payload.product = product;
-    await appModule.handleAction("open-windows-startup-settings");
+    await assert.rejects(() => appModule.handleAction("open-windows-startup-settings"), /do not apply to this platform/u);
     assert.equal(invoked.length, before + 1, "Windows action has no macOS dispatch");
   } finally {
     state.payload.product = product;
@@ -5028,7 +5061,7 @@ test("startup recovery is asked for by the dashboard itself after an installatio
   }
 });
 
-test("the TUN row says to press Approve again once the extension is allowed", async () => {
+test("the TUN row says the start continues once the extension is allowed", async () => {
   const originalEngine = responses.engine_snapshot;
   const priorLocale = getLocale();
   const capabilities = { system_proxy: true, tunnel: true, tunnel_system_proxy: true };
@@ -5039,17 +5072,17 @@ test("the TUN row says to press Approve again once the extension is allowed", as
     });
     // The note follows the Approve and Cancel buttons of the TUN row; the
     // short line is visible and the full instruction is its title.
-    const note = /data-action="retry-tun-mode">Approve…<\/button>\s*<button class="cfw-text-button" data-action="cancel-tun-mode">Cancel request<\/button>\s*<small class="cfw-row-note" title="Allow the extension under System Settings › General › Login Items &amp; Extensions, then come back and click Approve… again\.">Then click Approve… again<\/small>/u;
+    const note = /data-action="retry-tun-mode">Approve…<\/button>\s*<button class="cfw-text-button" data-action="cancel-tun-mode">Cancel request<\/button>\s*<small class="cfw-row-note" title="Allow the extension under System Settings › General › Login Items &amp; Extensions and the start continues by itself\. If it does not, click Approve… again\.">Continues once allowed<\/small>/u;
     assert.match(await renderPage("general"), note);
 
     setLocale("zh-Hans");
-    assert.match(await renderPage("general"), /<small class="cfw-row-note" title="在「系统设置 › 通用 › 登录项与扩展」中允许扩展后，回到这里再点一次「批准…」。">批准后再点一次「批准…」<\/small>/u);
+    assert.match(await renderPage("general"), /<small class="cfw-row-note" title="在「系统设置 › 通用 › 登录项与扩展」中允许扩展后，启动会自动继续。如果没有继续，再点一次「批准…」。">允许后自动继续<\/small>/u);
     setLocale(priorLocale);
 
     // No other tunnel state carries the note, a failed start included.
     for (const [generation, state] of [[2, "tunnel_installing"], [3, "tunnel_starting"], [4, "tunnel_active"]]) {
       await setEngine({ snapshot: { desired_mode: "tunnel", generation, config_digest: "digest", state: { state, generation } }, capabilities });
-      assert.doesNotMatch(await renderPage("general"), /Approve… again/u, state);
+      assert.doesNotMatch(await renderPage("general"), /Continues once allowed/u, state);
     }
     await setEngine({
       snapshot: { desired_mode: "tunnel", generation: 5, config_digest: "digest", state: { state: "failed", generation: 5, target: "tunnel", error: "extension refused" } },
@@ -5057,7 +5090,7 @@ test("the TUN row says to press Approve again once the extension is allowed", as
     });
     const failed = await renderPage("general");
     assert.match(failed, /data-action="retry-tun-mode">Retry</u);
-    assert.doesNotMatch(failed, /Approve… again/u);
+    assert.doesNotMatch(failed, /Continues once allowed/u);
   } finally {
     setLocale(priorLocale);
     await setEngine(originalEngine);
@@ -5718,5 +5751,56 @@ test("a refresh keeps an open dialog's scroll position while that dialog stays o
     if (automation === undefined) delete responses.read_automation_settings;
     else responses.read_automation_settings = automation;
     await renderPage("settings");
+  }
+});
+
+test("the navigation opens a page through the host and refreshes what that page shows", async () => {
+  const originalPage = state.activePage;
+  const buttons = ["proxies", "rules", "general"].map((id) => {
+    const button = interactiveElement();
+    button.dataset.page = id;
+    return button;
+  });
+  querySelectorAllElements.set("[data-page]", buttons);
+  responses.open_page = null;
+  const originalEngine = responses.engine_snapshot;
+  try {
+    await setEngine(RUNNING_ENGINE);
+    await renderPage("general");
+    for (const button of buttons) {
+      const before = invocationDetails.length;
+      await button.trigger("click");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const issued = invocationDetails.slice(before).map(({ command }) => command);
+      assert.equal(state.activePage, button.dataset.page);
+      assert.deepEqual(invocationDetails.slice(before).find(({ command }) => command === "open_page")?.args, { page: button.dataset.page });
+      if (button.dataset.page === "proxies") assert.ok(issued.includes("controller_snapshot"), "the proxy page reads the controller");
+      if (button.dataset.page === "rules") assert.ok(issued.includes("rules_snapshot"), "the rules page reads the rules");
+      if (button.dataset.page === "general") assert.ok(!issued.includes("rules_snapshot"));
+    }
+  } finally {
+    querySelectorAllElements.delete("[data-page]");
+    delete responses.open_page;
+    await setEngine(originalEngine);
+    await renderPage(originalPage);
+  }
+});
+
+test("the window's own actions reach the host", async () => {
+  responses.quit_app = null;
+  responses.force_quit_app = null;
+  try {
+    await appModule.handleAction("quit-app");
+    await appModule.handleAction("force-quit-app");
+    assert.deepEqual(invoked.slice(-2), ["quit_app", "force_quit_app"]);
+    const before = state.logs.length;
+    await appModule.handleAction("update-all-providers");
+    await appModule.handleAction("health-check-all");
+    assert.ok(state.logs.length >= before, "provider actions report through the log");
+    await appModule.handleAction("reload-dashboard");
+    assert.equal(state.logs[0].message, "Dashboard reloaded");
+  } finally {
+    delete responses.quit_app;
+    delete responses.force_quit_app;
   }
 });

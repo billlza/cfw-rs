@@ -1066,6 +1066,7 @@ fn engine_with_rights_bridge(bridge: Arc<RestorationRightsBridge>) -> super::Man
         preflight_backend: None,
         profile_delay_backend: bridge.clone(),
         system_proxy_authorization: bridge,
+        tunnel_approval: None,
         #[cfg(target_os = "macos")]
         cutover: super::cutover::CutoverPreparationGate::default(),
         maintenance: EngineMaintenanceGate::default(),

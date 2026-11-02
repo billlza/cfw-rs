@@ -330,7 +330,26 @@ enum IdentityBoundInstallAction: Equatable, Sendable {
   case retirementCapacityExceeded
 }
 
+/// What a watch over the submitted request learned. Watching never takes the
+/// request over and never consumes its terminal result.
+enum IdentityBoundTerminalObservation: Equatable, Sendable {
+  /// The request's terminal callback arrived; its result waits for the next
+  /// install.
+  case terminalArrived
+  /// No submitted request awaits a terminal callback.
+  case noActiveRequest
+  /// The watch's own deadline or cancellation ended it first.
+  case stillPending
+  /// Another watch already waits for the same request.
+  case alreadyObserved
+}
+
 final class IdentityBoundContinuation<Request: AnyObject, Value: Sendable>: @unchecked Sendable {
+  private struct TerminalObserver {
+    let id: UUID
+    let continuation: CheckedContinuation<IdentityBoundTerminalObservation, Never>
+  }
+
   private let lock = NSLock()
   private var activeRequest: Request?
   private var continuation: CheckedContinuation<Value, Error>?
@@ -339,6 +358,7 @@ final class IdentityBoundContinuation<Request: AnyObject, Value: Sendable>: @unc
   private var completedResult: Result<Value, Error>?
   private var pendingWaitResult: Result<Value, Error>?
   private var intermediateResultDelivered = false
+  private var terminalObserver: TerminalObserver?
   private var retiredRequests: [ObjectIdentifier: Request] = [:]
   private let maximumRetiredRequests = 1
 
@@ -413,8 +433,50 @@ final class IdentityBoundContinuation<Request: AnyObject, Value: Sendable>: @unc
     if continuation == nil {
       completedResult = result
     }
+    let observer = terminalObserver
+    terminalObserver = nil
     lock.unlock()
     continuation?.resume(with: result)
+    observer?.continuation.resume(returning: .terminalArrived)
+  }
+
+  /// Watches the submitted request until its terminal callback arrives. The
+  /// continuation is resumed exactly once: at once when that result is
+  /// already stored, when no request is submitted, or when another watch
+  /// waits; otherwise by the terminal callback, an explicit cancel, or
+  /// `finishObservation`.
+  func observeTerminal(
+    observerID: UUID,
+    continuation: CheckedContinuation<IdentityBoundTerminalObservation, Never>
+  ) {
+    lock.lock()
+    let immediate: IdentityBoundTerminalObservation?
+    if completedResult != nil {
+      immediate = .terminalArrived
+    } else if activeRequest == nil || !requestSubmitted {
+      immediate = .noActiveRequest
+    } else if terminalObserver != nil {
+      immediate = .alreadyObserved
+    } else {
+      immediate = nil
+      terminalObserver = TerminalObserver(id: observerID, continuation: continuation)
+    }
+    lock.unlock()
+    if let immediate {
+      continuation.resume(returning: immediate)
+    }
+  }
+
+  /// Ends one watch for its deadline or its caller's cancellation.
+  func finishObservation(observerID: UUID) {
+    lock.lock()
+    guard let observer = terminalObserver, observer.id == observerID else {
+      lock.unlock()
+      return
+    }
+    terminalObserver = nil
+    lock.unlock()
+    observer.continuation.resume(returning: .stillPending)
   }
 
   func finishWaitKeepingRequest(waitID: UUID, result: Result<Value, Error>) {
@@ -475,8 +537,11 @@ final class IdentityBoundContinuation<Request: AnyObject, Value: Sendable>: @unc
     completedResult = nil
     pendingWaitResult = nil
     intermediateResultDelivered = false
+    let observer = terminalObserver
+    terminalObserver = nil
     lock.unlock()
     continuation?.resume(throwing: CancellationError())
+    observer?.continuation.resume(returning: .noActiveRequest)
   }
 
   var retiredRequestCount: Int { lock.withLock { retiredRequests.count } }
@@ -487,6 +552,18 @@ public enum SystemExtensionInstallResult: Equatable, Sendable {
   case completed
   case awaitingApproval
   case requiresRestart
+}
+
+/// What a bounded wait for the person's approval of a submitted activation
+/// request found.
+public enum SystemExtensionApprovalWait: Equatable, Sendable {
+  /// The request reached its terminal callback; the next `install()` reads
+  /// its result.
+  case resolved
+  /// The request was still waiting for the person when the wait ended.
+  case stillAwaiting
+  /// No submitted request awaits a terminal callback.
+  case noPendingRequest
 }
 
 public enum AppleNetworkError: Error, Equatable, Sendable {
@@ -668,6 +745,11 @@ enum TicketOnlyTunnelStartFlow {
 
 public protocol SystemExtensionInstalling: Sendable {
   func install() async throws -> SystemExtensionInstallResult
+  /// Waits, within a bounded time, for the terminal callback of the submitted
+  /// request that is waiting for the person's approval. It neither takes the
+  /// request over nor consumes its result, which stays for the next
+  /// `install()`.
+  func awaitApprovalResolution() async throws -> SystemExtensionApprovalWait
   /// Abandons only local wait/request identity. Public SystemExtensions API
   /// does not provide a way to withdraw a submitted activation request; its
   /// eventual callback is ignored and cannot affect a newer request.
@@ -684,17 +766,22 @@ public final class OSSystemExtensionInstaller: NSObject, SystemExtensionInstalli
   private let extensionIdentifier: String
   private let approvalHandler: ApprovalHandler
   private let requestDeadline: CallbackDeadlineScheduler
+  private let approvalWaitDeadline: CallbackDeadlineScheduler
   private let continuationGate =
     IdentityBoundContinuation<OSSystemExtensionRequest, SystemExtensionInstallResult>()
 
+  /// `approvalWaitTimeout` bounds one wait for the person's approval inside
+  /// the bridge's 300-second authorization budget.
   public init(
     extensionIdentifier: String,
     approvalHandler: @escaping ApprovalHandler,
-    requestTimeout: Duration = .seconds(10)
+    requestTimeout: Duration = .seconds(10),
+    approvalWaitTimeout: Duration = .seconds(270)
   ) {
     self.extensionIdentifier = extensionIdentifier
     self.approvalHandler = approvalHandler
     requestDeadline = CallbackDeadlineScheduler(timeout: requestTimeout)
+    approvalWaitDeadline = CallbackDeadlineScheduler(timeout: approvalWaitTimeout)
   }
 
   public func install() async throws -> SystemExtensionInstallResult {
@@ -750,6 +837,30 @@ public final class OSSystemExtensionInstaller: NSObject, SystemExtensionInstalli
 
   public func cancelInstallationWait() {
     continuationGate.cancelActiveWait()
+  }
+
+  public func awaitApprovalResolution() async throws -> SystemExtensionApprovalWait {
+    try Task.checkCancellation()
+    let observerID = UUID()
+    var cancelDeadline: CallbackDeadlineScheduler.Cancel?
+    defer { cancelDeadline?() }
+    let observation = await withTaskCancellationHandler {
+      await withCheckedContinuation { continuation in
+        continuationGate.observeTerminal(observerID: observerID, continuation: continuation)
+        cancelDeadline = approvalWaitDeadline.schedule {
+          self.continuationGate.finishObservation(observerID: observerID)
+        }
+      }
+    } onCancel: {
+      continuationGate.finishObservation(observerID: observerID)
+    }
+    try Task.checkCancellation()
+    switch observation {
+    case .terminalArrived: return .resolved
+    case .stillPending: return .stillAwaiting
+    case .noActiveRequest: return .noPendingRequest
+    case .alreadyObserved: throw AppleNetworkError.installationAlreadyInProgress
+    }
   }
 
   public func request(
@@ -856,6 +967,9 @@ public final class OSSystemExtensionInstaller: NSObject, SystemExtensionInstalli
 
 public protocol TunnelHostBridging: Sendable {
   func installTunnel() async throws -> SystemExtensionInstallResult
+  /// Waits for the answer to the approval that `installTunnel()` reported as
+  /// awaited; see `SystemExtensionInstalling.awaitApprovalResolution()`.
+  func awaitTunnelInstallationApproval() async throws -> SystemExtensionApprovalWait
   func cancelTunnelInstallationWait() async
   /// Obtains the first VPN-configuration consent using a disabled, descriptor-only
   /// manager. No Authority lease, start ticket or credential material is involved.
@@ -960,6 +1074,10 @@ public actor NetworkExtensionHostBridge: TunnelHostBridging, ManagedTunnelOperat
 
   public func installTunnel() async throws -> SystemExtensionInstallResult {
     try await installer.install()
+  }
+
+  public func awaitTunnelInstallationApproval() async throws -> SystemExtensionApprovalWait {
+    try await installer.awaitApprovalResolution()
   }
 
   public func cancelTunnelInstallationWait() async {

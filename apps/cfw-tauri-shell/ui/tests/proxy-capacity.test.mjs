@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createProxyView, indexProxyNodes, PROXY_PAGE_SIZE } from "../src/proxies.js";
-import { escapeHtml } from "../src/format.js";
+import { escapeHtml } from "../src/text-format.js";
 import { createProxyDelayTest, MAX_DELAY_TEST_MILLISECONDS } from "../src/proxy-delay-test.js";
 
 function fixture() {

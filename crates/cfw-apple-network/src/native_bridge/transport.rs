@@ -85,6 +85,7 @@ fn validate_result(result: &NativeBridgeResult) -> Result<(), NativeBridgeError>
         .ok_or_else(rejected),
         NativeBridgeResult::Status(NativeEngineStatus::Off)
         | NativeBridgeResult::TunnelInstall(_)
+        | NativeBridgeResult::TunnelApproval(_)
         | NativeBridgeResult::Acknowledged => Ok(()),
         NativeBridgeResult::Status(NativeEngineStatus::LocalProxy { runtime })
         | NativeBridgeResult::Status(NativeEngineStatus::SystemProxy { runtime }) => {

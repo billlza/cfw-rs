@@ -161,3 +161,72 @@ fn profile_entry_name_resolves_only_existing_canonical_ids() {
 
     fs::remove_dir_all(root).expect("remove test directory");
 }
+
+#[test]
+fn a_stored_name_or_source_url_out_of_normal_form_is_refused() {
+    type Expect = fn(&ProfileError) -> bool;
+    let cases: [(&str, &str, Expect); 2] = [
+        (r#""name":"Remote""#, r#""name":" Remote""#, |error| {
+            matches!(error, ProfileError::InvalidName)
+        }),
+        (
+            r#""source_url":"https://subscription.example/profile""#,
+            r#""source_url":"http://subscription.example/profile""#,
+            |error| matches!(error, ProfileError::InvalidSourceUrl),
+        ),
+    ];
+    for (stored, edited, expected) in cases {
+        let (root, repository) = repository("stored-normal-form");
+        let imported = repository
+            .import_with_source(
+                Some("Remote"),
+                &profile(),
+                Some("https://subscription.example/profile"),
+            )
+            .expect("import profile");
+        let path = stored_path(&root, &imported.id);
+        let envelope = fs::read_to_string(&path).expect("read envelope");
+        assert!(envelope.contains(stored), "{stored}");
+        write_private(&path, envelope.replacen(stored, edited, 1).as_bytes());
+        let error = repository.snapshot().expect_err(edited);
+        assert!(expected(&error), "{edited}: {error}");
+        fs::remove_dir_all(root).expect("remove test directory");
+    }
+}
+
+#[test]
+fn single_profile_reads_refuse_a_linked_entry() {
+    let (root, repository) = repository("linked-single-read");
+    repository.import(None, &profile()).expect("import profile");
+    let outside = root.join("outside.json");
+    fs::write(&outside, b"secret").expect("write outside file");
+    let id = Uuid::new_v4().hyphenated().to_string();
+    symlink(&outside, stored_path(&root, &id)).expect("create symlink");
+
+    assert!(matches!(
+        repository.load(&id),
+        Err(ProfileError::UnsafeProfileFile(unsafe_id)) if unsafe_id == id
+    ));
+    assert!(matches!(
+        repository.source_url(&id),
+        Err(ProfileError::UnsafeProfileFile(unsafe_id)) if unsafe_id == id
+    ));
+    assert_eq!(fs::read(&outside).expect("outside target"), b"secret");
+    fs::remove_dir_all(root).expect("remove test directory");
+}
+
+#[test]
+fn one_way_cleanup_never_descends_into_a_subdirectory() {
+    let (root, repository) = repository("cleanup-subdirectory");
+    let imported = repository.import(None, &profile()).expect("import profile");
+    fs::create_dir(root.join("profiles").join("nested")).expect("create subdirectory");
+    assert!(matches!(
+        repository.clear_managed_profiles(),
+        Err(ProfileError::UnexpectedManagedSubdirectory(name)) if name == "nested"
+    ));
+    assert!(
+        stored_path(&root, &imported.id).exists(),
+        "nothing is removed"
+    );
+    fs::remove_dir_all(root).expect("remove test directory");
+}

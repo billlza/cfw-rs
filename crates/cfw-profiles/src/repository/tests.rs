@@ -20,6 +20,8 @@ use crate::{
 };
 
 mod intent_file;
+#[cfg(target_os = "macos")]
+mod interrupted;
 mod limits;
 mod recovery;
 mod recovery_conflicts;

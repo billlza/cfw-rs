@@ -115,3 +115,50 @@ fn selected_replace_intent_symlink_is_never_followed() {
     );
     fs::remove_dir_all(root).expect("remove symlink repository");
 }
+
+#[test]
+fn an_intent_of_another_schema_or_without_a_change_is_refused() {
+    let digest = |byte: &str| byte.repeat(32);
+    for (schema, profiles, envelopes, reason) in [
+        (
+            2,
+            ("a1", "b2"),
+            ("c3", "d4"),
+            "unsupported schema version 2",
+        ),
+        (
+            1,
+            ("a1", "a1"),
+            ("c3", "d4"),
+            "previous and replacement profile digests must differ",
+        ),
+        (
+            1,
+            ("a1", "b2"),
+            ("c3", "c3"),
+            "previous and replacement envelope digests must differ",
+        ),
+    ] {
+        let (root, repository, original) = selected_fixture("intent-fields");
+        let intent = format!(
+            r#"{{"schema_version":{schema},"profile_id":"{}","previous_profile_digest":"{}","replacement_profile_digest":"{}","previous_envelope_digest":"{}","replacement_envelope_digest":"{}"}}"#,
+            original.record.id,
+            digest(profiles.0),
+            digest(profiles.1),
+            digest(envelopes.0),
+            digest(envelopes.1),
+        );
+        write_private(
+            &root.join("profiles").join(SELECTED_REPLACE_FILE_NAME),
+            intent.as_bytes(),
+        );
+        assert!(
+            matches!(
+                repository.snapshot(),
+                Err(ProfileError::InvalidSelectedReplace(message)) if message == reason
+            ),
+            "{reason}"
+        );
+        fs::remove_dir_all(root).expect("remove test repository");
+    }
+}

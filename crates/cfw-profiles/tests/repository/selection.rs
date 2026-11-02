@@ -3,9 +3,12 @@
 
 use std::fs;
 
-use cfw_profiles::{InvalidSelection, ProfileError};
+use cfw_profiles::{InvalidSelection, ProfileError, ProfileSelectionState};
 
-use crate::support::{assert_private_file, profile, repository, selection_path, stored_path};
+use crate::private_file_fixture::write_private;
+use crate::support::{
+    assert_private_file, profile, repository, selection_path, stored_path, symlink,
+};
 
 #[test]
 fn prepared_online_selection_is_invisible_until_commit_and_drop_keeps_the_prior_profile() {
@@ -170,5 +173,149 @@ fn explicit_selection_can_repair_stale_metadata() {
         second.id
     );
 
+    fs::remove_dir_all(root).expect("remove test directory");
+}
+
+#[test]
+fn selection_metadata_must_be_bounded_current_and_canonical() {
+    let (root, repository) = repository("selection-form");
+    let imported = repository.import(None, &profile()).expect("import profile");
+    repository.select(&imported.id).expect("select profile");
+    let path = selection_path(&root);
+    let canonical = fs::read_to_string(&path).expect("read selection");
+    type Expect = fn(&ProfileError) -> bool;
+    let cases: [(String, Expect); 4] = [
+        // Selection metadata is limited to 1,024 bytes: at the limit it is
+        // read and refused for its form, one byte over for its size.
+        (
+            format!("{canonical}{}", " ".repeat(1_024 - canonical.len())),
+            |error| matches!(error, ProfileError::NonCanonicalSelection),
+        ),
+        (
+            format!("{canonical}{}", " ".repeat(1_025 - canonical.len())),
+            |error| matches!(error, ProfileError::SelectionTooLarge { actual: 1_025 }),
+        ),
+        (
+            canonical.replacen(r#""schema_version":1"#, r#""schema_version":2"#, 1),
+            |error| matches!(error, ProfileError::UnsupportedSelectionSchema(2)),
+        ),
+        (format!("{canonical}\n"), |error| {
+            matches!(error, ProfileError::NonCanonicalSelection)
+        }),
+    ];
+    for (selection, expected) in cases {
+        write_private(&path, selection.as_bytes());
+        let error = repository.snapshot().expect_err("selection refused");
+        assert!(expected(&error), "{error}");
+    }
+    repository
+        .select(&imported.id)
+        .expect("selecting again repairs the metadata");
+    assert_eq!(
+        fs::read_to_string(&path).expect("read selection"),
+        canonical
+    );
+    fs::remove_dir_all(root).expect("remove test directory");
+}
+
+#[test]
+fn a_linked_selection_file_is_refused_without_reading_its_target() {
+    let (root, repository) = repository("selection-symlink");
+    let imported = repository.import(None, &profile()).expect("import profile");
+    repository.select(&imported.id).expect("select profile");
+    let path = selection_path(&root);
+    let outside = root.join("outside-selection.json");
+    fs::rename(&path, &outside).expect("move the selection out");
+    let selection = fs::read(&outside).expect("read moved selection");
+    symlink(&outside, &path).expect("link the selection");
+
+    assert!(matches!(
+        repository.snapshot(),
+        Err(ProfileError::UnsafeSelectionFile)
+    ));
+    assert_eq!(fs::read(&outside).expect("outside target"), selection);
+    fs::remove_dir_all(root).expect("remove test directory");
+}
+
+#[test]
+fn an_exact_import_can_be_selected_by_the_same_mutation() {
+    const ID: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const UNSELECTED_ID: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    let (root, repository) = repository("exact-import-select");
+    let other = repository
+        .import(Some("Other"), &profile())
+        .expect("import other profile");
+    repository.select(&other.id).expect("select other profile");
+    let commit = |id: &str, activate: bool| {
+        repository
+            .begin_credential_profile_mutation()
+            .expect("mutation lock")
+            .commit_exact_import_and_select(
+                id,
+                Some("Migrated"),
+                &profile(),
+                Some("https://subscription.example/profile"),
+                activate,
+            )
+            .expect("exact import")
+    };
+    let selected_id = || {
+        repository
+            .require_selected()
+            .expect("selected profile")
+            .record
+            .id
+    };
+
+    assert!(commit(ID, true).created);
+    assert_eq!(selected_id(), ID);
+
+    // A replay creates nothing, so it selects nothing either.
+    repository.select(&other.id).expect("select other again");
+    assert!(!commit(ID, true).created);
+    assert_eq!(selected_id(), other.id);
+
+    assert!(commit(UNSELECTED_ID, false).created);
+    assert_eq!(selected_id(), other.id);
+
+    // A conflicting exact import is refused and selects nothing.
+    let conflict = repository
+        .begin_credential_profile_mutation()
+        .expect("mutation lock")
+        .commit_exact_import_and_select(ID, Some("Renamed"), &profile(), None, true)
+        .expect_err("the id is taken by a different profile");
+    assert!(matches!(conflict, ProfileError::AlreadyExists(id) if id == ID));
+    assert_eq!(selected_id(), other.id);
+    assert!(
+        repository
+            .load(UNSELECTED_ID)
+            .expect("load unselected import")
+            .is_some()
+    );
+    fs::remove_dir_all(root).expect("remove test directory");
+}
+
+#[test]
+fn a_mutation_reports_the_selection_it_holds() {
+    let (root, repository) = repository("mutation-selection");
+    let imported = repository.import(None, &profile()).expect("import profile");
+    let unselected = repository
+        .begin_credential_profile_mutation()
+        .expect("mutation lock")
+        .selected_profile()
+        .expect("selection state");
+    assert!(matches!(unselected, ProfileSelectionState::Unselected));
+    assert_eq!(unselected.into_loaded().expect("no selection"), None);
+
+    repository.select(&imported.id).expect("select profile");
+    let selected = repository
+        .begin_credential_profile_mutation()
+        .expect("mutation lock")
+        .selected_profile()
+        .expect("selection state")
+        .into_loaded()
+        .expect("valid selection")
+        .expect("selected profile");
+    assert_eq!(selected.record.id, imported.id);
     fs::remove_dir_all(root).expect("remove test directory");
 }

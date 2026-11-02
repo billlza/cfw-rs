@@ -114,3 +114,34 @@ fn selected_replace_recovery_rejects_a_missing_or_third_profile_envelope() {
     );
     fs::remove_dir_all(third_root).expect("remove third-profile repository");
 }
+
+#[test]
+fn selected_replace_recovery_rejects_an_unreadable_profile_or_selection() {
+    type EntryName = fn(&str) -> String;
+    let cases: [(&str, EntryName); 2] = [
+        ("replacement profile is unreadable: ", profile_file_name),
+        ("selected-profile metadata is unreadable: ", |_| {
+            SELECTION_FILE_NAME.to_owned()
+        }),
+    ];
+    for (reason, entry) in cases {
+        let (root, repository, original) = selected_fixture("unreadable-state");
+        stage_selected_replace(&root, &original, &profile("direct-replacement"));
+        write_private(
+            &root.join("profiles").join(entry(&original.record.id)),
+            b"{}",
+        );
+        let error = repository.snapshot().expect_err(reason);
+        assert!(
+            matches!(&error, ProfileError::SelectedReplaceConflict(message) if message.starts_with(reason)),
+            "{error}"
+        );
+        assert!(
+            root.join("profiles")
+                .join(SELECTED_REPLACE_FILE_NAME)
+                .exists(),
+            "{reason}"
+        );
+        fs::remove_dir_all(root).expect("remove test repository");
+    }
+}

@@ -3,7 +3,7 @@
 
 use std::fs;
 
-use cfw_profiles::ProfileError;
+use cfw_profiles::{ProfileError, StoredProfile};
 
 use crate::support::{application_entries, credential_profile, profile, repository};
 
@@ -295,5 +295,126 @@ fn metadata_updates_change_no_document_digest_or_selection() {
         Err(ProfileError::InvalidName)
     ));
 
+    fs::remove_dir_all(root).expect("remove test directory");
+}
+
+#[test]
+fn a_conditional_restore_of_another_profile_is_refused() {
+    let (root, repository) = repository("restore-other-profile");
+    let load = |id: &str| {
+        repository
+            .load(id)
+            .expect("load profile")
+            .expect("stored profile")
+    };
+    let first = load(
+        &repository
+            .import(Some("First"), &profile())
+            .expect("import first")
+            .id,
+    );
+    let second = load(
+        &repository
+            .import(Some("Second"), &profile())
+            .expect("import second")
+            .id,
+    );
+    assert!(matches!(
+        repository.restore_if_unchanged(&first, &second),
+        Err(ProfileError::ProfileChanged { id }) if id == second.record.id
+    ));
+    assert_eq!(load(&first.record.id), first);
+    assert_eq!(load(&second.record.id), second);
+    fs::remove_dir_all(root).expect("remove test directory");
+}
+
+#[test]
+fn a_restore_needs_a_consistent_snapshot() {
+    let (root, repository) = repository("restore-consistency");
+    let imported = repository
+        .import_with_source(
+            Some("Remote"),
+            &profile(),
+            Some("https://subscription.example/profile"),
+        )
+        .expect("import profile");
+    let stored = repository
+        .load(&imported.id)
+        .expect("load profile")
+        .expect("stored profile");
+    type Edit = fn(&mut StoredProfile);
+    type Expect = fn(&ProfileError) -> bool;
+    let cases: [(&str, Edit, Expect); 4] = [
+        (
+            "digest",
+            |snapshot| snapshot.record.digest = "00".repeat(32),
+            |error| matches!(error, ProfileError::DigestMismatch { .. }),
+        ),
+        (
+            "length",
+            |snapshot| snapshot.record.bytes += 1,
+            |error| matches!(error, ProfileError::DigestMismatch { .. }),
+        ),
+        (
+            "name",
+            |snapshot| snapshot.record.name = " Remote".into(),
+            |error| matches!(error, ProfileError::InvalidName),
+        ),
+        (
+            "source URL",
+            |snapshot| snapshot.source_url = Some("http://subscription.example/profile".into()),
+            |error| matches!(error, ProfileError::InvalidSourceUrl),
+        ),
+    ];
+    for (case, edit, expected) in cases {
+        let mut snapshot = stored.clone();
+        edit(&mut snapshot);
+        let error = repository.restore(&snapshot).expect_err(case);
+        assert!(expected(&error), "{case}: {error}");
+        // As the expected current state it is refused for itself, not
+        // because it differs from what is stored.
+        let error = repository
+            .restore_if_unchanged(&snapshot, &stored)
+            .expect_err(case);
+        assert!(expected(&error), "{case} as current: {error}");
+    }
+    assert_eq!(
+        repository.load(&imported.id).expect("load profile"),
+        Some(stored),
+        "nothing was written"
+    );
+    fs::remove_dir_all(root).expect("remove test directory");
+}
+
+#[test]
+fn a_locked_replacement_of_a_changed_profile_writes_nothing() {
+    let (root, repository) = repository("locked-changed");
+    let imported = repository
+        .import(Some("Original"), &profile())
+        .expect("import profile");
+    let stale = repository
+        .load(&imported.id)
+        .expect("load profile")
+        .expect("stored profile");
+    let current = repository
+        .update_metadata(&imported.id, Some("Renamed"), None)
+        .expect("rename profile");
+    let error = repository
+        .begin_credential_profile_mutation()
+        .expect("mutation lock")
+        .commit_replace_if_unchanged(
+            &stale,
+            None,
+            &credential_profile("cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
+            None,
+        )
+        .expect_err("the profile changed");
+    assert!(matches!(error, ProfileError::ProfileChanged { id } if id == imported.id));
+    let stored = repository
+        .load(&imported.id)
+        .expect("load profile")
+        .expect("stored profile");
+    assert_eq!(stored.record, current);
+    assert_eq!(stored.profile, stale.profile);
     fs::remove_dir_all(root).expect("remove test directory");
 }

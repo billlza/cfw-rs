@@ -1,4 +1,4 @@
-use crate::storage_atomic::{committed_sync_result, error_after_cleanup};
+use crate::storage_atomic::error_after_cleanup;
 use std::ffi::{CString, OsStr};
 use std::fs::File;
 use std::io::Write;
@@ -7,6 +7,8 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use uuid::Uuid;
 
 use crate::ProfileError;
+#[cfg(test)]
+use crate::storage::failpoint::{self, Operation};
 use crate::storage::{RepositoryDirectory, relative_c_string};
 
 struct CreatedEntryGuard<'a> {
@@ -80,6 +82,8 @@ impl RepositoryDirectory {
         let temporary = format!(".{}.tmp", Uuid::new_v4().hyphenated());
         let mut file = self.create_exclusive(&temporary)?;
         let operation = (|| -> Result<(), ProfileError> {
+            #[cfg(test)]
+            failpoint::check(Operation::Write, destination)?;
             file.write_all(bytes)?;
             file.sync_all()?;
             drop(file);
@@ -92,7 +96,7 @@ impl RepositoryDirectory {
         if let Err(error) = operation {
             Err(error_after_cleanup(error, self.unlink(&temporary)))
         } else {
-            committed_sync_result(destination, self.file.sync_all())
+            self.sync_committed(destination)
         }
     }
 

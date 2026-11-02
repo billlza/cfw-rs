@@ -271,12 +271,22 @@ INSTALLED_50030_PREDECESSOR: Final = PredecessorProfile(
 )
 # Exact installed notarized 0.5.1 GA build 51001, retired after GA runtime
 # acceptance and before publication. Its stapled tree is bound by the
-# signed-app manifest, both package seals and the `candidate` of the completed
-# 50030 -> 51001 install and service journals; the next GA install replaces it.
+# signed-app manifest, both package seals and the `candidate` of the
+# completed 50030 -> 51001 install and service journals; the 51002 GA
+# install replaced it.
 INSTALLED_51001_PREDECESSOR: Final = PredecessorProfile(
     product_version="0.5.1",
     build_number="51001",
     tree_sha256="274c9ed1bce0630724032a016869acc264682650311c90c87b15d6c8da2fa9c3",
+)
+# Exact installed notarized 0.5.1 GA build 51002, retired after GA runtime
+# acceptance and before publication. Its stapled tree is bound by the
+# signed-app manifest, both package seals and the `candidate` of the completed
+# 51001 -> 51002 install and service journals; the next GA install replaces it.
+INSTALLED_51002_PREDECESSOR: Final = PredecessorProfile(
+    product_version="0.5.1",
+    build_number="51002",
+    tree_sha256="3860382230d212a6607fb27c560cb9bd3bc82b272325b8af90b4d416eac5ed81",
 )
 SUPPORTED_PREDECESSORS: Final = MappingProxyType(
     {
@@ -285,6 +295,7 @@ SUPPORTED_PREDECESSORS: Final = MappingProxyType(
         INSTALLED_50029_PREDECESSOR.build_number: INSTALLED_50029_PREDECESSOR,
         INSTALLED_50030_PREDECESSOR.build_number: INSTALLED_50030_PREDECESSOR,
         INSTALLED_51001_PREDECESSOR.build_number: INSTALLED_51001_PREDECESSOR,
+        INSTALLED_51002_PREDECESSOR.build_number: INSTALLED_51002_PREDECESSOR,
     }
 )
 SERVICE_DECOMMISSION_PHASES: Final = (

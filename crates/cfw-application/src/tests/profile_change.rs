@@ -310,3 +310,65 @@ async fn native_preparation_is_serialized_with_polling_and_survives_a_dropped_wa
     assert_eq!(spec.profile_id(), NEW);
     assert!(spec.matches_ready_snapshot(&coordinator.snapshot()));
 }
+
+#[tokio::test]
+async fn a_change_based_on_another_profile_is_refused_without_touching_the_runtime() {
+    let backend = Arc::new(FakeBackend::default());
+    let coordinator = coordinator(backend.clone());
+    let running = coordinator
+        .set_mode(
+            EngineMode::LocalProxy,
+            OLD.into(),
+            ValidatedSingBoxProfile::direct(),
+            EngineSettings::default(),
+        )
+        .await
+        .unwrap();
+    let committed = Arc::new(AtomicBool::new(false));
+    let mut change = candidate(committed.clone(), false);
+    change.previous_profile = Some((NEW.into(), ValidatedSingBoxProfile::direct()));
+
+    let error = coordinator
+        .change_profile(EngineSettings::default(), async { Ok(change) })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            EngineCoordinatorError::ProfilePreparation(reason)
+                if reason.contains("differs from the active runtime")
+        ),
+        "{error}"
+    );
+    assert!(!committed.load(Ordering::Acquire));
+    assert_eq!(backend.proxy_requests().len(), 1);
+    assert_eq!(coordinator.snapshot().generation, running.generation);
+}
+
+#[tokio::test]
+async fn a_system_proxy_change_restarts_in_system_proxy_mode() {
+    let backend = Arc::new(FakeBackend::default());
+    let coordinator = coordinator(backend.clone());
+    coordinator
+        .set_mode(
+            EngineMode::SystemProxy,
+            OLD.into(),
+            ValidatedSingBoxProfile::direct(),
+            EngineSettings::default(),
+        )
+        .await
+        .unwrap();
+    let committed = Arc::new(AtomicBool::new(false));
+    let change = candidate(committed.clone(), false);
+
+    let committed_id = coordinator
+        .change_profile(EngineSettings::default(), async { Ok(change) })
+        .await
+        .unwrap();
+    assert_eq!(committed_id, NEW);
+    assert!(committed.load(Ordering::Acquire));
+    assert_eq!(coordinator.snapshot().desired_mode, EngineMode::SystemProxy);
+    let requests = backend.proxy_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1].mode, requests[0].mode);
+}

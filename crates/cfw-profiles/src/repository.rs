@@ -8,8 +8,8 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::envelope::{
-    DecodedEntry, decode, encode, encode_with_timestamp, normalize_name, normalize_source_url,
-    profile_file_name, profile_id_from_file_name, validate_profile_id,
+    DecodedEntry, decode, encode, encode_with_timestamp, normalize_name, profile_file_name,
+    profile_id_from_file_name, validate_profile_id, validate_source_url,
 };
 use crate::selected_replace::{self, SelectedProfileReplaceIntent};
 use crate::selection::{ProfileSelection, decode as decode_selection, encode as encode_selection};
@@ -338,10 +338,8 @@ fn validate_stored_profile(stored: &StoredProfile) -> Result<(), ProfileError> {
     if normalize_name(&stored.record.name)? != stored.record.name {
         return Err(ProfileError::InvalidName);
     }
-    if let Some(source_url) = stored.source_url.as_deref()
-        && normalize_source_url(source_url)? != source_url
-    {
-        return Err(ProfileError::InvalidSourceUrl);
+    if let Some(source_url) = stored.source_url.as_deref() {
+        validate_source_url(source_url)?;
     }
     if stored.record.source_kind != ProfileSourceKind::from_source_url(stored.source_url.as_deref())
     {

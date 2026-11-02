@@ -89,9 +89,8 @@ pub(crate) fn encode_with_timestamp(
         digest: profile.digest().to_string(),
         created_epoch_secs,
         source_url: source_url
-            .map(normalize_source_url)
-            .transpose()?
-            .map(ToOwned::to_owned),
+            .map(|url| validate_source_url(url).map(|()| url.to_owned()))
+            .transpose()?,
         proxy_selections: profile.proxy_selections().clone(),
         provider_sources: profile.provider_sources(),
     };
@@ -139,10 +138,8 @@ pub(crate) fn decode(expected_id: &str, mut file: File) -> Result<DecodedEntry, 
     if normalize_name(&envelope.name)? != envelope.name {
         return Err(ProfileError::InvalidName);
     }
-    if let Some(source_url) = envelope.source_url.as_deref()
-        && normalize_source_url(source_url)? != source_url
-    {
-        return Err(ProfileError::InvalidSourceUrl);
+    if let Some(source_url) = envelope.source_url.as_deref() {
+        validate_source_url(source_url)?;
     }
     if serde_json::to_vec(&envelope)? != bytes {
         return Err(ProfileError::NonCanonicalEnvelope(expected_id.to_string()));
@@ -222,12 +219,13 @@ pub(crate) fn normalize_name(name: &str) -> Result<String, ProfileError> {
     Ok(name.to_string())
 }
 
-/// Accepts only a bounded, whitespace-free `https` subscription URL.
+/// Accepts only a bounded, whitespace-free `https` subscription URL; a valid
+/// URL is stored exactly as given.
 ///
 /// The repository treats the value as opaque text: it never fetches it. Plain
 /// HTTP is rejected here as well as at fetch time, so a stored profile can never
 /// carry a URL the product would refuse to refresh.
-pub(crate) fn normalize_source_url(url: &str) -> Result<&str, ProfileError> {
+pub(crate) fn validate_source_url(url: &str) -> Result<(), ProfileError> {
     if url.trim() != url
         || url.len() < MIN_SOURCE_URL_CHARS
         || url.len() > MAX_SOURCE_URL_BYTES
@@ -238,7 +236,7 @@ pub(crate) fn normalize_source_url(url: &str) -> Result<&str, ProfileError> {
     {
         return Err(ProfileError::InvalidSourceUrl);
     }
-    Ok(url)
+    Ok(())
 }
 
 pub(crate) fn validate_profile_id(id: &str) -> Result<&str, ProfileError> {

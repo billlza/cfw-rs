@@ -260,7 +260,7 @@ REQUIRED_ENGINE_START_PATH_BINDINGS = frozenset(
         ),
         (
             "with_clash_api",
-            "crates/cfw-singbox-config/src/projection.rs",
+            "crates/cfw-singbox-config/src/projection/projector.rs",
             'root.insert("experimental".into(), clash_api.experimental_value());',
         ),
         (

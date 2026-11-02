@@ -418,7 +418,7 @@
       },
       {
         "tag": "with_clash_api",
-        "path": "crates/cfw-singbox-config/src/projection.rs",
+        "path": "crates/cfw-singbox-config/src/projection/projector.rs",
         "requiredWhenContains": "root.insert(\"experimental\".into(), clash_api.experimental_value());",
         "triggerRequired": true,
         "reason": "Every projected configuration carries the controller block, so every engine start needs the clash API server compiled in."

@@ -274,7 +274,7 @@ _PINNED_INPUTS = (
     # Sources the pinned libbox build tags are bound to: the controller block and
     # the projection that injects it require `with_clash_api` in the artifact.
     "crates/cfw-singbox-config/src/controller.rs",
-    "crates/cfw-singbox-config/src/projection.rs",
+    "crates/cfw-singbox-config/src/projection/projector.rs",
     "crates/cfw-singbox-config/src/profile_projection.rs",
 )
 _PINS_ENV = "scripts/dependency_pins.env"

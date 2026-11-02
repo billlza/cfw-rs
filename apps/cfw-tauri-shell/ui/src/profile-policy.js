@@ -31,6 +31,9 @@ export function savedProfilePolicy(profile) {
       }),
     };
   });
+  if (profile.app_selector != null) {
+    groups.unshift(appSelectorGroup(profile.app_selector, nodes, profile.proxy_selections));
+  }
   if (groups.length === 0) {
     groups.push({ name: "Configured nodes", type: "List", now: document.route?.final ?? document.outbounds[0].tag, options: [...nodes.values()] });
   }
@@ -46,4 +49,24 @@ export function savedProfilePolicy(profile) {
   }
   const geoipCountries = [...new Set(rules.filter((rule) => rule.type === "GEOIP" && rule.payload !== "LAN").map((rule) => rule.payload))];
   return { profileId: profile.id, name: profile.name, groups, rules, geoipCountries, nodeLabels: Object.fromEntries(labels) };
+}
+
+// The selector the running core puts in front of a profile that names no final
+// route. It is not part of the saved document, so the profile response carries
+// it; offering it here lets a node be chosen while the core is off.
+function appSelectorGroup(selector, nodes, selections) {
+  if (typeof selector?.tag !== "string" || typeof selector.default !== "string"
+    || !Array.isArray(selector.members) || !selector.members.includes(selector.default)) {
+    throw new TypeError("saved app selector is invalid");
+  }
+  return {
+    name: selector.tag,
+    type: "Selector",
+    now: selections?.[selector.tag] ?? selector.default,
+    options: selector.members.map((name) => {
+      const node = nodes.get(name);
+      if (!node) throw new TypeError("saved app selector member is missing");
+      return node;
+    }),
+  };
 }

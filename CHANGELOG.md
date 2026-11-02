@@ -17,6 +17,12 @@
   position across refreshes and dialogs, and an open dialog keeps its own
   while it stays open; another page, or a dialog opened again, still starts at
   the top.
+- Let the node of a profile that declares no selector group be chosen while
+  the core is off. Such a profile runs behind the app's own selector,
+  `cfw-proxy-selector`, but until the core ran the Proxies page listed its
+  nodes without a group to choose from. The page now shows that selector with
+  the saved choice, and a node chosen there is saved with the profile and used
+  at the next start.
 
 ### Profiles
 

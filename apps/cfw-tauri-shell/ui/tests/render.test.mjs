@@ -1139,6 +1139,31 @@ test("refreshing the same saved profile terminates the visible latency progress"
   }
 });
 
+test("while the core is off, the nodes of a profile without a selector group can be chosen in the app selector", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalProfiles = responses.profiles_snapshot;
+  const originalText = responses.read_profile_text;
+  try {
+    responses.profiles_snapshot = { profiles: [{ id: "nodes-profile", name: "Nodes", active: true, bytes: 200, source_kind: "local", updated_epoch_secs: 1 }], invalid_profiles: [] };
+    responses.read_profile_text = { id: "nodes-profile", name: "Nodes", proxy_selections: { "cfw-proxy-selector": "Node B" },
+      app_selector: { tag: "cfw-proxy-selector", members: ["Node A", "Node B"], default: "Node A" },
+      body: JSON.stringify({ outbounds: [
+        { type: "socks5", tag: "Node A" }, { type: "socks5", tag: "Node B" }, { type: "direct", tag: "DIRECT" },
+      ] }) };
+    await setEngine(OFF_ENGINE);
+    await reloadButton.click();
+    state.activeProxyGroup = "cfw-proxy-selector";
+    const html = await renderPage("proxies");
+    assert.match(html, /data-proxy-node="Node A" data-group="cfw-proxy-selector" data-node="Node A"/u);
+    assert.match(html, /class="cfw-node-card selected[^"]*" data-proxy-node="Node B" data-group="cfw-proxy-selector"/u);
+    assert.doesNotMatch(html, /Configured nodes/u);
+  } finally {
+    responses.profiles_snapshot = originalProfiles;
+    responses.read_profile_text = originalText;
+    await setEngine(originalEngine);
+  }
+});
+
 const dispatchDocumentEvent = async (type, event = {}) => {
   for (const listener of documentListeners.get(type) ?? []) {
     const result = listener({

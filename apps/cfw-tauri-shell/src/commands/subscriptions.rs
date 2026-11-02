@@ -23,7 +23,7 @@ use cfw_engine_api::CredentialVaultProvisioner;
 use cfw_profiles::{
     ExactProfileImportOutcome, ProfileImportResult, ProfileRepository, StoredProfile,
 };
-use cfw_singbox_config::{EngineSettings, ProjectionMode, ValidatedSingBoxProfile};
+use cfw_singbox_config::{AppSelector, EngineSettings, ProjectionMode, ValidatedSingBoxProfile};
 use qrcode::QrCode;
 use qrcode::render::svg;
 use serde::Serialize;
@@ -64,10 +64,31 @@ pub(crate) struct UiProfileText {
     name: String,
     body: String,
     proxy_selections: std::collections::BTreeMap<String, String>,
+    app_selector: Option<UiAppSelector>,
     active: bool,
     source_url: Option<String>,
     bytes: usize,
     updated_epoch_secs: u64,
+}
+
+/// The selector the running core puts in front of a profile that names no
+/// final route. The saved profile view offers it like a selector group, so a
+/// node can be chosen while the core is off.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct UiAppSelector {
+    tag: String,
+    members: Vec<String>,
+    default: String,
+}
+
+impl From<AppSelector> for UiAppSelector {
+    fn from(selector: AppSelector) -> Self {
+        Self {
+            tag: selector.tag,
+            members: selector.members,
+            default: selector.default,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -297,20 +318,25 @@ pub(crate) async fn read_profile_text(
     id: String,
 ) -> Result<UiProfileText, String> {
     read_repository(profiles.repository(), move |repository| {
-        let stored = load_profile(repository, &id)?;
-        Ok(UiProfileText {
-            digest: stored.record.digest,
-            active: is_selected(repository, &id)?,
-            id: stored.record.id,
-            name: stored.record.name,
-            bytes: stored.record.bytes,
-            updated_epoch_secs: stored.record.created_epoch_secs,
-            source_url: stored.source_url,
-            body: stored.profile.as_json().to_owned(),
-            proxy_selections: stored.profile.proxy_selections().clone(),
-        })
+        profile_text(repository, &id)
     })
     .await
+}
+
+fn profile_text(repository: &ProfileRepository, id: &str) -> Result<UiProfileText, String> {
+    let stored = load_profile(repository, id)?;
+    Ok(UiProfileText {
+        digest: stored.record.digest,
+        active: is_selected(repository, id)?,
+        id: stored.record.id,
+        name: stored.record.name,
+        bytes: stored.record.bytes,
+        updated_epoch_secs: stored.record.created_epoch_secs,
+        source_url: stored.source_url,
+        body: stored.profile.as_json().to_owned(),
+        app_selector: stored.profile.app_selector().map(UiAppSelector::from),
+        proxy_selections: stored.profile.proxy_selections().clone(),
+    })
 }
 
 /// Replaces the document of an existing profile with edited text.

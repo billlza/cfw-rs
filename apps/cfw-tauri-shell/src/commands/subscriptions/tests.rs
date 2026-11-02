@@ -687,6 +687,7 @@ fn profile_text_payload_carries_no_projection_or_path() {
         name: "Work".into(),
         body: PROFILE_JSON.to_owned(),
         proxy_selections: std::collections::BTreeMap::new(),
+        app_selector: None,
         active: true,
         source_url: Some("https://example.com/sub?token=t".into()),
         bytes: PROFILE_JSON.len(),
@@ -703,6 +704,7 @@ fn profile_text_payload_carries_no_projection_or_path() {
         keys,
         [
             "active",
+            "app_selector",
             "body",
             "bytes",
             "digest",
@@ -718,6 +720,36 @@ fn profile_text_payload_carries_no_projection_or_path() {
     );
     assert!(!payload.to_string().contains("generated_body"));
     assert!(!payload.to_string().contains("clash_api"));
+}
+
+#[test]
+fn profile_text_offers_the_app_selector_of_a_profile_without_a_final_route() {
+    const NODES_ID: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const FINAL_ID: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    let nodes = serde_json::json!({"outbounds": [
+        {"type":"socks5","tag":"first","server":"first.example.com","server_port":1080},
+        {"type":"socks5","tag":"second","server":"second.example.com","server_port":1080},
+        {"type":"direct","tag":"DIRECT"}
+    ]});
+    let mut explicit_final = nodes.clone();
+    explicit_final["route"] = serde_json::json!({"final": "first"});
+    let temporary = tempfile::TempDir::new().expect("temporary directory");
+    let repository = ProfileRepository::new(temporary.path().join("profiles"));
+    for (id, document) in [(NODES_ID, &nodes), (FINAL_ID, &explicit_final)] {
+        let profile = ValidatedSingBoxProfile::parse(&document.to_string()).expect("profile");
+        repository
+            .import_with_id_and_source(id, Some("Nodes"), &profile, None)
+            .expect("import profile");
+    }
+    let text = |id| {
+        serde_json::to_value(profile_text(&repository, id).expect("profile text"))
+            .expect("serialize profile text")
+    };
+    assert_eq!(
+        text(NODES_ID)["app_selector"],
+        serde_json::json!({"tag":"cfw-proxy-selector","members":["first","second"],"default":"first"})
+    );
+    assert_eq!(text(FINAL_ID)["app_selector"], serde_json::Value::Null);
 }
 
 #[tokio::test]

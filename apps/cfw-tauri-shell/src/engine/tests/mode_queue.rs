@@ -153,9 +153,15 @@ async fn mode_change_queue_is_bounded_and_cancelled_waiters_release_capacity() {
         );
         queued.push(pending);
     }
+    // An admitted change would wait for the held serial permit, so the refusal
+    // is bounded: a queue that admits one change too many fails here at once.
     assert!(matches!(
-        gate.begin_mode_change(EngineModeChangeIntent::Set(EngineMode::Off))
-            .await,
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            gate.begin_mode_change(EngineModeChangeIntent::Set(EngineMode::Off)),
+        )
+        .await
+        .expect("a full queue refuses without waiting for the serial permit"),
         Err(EngineMaintenanceError::QueueFull)
     ));
 

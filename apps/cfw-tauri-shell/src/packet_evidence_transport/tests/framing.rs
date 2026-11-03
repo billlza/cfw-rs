@@ -35,6 +35,25 @@ async fn async_truncated_body_reaches_eof_without_blocking() {
     ));
 }
 
+/// The proxy reports an early end as a control failure, not as invalid input.
+#[test]
+fn truncated_body_is_a_truncated_frame_not_an_invalid_one() {
+    let (host, mut collector) = UnixStream::pair().expect("pair");
+    collector
+        .write_all(&10_u32.to_be_bytes())
+        .expect("declared length");
+    collector.write_all(b"{}").expect("partial body");
+    collector
+        .shutdown(std::net::Shutdown::Write)
+        .expect("collector shutdown");
+    let mut channel = PacketEvidenceChannel::from_fd(host.into_raw_fd()).expect("channel");
+    let result: Result<CollectorRequest, _> = channel.receive();
+    assert!(matches!(
+        result,
+        Err(PacketEvidenceTransportError::TruncatedFrame)
+    ));
+}
+
 #[test]
 fn noncanonical_unknown_and_oversized_frames_fail_closed() {
     for (body, expected) in [
@@ -74,12 +93,11 @@ fn noncanonical_unknown_and_oversized_frames_fail_closed() {
     ));
 }
 
-#[test]
-fn ancillary_descriptors_are_closed_and_rejected() {
-    let (host, collector) = UnixStream::pair().expect("pair");
-    let mut channel = PacketEvidenceChannel::from_fd(host.into_raw_fd()).expect("channel");
-    let descriptor = fs::File::open("/dev/null").expect("sentinel");
-    let payload = [descriptor.as_raw_fd()];
+/// Sends the frame `{}` in one message that also carries one end of a fresh
+/// socket pair, then closes the sender's copy of that end. The returned end
+/// reads EOF once the receiver closes its copy too.
+fn send_frame_with_attached_socket(collector: &UnixStream) -> UnixStream {
+    let (witness, attached) = UnixStream::pair().expect("witness pair");
     let mut message = libc::msghdr {
         msg_name: std::ptr::null_mut(),
         msg_namelen: 0,
@@ -104,17 +122,54 @@ fn ancillary_descriptors_are_closed_and_rejected() {
         (*header).cmsg_level = libc::SOL_SOCKET;
         (*header).cmsg_type = libc::SCM_RIGHTS;
         (*header).cmsg_len = libc::CMSG_LEN(size_of::<RawFd>() as _) as _;
-        *libc::CMSG_DATA(header).cast::<RawFd>() = payload[0];
+        *libc::CMSG_DATA(header).cast::<RawFd>() = attached.as_raw_fd();
         assert_eq!(
             libc::sendmsg(collector.as_raw_fd(), &message, 0),
             bytes.len() as isize
         );
     }
+    drop(attached);
+    witness.set_nonblocking(true).expect("nonblocking witness");
+    witness
+}
+
+/// A copy the receiver kept open would leave the witness waiting for data.
+fn assert_attached_socket_closed(mut witness: UnixStream) {
+    let read = witness.read(&mut [0_u8; 1]);
+    assert!(
+        matches!(read, Ok(0)),
+        "every copy of the attached socket must be closed: {read:?}"
+    );
+}
+
+#[test]
+fn ancillary_descriptors_are_closed_and_rejected() {
+    let (host, collector) = UnixStream::pair().expect("pair");
+    let mut channel = PacketEvidenceChannel::from_fd(host.into_raw_fd()).expect("channel");
+    let witness = send_frame_with_attached_socket(&collector);
     let result: Result<CollectorRequest, _> = channel.receive();
     assert!(matches!(
         result,
         Err(PacketEvidenceTransportError::AncillaryData)
     ));
+    assert_attached_socket_closed(witness);
+}
+
+#[tokio::test]
+async fn async_ancillary_descriptors_are_closed_and_rejected() {
+    let (app, collector) = UnixStream::pair().expect("pair");
+    app.set_nonblocking(true).expect("app nonblocking");
+    let mut app =
+        AsyncPacketEvidenceChannel::new(tokio::net::UnixStream::from_std(app).expect("async app"));
+    let witness = send_frame_with_attached_socket(&collector);
+    let result = tokio::time::timeout(Duration::from_secs(1), app.receive::<CollectorRequest>())
+        .await
+        .expect("bounded receive");
+    assert!(matches!(
+        result,
+        Err(PacketEvidenceTransportError::AncillaryData)
+    ));
+    assert_attached_socket_closed(witness);
 }
 
 #[test]

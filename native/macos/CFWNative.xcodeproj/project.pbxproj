@@ -202,6 +202,7 @@
 		90020793404E0EABF8D72D1E /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C728A426AD56CF0A261E2E63 /* Security.framework */; };
 		92A799DBD87E1662D3BB1BF1 /* AuthorityJournalStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACCEC2909F1BC1E0F1B30BD1 /* AuthorityJournalStoreTests.swift */; };
 		930613C9BEEDDD2FFC874965 /* NativeBridgeProtocolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 537C67153E58D0DDE5BC19A0 /* NativeBridgeProtocolTests.swift */; };
+		9516594CAA24E2F840DC0387 /* AuthorityEndedOwnerTestSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A8BBD8D75847D3B259A6E2B /* AuthorityEndedOwnerTestSupport.swift */; };
 		95BC27876DFD33B32D080B81 /* AuthorityTunnelStartPreparer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23AB3114001202652F8107CF /* AuthorityTunnelStartPreparer.swift */; };
 		9629069391C33D27771008CB /* LibboxDiagnosticTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74B2821E6649D6778DF1C406 /* LibboxDiagnosticTests.swift */; };
 		9637349A459768D62A8B09EB /* AuthorityV1Sensitive.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00644A47AC4FFD8CE6DD476 /* AuthorityV1Sensitive.swift */; };
@@ -324,6 +325,7 @@
 		E411BADABEAC87C93B41D6BD /* libCFWSharedProtocol.a in Frameworks */ = {isa = PBXBuildFile; fileRef = E1382358BF9A0F2942FF7CC0 /* libCFWSharedProtocol.a */; };
 		E491C3D253D95E05171DB781 /* SystemConfiguration.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2A0E3A08746263766406F990 /* SystemConfiguration.framework */; };
 		E5496D095CD28524AF78E0C9 /* LibboxStartWatchdog.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4688D786788B5994A8202EB /* LibboxStartWatchdog.swift */; };
+		E5533242A4E6B9F6B66A08BA /* AuthorityLeaseStatusTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1780061971272F0FBC7BC712 /* AuthorityLeaseStatusTests.swift */; };
 		E59DC2E3CDCA0F44CFB09250 /* SystemConfiguration.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2A0E3A08746263766406F990 /* SystemConfiguration.framework */; };
 		E5C74BAEDCDC2A957067A831 /* AuthorityBackedTunnelStartPreparerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D44D4B1B2F0C38FAC4E2DC4 /* AuthorityBackedTunnelStartPreparerTests.swift */; };
 		E6484999BF9D9FFCDDC5717C /* libCFWCredentialVault.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 02A5FEEB309B0F35426952B8 /* libCFWCredentialVault.a */; };
@@ -904,6 +906,7 @@
 		1620B333C955FB29FAE0D7AC /* HostTicketOnlyStartCancellationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostTicketOnlyStartCancellationTests.swift; sourceTree = "<group>"; };
 		16DC14DF6A62549232F309EA /* CrossProcessEngineLease.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CrossProcessEngineLease.swift; sourceTree = "<group>"; };
 		17437FC5747522533423CDCD /* NativeServiceMaintenance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeServiceMaintenance.swift; sourceTree = "<group>"; };
+		1780061971272F0FBC7BC712 /* AuthorityLeaseStatusTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthorityLeaseStatusTests.swift; sourceTree = "<group>"; };
 		17FA1E1563C845593EEBB0B9 /* CFWSharedProtocolTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CFWSharedProtocolTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		18B43654E000715C99413186 /* libresolv.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libresolv.tbd; path = usr/lib/libresolv.tbd; sourceTree = SDKROOT; };
 		19545CBBAF9DB86AC7DE4948 /* AuthorityPeerEventChannelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthorityPeerEventChannelTests.swift; sourceTree = "<group>"; };
@@ -970,6 +973,7 @@
 		56B16A6741BD263D2718064E /* AuthorityMigration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthorityMigration.swift; sourceTree = "<group>"; };
 		59151737C9E68ACE294EF6C6 /* AuthorityJournalAnchor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthorityJournalAnchor.swift; sourceTree = "<group>"; };
 		59C52B85A64A7895C88E91CD /* TunnelAddressPlan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelAddressPlan.swift; sourceTree = "<group>"; };
+		5A8BBD8D75847D3B259A6E2B /* AuthorityEndedOwnerTestSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthorityEndedOwnerTestSupport.swift; sourceTree = "<group>"; };
 		5CAF0B39DEA0AC51CD712E30 /* TicketOnlyStartupStopTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TicketOnlyStartupStopTests.swift; sourceTree = "<group>"; };
 		5D44D4B1B2F0C38FAC4E2DC4 /* AuthorityBackedTunnelStartPreparerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthorityBackedTunnelStartPreparerTests.swift; sourceTree = "<group>"; };
 		5E44B3DE1EB0AD41B7D6ECE1 /* ReleaseObservationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReleaseObservationTests.swift; sourceTree = "<group>"; };
@@ -1849,12 +1853,14 @@
 			children = (
 				452722C7509B126FC38EC3B9 /* AuthorityBackpressureTests.swift */,
 				9ACDDBC5C80C1DEC51B36B9B /* AuthorityEndedOwnerRecoveryTests.swift */,
+				5A8BBD8D75847D3B259A6E2B /* AuthorityEndedOwnerTestSupport.swift */,
 				13CBF79EBF1FC7107A9D317A /* AuthorityJournalAnchorTests.swift */,
 				893E3472C0150B75408D333F /* AuthorityJournalCompactionTests.swift */,
 				FA5445CD1331DB6B581D1DF8 /* AuthorityJournalCrashTests.swift */,
 				ACCEC2909F1BC1E0F1B30BD1 /* AuthorityJournalStoreTests.swift */,
 				F2284DAFAD274DE332744A48 /* AuthorityJournalTests.swift */,
 				68B287B5E02A2D19E977003C /* AuthorityJournalTestSupport.swift */,
+				1780061971272F0FBC7BC712 /* AuthorityLeaseStatusTests.swift */,
 				8C26C4C175B8052338A2C6E8 /* AuthorityLifecycleContractTests.swift */,
 				E663F4A99AFEF18C139BD664 /* AuthorityLivenessTests.swift */,
 				19545CBBAF9DB86AC7DE4948 /* AuthorityPeerEventChannelTests.swift */,
@@ -2840,12 +2846,14 @@
 			files = (
 				BFABEEC9775FFD6B0ACD39E5 /* AuthorityBackpressureTests.swift in Sources */,
 				4FAEFA5669F8837D7B479A37 /* AuthorityEndedOwnerRecoveryTests.swift in Sources */,
+				9516594CAA24E2F840DC0387 /* AuthorityEndedOwnerTestSupport.swift in Sources */,
 				85B6FAA4B800D7E0427B6D10 /* AuthorityJournalAnchorTests.swift in Sources */,
 				E75D9F2682E11B1225DDF80C /* AuthorityJournalCompactionTests.swift in Sources */,
 				71487F721E08705BE4CF2945 /* AuthorityJournalCrashTests.swift in Sources */,
 				92A799DBD87E1662D3BB1BF1 /* AuthorityJournalStoreTests.swift in Sources */,
 				AE801599728A32F31FE47AC6 /* AuthorityJournalTestSupport.swift in Sources */,
 				898AC5F4F41C6DD80D3BCFA8 /* AuthorityJournalTests.swift in Sources */,
+				E5533242A4E6B9F6B66A08BA /* AuthorityLeaseStatusTests.swift in Sources */,
 				70F3236B0BBD6B7456B9BA00 /* AuthorityLifecycleContractTests.swift in Sources */,
 				B67D1E50FD592E5B592447B1 /* AuthorityLivenessTests.swift in Sources */,
 				7BC50CE790768817735373B2 /* AuthorityPeerEventChannelTests.swift in Sources */,

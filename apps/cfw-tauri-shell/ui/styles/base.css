@@ -1,0 +1,123 @@
+/* Theme tokens for light and dark, and the defaults of the page's elements. */
+:root {
+  color-scheme: light;
+  --bgc: #fff;
+  --fgc: #111;
+  --bc: #dcdcdc;
+  --mbgc: #f5f5f5;
+  --shadow: rgba(50, 50, 50, 0.1);
+  --accent: #41b883;
+  --accent-dark: #218457;
+  --danger: #d44545;
+  --warn: #d08a1d;
+  --blue: #045c85;
+  --muted: rgb(116, 125, 136);
+  --soft: #b3b3b3;
+  --status-bgc: #ebebeb;
+  --status-close-hover: rgba(50, 50, 50, 0.2);
+  --menu-fgc: rgb(116, 125, 136);
+  --general-item-bgc: #f1f1f1;
+  --general-title-c: #2c3e50;
+  --proxy-item-bgc: rgba(41, 41, 41, 0.05);
+  --proxy-item-selected-border-c: #41b883;
+  --proxy-item-border-c: rgba(75, 75, 75, 0.185);
+  --proxy-item-hint-c: rgb(128, 128, 128);
+  --log-item-border-c: rgba(50, 50, 50, 0.1);
+  --scroll-bar-bgc: rgb(202, 200, 198);
+  --input-bgc: #f1f1f1;
+  --input-phc: rgb(163, 163, 163);
+  --setting-input-bgc: #fff;
+  --mono: "SF Mono", Menlo, Consolas, monospace;
+  --sans: "Avenir Next", "SF Pro Text", "Helvetica Neue", sans-serif;
+  --system-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bgc: #141618;
+  --fgc: #f0f2f3;
+  --bc: #34383d;
+  --mbgc: #1d2023;
+  --shadow: rgba(0, 0, 0, 0.28);
+  --muted: #9ba4ad;
+  --soft: #666d75;
+  --status-bgc: #1d2023;
+  --menu-fgc: #a5adb5;
+  --general-item-bgc: #202428;
+  --general-title-c: #e6ebef;
+  --proxy-item-bgc: rgba(255, 255, 255, 0.06);
+  --proxy-item-border-c: rgba(255, 255, 255, 0.16);
+  --proxy-item-hint-c: #9ba4ad;
+  --log-item-border-c: rgba(255, 255, 255, 0.12);
+  --scroll-bar-bgc: #555b62;
+  --input-bgc: #202428;
+  --input-phc: #747d86;
+  --setting-input-bgc: #1b1f23;
+}
+
+* {
+  box-sizing: border-box;
+  user-select: none;
+}
+
+body {
+  margin: 0;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  color: var(--fgc);
+  background: var(--bgc);
+  font-family: var(--sans);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+input {
+  border: 1px solid var(--bc);
+  border-radius: 4px;
+  outline: none;
+  background: var(--bgc);
+  color: var(--fgc);
+}
+
+.cfw-select {
+  min-width: 80px;
+  border: 0;
+  border-bottom: 1px dashed var(--bc);
+  border-radius: 0;
+  background: var(--bgc);
+  color: var(--fgc);
+  padding: 1px 0;
+  outline: none;
+}
+
+.cfw-number {
+  width: 64px;
+  border: 0;
+  border-bottom: 1px solid var(--bc);
+  border-radius: 0;
+  padding: 1px 0;
+  text-align: right;
+}
+
+input::placeholder {
+  color: var(--input-phc);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+}

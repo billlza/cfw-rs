@@ -1,13 +1,13 @@
 // Profiles: source metadata, invalid stored profiles, Update All, credential
 // cleanup, the configuration preview, and imports.
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   OFF_ENGINE, PROFILE_ID, PROJECTION, RUNNING_ENGINE, appModule, element, emit, glassRoot,
   interactiveElement, invocationDetails, invoked, querySelectorAllElements, querySelectorElements,
   rejected, reloadButton, renderPage, responses, setEngine, state,
 } from "./support/render-harness.mjs";
+import { readStylesheet } from "./support/stylesheet.mjs";
 
 test("runtime configuration preview is offline and depends only on repository-backed selection", async () => {
   const originalEngine = responses.engine_snapshot;
@@ -456,7 +456,7 @@ test("SOCKS5 links, local YAML, and dropped text use native conversion and never
 });
 
 test("the single-row import box shows its first line whole and no part of the next", async () => {
-  const styles = await readFile(new URL("../styles.css", import.meta.url), "utf8");
+  const styles = await readStylesheet();
   const body = styles.match(/^\.cfw-url-box textarea\s*\{(?<body>[^}]*)\}/mu)?.groups.body;
   assert.ok(body, "the import box rule exists");
   const rule = Object.fromEntries(

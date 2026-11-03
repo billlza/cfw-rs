@@ -1,0 +1,88 @@
+/* The header's brand: slogan, app mark, cat logo, title and update badge, and
+ * the bench row's text button. */
+/* The product's slogan, in the rounded system face, set as plain text: a
+ * badge of words, not another glass element. */
+.cfw-slogan {
+  display: none;
+  position: absolute;
+  top: 8px;
+  right: 24px;
+  color: var(--muted);
+  font-family: ui-rounded, var(--sans);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  line-height: 1.35;
+  text-align: center;
+  transform: rotate(-7deg);
+  pointer-events: none;
+}
+
+.cfw-app-mark {
+  width: 94px;
+  height: 82px;
+  color: #1f416d;
+}
+
+.cfw-cat-logo {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.cfw-cat-logo path:first-child {
+  fill: currentColor;
+}
+
+.cfw-cat-logo .cat-tail,
+.cfw-cat-logo .cat-mouth {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 7;
+  stroke-linecap: round;
+}
+
+.cfw-cat-logo circle {
+  fill: #fff;
+}
+
+.cfw-title {
+  display: flex;
+  align-items: baseline;
+  color: var(--general-title-c);
+  font-size: 32px;
+  font-weight: 500;
+}
+
+.cfw-title small {
+  margin-left: 10px;
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 400;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cfw-update-badge {
+  border: 0;
+  background: #e8f3ff;
+  color: #1d4ed8;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.cfw-update-badge:hover {
+  background: #dbeafe;
+}
+
+.cfw-row-bench .cfw-text-button {
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

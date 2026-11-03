@@ -75,7 +75,7 @@ impl PlatformRuntime {
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
-    use cfw_apple_network::{AppleNetworkBackend, MissingNativeBridge, NativeFrameworkBridge};
+    use cfw_apple_network::{AppleNetworkBackend, NativeFrameworkBridge};
     use cfw_engine_api::{EngineLineage, EngineSessionIdentity, EngineState};
 
     struct Lineage;
@@ -95,8 +95,8 @@ mod tests {
     }
 
     fn services(generations: Result<Arc<dyn EngineGenerationStore>, String>) -> PlatformRuntime {
-        let backend = Arc::new(AppleNetworkBackend::new(MissingNativeBridge));
         // These ports are retained but never invoked by preparation.
+        let backend = Arc::new(AppleNetworkBackend::new(NativeFrameworkBridge::load()));
         let bridge = Arc::new(NativeFrameworkBridge::load());
         PlatformRuntime {
             credentials: bridge.clone(),

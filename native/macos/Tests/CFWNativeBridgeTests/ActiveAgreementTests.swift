@@ -46,28 +46,6 @@ private func descriptor(
   )
 }
 
-private func agreement(
-  for descriptor: ConfigurationDescriptor,
-  mode: AuthorityMode,
-  leaseState: AuthorityLeaseState = .active,
-  epoch: UInt64? = nil,
-  generation: UInt64? = nil,
-  installationID: UUID? = nil,
-  configSHA256: CFWSharedProtocol.SHA256Digest? = nil,
-  identitySHA256: CFWSharedProtocol.SHA256Digest? = nil
-) -> AuthorityLeaseAgreement {
-  AuthorityLeaseAgreement(
-    installationID: installationID ?? descriptor.installationID,
-    epoch: epoch ?? descriptor.epoch,
-    generation: generation ?? descriptor.generation,
-    ownerUID: 501,
-    mode: mode,
-    configSHA256: configSHA256 ?? descriptor.sha256,
-    identitySHA256: identitySHA256 ?? descriptor.identitySHA256,
-    leaseState: leaseState
-  )
-}
-
 private struct StubLease: NativeEngineLeaseInspecting {
   let observation: AuthorityOwnershipObservation
   let onObservation: @Sendable () -> Void

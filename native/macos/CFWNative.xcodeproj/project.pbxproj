@@ -289,6 +289,7 @@
 		C3CBFA469F0C92568C393D41 /* AuthorityV1WireModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9B1580E311290A6C8CA0D08 /* AuthorityV1WireModel.swift */; };
 		C3DF62C3C17E8635D88B5B1E /* libCFWSharedProtocol.a in Frameworks */ = {isa = PBXBuildFile; fileRef = E1382358BF9A0F2942FF7CC0 /* libCFWSharedProtocol.a */; };
 		C51EF1F7EB2667D2AD891F11 /* NativeStartSynchronizationTestSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = E891CDC0DAD508FDE677D000 /* NativeStartSynchronizationTestSupport.swift */; };
+		C54576EEEE45D26319ACC6B5 /* TunnelTicketStartDependencies.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBB1185BDE1C01488689E128 /* TunnelTicketStartDependencies.swift */; };
 		C6F2B86D5DBB5B13FC3BC9A6 /* ProxySystemProxyOwnerCoordinatorTestSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7AA545FECC5E3B863D165747 /* ProxySystemProxyOwnerCoordinatorTestSupport.swift */; };
 		C7A0E5AFC9C734BC7CC82289 /* ProviderLifecycleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C133F0773520864076543B11 /* ProviderLifecycleTests.swift */; };
 		C879D04BB3E96898FED1A675 /* libCFWCredentialVault.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 02A5FEEB309B0F35426952B8 /* libCFWCredentialVault.a */; };
@@ -1214,6 +1215,7 @@
 		EA9A745EE5A037D5B6BA6084 /* ServiceRegistrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServiceRegistrationTests.swift; sourceTree = "<group>"; };
 		EAC5632EC7EB5345F733521E /* AuthorityService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthorityService.swift; sourceTree = "<group>"; };
 		EAEAFE2891FB95ADA4DC08CA /* TunnelPreferenceMutationJournalTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelPreferenceMutationJournalTests.swift; sourceTree = "<group>"; };
+		EBB1185BDE1C01488689E128 /* TunnelTicketStartDependencies.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelTicketStartDependencies.swift; sourceTree = "<group>"; };
 		EBD1033C9BC65B070C73FA75 /* LibboxStartOutcomeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibboxStartOutcomeTests.swift; sourceTree = "<group>"; };
 		EC11369449ED21F1068347C4 /* AuthorityPeerService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthorityPeerService.swift; sourceTree = "<group>"; };
 		ECC482179E77314934F4F9A6 /* PeerAuthorizationPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PeerAuthorizationPolicy.swift; sourceTree = "<group>"; };
@@ -1787,6 +1789,7 @@
 				CDEE2567B544BCF93C1CE3EB /* PacketTunnelSessionLifecycle.swift */,
 				59C52B85A64A7895C88E91CD /* TunnelAddressPlan.swift */,
 				CE352AE4E1DD5F81BA8A06AE /* TunnelTicketStartCoordinator.swift */,
+				EBB1185BDE1C01488689E128 /* TunnelTicketStartDependencies.swift */,
 			);
 			path = CFWPacketTunnel;
 			sourceTree = "<group>";
@@ -2787,6 +2790,7 @@
 				F1710071DAB1665267179D4A /* PacketTunnelSessionLifecycle.swift in Sources */,
 				F1CCCA6A4C5DF9BE9004EB8A /* TunnelAddressPlan.swift in Sources */,
 				B8A7C0B992DCB331B75F7DC4 /* TunnelTicketStartCoordinator.swift in Sources */,
+				C54576EEEE45D26319ACC6B5 /* TunnelTicketStartDependencies.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -317,3 +317,81 @@ fn tls_protocol_uri_imports_fail_closed_on_unrepresented_semantics() {
         assert!(!error.contains("0001020304"), "{label}: {error}");
     }
 }
+
+#[test]
+fn share_links_carry_one_user_info_component_a_decodable_fragment_and_one_alias_each() {
+    const VLESS: &str = "vless://11111111-1111-4111-8111-111111111111@v.example:443";
+    const TUIC: &str =
+        "tuic://11111111-1111-4111-8111-111111111111:TopSecretValue%21@tuic.example.com:443";
+    for (uri, expected) in [
+        (
+            "vless://11111111-1111-4111-8111-111111111111:TopSecretValue123@v.example:443"
+                .to_owned(),
+            "VLESS URI must encode its UUID as the single user-info component",
+        ),
+        (
+            "trojan://user:TopSecretValue123@t.example:443".to_owned(),
+            "Trojan URI password must percent-encode reserved separators",
+        ),
+        (
+            "hy2://user:TopSecretValue123@hy2.example.com:443".to_owned(),
+            "Hysteria2 URI must encode its password as the single user-info component",
+        ),
+        (
+            "anytls://user:TopSecretValue123@anytls.example.com:443".to_owned(),
+            "AnyTLS URI must encode its password as the single user-info component",
+        ),
+        (
+            format!("{VLESS}#%FF"),
+            "VLESS URI fragment has invalid percent-encoding",
+        ),
+        (
+            "trojan://TopSecretValue%21@t.example:443#%FF".to_owned(),
+            "Trojan URI fragment has invalid percent-encoding",
+        ),
+        (
+            "hy2://TopSecretValue%21@hy2.example.com:443#%FF".to_owned(),
+            "Hysteria2 URI fragment has invalid percent-encoding",
+        ),
+        (
+            "anytls://TopSecretValue%21@anytls.example.com:443#%FF".to_owned(),
+            "AnyTLS URI fragment has invalid percent-encoding",
+        ),
+        (
+            format!("{TUIC}#%FF"),
+            "TUIC URI fragment has invalid percent-encoding",
+        ),
+        (
+            format!("{VLESS}?packetEncoding=xudp&packet-encoding=xudp"),
+            "VLESS URI repeats packet encoding using multiple aliases",
+        ),
+        (
+            format!("{VLESS}?type=grpc&serviceName=api&service_name=api"),
+            "VLESS URI repeats gRPC service name using multiple aliases",
+        ),
+        (
+            "trojan://TopSecretValue%21@t.example:443?type=grpc&serviceName=api&service_name=api"
+                .to_owned(),
+            "Trojan URI repeats gRPC service name using multiple aliases",
+        ),
+        (
+            "hy2://TopSecretValue%21@hy2.example.com:443,8443-8450?hop-interval=30&hop_interval=30"
+                .to_owned(),
+            "Hysteria2 URI repeats hop interval using multiple aliases",
+        ),
+        (
+            format!("{VLESS}?security=TopSecretValue123"),
+            "VLESS security mode is unsupported: <redacted>",
+        ),
+        (
+            "hy2://TopSecretValue%21@hy2.example.com:443?obfs=TopSecretValue123".to_owned(),
+            "Hysteria2 obfs mode is unsupported: <redacted>",
+        ),
+    ] {
+        assert_eq!(
+            import_subscription_document(&uri).map(|_| ()),
+            Err(expected.into()),
+            "{uri}"
+        );
+    }
+}

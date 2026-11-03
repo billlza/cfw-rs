@@ -16,10 +16,11 @@ use cfw_singbox_config::{EngineSettings, ValidatedSingBoxProfile};
 use super::maintenance::{
     EngineMaintenanceError, EngineMaintenanceGate, EngineModeChangeIntent, MAX_PENDING_MODE_CHANGES,
 };
+use super::mode_switch::set_mode_with_endpoint_rebind;
 use super::{
     ActiveControllerBinding, EngineEndpointBinding, StagedEndpointRebind, commit_endpoint_rebind,
     engine_snapshot_is_off, read_active_controller_access, record_endpoint_runtime,
-    selected_profile_for_mode, set_mode_with_endpoint_rebind,
+    selected_profile_for_mode,
 };
 use crate::engine::endpoints::{CANDIDATE_COUNT, EndpointCandidateCursor};
 use cfw_application::{EngineControllerAccess, EngineModeCoordinator};

@@ -62,6 +62,7 @@
 		264A06450650FF1BD2B0577B /* CFWLibboxObjC.m in Sources */ = {isa = PBXBuildFile; fileRef = A499F5929B081DA13698546D /* CFWLibboxObjC.m */; };
 		281F6E3A928E9C48C94C2461 /* DescriptorRelativeAuthorityJournalStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 465A3C62623695EE6E126275 /* DescriptorRelativeAuthorityJournalStore.swift */; };
 		290F5647E4CA6DAE86780DF3 /* SystemExtensions.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D3BB877A7812177051275480 /* SystemExtensions.framework */; };
+		2985C0CF3ACB9CB52DBBDBD0 /* PacketTunnelProviderError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 150714FDDD2CD8852B67105D /* PacketTunnelProviderError.swift */; };
 		2A89401485BC97A4B891807A /* ConfigurationAcceptanceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C23E8D5D284F70D5D716D59 /* ConfigurationAcceptanceStore.swift */; };
 		2BF9FA6651D39E9CF41BB152 /* libCFWPacketTunnel.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 2047E844D12435EE7D3CFE4C /* libCFWPacketTunnel.a */; };
 		2C79CC98E302378BF4BD0DCB /* KernelProcessTableTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB18EA60A92AAA4C3F0570DA /* KernelProcessTableTests.swift */; };
@@ -935,6 +936,7 @@
 		13CBF79EBF1FC7107A9D317A /* AuthorityJournalAnchorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthorityJournalAnchorTests.swift; sourceTree = "<group>"; };
 		142BEACC628DDBF81D3767B7 /* GlobalAuthorityServiceControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlobalAuthorityServiceControllerTests.swift; sourceTree = "<group>"; };
 		1442797CFC4C5CB46B7B044C /* SystemProxyPreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemProxyPreferences.swift; sourceTree = "<group>"; };
+		150714FDDD2CD8852B67105D /* PacketTunnelProviderError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketTunnelProviderError.swift; sourceTree = "<group>"; };
 		1620B333C955FB29FAE0D7AC /* HostTicketOnlyStartCancellationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostTicketOnlyStartCancellationTests.swift; sourceTree = "<group>"; };
 		16DC14DF6A62549232F309EA /* CrossProcessEngineLease.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CrossProcessEngineLease.swift; sourceTree = "<group>"; };
 		17437FC5747522533423CDCD /* NativeServiceMaintenance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeServiceMaintenance.swift; sourceTree = "<group>"; };
@@ -1780,6 +1782,7 @@
 				CDDB12B6A87D751CA43891BE /* PacketEngine.swift */,
 				50B97864F5CD88EFAD9B3568 /* PacketTunnelProcessEnd.swift */,
 				C72C5ECB90D52B622ED1FD9E /* PacketTunnelProvider.swift */,
+				150714FDDD2CD8852B67105D /* PacketTunnelProviderError.swift */,
 				5B34BC22691773BD9BE956B6 /* PacketTunnelSessionDependencies.swift */,
 				CDEE2567B544BCF93C1CE3EB /* PacketTunnelSessionLifecycle.swift */,
 				59C52B85A64A7895C88E91CD /* TunnelAddressPlan.swift */,
@@ -2779,6 +2782,7 @@
 				9BE41D30004EBECCB1AE8FC5 /* PacketEngine.swift in Sources */,
 				2D376D05445AD91EADE9B7B2 /* PacketTunnelProcessEnd.swift in Sources */,
 				FBFD168627E6B687B0CF32D1 /* PacketTunnelProvider.swift in Sources */,
+				2985C0CF3ACB9CB52DBBDBD0 /* PacketTunnelProviderError.swift in Sources */,
 				4E9EF1C91AEE5758AC783499 /* PacketTunnelSessionDependencies.swift in Sources */,
 				F1710071DAB1665267179D4A /* PacketTunnelSessionLifecycle.swift in Sources */,
 				F1CCCA6A4C5DF9BE9004EB8A /* TunnelAddressPlan.swift in Sources */,

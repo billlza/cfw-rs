@@ -311,7 +311,7 @@ private func unclosableFailure(
 
 /// What happened, in order: completions the test records, cancelled tunnels
 /// and ended processes.
-private final class EventLog: @unchecked Sendable {
+private final class ProviderEventLog: @unchecked Sendable {
   private let lock = NSLock()
   private var events: [String] = []
 
@@ -419,10 +419,10 @@ private struct ProviderFixture {
   let settingsGate: NetworkSettingsGate
   let cancelRecorder: CancelRecorder
   let endRecorder: EndProcessRecorder
-  let events: EventLog
+  let events: ProviderEventLog
 }
 
-private func tunnelDescriptor() throws -> ConfigurationDescriptor {
+private func providerTunnelDescriptor() throws -> ConfigurationDescriptor {
   try ConfigurationDescriptor(
     slot: .tunnel,
     tunnelOptions: TunnelNetworkOptions(ipv6Enabled: true, mtu: 1_500),
@@ -444,7 +444,7 @@ private func fixture(
   engineStartError: any Error = ForcedFailure.requested,
   processEnd: PacketTunnelProcessEnd? = nil
 ) throws -> ProviderFixture {
-  let descriptor = try tunnelDescriptor()
+  let descriptor = try providerTunnelDescriptor()
   let configuration = Data("{}".utf8)
   let engine = TestEngine(startFails: stage == .engineStart, startError: engineStartError)
   let lease = TestLease()
@@ -453,7 +453,7 @@ private func fixture(
   let pumpHolder = PumpHolder()
   let cancelRecorder = CancelRecorder()
   let endRecorder = EndProcessRecorder()
-  let events = EventLog()
+  let events = ProviderEventLog()
 
   let dependencies = PacketTunnelSessionDependencies(
     prepareConfiguration: { receivedDescriptor, receivedConfiguration, _ in
@@ -559,7 +559,7 @@ struct ProviderLifecycleTests {
       ),
       (.networkSettings("secret network detail"), "tunnel-network-settings-failed", true),
     ]
-    let descriptor = try tunnelDescriptor()
+    let descriptor = try providerTunnelDescriptor()
     var codes = Set<String>()
 
     for (error, code, retryable) in errors {

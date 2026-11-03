@@ -469,6 +469,44 @@ fn malformed_or_writable_journal_fails_closed() {
 }
 
 #[test]
+fn a_stored_journal_that_is_not_canonical_or_not_valid_fails_closed() {
+    let root = tempfile::tempdir().expect("temp");
+    let store = CutoverJournalStore::new(root.path());
+    let journal = CutoverJournal::prepared(
+        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "33".repeat(32),
+        &request(),
+        EngineSettings::default(),
+        LegacyRuntimePlanKind::FreshInstall,
+        LegacyNetworkJournalInput::default(),
+        None,
+    )
+    .expect("journal");
+    store.write_prepared(&journal).expect("write prepared");
+    let path = root.path().join(JOURNAL_FILE);
+
+    // The same journal, pretty-printed: it parses, but it is not the
+    // encoding the store writes.
+    fs::write(&path, serde_json::to_vec_pretty(&journal).expect("encode")).expect("rewrite");
+    assert_eq!(
+        store.load().expect_err("non-canonical journal"),
+        "legacy cutover journal is not canonical JSON"
+    );
+
+    // A compact encoding of a journal whose identity is invalid.
+    let mut invalid = journal.clone();
+    invalid.schema_version = SCHEMA_VERSION - 1;
+    fs::write(&path, serde_json::to_vec(&invalid).expect("encode")).expect("rewrite");
+    assert_eq!(
+        store.load().expect_err("invalid journal"),
+        "legacy cutover journal identity is invalid"
+    );
+
+    fs::write(&path, serde_json::to_vec(&journal).expect("encode")).expect("restore");
+    assert_eq!(store.load().expect("load").expect("journal"), journal);
+}
+
+#[test]
 fn fresh_install_journal_has_no_invented_legacy_gui_identity() {
     let journal = CutoverJournal::prepared(
         "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",

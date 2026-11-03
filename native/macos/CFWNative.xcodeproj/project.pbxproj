@@ -74,6 +74,7 @@
 		3299E762ADC5BCC4471B86EA /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C728A426AD56CF0A261E2E63 /* Security.framework */; };
 		335CC5EC8126996D63B565EF /* SystemProxyAuthorization.swift in Sources */ = {isa = PBXBuildFile; fileRef = CCD88FA7E7E893E160265D8F /* SystemProxyAuthorization.swift */; };
 		3461914FFEFE386E960FBD31 /* libCFWPacketTransport.a in Frameworks */ = {isa = PBXBuildFile; fileRef = E899BAFDF20794FBCC622B32 /* libCFWPacketTransport.a */; };
+		3550AC6C8CF303EAC320EEE8 /* ProtocolExampleTestSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F92B464CF0CC60ACD65EA17 /* ProtocolExampleTestSupport.swift */; };
 		357B33A302E2DD24D9510DD0 /* NativeCredentialRebinding.swift in Sources */ = {isa = PBXBuildFile; fileRef = C713ECBD8EDF96EB218A15E6 /* NativeCredentialRebinding.swift */; };
 		35CC69C0E9EADCD53EA54CA0 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C728A426AD56CF0A261E2E63 /* Security.framework */; };
 		36A9071EB2A3190A6953B5BE /* ProxyOwnerBindingIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12A246B1827CB13A19AC71DB /* ProxyOwnerBindingIntegrationTests.swift */; };
@@ -97,6 +98,7 @@
 		424EC4E4F9AD9B5D36AE0504 /* AuthenticatedJournal.swift in Sources */ = {isa = PBXBuildFile; fileRef = A37AC022C76CAD0A7365562B /* AuthenticatedJournal.swift */; };
 		42C46E068DD184CFA6796FA2 /* GlobalAuthorityReducerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD02C6364328FDD47881BD55 /* GlobalAuthorityReducerTests.swift */; };
 		4323BE294D6A766FE3FCC395 /* PacketQueueTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25FC3CE99C5C521F6CB43C2B /* PacketQueueTests.swift */; };
+		43C161D6DD9A509B2E663C7C /* AuthorityAvailabilityExampleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBD1F3C8CE654102F8EF7416 /* AuthorityAvailabilityExampleTests.swift */; };
 		43EBA03C212AB2366DCA54E8 /* NativeBridgeEndedOwnerStopTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E13C1B80070A024E91582357 /* NativeBridgeEndedOwnerStopTests.swift */; };
 		443F8A66CAFBCC0655A36A3B /* ProviderTicketRestartIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 132D00182F5466FD5C5ACF2E /* ProviderTicketRestartIntegrationTests.swift */; };
 		46DF4EF2E36E94B0AC042B3C /* SensitiveDataBufferTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DF1E90C407C1EE1B28FD463 /* SensitiveDataBufferTests.swift */; };
@@ -118,6 +120,7 @@
 		4FAEFA5669F8837D7B479A37 /* AuthorityEndedOwnerRecoveryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9ACDDBC5C80C1DEC51B36B9B /* AuthorityEndedOwnerRecoveryTests.swift */; };
 		50126BEDAEECE79D002EB2DD /* NativeServiceMaintenance.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6F5C955BE3888C734719F8C /* NativeServiceMaintenance.swift */; };
 		50FB27BF9560CD697B23FCB5 /* CurrentAppServiceBuildIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D75E34CDE0982B08258C6B8F /* CurrentAppServiceBuildIdentityTests.swift */; };
+		51155613BBF935745DF13BED /* ProtocolBoundExampleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3847F6E1742B356E1EA0994 /* ProtocolBoundExampleTests.swift */; };
 		51617AF3C09BB388D3E907E9 /* Installed40019ServiceIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = D52F90CAACC8058CD237E904 /* Installed40019ServiceIdentity.swift */; };
 		51A66433541E7BFA56D8349F /* AuthorityOwnerLiveness.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B6B108B86A1999F6F49DC65 /* AuthorityOwnerLiveness.swift */; };
 		527D00F15E863BCF363DE5B9 /* CredentialVaultTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62F4C3519285AD3E4A9D9EF7 /* CredentialVaultTests.swift */; };
@@ -947,6 +950,7 @@
 		3B7E6A542EA8E11E503788A4 /* ProxySystemProxyOwnerCoordinatorCallTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxySystemProxyOwnerCoordinatorCallTests.swift; sourceTree = "<group>"; };
 		3F4A8D21CD0316D2E6F9F34D /* LibboxProcessLookupPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibboxProcessLookupPolicy.swift; sourceTree = "<group>"; };
 		3F810BFA06C702E1E7372201 /* TicketOnlyStartupTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TicketOnlyStartupTests.swift; sourceTree = "<group>"; };
+		3F92B464CF0CC60ACD65EA17 /* ProtocolExampleTestSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProtocolExampleTestSupport.swift; sourceTree = "<group>"; };
 		40C31EAF47A4BE397A32F597 /* CFWLibboxRuntimeTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CFWLibboxRuntimeTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		4364012AE4E9B6ED4B035738 /* LibboxBoundedCallTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibboxBoundedCallTests.swift; sourceTree = "<group>"; };
 		452632C2C9A18D7B70323830 /* NativeEngineOperations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeEngineOperations.swift; sourceTree = "<group>"; };
@@ -1093,12 +1097,14 @@
 		BA527AD5AB1CAE95505DDD59 /* TunnelPreferenceWriteTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelPreferenceWriteTests.swift; sourceTree = "<group>"; };
 		BB18EA60A92AAA4C3F0570DA /* KernelProcessTableTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KernelProcessTableTests.swift; sourceTree = "<group>"; };
 		BB488DA36986FDFC8BC5572C /* EngineFailureCodeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineFailureCodeTests.swift; sourceTree = "<group>"; };
+		BBD1F3C8CE654102F8EF7416 /* AuthorityAvailabilityExampleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthorityAvailabilityExampleTests.swift; sourceTree = "<group>"; };
 		BBD4B2FD800AEC05BB07C32E /* LibboxLinkedStartTestSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibboxLinkedStartTestSupport.swift; sourceTree = "<group>"; };
 		BDE990BD471ECF473DA19BF0 /* NativeStartTunnelHostTestSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeStartTunnelHostTestSupport.swift; sourceTree = "<group>"; };
 		BEBA3B9D2E141CE28AB40EA3 /* CFWPacketTunnelTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CFWPacketTunnelTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		C0968AA95D99B0ADFCE2E644 /* GlobalAuthorityServiceController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlobalAuthorityServiceController.swift; sourceTree = "<group>"; };
 		C133F0773520864076543B11 /* ProviderLifecycleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProviderLifecycleTests.swift; sourceTree = "<group>"; };
 		C1C72F7B01B351D31FDF6136 /* ProxyAgentInstalled40019Tests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxyAgentInstalled40019Tests.swift; sourceTree = "<group>"; };
+		C3847F6E1742B356E1EA0994 /* ProtocolBoundExampleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProtocolBoundExampleTests.swift; sourceTree = "<group>"; };
 		C4146744E5941DE00451B081 /* CurrentAppServiceMaintenance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CurrentAppServiceMaintenance.swift; sourceTree = "<group>"; };
 		C45D95BA9BAA3B4127819F1A /* GlobalLeaseExclusivityPropertyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlobalLeaseExclusivityPropertyTests.swift; sourceTree = "<group>"; };
 		C495FC6C7C4C3D5151C04BB0 /* LibboxStartWatchdogTestSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibboxStartWatchdogTestSupport.swift; sourceTree = "<group>"; };
@@ -1446,6 +1452,7 @@
 		3893B172E8C613DF487A7DBE /* CFWSharedProtocolTests */ = {
 			isa = PBXGroup;
 			children = (
+				BBD1F3C8CE654102F8EF7416 /* AuthorityAvailabilityExampleTests.swift */,
 				4B3D6FE468EE9DC213A01F76 /* AuthorityV1CodecTests.swift */,
 				886B86DF5657CF8262E91220 /* CredentialProvisioningTests.swift */,
 				54333B2DCDEE75257A96F889 /* CrossProcessEngineLeaseTests.swift */,
@@ -1455,6 +1462,8 @@
 				BB18EA60A92AAA4C3F0570DA /* KernelProcessTableTests.swift */,
 				E1213D975F966E8D1AE1A8C2 /* LANConfigurationTests.swift */,
 				F0ADE357B98AE70D95F88166 /* ProfileProbeTests.swift */,
+				C3847F6E1742B356E1EA0994 /* ProtocolBoundExampleTests.swift */,
+				3F92B464CF0CC60ACD65EA17 /* ProtocolExampleTestSupport.swift */,
 				8569B9D226EF86F2B91C544E /* ReleaseGateAndErrorMappingExampleTests.swift */,
 				5E44B3DE1EB0AD41B7D6ECE1 /* ReleaseObservationTests.swift */,
 				648FFFF2B9583C604BA9C27D /* SandboxAcceptanceStoreTests.swift */,
@@ -2894,6 +2903,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				43C161D6DD9A509B2E663C7C /* AuthorityAvailabilityExampleTests.swift in Sources */,
 				A58C40FC5D97E0D5A8DC859D /* AuthorityV1CodecTests.swift in Sources */,
 				F70BC076BD2D318B0489AD8D /* CredentialProvisioningTests.swift in Sources */,
 				826700227EC483E4CDACC615 /* CrossProcessEngineLeaseTests.swift in Sources */,
@@ -2903,6 +2913,8 @@
 				2C79CC98E302378BF4BD0DCB /* KernelProcessTableTests.swift in Sources */,
 				2FD38E04FFB446291E3D43C0 /* LANConfigurationTests.swift in Sources */,
 				12203711F9A93F0ED7B15311 /* ProfileProbeTests.swift in Sources */,
+				51155613BBF935745DF13BED /* ProtocolBoundExampleTests.swift in Sources */,
+				3550AC6C8CF303EAC320EEE8 /* ProtocolExampleTestSupport.swift in Sources */,
 				09D10C4C4BACC53129D462D9 /* ReleaseGateAndErrorMappingExampleTests.swift in Sources */,
 				591D1BD5E9F10FEF4CB973AF /* ReleaseObservationTests.swift in Sources */,
 				6BCC3006DF57517C283F6432 /* SandboxAcceptanceStoreTests.swift in Sources */,

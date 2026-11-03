@@ -1,0 +1,200 @@
+/* The Settings page with its taxonomy groups and quality panel; preformatted,
+ * empty and fatal states; the connection table's scrollbar; and the narrow
+ * window. */
+.settings-layout {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-content: start;
+}
+
+.settings-toolbar,
+.settings-index,
+.deep-link-panel,
+.quality-panel {
+  grid-column: 1 / -1;
+}
+
+/* Translated actions keep readable words at the minimum window width. */
+.settings-toolbar {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.settings-toolbar .toolbar-actions {
+  flex-wrap: wrap;
+  max-width: 100%;
+}
+
+.settings-toolbar .toolbar-actions .button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.settings-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.setting-row {
+  min-height: 38px;
+  border-radius: 3px;
+  background: var(--general-item-bgc);
+  padding: 8px 10px;
+}
+
+.setting-row > span:first-child {
+  flex: 1 1 48%;
+  min-width: 0;
+}
+
+.setting-row > strong {
+  flex: 0 1 48%;
+  min-width: 0;
+}
+
+.setting-row strong {
+  max-width: 52%;
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 400;
+  text-align: right;
+}
+
+.setting-control-row {
+  cursor: text;
+}
+
+.setting-input {
+  width: min(260px, 52%);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--setting-input-bgc);
+  color: var(--text);
+  font: 13px var(--mono);
+  padding: 7px 9px;
+  text-align: right;
+}
+
+.setting-action {
+  display: flex;
+  flex: 0 1 52%;
+  flex-wrap: wrap;
+  min-width: 0;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  max-width: 56%;
+}
+
+.setting-action strong {
+  flex: 1 1 auto;
+  min-width: min(100%, 6ch);
+  max-width: none;
+}
+
+.setting-action .button {
+  flex: 0 0 auto;
+}
+
+.settings-taxonomy {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.taxonomy-group {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+  border-radius: 3px;
+  background: var(--general-item-bgc);
+  padding: 9px;
+}
+
+.taxonomy-group h4 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.quality-panel {
+  display: grid;
+  grid-template-columns: 0.85fr 1.15fr;
+  gap: 16px;
+}
+
+pre {
+  max-height: 220px;
+  overflow: auto;
+  margin: 12px 0 0;
+  border-radius: 3px;
+  background: #1f1f1f;
+  color: #e8e8e8;
+  padding: 12px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  user-select: text;
+}
+
+.empty {
+  margin: 0;
+  padding: 18px;
+  color: var(--muted);
+}
+
+.fatal {
+  margin: 32px;
+  white-space: pre-wrap;
+}
+
+.proxy-layout::-webkit-scrollbar,
+.profiles-layout::-webkit-scrollbar,
+.providers-layout::-webkit-scrollbar,
+.rules-layout::-webkit-scrollbar,
+.settings-layout::-webkit-scrollbar,
+.feedback-layout::-webkit-scrollbar,
+.log-stream::-webkit-scrollbar,
+.connection-table::-webkit-scrollbar {
+  width: 16px;
+}
+
+.proxy-layout::-webkit-scrollbar-thumb,
+.profiles-layout::-webkit-scrollbar-thumb,
+.providers-layout::-webkit-scrollbar-thumb,
+.rules-layout::-webkit-scrollbar-thumb,
+.settings-layout::-webkit-scrollbar-thumb,
+.feedback-layout::-webkit-scrollbar-thumb,
+.log-stream::-webkit-scrollbar-thumb,
+.connection-table::-webkit-scrollbar-thumb {
+  border: 3px solid var(--bgc);
+  border-radius: 100px;
+  background: var(--scroll-bar-bgc);
+}
+
+@media (max-width: 760px) {
+  .app-shell {
+    grid-template-columns: 132px minmax(0, 1fr);
+  }
+
+  .sidebar-meta {
+    display: none;
+  }
+
+  .traffic-pane div {
+    padding: 3px 12px;
+  }
+
+  .cfw-content {
+    width: 92%;
+  }
+
+  .settings-layout,
+  .settings-taxonomy {
+    grid-template-columns: 1fr;
+  }
+}

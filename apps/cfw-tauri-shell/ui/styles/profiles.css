@@ -1,0 +1,300 @@
+/* The Profiles page: imports by URL or paste, the profile list, empty states,
+ * mixins and providers. */
+.profiles-layout,
+.providers-layout,
+.rules-layout,
+.settings-layout,
+.feedback-layout {
+  overflow-y: auto;
+}
+
+.import-row {
+  display: grid;
+  min-width: 380px;
+  grid-template-columns: minmax(220px, 1fr) auto;
+  gap: 8px;
+}
+
+.import-row input,
+.search-box input,
+.connection-controls input {
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+}
+
+.cfw-profile-remote {
+  display: grid;
+  min-height: 80px;
+  flex-shrink: 0;
+  grid-template-columns: minmax(330px, 1fr) repeat(3, 84px);
+  align-items: center;
+  gap: 5px;
+  margin-top: -7px;
+  border-bottom: 1px solid var(--bc);
+  padding: 16px 28px 16px 36px;
+}
+
+.cfw-url-box {
+  position: relative;
+}
+
+/* A textarea keeps pasted line breaks that a single-line input would strip;
+   it otherwise looks and behaves like the input it replaces. Overflow clips at
+   the padding box, so vertical padding would expose part of a second line;
+   the one visible line is centred by its line height (45px less the borders). */
+.cfw-url-box textarea {
+  display: block;
+  width: 100%;
+  height: 45px;
+  border: 1px solid var(--bc);
+  border-radius: 4px;
+  outline: none;
+  padding: 0 48px 0 12px;
+  background: var(--bgc);
+  color: #444;
+  font: inherit;
+  font-size: 20px;
+  line-height: 43px;
+  white-space: pre;
+  overflow: hidden;
+  resize: none;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.cfw-url-box textarea::placeholder {
+  color: #999;
+}
+
+.paste-icon {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  border: 0;
+  background: transparent;
+  color: #818181;
+  font-size: 24px;
+}
+
+.cfw-big-button {
+  height: 45px;
+  width: 84px;
+  border: 0;
+  border-radius: 3px;
+  background: #777272;
+  color: #fff;
+  padding: 0 4px;
+  font-size: 14px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.profile-file-hidden {
+  display: none;
+}
+
+.cfw-profile-list {
+  display: flex;
+  align-content: flex-start;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  overflow-y: auto;
+  padding: 15px 36px;
+}
+
+.empty-profile-state {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.empty-profile-state button {
+  height: 32px;
+  border: 0;
+  border-radius: 3px;
+  background: #777272;
+  color: #fff;
+  padding: 0 14px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.cfw-profile-card {
+  position: relative;
+  display: grid;
+  width: 286px;
+  min-height: 68px;
+  grid-template-columns: 4px minmax(0, 1fr);
+  gap: 12px;
+  border-radius: 3px;
+  background: var(--general-item-bgc);
+  padding: 9px 42px 8px 0;
+  cursor: pointer;
+}
+
+.cfw-profile-card > i {
+  width: 4px;
+  height: 100%;
+  border-radius: 2px;
+  background: #d8d8d8;
+}
+
+.cfw-profile-card.active > i {
+  background: var(--accent);
+}
+
+.profile-card-main {
+  min-width: 0;
+}
+
+.profile-card-main h3 {
+  margin: 0;
+  overflow: hidden;
+  font-size: 15px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-card-main p {
+  overflow: hidden;
+  color: #7c7c7c;
+  font-size: 12px;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-card-main p {
+  margin: 4px 0 0;
+}
+
+.profile-progress {
+  width: min(170px, 80%);
+  height: 3px;
+  margin-top: 4px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: #ddd;
+}
+
+.profile-progress b {
+  display: block;
+  height: 100%;
+  background: #ff6d7a;
+}
+
+.profile-card-primary {
+  position: absolute;
+  top: 50%;
+  right: 13px;
+  display: flex;
+  width: 26px;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  transform: translateY(-50%);
+}
+
+.profile-card-primary button,
+.profile-current {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: #111;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.profile-current {
+  color: var(--accent);
+  font-size: 12px;
+}
+
+/* A stored profile that fails validation can be deleted but not selected. */
+.cfw-profile-card.invalid {
+  cursor: default;
+}
+
+.cfw-profile-card.invalid > i {
+  background: var(--danger);
+}
+
+.profile-card-main .profile-card-invalid {
+  color: var(--danger);
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.profile-list,
+.provider-section {
+  display: grid;
+  gap: 0;
+}
+
+.profile-inspector {
+  display: grid;
+  gap: 12px;
+}
+
+.profile-diff-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.profile-diff-grid pre,
+.profile-editor,
+.mixin-editor {
+  width: 100%;
+  min-height: 280px;
+  max-height: 440px;
+  overflow: auto;
+  border: 1px solid var(--bc);
+  border-radius: 3px;
+  background: #fbfbfb;
+  color: var(--fgc);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.55;
+  padding: 10px;
+  white-space: pre;
+}
+
+.profile-editor {
+  resize: vertical;
+}
+
+.mixin-editor {
+  min-height: 150px;
+  resize: vertical;
+}
+
+.profile-qr {
+  display: grid;
+  place-items: center;
+  width: fit-content;
+  padding: 12px;
+  border: 1px solid var(--bc);
+  background: #fff;
+}
+
+.provider-section .section-title {
+  border-bottom: 1px solid var(--bc);
+  padding: 12px 20px 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.profile-row.active {
+  box-shadow: inset 4px 0 0 var(--accent);
+}

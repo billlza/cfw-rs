@@ -1,0 +1,273 @@
+/* The window's shell: the status bar, the sidebar with its traffic lights,
+ * navigation, runtime and connection cards, the workspace and page, buttons,
+ * badges and the header. */
+.status-bar {
+  display: none;
+}
+
+.status-progress {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 5px;
+  overflow: hidden;
+}
+
+.status-progress i {
+  display: block;
+  width: 0%;
+  height: 100%;
+  background: var(--accent);
+  transition: width 220ms ease;
+}
+
+.status-button {
+  position: absolute;
+  right: 8px;
+  height: 19px;
+  border: 0;
+  border-radius: 3px;
+  color: var(--muted);
+  background: transparent;
+  padding: 0 7px;
+  font-size: 11px;
+}
+
+.status-button:hover {
+  background: var(--status-close-hover);
+  color: var(--fgc);
+}
+
+.app-shell {
+  display: grid;
+  grid-template-columns: 170px minmax(0, 1fr);
+  height: 100vh;
+  margin-top: 0;
+}
+
+.sidebar {
+  display: flex;
+  height: 100%;
+  flex-direction: column;
+  overflow: hidden;
+  border-right: 1px solid var(--bc);
+  background: var(--mbgc);
+  color: var(--menu-fgc);
+}
+
+.traffic-pane {
+  display: flex;
+  height: 80px;
+  flex-shrink: 0;
+  flex-direction: column;
+  justify-content: center;
+  border-bottom: 1px solid var(--bc);
+  background: var(--mbgc);
+  font-size: 12px;
+  letter-spacing: 0.5px;
+}
+
+.traffic-pane .traffic-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 4px 18px;
+  color: var(--fgc);
+}
+
+.traffic-pane strong {
+  color: var(--fgc);
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.nav-list {
+  position: relative;
+  display: flex;
+  height: 400px;
+  flex-shrink: 0;
+  flex-direction: column;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--bc);
+  background: var(--bgc);
+}
+
+.nav-item {
+  position: relative;
+  display: flex;
+  flex: 1 1 0;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  color: var(--menu-fgc);
+  background: var(--mbgc);
+  padding: 0;
+  text-align: center;
+}
+
+.nav-item:hover {
+  color: var(--fgc);
+}
+
+.nav-item span {
+  display: none;
+}
+
+.nav-list:hover .nav-item span {
+  display: none;
+}
+
+.nav-item b {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.nav-item.active {
+  color: var(--fgc);
+  background: var(--bgc);
+}
+
+.nav-item.active + .nav-item {
+  border-top-right-radius: 10px;
+}
+
+.nav-item:has(+ .nav-item.active) {
+  border-bottom-right-radius: 10px;
+}
+
+.runtime-pane {
+  display: flex;
+  min-height: 82px;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: var(--fgc);
+}
+
+.runtime-pane span,
+.sidebar-meta p,
+.label {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.05em;
+}
+
+.runtime-pane strong {
+  font-family: var(--mono);
+  font-size: 15px;
+  font-weight: 500;
+}
+
+.sidebar-meta {
+  flex-shrink: 0;
+  border-top: 1px solid var(--bc);
+  padding: 14px 45px 15px;
+  background: var(--mbgc);
+}
+
+.connected-line {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0;
+  color: var(--fgc);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.connected-line i {
+  display: block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--danger);
+}
+
+.connected-line i.on {
+  background: var(--accent);
+}
+
+.workspace {
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bgc);
+}
+
+.page {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.button,
+.icon-button {
+  min-height: 26px;
+  border: 0;
+  border-radius: 3px;
+  color: #fff;
+  background: #535353;
+  padding: 4px 12px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.button:hover,
+.icon-button:hover {
+  filter: brightness(0.95);
+}
+
+.button.ghost,
+.icon-button {
+  border: 1px solid var(--bc);
+  color: var(--fgc);
+  background: var(--bgc);
+}
+
+.button.danger {
+  background: var(--danger);
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 22px;
+  border-radius: 999px;
+  color: #fff;
+  background: #464646;
+  padding: 2px 9px;
+  font-size: 12px;
+}
+
+.muted {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.cfw-general-view {
+  display: flex;
+  height: 100%;
+  flex-direction: column;
+  justify-content: flex-start;
+}
+
+.cfw-header {
+  display: flex;
+  position: relative;
+  height: 112px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  gap: 24px;
+  padding-top: 12px;
+}

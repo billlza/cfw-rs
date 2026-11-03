@@ -18,7 +18,7 @@ fn typed_observations_propagate_timeout_and_output_bounds() {
         Err(BoundedCommandError::OutputExceeded {
             program: TCP_LISTENERS.into(),
             stream: "stdout",
-            limit: MAX_STDOUT_BYTES,
+            limit: LISTENER_TABLE_MAX_STDOUT_BYTES,
         }),
     )
     .expect_err("oversized output");
@@ -58,6 +58,39 @@ fn an_observation_is_the_trimmed_output_of_a_clean_run() {
         let error = finish_observation("legacy process table", Ok(output)).expect_err(message);
         assert_eq!(error.to_string(), message);
     }
+}
+
+/// Writes `bytes` copies of `x` to stdout, as one long row of a table.
+fn table_of(bytes: usize) -> String {
+    format!("head -c {bytes} /dev/zero | tr '\\0' x")
+}
+
+#[test]
+fn a_busy_macs_process_table_is_read_whole() {
+    // `ps` writes whole command lines to a pipe; with browsers, Electron apps
+    // and parallel compilers running, one Mac's table measured 2.3 MB.
+    let bytes = 4 * 1024 * 1024;
+    let table = observe_process_table("/bin/sh", &["-c", &table_of(bytes)])
+        .expect("a busy Mac's process table");
+    assert_eq!(table.len(), bytes);
+}
+
+#[test]
+fn a_process_table_past_its_bound_fails_closed() {
+    let error = observe_process_table(
+        "/bin/sh",
+        &["-c", &table_of(PROCESS_TABLE_MAX_STDOUT_BYTES + 1)],
+    )
+    .expect_err("an unbounded process table");
+    assert!(
+        error
+            .to_string()
+            .starts_with("legacy process table failed:")
+            && error.to_string().contains(&format!(
+                "{PROCESS_TABLE_MAX_STDOUT_BYTES}-byte safety bound"
+            )),
+        "{error}"
+    );
 }
 
 #[test]

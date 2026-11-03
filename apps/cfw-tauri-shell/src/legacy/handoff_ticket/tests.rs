@@ -233,15 +233,24 @@ fn ambiguous_ready_write_failure_retains_the_exclusive_file_lock() {
     // descriptor (CLOEXEC closes only at exec). Verify the same lock/drop
     // contract in a process that runs this test alone.
     if std::env::var_os("CFM_HANDOFF_LOCK_TEST_CHILD").is_none() {
+        // The test is named from this module's path, so a moved module cannot
+        // turn the isolated run into one that runs no test and passes.
+        let test = concat!(
+            module_path!(),
+            "::ambiguous_ready_write_failure_retains_the_exclusive_file_lock"
+        )
+        .split_once("::")
+        .expect("crate-qualified test path")
+        .1;
         let output = Command::new(std::env::current_exe().expect("test executable"))
-            .args(["--exact", "legacy::handoff_ticket::tests::ambiguous_ready_write_failure_retains_the_exclusive_file_lock", "--nocapture"])
+            .args(["--exact", test, "--nocapture"])
             .env("CFM_HANDOFF_LOCK_TEST_CHILD", "1")
             .output()
             .expect("isolated file-lock test");
+        let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
-            output.status.success(),
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
+            output.status.success() && stdout.contains("test result: ok. 1 passed;"),
+            "{stdout}\n{}",
             String::from_utf8_lossy(&output.stderr)
         );
         return;

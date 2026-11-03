@@ -507,5 +507,4 @@ impl SettingsStore {
 }
 
 #[cfg(test)]
-#[path = "settings_tests.rs"]
 mod tests;

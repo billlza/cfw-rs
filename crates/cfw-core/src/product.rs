@@ -19,57 +19,26 @@ impl DesktopProductInfo {
             version: env!("CARGO_PKG_VERSION"),
             license: env!("CARGO_PKG_LICENSE"),
             operating_system: std::env::consts::OS,
-            minimum_os_version: if cfg!(target_os = "macos") {
-                Some("15.0")
-            } else {
-                None
-            },
-            architecture: match std::env::consts::ARCH {
-                "aarch64" => "arm64",
-                "x86_64" => "x64",
-                architecture => architecture,
-            },
+            minimum_os_version: minimum_os_version(std::env::consts::OS),
+            architecture: release_architecture(std::env::consts::ARCH),
         }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// The oldest system release this build is qualified on, for the system it
+/// was built for.
+fn minimum_os_version(operating_system: &str) -> Option<&'static str> {
+    (operating_system == "macos").then_some("15.0")
+}
 
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn mac_product_preserves_the_ga_wire_identity() {
-        assert_eq!(
-            serde_json::to_value(DesktopProductInfo::current()).unwrap(),
-            serde_json::json!({
-                "name": "Clash for Mac",
-                "version": env!("CARGO_PKG_VERSION"),
-                "license": "GPL-3.0-or-later",
-                "operating_system": "macos",
-                "minimum_os_version": "15.0",
-                "architecture": "arm64",
-            }),
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_product_never_advertises_apple_identity_or_unqualified_os_support() {
-        let value = serde_json::to_value(DesktopProductInfo::current()).unwrap();
-        assert_eq!(value["name"], "Clash for Windows");
-        assert_eq!(value["operating_system"], "windows");
-        assert_eq!(value["version"], env!("CARGO_PKG_VERSION"));
-        assert_eq!(value["license"], "GPL-3.0-or-later");
-        assert!(value["minimum_os_version"].is_null());
-        assert_eq!(value.as_object().unwrap().len(), 6);
-        assert_eq!(
-            value["architecture"],
-            match std::env::consts::ARCH {
-                "x86_64" => "x64",
-                "aarch64" => "arm64",
-                _ => panic!("unqualified Windows desktop architecture"),
-            },
-        );
+/// The architecture name the release artifacts use.
+fn release_architecture(architecture: &'static str) -> &'static str {
+    match architecture {
+        "aarch64" => "arm64",
+        "x86_64" => "x64",
+        architecture => architecture,
     }
 }
+
+#[cfg(test)]
+mod tests;

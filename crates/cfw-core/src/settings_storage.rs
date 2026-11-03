@@ -9,3 +9,6 @@ mod platform;
 compile_error!("application storage supports macOS and Windows");
 
 pub(crate) use platform::{FileIdentity, FilePolicy, SecureDirectory};
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests;

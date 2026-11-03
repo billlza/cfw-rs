@@ -483,10 +483,6 @@ private func mismatchedLease(_ descriptor: ConfigurationDescriptor) throws -> Le
     state: .starting, expiryMonotonic: 10_000)
 }
 
-private func readyEndpoint() throws -> MixedListenerEndpoint {
-  try MixedListenerEndpoint(host: "127.0.0.1", port: 7_890)
-}
-
 private struct CoordinatorFixture {
   let coordinator: ProxySystemProxyOwnerCoordinator
   let authority: FakeProxyOwnerAuthorityClient

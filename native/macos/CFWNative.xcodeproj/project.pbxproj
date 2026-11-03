@@ -30,6 +30,7 @@
 		0C0217CE41F6C8FEC81AD19C /* CryptoKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6833E1FDAD1F7246FAB83752 /* CryptoKit.framework */; };
 		0CB1BD5A7C6B05E4BB7E75A6 /* NativeBridgeStopRetryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7C843C4DFDDAD8EE2896EBD /* NativeBridgeStopRetryTests.swift */; };
 		0CDEF5EECD7EDB54D2FBC8C2 /* NativeBridgeStopRestoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 50B86A77FFC099831271524C /* NativeBridgeStopRestoreTests.swift */; };
+		0D199CC15096534E938A35C1 /* NativeStopTransaction.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1090FADB2333FE8AAEC7AF6A /* NativeStopTransaction.swift */; };
 		0F7A8914DA83F0FF23B82662 /* TunnelStartPayloadTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8417065D3B67D2B50263CD01 /* TunnelStartPayloadTests.swift */; };
 		1095FFA840D61812DF74CAB3 /* libCFWLibboxRuntime.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 7AEC5CA60C55F16137EEAAF0 /* libCFWLibboxRuntime.a */; };
 		11F76D79F69C374799833893 /* TunnelStartPayload.swift in Sources */ = {isa = PBXBuildFile; fileRef = 60B3C108BAE14F4FAD80B612 /* TunnelStartPayload.swift */; };
@@ -233,6 +234,7 @@
 		A207E8B7785CFD846EB8AC9F /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C728A426AD56CF0A261E2E63 /* Security.framework */; };
 		A21562DC3AC1817424EA1E71 /* OneWayMigrationPropertyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0EB48FF702749F262289254F /* OneWayMigrationPropertyTests.swift */; };
 		A258259F7191365268A36455 /* ProviderLifecycleStopTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EFCB0D772F8D6503589E9466 /* ProviderLifecycleStopTests.swift */; };
+		A2E617458928D7A080861FA3 /* NativeEngineLeaseInspecting.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15D84D9FD83D988C92BE897 /* NativeEngineLeaseInspecting.swift */; };
 		A5018586E0AD29002C5940B9 /* TunnelPreferenceWriteTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA527AD5AB1CAE95505DDD59 /* TunnelPreferenceWriteTests.swift */; };
 		A50A7DFEDCCA3C98D5D4C5CC /* CredentialGarbageCollectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA950506551AB5C5184FC6D9 /* CredentialGarbageCollectionTests.swift */; };
 		A58C40FC5D97E0D5A8DC859D /* AuthorityV1CodecTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B3D6FE468EE9DC213A01F76 /* AuthorityV1CodecTests.swift */; };
@@ -920,6 +922,7 @@
 		0EBFB02DD63385B5E78B4C72 /* CredentialMaterialTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialMaterialTests.swift; sourceTree = "<group>"; };
 		0EC9560714B4C1B12BCF8054 /* LibboxRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibboxRuntime.swift; sourceTree = "<group>"; };
 		0F0B695567523E56A16C3491 /* CFWGlobalAuthorityTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CFWGlobalAuthorityTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		1090FADB2333FE8AAEC7AF6A /* NativeStopTransaction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeStopTransaction.swift; sourceTree = "<group>"; };
 		116FB108DAEC7A1D5A893E63 /* NativeBridgeABIRequestRegistryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeBridgeABIRequestRegistryTests.swift; sourceTree = "<group>"; };
 		11CD9A1E84DC634DD581C9CA /* CFWProxyAgent.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CFWProxyAgent.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		128D75EF9EC431457D0C0BEF /* SecureAppGroupFileSystem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureAppGroupFileSystem.swift; sourceTree = "<group>"; };
@@ -1091,6 +1094,7 @@
 		9F20FCBF1974166C58E956B5 /* RoleScopedConnectionAuthorization.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoleScopedConnectionAuthorization.swift; sourceTree = "<group>"; };
 		A02909CBD418C743B2C44F89 /* AuthorityV1Requests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthorityV1Requests.swift; sourceTree = "<group>"; };
 		A0C9254D37480BD624C5719E /* NativeStartProxyAgentTestSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeStartProxyAgentTestSupport.swift; sourceTree = "<group>"; };
+		A15D84D9FD83D988C92BE897 /* NativeEngineLeaseInspecting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeEngineLeaseInspecting.swift; sourceTree = "<group>"; };
 		A17BF0DE3CF49144B362644C /* LibboxStartBudgetTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibboxStartBudgetTests.swift; sourceTree = "<group>"; };
 		A1EF47E09801CEB2FEDA6056 /* LibboxProfileProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibboxProfileProbe.swift; sourceTree = "<group>"; };
 		A237C7BA5EE6EC8197286026 /* NativeCredentialOperations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeCredentialOperations.swift; sourceTree = "<group>"; };
@@ -1855,10 +1859,12 @@
 				24B2949D961A95CDC43CD78D /* NativeBridgeCoordinator.swift */,
 				7C19605072174559F5EF08AE /* NativeBridgeCoordinatorSupport.swift */,
 				A237C7BA5EE6EC8197286026 /* NativeCredentialOperations.swift */,
+				A15D84D9FD83D988C92BE897 /* NativeEngineLeaseInspecting.swift */,
 				452632C2C9A18D7B70323830 /* NativeEngineOperations.swift */,
 				54874CC86565F799055BFC6E /* NativeProfileProbe.swift */,
 				ACCA752D82ED695DFF524483 /* NativeServiceBuildUpgrade.swift */,
 				17437FC5747522533423CDCD /* NativeServiceMaintenance.swift */,
+				1090FADB2333FE8AAEC7AF6A /* NativeStopTransaction.swift */,
 			);
 			path = CFWNativeBridge;
 			sourceTree = "<group>";
@@ -2781,10 +2787,12 @@
 				47D8833530B85167D3AA4421 /* NativeBridgeCoordinator.swift in Sources */,
 				EC8E3E6549674D0D6DC6CBE2 /* NativeBridgeCoordinatorSupport.swift in Sources */,
 				A9BA08A4674699FE9096AFF6 /* NativeCredentialOperations.swift in Sources */,
+				A2E617458928D7A080861FA3 /* NativeEngineLeaseInspecting.swift in Sources */,
 				F0E9A05FCDAE5987205212C3 /* NativeEngineOperations.swift in Sources */,
 				636D9FC118E27E3AFF497050 /* NativeProfileProbe.swift in Sources */,
 				312DE70F1452BD5BE5AAD7C2 /* NativeServiceBuildUpgrade.swift in Sources */,
 				692231AC32BB1DDA9998CFB2 /* NativeServiceMaintenance.swift in Sources */,
+				0D199CC15096534E938A35C1 /* NativeStopTransaction.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

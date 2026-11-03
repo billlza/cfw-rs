@@ -1,6 +1,9 @@
 use std::os::unix::fs::PermissionsExt as _;
 
-use super::*;
+use super::{
+    check::{install_support, release_page_url},
+    *,
+};
 
 fn authorization(version: &str) -> UpdateAuthorization {
     UpdateAuthorization {

@@ -1223,23 +1223,6 @@ private func context(
     configEpoch: request.context.configEpoch, generation: generation)
 }
 
-private func agreement(
-  for descriptor: ConfigurationDescriptor,
-  mode: AuthorityMode,
-  generation: UInt64? = nil,
-  leaseState: AuthorityLeaseState = .active
-) -> AuthorityLeaseAgreement {
-  AuthorityLeaseAgreement(
-    installationID: descriptor.installationID,
-    epoch: descriptor.epoch,
-    generation: generation ?? descriptor.generation,
-    ownerUID: 501,
-    mode: mode,
-    configSHA256: descriptor.sha256,
-    identitySHA256: descriptor.identitySHA256,
-    leaseState: leaseState)
-}
-
 private func recoveredStop(
   for descriptor: ConfigurationDescriptor,
   ownerUID: UInt32 = 501

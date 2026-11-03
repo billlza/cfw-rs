@@ -207,6 +207,7 @@
 		B56A4AAD76B284A51DD2EACD /* AuthorityOwnerProcess.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28F25B81E1B93D762D2CA1F5 /* AuthorityOwnerProcess.swift */; };
 		B67D1E50FD592E5B592447B1 /* AuthorityLivenessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E663F4A99AFEF18C139BD664 /* AuthorityLivenessTests.swift */; };
 		B7A66DBFE129AE59041EBAB8 /* libCFWLibboxObjC.a in Frameworks */ = {isa = PBXBuildFile; fileRef = F4CD5E1FF39376D7C0285148 /* libCFWLibboxObjC.a */; };
+		B7CF0551795449BFD2193962 /* AuthorityLeaseAgreementTestSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF8826C51BB37A03E66562BA /* AuthorityLeaseAgreementTestSupport.swift */; };
 		B85F40A8EBD4CDFF9E880E0E /* LibboxProfileProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EF47E09801CEB2FEDA6056 /* LibboxProfileProbe.swift */; };
 		B8A7C0B992DCB331B75F7DC4 /* TunnelTicketStartCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE352AE4E1DD5F81BA8A06AE /* TunnelTicketStartCoordinator.swift */; };
 		BA3C7F29FCA101E92BB1225A /* BoundedPacketQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BC7347BB0CC09FA8FD40FF0 /* BoundedPacketQueue.swift */; };
@@ -1042,6 +1043,7 @@
 		F9B1580E311290A6C8CA0D08 /* AuthorityV1WireModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthorityV1WireModel.swift; sourceTree = "<group>"; };
 		F9D32E275B38C221430B4CE0 /* NativeCredentialProvisioning.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeCredentialProvisioning.swift; sourceTree = "<group>"; };
 		FCE7A0D3AB0837E035620FF1 /* GlobalAuthorityReducer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlobalAuthorityReducer.swift; sourceTree = "<group>"; };
+		FF8826C51BB37A03E66562BA /* AuthorityLeaseAgreementTestSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthorityLeaseAgreementTestSupport.swift; sourceTree = "<group>"; };
 		FFC1C346771288A99F87CD85 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -1746,6 +1748,7 @@
 			isa = PBXGroup;
 			children = (
 				AA95986F311AAC515D6E91A9 /* ActiveAgreementTests.swift */,
+				FF8826C51BB37A03E66562BA /* AuthorityLeaseAgreementTestSupport.swift */,
 				72763B7F4E8EFD835CAA85C1 /* CredentialFailureMappingTests.swift */,
 				F31C7A64D276147B0B903D0D /* CutoverPreflightTests.swift */,
 				CB44296713539DAD97D0A561 /* GlobalAuthorityEngineLeaseInspectorTests.swift */,
@@ -2525,6 +2528,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				2D326E131B9136B45351E0F7 /* ActiveAgreementTests.swift in Sources */,
+				B7CF0551795449BFD2193962 /* AuthorityLeaseAgreementTestSupport.swift in Sources */,
 				1A5749787030E8BCB3DD2E1E /* CredentialFailureMappingTests.swift in Sources */,
 				C03936D210F6FF968A349F09 /* CutoverPreflightTests.swift in Sources */,
 				2228BBD79E09BC5D4CF6384B /* GlobalAuthorityEngineLeaseInspectorTests.swift in Sources */,

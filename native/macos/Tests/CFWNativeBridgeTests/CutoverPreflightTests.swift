@@ -8,398 +8,9 @@ import Testing
 @testable import CFWNativeBridge
 @testable import CFWSharedProtocol
 
-private actor RecordingProxyAgent: ProxyAgentTransporting {
-  func testProfileProxies(
-    configuration: Data, proxies: [String], timeoutMS: UInt16, targetURL: String,
-    expectedStatus: String
-  ) async throws
-    -> [ProfileProxyDelay]
-  {
-    #expect(!configuration.isEmpty)
-    #expect(timeoutMS == 5000)
-    return try proxies.map { try ProfileProxyDelay(name: $0, delay: 42, errorKind: nil) }
-  }
-
-  func authorizeSystemProxy(restorationOnly: Bool) async throws {}
-  private let observedSnapshot: EngineSnapshot
-  private let rejectsValidation: Bool
-  private(set) var startCalls = 0
-  private(set) var stopCalls = 0
-  private(set) var validationCalls = 0
-
-  init(
-    observedSnapshot: EngineSnapshot = .off,
-    rejectsValidation: Bool = false
-  ) {
-    self.observedSnapshot = observedSnapshot
-    self.rejectsValidation = rejectsValidation
-  }
-
-  func registrationStatus() -> ProxyAgentRegistrationStatus { .notRegistered }
-  func ensureRegistered() throws {}
-
-  func start(
-    configuration: Data,
-    descriptor: ConfigurationDescriptor,
-    authorization: HostPreparedSystemProxyStart
-  ) throws {
-    _ = configuration
-    _ = descriptor
-    authorization.erase()
-    throw UnusedSystemProxyStartPreparerError.unexpectedInvocation
-  }
-
-  func stop(configuration: ConfigurationDescriptor) throws {
-    _ = configuration
-    stopCalls += 1
-  }
-
-  func restoreSettingsBeforeStop(configuration: ConfigurationDescriptor) throws {
-    Issue.record("a cutover preflight stops no System Proxy session")
-  }
-
-  func snapshot() -> EngineSnapshot { observedSnapshot }
-
-  func validateConfiguration(
-    _ configuration: Data,
-    descriptor: ConfigurationDescriptor
-  ) throws {
-    _ = descriptor
-    #expect(!configuration.isEmpty)
-    validationCalls += 1
-    if rejectsValidation {
-      throw ProxyAgentHostError.agentFailure(
-        EngineFailure(
-          code: "configuration-rejected",
-          message: "Source-built libbox rejected the configuration.",
-          isRetryable: false
-        )
-      )
-    }
-  }
-
-  func mutationCounts() -> (Int, Int) { (startCalls, stopCalls) }
-  func validationCount() -> Int { validationCalls }
-}
-
-private struct ForbiddenProfileProbeOperationLease: NativeHostOperationLeaseAcquiring {
-  func acquire() throws -> any NativeHostOperationLeaseHolding {
-    throw UnusedSystemProxyStartPreparerError.unexpectedInvocation
-  }
-}
-
-private final class RebindTestStore: CredentialVaultBlobStoring, @unchecked Sendable {
-  private let lock = NSLock()
-  private var blob: StoredCredentialVaultBlob?
-  func load() throws -> StoredCredentialVaultBlob? { lock.withLock { blob } }
-  func compareAndSwap(expectedRevision: UUID?, newRevision: UUID, data: Data) throws {
-    try lock.withLock {
-      guard blob?.revision == expectedRevision else {
-        throw CredentialVaultError.compareAndSwapConflict
-      }
-      blob = StoredCredentialVaultBlob(data: data, revision: newRevision)
-    }
-  }
-}
-
-@Test func editedProfileRebindRetainsBothExactNativeCredentialAudiences() async throws {
-  let previous = try preflightRequest().systemProxyRequest.credentialAudience
-  let next = CredentialAudience(
-    profileID: previous.profileID,
-    profileDigest: try SHA256Digest(hex: String(repeating: "cd", count: 32)))
-  let reference = CredentialReference(id: UUID(), kind: .trojanPassword)
-  let slot = try CredentialSlot(
-    reference: reference, target: .trojanPassword, outboundIndex: 0,
-    jsonPointer: "/outbounds/0/password")
-  var material = try CredentialMaterial(entries: [
-    CredentialMaterialEntry(reference: reference, secret: Data("isolated-rebind-secret".utf8))
-  ])
-  defer { material.erase() }
-  let vault = CredentialVault(testingStore: RebindTestStore())
-  _ = try vault.provision(audience: previous, requiredReferences: [reference], material: material)
-  #expect(try vault.presence(audience: next, of: [reference]).allSatisfy { !$0.present })
-  let proxy = RecordingProxyAgent()
-  let tunnel = RecordingTunnelHost()
-  let coordinator = makeCoordinator(proxy: proxy, tunnel: tunnel, credentialVault: vault)
-  let request = try CredentialRebindRequest(
-    previousAudience: previous, audience: next, slots: [slot])
-  let wire = try JSONEncoder().encode(
-    NativeRequestEnvelope(command: .rebindProfileCredentials(request)))
-  #expect(!String(decoding: wire, as: UTF8.self).contains("isolated-rebind-secret"))
-  let decoded = try NativeBridgeProtocolCodec.decodeRequest(wire)
-  for _ in 0..<2 {
-    guard case .credentialReceipt(let receipt) = try await coordinator.execute(decoded.command)
-    else {
-      Issue.record("credential rebind did not return a receipt")
-      return
-    }
-    #expect(receipt.profileDigest == next.profileDigest)
-  }
-  for audience in [previous, next] {
-    var resolved = try vault.resolve(audience: audience, slots: [slot])
-    defer { resolved.erase() }
-    #expect(resolved.entries.count == 1)
-    #expect(try vault.presence(audience: audience, of: [reference]).allSatisfy(\.present))
-  }
-  // Provider refresh combines unchanged, rebound local nodes with credentials
-  // for new downloaded nodes in the same candidate audience.
-  let addedReference = CredentialReference(id: UUID(), kind: .trojanPassword)
-  let required = [reference, addedReference].sorted { $0.id.uuidString < $1.id.uuidString }
-  let provision = try CredentialProvisionRequest(
-    audience: next, requiredReferences: required,
-    entries: [CredentialProvisionEntry(reference: addedReference, secret: "new-provider-secret")])
-  guard case .credentialReceipt = try await coordinator.execute(.provisionCredentials(provision))
-  else {
-    Issue.record("partial provider provisioning did not return a receipt")
-    return
-  }
-  #expect(try vault.presence(audience: next, of: required).allSatisfy(\.present))
-  #expect(try vault.presence(audience: previous, of: [reference]).allSatisfy(\.present))
-  #expect(try vault.presence(audience: previous, of: [addedReference]).allSatisfy { !$0.present })
-  let wrong = CredentialAudience(
-    profileID: previous.profileID,
-    profileDigest: try SHA256Digest(hex: String(repeating: "ef", count: 32)))
-  await #expect(throws: (any Error).self) {
-    try await coordinator.execute(
-      .rebindProfileCredentials(
-        CredentialRebindRequest(previousAudience: wrong, audience: next, slots: [slot])))
-  }
-  #expect(throws: (any Error).self) {
-    try CredentialRebindRequest(
-      previousAudience: previous,
-      audience: CredentialAudience(profileID: UUID(), profileDigest: next.profileDigest),
-      slots: [slot])
-  }
-  #expect(await proxy.mutationCounts() == (0, 0))
-  #expect(await tunnel.mutationCounts() == (install: 0, cancel: 0, start: 0, stop: 0))
-}
-
-@Test func offlineProfileProbeDoesNotAcquireNetworkOwnershipOrStartEitherMode() async throws {
-  let proxy = RecordingProxyAgent()
-  let tunnel = RecordingTunnelHost()
-  let coordinator = NativeBridgeCoordinator(
-    proxy: proxy, systemProxyPreparer: UnusedSystemProxyStartPreparer(), tunnel: tunnel,
-    engineLease: AvailableEngineLease(), credentialVault: EmptyCredentialVault(),
-    hostOperationLease: ForbiddenProfileProbeOperationLease(),
-    serviceBuildObserver: FixedCurrentServiceBuildObserver())
-  let request = try ProfileDelayTestRequest(
-    audience: preflightRequest().systemProxyRequest.credentialAudience,
-    configJSON: #"{"outbounds":[{"type":"direct","tag":"node"}]}"#,
-    credentialSlots: [], proxies: ["node"], timeoutMS: 5000)
-  let envelope = NativeRequestEnvelope(requestID: UUID(), command: .testProfileDelays(request))
-  let decoded = try NativeBridgeProtocolCodec.decodeRequest(JSONEncoder().encode(envelope))
-  let result = try await coordinator.execute(decoded.command)
-  #expect(
-    result == .profileDelays([try ProfileProxyDelay(name: "node", delay: 42, errorKind: nil)]))
-  #expect(await proxy.mutationCounts() == (0, 0))
-  #expect(await proxy.validationCount() == 0)
-  #expect(await tunnel.mutationCounts() == (install: 0, cancel: 0, start: 0, stop: 0))
-}
-
-private actor RecordingTunnelHost: TunnelHostBridging {
-  private var installResults: [SystemExtensionInstallResult]
-  private let managedConfiguration: ConfigurationDescriptor?
-  private(set) var installCalls = 0
-  private(set) var cancelCalls = 0
-  private(set) var startCalls = 0
-  private(set) var stopCalls = 0
-
-  init(
-    installResult: SystemExtensionInstallResult = .completed,
-    managedConfiguration: ConfigurationDescriptor? = nil
-  ) {
-    installResults = [installResult]
-    self.managedConfiguration = managedConfiguration
-  }
-
-  init(installResults: [SystemExtensionInstallResult]) {
-    self.installResults = installResults
-    managedConfiguration = nil
-  }
-
-  func installTunnel() throws -> SystemExtensionInstallResult {
-    installCalls += 1
-    guard !installResults.isEmpty else {
-      throw AppleNetworkError.unknownSystemExtensionResult(-1)
-    }
-    return installResults.removeFirst()
-  }
-
-  func awaitTunnelInstallationApproval() -> SystemExtensionApprovalWait {
-    Issue.record("a cutover preflight never awaits an approval")
-    return .noPendingRequest
-  }
-
-  func cancelTunnelInstallationWait() { cancelCalls += 1 }
-
-  func authorizeTunnelConfiguration(_ descriptor: ConfigurationDescriptor) throws {
-    throw AppleNetworkError.providerDidNotRespond
-  }
-
-  func startTunnel(
-    configuration: Data,
-    descriptor: ConfigurationDescriptor,
-    credentialPayload: Data?
-  ) {
-    _ = configuration
-    _ = descriptor
-    _ = credentialPayload
-    startCalls += 1
-  }
-
-  func stopTunnel(expectedConfiguration: ConfigurationDescriptor) {
-    _ = expectedConfiguration
-    stopCalls += 1
-  }
-
-  func snapshot() -> EngineSnapshot { .off }
-  func hasManagedTunnelConfiguration() -> Bool { false }
-  func managedTunnelConfiguration() -> ConfigurationDescriptor? { managedConfiguration }
-  func pendingPreferenceMutationConfiguration() -> ConfigurationDescriptor? { nil }
-  func compensatePendingPreferenceMutation(
-    expectedConfiguration: ConfigurationDescriptor,
-    revokePreparation: @escaping @Sendable () async throws -> Void
-  ) async throws -> Bool { false }
-  func finishPreferenceCompensation(
-    expectedConfiguration: ConfigurationDescriptor
-  ) async throws {}
-  func completePreferenceMutation(
-    expectedConfiguration: ConfigurationDescriptor
-  ) {}
-
-  func mutationCounts() -> (install: Int, cancel: Int, start: Int, stop: Int) {
-    (installCalls, cancelCalls, startCalls, stopCalls)
-  }
-}
-
-private struct AvailableEngineLease: NativeEngineLeaseInspecting {
-  func isAvailable() async throws -> Bool { true }
-  func beginStop(
-    for descriptor: ConfigurationDescriptor
-  ) async throws -> NativeAuthorityStopContext {
-    throw NativeBridgeExecutionError.failure(.unavailable, "unused stop boundary")
-  }
-  func completeStop(_ context: NativeAuthorityStopContext) async throws {
-    throw NativeBridgeExecutionError.failure(.unavailable, "unused stop boundary")
-  }
-}
-
-private final class RecordingGarbageCollectionVault:
-  NativeCredentialVaulting, @unchecked Sendable
-{
-  private let lock = NSLock()
-  private var previewReferences: [CredentialReference] = []
-
-  func provision(
-    audience: CredentialAudience,
-    requiredReferences: [CredentialReference],
-    material: CredentialMaterial
-  ) throws -> CFWCredentialVault.CredentialVaultReceipt {
-    _ = requiredReferences
-    _ = material
-    return CFWCredentialVault.CredentialVaultReceipt(audience: audience)
-  }
-
-  func presence(
-    audience: CredentialAudience,
-    of references: [CredentialReference]
-  ) throws -> [CFWCredentialVault.CredentialPresence] {
-    references.map { CFWCredentialVault.CredentialPresence(reference: $0, present: true) }
-  }
-
-  func resolve(
-    audience: CredentialAudience,
-    slots: [CredentialSlot]
-  ) throws -> CredentialMaterial {
-    _ = slots
-    return .empty
-  }
-
-  func previewGarbageCollection(
-    _ request: CredentialGarbageCollectionRequest
-  ) throws -> CredentialGarbageCollectionPreview {
-    lock.withLock { previewReferences = request.catalog.flatMap(\.references) }
-    return try CredentialGarbageCollectionPreview(
-      snapshotDigest: request.snapshotDigest,
-      vaultRevision: #require(
-        UUID(uuidString: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee")
-      ),
-      orphanBindings: []
-    )
-  }
-
-  func commitGarbageCollection(
-    _ request: CredentialGarbageCollectionCommitRequest
-  ) throws -> CredentialGarbageCollectionReceipt {
-    _ = request
-    throw CredentialVaultError.garbageCollectionConfirmationExpired
-  }
-
-  func capturedReferences() -> [CredentialReference] {
-    lock.withLock { previewReferences }
-  }
-}
-
-private final class EmptyCredentialVault: NativeCredentialVaulting, @unchecked Sendable {
-  func provision(
-    audience: CredentialAudience,
-    requiredReferences: [CredentialReference],
-    material: CredentialMaterial
-  ) throws -> CFWCredentialVault.CredentialVaultReceipt {
-    _ = requiredReferences
-    _ = material
-    return CFWCredentialVault.CredentialVaultReceipt(audience: audience)
-  }
-
-  func presence(
-    audience: CredentialAudience,
-    of references: [CredentialReference]
-  ) throws -> [CFWCredentialVault.CredentialPresence] {
-    references.map {
-      CFWCredentialVault.CredentialPresence(reference: $0, present: false)
-    }
-  }
-
-  func resolve(
-    audience: CredentialAudience,
-    slots: [CredentialSlot]
-  ) throws -> CredentialMaterial {
-    guard slots.isEmpty else {
-      throw CredentialMaterialError.missingReference(slots[0].reference.id)
-    }
-    return .empty
-  }
-
-  func previewGarbageCollection(
-    _ request: CredentialGarbageCollectionRequest
-  ) throws -> CredentialGarbageCollectionPreview {
-    _ = request
-    throw CredentialVaultError.missingVault
-  }
-
-  func commitGarbageCollection(
-    _ request: CredentialGarbageCollectionCommitRequest
-  ) throws -> CredentialGarbageCollectionReceipt {
-    _ = request
-    throw CredentialVaultError.missingVault
-  }
-}
-
-private func makeCoordinator(
-  proxy: any ProxyAgentTransporting,
-  tunnel: any TunnelHostBridging,
-  credentialVault: any NativeCredentialVaulting
-) -> NativeBridgeCoordinator {
-  NativeBridgeCoordinator(
-    proxy: proxy,
-    systemProxyPreparer: UnusedSystemProxyStartPreparer(),
-    tunnel: tunnel,
-    engineLease: AvailableEngineLease(),
-    credentialVault: credentialVault,
-    hostOperationLease: AvailableNativeHostOperationLease(),
-    serviceBuildObserver: FixedCurrentServiceBuildObserver())
-}
-
+// The cutover preflight: both configurations checked without a data plane, an
+// active owner never stopped, no System Extension installation for System
+// Proxy, approval retries reattached, and a native state that is not Off.
 private struct PreflightIdentityDocument: Encodable {
   let configurationSHA256: String
   let credentialAudience: CredentialAudience
@@ -438,7 +49,7 @@ private func sha256(_ data: Data) throws -> CFWSharedProtocol.SHA256Digest {
   )
 }
 
-private func preflightRequest(target: EngineMode = .tunnel) throws -> CutoverPreflightRequest {
+func preflightRequest(target: EngineMode = .tunnel) throws -> CutoverPreflightRequest {
   let context = try EngineCommandContext(
     installationID: #require(UUID(uuidString: "11111111-1111-4111-8111-111111111111")),
     configEpoch: 2,
@@ -487,7 +98,7 @@ private func preflightRequest(target: EngineMode = .tunnel) throws -> CutoverPre
 @Test func cutoverPreflightChecksBothConfigsAndNeverStartsADataPlane() async throws {
   let proxy = RecordingProxyAgent()
   let tunnel = RecordingTunnelHost()
-  let coordinator = makeCoordinator(
+  let coordinator = makePreflightCoordinator(
     proxy: proxy,
     tunnel: tunnel,
     credentialVault: EmptyCredentialVault()
@@ -508,7 +119,7 @@ private func preflightRequest(target: EngineMode = .tunnel) throws -> CutoverPre
 @Test func failedConfigPreflightLeavesInstallAndDataPlaneUntouched() async throws {
   let proxy = RecordingProxyAgent(rejectsValidation: true)
   let tunnel = RecordingTunnelHost()
-  let coordinator = makeCoordinator(
+  let coordinator = makePreflightCoordinator(
     proxy: proxy,
     tunnel: tunnel,
     credentialVault: EmptyCredentialVault()
@@ -529,7 +140,7 @@ func onlineCandidateCheckNeverStopsTheActiveOwner(rejected: Bool) async throws {
     configuration: try request.descriptor(slot: .systemProxy), sequence: 7)
   let proxy = RecordingProxyAgent(observedSnapshot: before, rejectsValidation: rejected)
   let tunnel = RecordingTunnelHost()
-  let coordinator = makeCoordinator(
+  let coordinator = makePreflightCoordinator(
     proxy: proxy, tunnel: tunnel, credentialVault: EmptyCredentialVault())
   let envelope = NativeRequestEnvelope(requestID: UUID(), command: .checkConfiguration(request))
   let decoded = try NativeBridgeProtocolCodec.decodeRequest(JSONEncoder().encode(envelope))
@@ -547,7 +158,7 @@ func onlineCandidateCheckNeverStopsTheActiveOwner(rejected: Bool) async throws {
 @Test func systemProxyPreflightNeverRequestsSystemExtensionInstallation() async throws {
   let proxy = RecordingProxyAgent()
   let tunnel = RecordingTunnelHost()
-  let coordinator = makeCoordinator(
+  let coordinator = makePreflightCoordinator(
     proxy: proxy,
     tunnel: tunnel,
     credentialVault: EmptyCredentialVault()
@@ -569,7 +180,7 @@ func onlineCandidateCheckNeverStopsTheActiveOwner(rejected: Bool) async throws {
 @Test func approvalRetryReattachesWithoutAbandoningRequestOrStartingTunnel() async throws {
   let proxy = RecordingProxyAgent()
   let tunnel = RecordingTunnelHost(installResults: [.awaitingApproval, .completed])
-  let coordinator = makeCoordinator(
+  let coordinator = makePreflightCoordinator(
     proxy: proxy,
     tunnel: tunnel,
     credentialVault: EmptyCredentialVault()
@@ -602,7 +213,7 @@ func onlineCandidateCheckNeverStopsTheActiveOwner(rejected: Bool) async throws {
     )
   )
   let tunnel = RecordingTunnelHost()
-  let coordinator = makeCoordinator(
+  let coordinator = makePreflightCoordinator(
     proxy: proxy,
     tunnel: tunnel,
     credentialVault: EmptyCredentialVault()
@@ -616,7 +227,7 @@ func onlineCandidateCheckNeverStopsTheActiveOwner(rejected: Bool) async throws {
   #expect(await tunnel.mutationCounts() == (install: 0, cancel: 0, start: 0, stop: 0))
 }
 
-private func descriptor(
+func preflightDescriptor(
   slot: ConfigurationSlot,
   reference: CredentialReference
 ) throws -> ConfigurationDescriptor {
@@ -643,36 +254,4 @@ private func descriptor(
     identitySHA256: digest,
     credentialSlots: [credentialSlot]
   )
-}
-
-@Test func garbageCollectionProtectsActiveAndManagedTunnelCredentialReferences() async throws {
-  let activeReference = CredentialReference(
-    id: try #require(UUID(uuidString: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")),
-    kind: .trojanPassword
-  )
-  let pendingReference = CredentialReference(
-    id: try #require(UUID(uuidString: "cccccccc-cccc-4ccc-8ccc-cccccccccccc")),
-    kind: .shadowsocksPassword
-  )
-  let activeDescriptor = try descriptor(slot: .systemProxy, reference: activeReference)
-  let pendingDescriptor = try descriptor(slot: .tunnel, reference: pendingReference)
-  let proxy = RecordingProxyAgent(
-    observedSnapshot: .proxyActive(configuration: activeDescriptor, sequence: 1)
-  )
-  let tunnel = RecordingTunnelHost(
-    managedConfiguration: pendingDescriptor
-  )
-  let vault = RecordingGarbageCollectionVault()
-  let coordinator = makeCoordinator(
-    proxy: proxy,
-    tunnel: tunnel,
-    credentialVault: vault
-  )
-  let request = try CredentialGarbageCollectionRequest(
-    snapshotDigest: CFWSharedProtocol.SHA256Digest(hex: String(repeating: "ab", count: 32)),
-    catalog: []
-  )
-
-  _ = try await coordinator.execute(.previewCredentialGarbageCollection(request))
-  #expect(vault.capturedReferences() == [activeReference, pendingReference])
 }

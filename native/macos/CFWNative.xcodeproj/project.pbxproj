@@ -134,6 +134,7 @@
 		5F45EEDDCDAE81DF39248C03 /* KernelProcessTable.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5AB14322545E5B4A56ABA2B /* KernelProcessTable.swift */; };
 		5F56494F4016F187CB4B8815 /* CryptoKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6833E1FDAD1F7246FAB83752 /* CryptoKit.framework */; };
 		5F735E801E1FB03775C94C41 /* LANConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62CF1627365A4F6656F17E2E /* LANConfiguration.swift */; };
+		5FC9A29984A0D888C74062B8 /* SystemProxyPreferencesTestSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38DD018C9EC5D8B20ACD9229 /* SystemProxyPreferencesTestSupport.swift */; };
 		6106C7AB41233EB6F423CDBF /* TunnelPreferenceCompensationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5625795A2E9D9E5CB7179D5 /* TunnelPreferenceCompensationTests.swift */; };
 		62506ECCDA67BBC99A44B67A /* ProxySystemProxyOwnerCoordinatorRevocationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 95F2DCF952F7107D97ED0A13 /* ProxySystemProxyOwnerCoordinatorRevocationTests.swift */; };
 		627D8348373EE0FC5DEA4350 /* AuthorityJournalAnchor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59151737C9E68ACE294EF6C6 /* AuthorityJournalAnchor.swift */; };
@@ -205,6 +206,7 @@
 		A207E8B7785CFD846EB8AC9F /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C728A426AD56CF0A261E2E63 /* Security.framework */; };
 		A21562DC3AC1817424EA1E71 /* OneWayMigrationPropertyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0EB48FF702749F262289254F /* OneWayMigrationPropertyTests.swift */; };
 		A58C40FC5D97E0D5A8DC859D /* AuthorityV1CodecTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B3D6FE468EE9DC213A01F76 /* AuthorityV1CodecTests.swift */; };
+		A5A6C2F90D6397CBB00D2DFF /* SystemProxyEffectiveStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D22AA2C7BCD8BA6D8482512F /* SystemProxyEffectiveStateTests.swift */; };
 		A6D200B683B5DEBDF3564B6C /* LibboxConfigurationChecker.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF56679A8B961C61681A71BE /* LibboxConfigurationChecker.swift */; };
 		A79B2095D3851142ADC2A552 /* libCFWGlobalAuthority.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 9C9FB4A929A9CCB2ACF903FF /* libCFWGlobalAuthority.a */; };
 		A82FA5BAFE47EF0CE58E1F21 /* GlobalAuthorityDaemon.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5424424668278B46A475D684 /* GlobalAuthorityDaemon.swift */; };
@@ -233,6 +235,7 @@
 		BA4EF1F30860F0FC405C5942 /* PeerAuthorizationPropertyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE9EC79B707150A7F6704AB2 /* PeerAuthorizationPropertyTests.swift */; };
 		BA8CF5B3053A018D061066CC /* CryptoKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6833E1FDAD1F7246FAB83752 /* CryptoKit.framework */; };
 		BB7DAEEE558037767B17F502 /* SystemProxyStartPreparerTestSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23A8434D510A63CC0DD8F4E3 /* SystemProxyStartPreparerTestSupport.swift */; };
+		BC06E7E2FE066B3AE1502BE7 /* SystemProxyAuthorizationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA2EA9F29D36D99D4BA380B9 /* SystemProxyAuthorizationTests.swift */; };
 		BC0E1A268E547770252AA71D /* AuthorityJournal.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2C06BAA66095977A49B9088 /* AuthorityJournal.swift */; };
 		BDC14BB7C2FAC8C7450A8693 /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A8823AD70E7698BBEC5D4EFC /* NetworkExtension.framework */; };
 		BFABEEC9775FFD6B0ACD39E5 /* AuthorityBackpressureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 452722C7509B126FC38EC3B9 /* AuthorityBackpressureTests.swift */; };
@@ -895,6 +898,7 @@
 		34CF9D4C6428C4F7637376BC /* IPPacket.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IPPacket.swift; sourceTree = "<group>"; };
 		363A7D4E545593B4AF3C4280 /* AuthorityProtocolServiceExampleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthorityProtocolServiceExampleTests.swift; sourceTree = "<group>"; };
 		374828D0449C73C8F8420F62 /* Network.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Network.framework; path = System/Library/Frameworks/Network.framework; sourceTree = SDKROOT; };
+		38DD018C9EC5D8B20ACD9229 /* SystemProxyPreferencesTestSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemProxyPreferencesTestSupport.swift; sourceTree = "<group>"; };
 		39B71BA8FC172A948930EE09 /* ProxyOwnershipJournalStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxyOwnershipJournalStoreTests.swift; sourceTree = "<group>"; };
 		3B7B7315A916D4D8736E68DE /* ProxySessionLifecycleRetirementTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxySessionLifecycleRetirementTests.swift; sourceTree = "<group>"; };
 		3B7E6A542EA8E11E503788A4 /* ProxySystemProxyOwnerCoordinatorCallTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxySystemProxyOwnerCoordinatorCallTests.swift; sourceTree = "<group>"; };
@@ -1054,6 +1058,7 @@
 		CF56679A8B961C61681A71BE /* LibboxConfigurationChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibboxConfigurationChecker.swift; sourceTree = "<group>"; };
 		D15842B4F4ACC7A89500CC86 /* CFWGlobalAuthority */ = {isa = PBXFileReference; includeInIndex = 0; path = CFWGlobalAuthority; sourceTree = BUILT_PRODUCTS_DIR; };
 		D169D69CE3BF020154B89CCC /* EngineProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineProtocolTests.swift; sourceTree = "<group>"; };
+		D22AA2C7BCD8BA6D8482512F /* SystemProxyEffectiveStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemProxyEffectiveStateTests.swift; sourceTree = "<group>"; };
 		D24EB08B13BEBBEB1F049D98 /* ProxySystemProxyOwnerCoordinatorRetirementTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxySystemProxyOwnerCoordinatorRetirementTests.swift; sourceTree = "<group>"; };
 		D2BE7D73795FBD8CE7887272 /* NativeCredentialGarbageCollection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeCredentialGarbageCollection.swift; sourceTree = "<group>"; };
 		D2F4658B4AD92ECE5D6CC765 /* CutoverPreflightProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CutoverPreflightProtocol.swift; sourceTree = "<group>"; };
@@ -1081,6 +1086,7 @@
 		E891CDC0DAD508FDE677D000 /* NativeStartSynchronizationTestSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeStartSynchronizationTestSupport.swift; sourceTree = "<group>"; };
 		E899BAFDF20794FBCC622B32 /* libCFWPacketTransport.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libCFWPacketTransport.a; sourceTree = BUILT_PRODUCTS_DIR; };
 		E9C716EA643D514E99C8BB90 /* com.bill.clashformac.packet-tunnel.systemextension */ = {isa = PBXFileReference; explicitFileType = "wrapper.system-extension"; includeInIndex = 0; path = "com.bill.clashformac.packet-tunnel.systemextension"; sourceTree = BUILT_PRODUCTS_DIR; };
+		EA2EA9F29D36D99D4BA380B9 /* SystemProxyAuthorizationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemProxyAuthorizationTests.swift; sourceTree = "<group>"; };
 		EA6FF4FBA34DB348729C3AC9 /* NativeBridgeStartAgreementTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeBridgeStartAgreementTests.swift; sourceTree = "<group>"; };
 		EAC5632EC7EB5345F733521E /* AuthorityService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthorityService.swift; sourceTree = "<group>"; };
 		EAEAFE2891FB95ADA4DC08CA /* TunnelPreferenceMutationJournalTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelPreferenceMutationJournalTests.swift; sourceTree = "<group>"; };
@@ -1504,7 +1510,10 @@
 				316D40275C129671D8EA3018 /* ProxySystemProxyOwnerCoordinatorStopTests.swift */,
 				CA8C51159D7679093887C868 /* ProxySystemProxyOwnerCoordinatorTests.swift */,
 				7AA545FECC5E3B863D165747 /* ProxySystemProxyOwnerCoordinatorTestSupport.swift */,
+				EA2EA9F29D36D99D4BA380B9 /* SystemProxyAuthorizationTests.swift */,
+				D22AA2C7BCD8BA6D8482512F /* SystemProxyEffectiveStateTests.swift */,
 				4A6CEC2D04B4AFAA3A8C03B8 /* SystemProxyPreferencesTests.swift */,
+				38DD018C9EC5D8B20ACD9229 /* SystemProxyPreferencesTestSupport.swift */,
 			);
 			path = CFWProxyAgentTests;
 			sourceTree = "<group>";
@@ -2458,6 +2467,9 @@
 				09555BA87A09FB4BFCBB1906 /* ProxySystemProxyOwnerCoordinatorStopTests.swift in Sources */,
 				C6F2B86D5DBB5B13FC3BC9A6 /* ProxySystemProxyOwnerCoordinatorTestSupport.swift in Sources */,
 				2FD87C0054E1B0612C53D829 /* ProxySystemProxyOwnerCoordinatorTests.swift in Sources */,
+				BC06E7E2FE066B3AE1502BE7 /* SystemProxyAuthorizationTests.swift in Sources */,
+				A5A6C2F90D6397CBB00D2DFF /* SystemProxyEffectiveStateTests.swift in Sources */,
+				5FC9A29984A0D888C74062B8 /* SystemProxyPreferencesTestSupport.swift in Sources */,
 				6D84EAF8E3A7C844363D2691 /* SystemProxyPreferencesTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

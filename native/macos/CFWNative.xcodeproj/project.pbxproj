@@ -196,6 +196,7 @@
 		7D2FFA00D27C51C9B77525AC /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFC1C346771288A99F87CD85 /* main.swift */; };
 		7E2B3D8B3A566130B29B6C29 /* NativeStartTunnelHostTestSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDE990BD471ECF473DA19BF0 /* NativeStartTunnelHostTestSupport.swift */; };
 		7F70A8CCD09E0B96C9C8342B /* ProviderLifecycleTestSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02B13B7D9FFC4641450046D1 /* ProviderLifecycleTestSupport.swift */; };
+		7F880C40DF6C011BCBDC9F68 /* ProxyOwnerCoordinatorValues.swift in Sources */ = {isa = PBXBuildFile; fileRef = 804FF2E1E4F6EA675736DD10 /* ProxyOwnerCoordinatorValues.swift */; };
 		802DD1A538C3865A9E4B14A6 /* ActiveAgreementFakes.swift in Sources */ = {isa = PBXBuildFile; fileRef = DC528059154A1DBF370905E9 /* ActiveAgreementFakes.swift */; };
 		806D9DCC408819CF8DD2C3E2 /* libCFWLibboxRuntime.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 7AEC5CA60C55F16137EEAAF0 /* libCFWLibboxRuntime.a */; };
 		81F861A4410EBC8CC71808E6 /* ProxyAgentTestSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = F5968B72E4D18A74886CB8FD /* ProxyAgentTestSupport.swift */; };
@@ -384,6 +385,7 @@
 		F1710071DAB1665267179D4A /* PacketTunnelSessionLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = CDEE2567B544BCF93C1CE3EB /* PacketTunnelSessionLifecycle.swift */; };
 		F1CCCA6A4C5DF9BE9004EB8A /* TunnelAddressPlan.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59C52B85A64A7895C88E91CD /* TunnelAddressPlan.swift */; };
 		F2C247BBF6E09E5A31EA663E /* ProxyAgentHostClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 565BFA9F05D311A350FAD7E1 /* ProxyAgentHostClient.swift */; };
+		F2E8FBFDF23CD1E38F369DF9 /* ProxyOwnerDependencies.swift in Sources */ = {isa = PBXBuildFile; fileRef = 009F3A6FBB01A16F6BD691E3 /* ProxyOwnerDependencies.swift */; };
 		F5191F35E3A5A0CFC44CD86C /* libCFWSharedProtocol.a in Frameworks */ = {isa = PBXBuildFile; fileRef = E1382358BF9A0F2942FF7CC0 /* libCFWSharedProtocol.a */; };
 		F6B5D799D2BA819920FFC0B4 /* CredentialMaterial.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66D069304736A571212FCD7C /* CredentialMaterial.swift */; };
 		F6F8CDD8340E85E212A12AC6 /* NativeStartProxyAgentTestSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0C9254D37480BD624C5719E /* NativeStartProxyAgentTestSupport.swift */; };
@@ -916,6 +918,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		009F3A6FBB01A16F6BD691E3 /* ProxyOwnerDependencies.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxyOwnerDependencies.swift; sourceTree = "<group>"; };
 		010A96B47FD363C7FD7A3505 /* EngineFailureCode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineFailureCode.swift; sourceTree = "<group>"; };
 		02A4D48E5387D9535AE9A0FC /* TicketOnlyTunnelStartTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TicketOnlyTunnelStartTests.swift; sourceTree = "<group>"; };
 		02A5FEEB309B0F35426952B8 /* libCFWCredentialVault.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libCFWCredentialVault.a; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -1078,6 +1081,7 @@
 		7B6B108B86A1999F6F49DC65 /* AuthorityOwnerLiveness.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthorityOwnerLiveness.swift; sourceTree = "<group>"; };
 		7C19605072174559F5EF08AE /* NativeBridgeCoordinatorSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeBridgeCoordinatorSupport.swift; sourceTree = "<group>"; };
 		7E78C153A23537769A7F8D59 /* NativeBridgeStartCommandIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeBridgeStartCommandIntegrationTests.swift; sourceTree = "<group>"; };
+		804FF2E1E4F6EA675736DD10 /* ProxyOwnerCoordinatorValues.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxyOwnerCoordinatorValues.swift; sourceTree = "<group>"; };
 		809342A1B071C7EC9BC2CBA7 /* CurrentAppServiceMaintenanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CurrentAppServiceMaintenanceTests.swift; sourceTree = "<group>"; };
 		811D2A50690D3024E318A4DE /* ServiceCodeHash.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServiceCodeHash.swift; sourceTree = "<group>"; };
 		82685BB8910588272D53CC8C /* EngineProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineProtocol.swift; sourceTree = "<group>"; };
@@ -1997,6 +2001,8 @@
 				5641D870A50F668D27BBD945 /* ProxyAgentService.swift */,
 				90CCAF59793DBC94CF708C90 /* ProxyAuthorityOwnership.swift */,
 				CAB752DDC87AB652A7909F45 /* ProxyEngine.swift */,
+				804FF2E1E4F6EA675736DD10 /* ProxyOwnerCoordinatorValues.swift */,
+				009F3A6FBB01A16F6BD691E3 /* ProxyOwnerDependencies.swift */,
 				7992F66A36F455FF02A57EDB /* ProxyOwnershipJournal.swift */,
 				6D6C8F26D378EB06A88158DE /* ProxySessionLifecycle.swift */,
 				CCD88FA7E7E893E160265D8F /* SystemProxyAuthorization.swift */,
@@ -2952,6 +2958,8 @@
 				319889940229F25DF0E96648 /* ProxyAgentService.swift in Sources */,
 				0ACB7FE52E6F98E094958146 /* ProxyAuthorityOwnership.swift in Sources */,
 				D06BA5B8CDED7A536F16A41E /* ProxyEngine.swift in Sources */,
+				7F880C40DF6C011BCBDC9F68 /* ProxyOwnerCoordinatorValues.swift in Sources */,
+				F2E8FBFDF23CD1E38F369DF9 /* ProxyOwnerDependencies.swift in Sources */,
 				D51CDD9B50E2759901312C83 /* ProxyOwnershipJournal.swift in Sources */,
 				780FCAA8E5686E46112B0C76 /* ProxySessionLifecycle.swift in Sources */,
 				335CC5EC8126996D63B565EF /* SystemProxyAuthorization.swift in Sources */,

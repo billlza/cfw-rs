@@ -47,6 +47,7 @@
 		1C7672F97E7602035110991D /* EngineFailureCode.swift in Sources */ = {isa = PBXBuildFile; fileRef = 010A96B47FD363C7FD7A3505 /* EngineFailureCode.swift */; };
 		1D5B8CB0AA6AE7410CC525FD /* AuthorityV1Codec.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F1B8C9A5CD0697EF290FDC8 /* AuthorityV1Codec.swift */; };
 		1E6E7AC1FB1DB90874772E7D /* Network.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 374828D0449C73C8F8420F62 /* Network.framework */; };
+		1FD38EE8FDA9CA52E06CC807 /* OneWayMigrationPropertyTestSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = E63C20ADF3C0F39757D5F9D8 /* OneWayMigrationPropertyTestSupport.swift */; };
 		20C52AE97BE3FF50C236D262 /* LibboxProcessLookupPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F4A8D21CD0316D2E6F9F34D /* LibboxProcessLookupPolicy.swift */; };
 		214369C049B83F2014388F47 /* libCFWPacketTransport.a in Frameworks */ = {isa = PBXBuildFile; fileRef = E899BAFDF20794FBCC622B32 /* libCFWPacketTransport.a */; };
 		2228BBD79E09BC5D4CF6384B /* GlobalAuthorityEngineLeaseInspectorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB44296713539DAD97D0A561 /* GlobalAuthorityEngineLeaseInspectorTests.swift */; };
@@ -301,6 +302,7 @@
 		E0F6DDD934BA4C878B445E4A /* ProxyAgentInstalled40019Tests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1C72F7B01B351D31FDF6136 /* ProxyAgentInstalled40019Tests.swift */; };
 		E16EAB4D2627359BF47AAC3D /* NativeCredentialGarbageCollection.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2BE7D73795FBD8CE7887272 /* NativeCredentialGarbageCollection.swift */; };
 		E17B3EC54E87EBCA0CE295BB /* CryptoKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6833E1FDAD1F7246FAB83752 /* CryptoKit.framework */; };
+		E1C4412D7CA5C341C7819824 /* OneWayMigrationEnrollmentPropertyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3714EA6527662D8FD5D1FB9 /* OneWayMigrationEnrollmentPropertyTests.swift */; };
 		E1D1F3852AE4A8CC3DA84E26 /* CodeIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08BE33F94DC44BB352596B1A /* CodeIdentity.swift */; };
 		E1FEB1EB30DCC6826ABA4CA4 /* SandboxConfigurationAcceptanceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03314AEFA2B438B786B82D20 /* SandboxConfigurationAcceptanceStore.swift */; };
 		E24A50C51AC923434CF9AEA5 /* libCFWProxyAgentCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 1D1173992869652522AD0288 /* libCFWProxyAgentCore.a */; };
@@ -1105,7 +1107,9 @@
 		E1382358BF9A0F2942FF7CC0 /* libCFWSharedProtocol.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libCFWSharedProtocol.a; sourceTree = BUILT_PRODUCTS_DIR; };
 		E13C1B80070A024E91582357 /* NativeBridgeEndedOwnerStopTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeBridgeEndedOwnerStopTests.swift; sourceTree = "<group>"; };
 		E2701A3BD1D4D847DF0FA6AD /* CredentialVault.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialVault.swift; sourceTree = "<group>"; };
+		E3714EA6527662D8FD5D1FB9 /* OneWayMigrationEnrollmentPropertyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OneWayMigrationEnrollmentPropertyTests.swift; sourceTree = "<group>"; };
 		E4ED128AC51841A4C0D2E48B /* ConfigurationCredentialSlots.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigurationCredentialSlots.swift; sourceTree = "<group>"; };
+		E63C20ADF3C0F39757D5F9D8 /* OneWayMigrationPropertyTestSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OneWayMigrationPropertyTestSupport.swift; sourceTree = "<group>"; };
 		E663F4A99AFEF18C139BD664 /* AuthorityLivenessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthorityLivenessTests.swift; sourceTree = "<group>"; };
 		E7023E036C07D36995D0CFA7 /* libCFWAppleNetwork.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libCFWAppleNetwork.a; sourceTree = BUILT_PRODUCTS_DIR; };
 		E7AAC3C84790FF6D3B9BCE2B /* AuthorityV1Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthorityV1Models.swift; sourceTree = "<group>"; };
@@ -1859,7 +1863,9 @@
 				809342A1B071C7EC9BC2CBA7 /* CurrentAppServiceMaintenanceTests.swift */,
 				142BEACC628DDBF81D3767B7 /* GlobalAuthorityServiceControllerTests.swift */,
 				1620B333C955FB29FAE0D7AC /* HostTicketOnlyStartCancellationTests.swift */,
+				E3714EA6527662D8FD5D1FB9 /* OneWayMigrationEnrollmentPropertyTests.swift */,
 				0EB48FF702749F262289254F /* OneWayMigrationPropertyTests.swift */,
+				E63C20ADF3C0F39757D5F9D8 /* OneWayMigrationPropertyTestSupport.swift */,
 				FE44E6678ECC1CEEE2CF7A58 /* ProductionDeadlineTests.swift */,
 				616E9511DEDB800B2C0D20E4 /* ProxyAgentHostClientIdentityTests.swift */,
 				AAD05F579DE857E47E3E3CB7 /* ProxyAgentHostClientTests.swift */,
@@ -2678,6 +2684,8 @@
 				9F556A3B9DE753175DDBEEE2 /* CurrentAppServiceMaintenanceTests.swift in Sources */,
 				F97D0D94B77C0D3C98CF0ADF /* GlobalAuthorityServiceControllerTests.swift in Sources */,
 				CC0052CFF063DB8B5351728A /* HostTicketOnlyStartCancellationTests.swift in Sources */,
+				E1C4412D7CA5C341C7819824 /* OneWayMigrationEnrollmentPropertyTests.swift in Sources */,
+				1FD38EE8FDA9CA52E06CC807 /* OneWayMigrationPropertyTestSupport.swift in Sources */,
 				A21562DC3AC1817424EA1E71 /* OneWayMigrationPropertyTests.swift in Sources */,
 				E29C711CB6C12C775EBACB86 /* ProductionDeadlineTests.swift in Sources */,
 				FCF4E83A78E1A026F6699406 /* ProxyAgentHostClientIdentityTests.swift in Sources */,

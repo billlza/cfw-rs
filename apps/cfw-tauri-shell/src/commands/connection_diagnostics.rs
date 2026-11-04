@@ -86,15 +86,14 @@ where
     let work = async {
         let initial_selection = selections(engine, &snapshot).await?;
         let result = operation(route).await?;
-        if engine
-            .mode_intent_revision()
-            .map_err(|_| "runtime_changed")?
-            != revision
-            || engine.coordinator.snapshot() != snapshot
-            || selections(engine, &snapshot).await? != initial_selection
-        {
-            return Err("runtime_changed".into());
-        }
+        validate_final_selection(selections(engine, &snapshot), initial_selection, || {
+            Ok(engine
+                .mode_intent_revision()
+                .map_err(|_| "runtime_changed")?
+                == revision
+                && engine.coordinator.snapshot() == snapshot)
+        })
+        .await?;
         Ok(result)
     };
     tokio::select! {
@@ -102,6 +101,25 @@ where
         _ = wait_for_snapshot_change(&mut changes, &snapshot) => Err("runtime_changed".into()),
         result = tokio::time::timeout(Duration::from_secs(30), work) => result.map_err(|_| "timeout".to_owned())?,
     }
+}
+
+// The final controller read can itself overlap a node change. Validate the
+// monotonic intent revision after that await, including an A -> B -> A change
+// whose final selector value alone would look unchanged.
+async fn validate_final_selection<F, C>(
+    read: F,
+    expected: Vec<(String, Option<String>)>,
+    current: C,
+) -> Result<(), String>
+where
+    F: Future<Output = Result<Vec<(String, Option<String>)>, String>>,
+    C: FnOnce() -> Result<bool, String>,
+{
+    let observed = read.await?;
+    if !current()? || observed != expected {
+        return Err("runtime_changed".into());
+    }
+    Ok(())
 }
 
 async fn wait_for_snapshot_change(
@@ -118,6 +136,23 @@ async fn wait_for_snapshot_change(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn node_change_during_final_read_is_rejected_even_when_selection_returns_to_original() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let revision = AtomicU64::new(1);
+        let original = vec![("group".into(), Some("node-a".into()))];
+        let read = async {
+            tokio::task::yield_now().await;
+            revision.store(3, Ordering::SeqCst);
+            Ok(original.clone())
+        };
+        let result = validate_final_selection(read, original.clone(), || {
+            Ok(revision.load(Ordering::SeqCst) == 1)
+        })
+        .await;
+        assert_eq!(result, Err("runtime_changed".into()));
+    }
 
     #[tokio::test]
     async fn duplicate_attestations_do_not_cancel_but_new_generations_do() {

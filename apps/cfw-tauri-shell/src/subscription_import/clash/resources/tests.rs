@@ -1,3 +1,5 @@
+use cfw_singbox_config::RuleKind;
+
 use super::*;
 use crate::subscription_import::import_subscription_document;
 
@@ -293,3 +295,6 @@ fn classical_rule_providers_accept_geosite_conditions() {
         ]
     );
 }
+
+mod boundaries;
+mod refresh;

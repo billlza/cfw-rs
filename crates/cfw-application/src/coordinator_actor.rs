@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use cfw_engine_api::{
-    CutoverPreflightRequest, EngineBackend, EngineGenerationStore, EngineMode,
-    EngineRuntimePlatform, EngineSessionIdentity, EngineSnapshot,
+    CutoverPreflightRequest, EngineBackend, EngineCommandContext, EngineGenerationStore,
+    EngineMode, EngineRuntimePlatform, EngineSessionIdentity, EngineSnapshot,
 };
 use cfw_singbox_config::{EngineSettings, ValidatedSingBoxProfile};
 use tokio::{
@@ -17,7 +17,9 @@ use crate::{
         reconcile_initial_state,
     },
     cutover::prepare_cutover_request,
-    runtime::{CoordinatorState, reconcile_active_runtime, set_failed, set_off},
+    runtime::{
+        CoordinatorState, pending_tunnel_approval, reconcile_active_runtime, set_failed, set_off,
+    },
     transition::{transition, transition_to_off},
 };
 
@@ -69,6 +71,10 @@ pub(crate) enum Command {
     PrepareCutover(Box<PrepareCutoverCommand>),
     RestartSpec {
         response: oneshot::Sender<Result<Option<EngineRestartSpec>, EngineCoordinatorError>>,
+    },
+    PendingTunnelApproval {
+        observed: EngineSnapshot,
+        response: oneshot::Sender<Option<EngineCommandContext>>,
     },
     QuarantineReleaseEvidenceRestore {
         response: oneshot::Sender<Result<EngineSnapshot, EngineCoordinatorError>>,
@@ -218,6 +224,10 @@ pub(crate) async fn run_coordinator(
                         Command::RestartSpec { response } => {
                             let _response_dropped = response.send(Ok(state.restart_spec.clone()));
                         }
+                        Command::PendingTunnelApproval { observed, response } => {
+                            let _response_dropped =
+                                response.send(pending_tunnel_approval(&state, &observed));
+                        }
                         Command::QuarantineReleaseEvidenceRestore { response } => {
                             let _response_dropped = response.send(Err(failure.error.clone()));
                         }
@@ -334,6 +344,10 @@ pub(crate) async fn run_coordinator(
                     }
                     Command::RestartSpec { response } => {
                         let _response_dropped = response.send(Ok(state.restart_spec.clone()));
+                    }
+                    Command::PendingTunnelApproval { observed, response } => {
+                        let _response_dropped =
+                            response.send(pending_tunnel_approval(&state, &observed));
                     }
                     Command::QuarantineReleaseEvidenceRestore { response } => {
                         let error = state

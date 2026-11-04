@@ -12,7 +12,7 @@ impl MacOsPlatformService {
     pub fn enable_login_item(&self) -> Result<ServiceModeStatus> {
         #[cfg(target_os = "macos")]
         {
-            sm_login_item::register().map_err(anyhow::Error::msg)
+            service_management::register().map_err(anyhow::Error::msg)
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -23,7 +23,7 @@ impl MacOsPlatformService {
     pub fn disable_login_item(&self) -> Result<()> {
         #[cfg(target_os = "macos")]
         {
-            sm_login_item::unregister().map_err(anyhow::Error::msg)
+            service_management::unregister().map_err(anyhow::Error::msg)
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -34,7 +34,7 @@ impl MacOsPlatformService {
     pub fn login_item_status(&self) -> ServiceModeStatus {
         #[cfg(target_os = "macos")]
         {
-            sm_login_item::status()
+            service_management::status()
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -44,7 +44,7 @@ impl MacOsPlatformService {
 
     pub fn open_login_items_settings(&self) {
         #[cfg(target_os = "macos")]
-        sm_login_item::open_settings();
+        service_management::open_settings();
     }
 
     /// Remove only the historical fixed-label user LaunchAgent.
@@ -55,18 +55,8 @@ impl MacOsPlatformService {
         #[cfg(target_os = "macos")]
         {
             let path = legacy_login_agent_path()?;
-            match fs::symlink_metadata(&path) {
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-                Ok(metadata)
-                    if metadata.file_type().is_file() || metadata.file_type().is_symlink() => {}
-                Ok(_) => bail!(
-                    "refusing to retire non-file legacy Login Item path: {}",
-                    path.display()
-                ),
-                Err(error) => {
-                    return Err(error)
-                        .with_context(|| format!("failed to inspect {}", path.display()));
-                }
+            if !legacy_login_agent_present(&path)? {
+                return Ok(());
             }
             let uid = launchctl::current_uid()?;
             let target = format!("gui/{uid}/{LEGACY_LOGIN_AGENT_LABEL}");
@@ -91,6 +81,22 @@ fn legacy_login_agent_path() -> Result<PathBuf> {
         .join("Library")
         .join("LaunchAgents")
         .join(format!("{LEGACY_LOGIN_AGENT_LABEL}.plist")))
+}
+
+/// Whether a legacy Login Item file is left to retire. Anything but a file or
+/// a symlink in its place is refused, not removed.
+fn legacy_login_agent_present(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Ok(metadata) if metadata.file_type().is_file() || metadata.file_type().is_symlink() => {
+            Ok(true)
+        }
+        Ok(_) => bail!(
+            "refusing to retire non-file legacy Login Item path: {}",
+            path.display()
+        ),
+        Err(error) => Err(error).with_context(|| format!("failed to inspect {}", path.display())),
+    }
 }
 
 pub(crate) fn remove_fixed_file_if_present(path: &Path) -> Result<()> {
@@ -123,92 +129,7 @@ pub(crate) fn ensure_path_absent(path: &Path) -> Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-mod sm_login_item {
-    use objc2::rc::{Retained, autoreleasepool};
-    use objc2_service_management::SMAppService;
-
-    use crate::{ServiceModeStatus, map_service_status};
-
-    fn service() -> Retained<SMAppService> {
-        // SAFETY: mainAppService returns the calling application's service object.
-        unsafe { SMAppService::mainAppService() }
-    }
-
-    pub(super) fn status() -> ServiceModeStatus {
-        // SAFETY: status is a read-only query.
-        // These queries also run on Rust's blocking pool, outside AppKit's
-        // event-loop autorelease pool.
-        autoreleasepool(|_| map_service_status(unsafe { service().status() }))
-    }
-
-    pub(super) fn register() -> Result<ServiceModeStatus, String> {
-        autoreleasepool(|_| {
-            let service = service();
-            // SAFETY: registration is scoped by macOS to the signed calling app.
-            unsafe { service.registerAndReturnError() }
-                .map_err(|error| format!("SMAppService Login Item register failed: {error:?}"))?;
-            Ok(map_service_status(unsafe { service.status() }))
-        })
-    }
-
-    pub(super) fn unregister() -> Result<(), String> {
-        autoreleasepool(|_| {
-            if matches!(
-                status(),
-                ServiceModeStatus::NotRegistered | ServiceModeStatus::NotFound
-            ) {
-                return Ok(());
-            }
-            // SAFETY: unregistration is scoped by macOS to the signed calling app.
-            unsafe { service().unregisterAndReturnError() }
-                .map_err(|error| format!("SMAppService Login Item unregister failed: {error:?}"))?;
-            match status() {
-                ServiceModeStatus::NotRegistered | ServiceModeStatus::NotFound => Ok(()),
-                other => Err(format!(
-                    "SMAppService Login Item remains registered: {other:?}"
-                )),
-            }
-        })
-    }
-
-    pub(super) fn open_settings() {
-        // SAFETY: this only opens the system-owned Login Items settings pane.
-        autoreleasepool(|_| unsafe { SMAppService::openSystemSettingsLoginItems() })
-    }
-}
+mod service_management;
 
 #[cfg(test)]
-mod tests {
-    use std::os::unix::fs::symlink;
-
-    use super::*;
-
-    fn test_root(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("cfw-platform-login-{name}-{}", std::process::id()))
-    }
-
-    #[test]
-    fn fixed_file_cleanup_unlinks_symlink_without_following_it() {
-        let root = test_root("symlink");
-        let target = root.join("target");
-        let link = root.join("legacy.plist");
-        fs::create_dir_all(&root).expect("create root");
-        fs::write(&target, b"keep").expect("write target");
-        symlink(&target, &link).expect("create symlink");
-
-        remove_fixed_file_if_present(&link).expect("remove link");
-
-        assert_eq!(fs::read(&target).expect("read target"), b"keep");
-        fs::remove_file(target).expect("remove target");
-        fs::remove_dir(root).expect("remove root");
-    }
-
-    #[test]
-    fn fixed_file_cleanup_rejects_directories() {
-        let root = test_root("directory");
-        fs::create_dir_all(&root).expect("create root");
-        let error = remove_fixed_file_if_present(&root).expect_err("directory must be rejected");
-        assert!(error.to_string().contains("non-file"));
-        fs::remove_dir(root).expect("remove root");
-    }
-}
+mod tests;

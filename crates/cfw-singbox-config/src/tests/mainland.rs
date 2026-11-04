@@ -429,12 +429,12 @@ fn release_evidence_projections_ignore_the_switch() {
 #[test]
 fn the_mainland_resolvers_pass_the_authenticated_endpoint_checks() {
     for ipv6 in [true, false] {
-        crate::projection::validate_authenticated_dns_pool(
+        crate::projection::dns::validate_authenticated_dns_pool(
             &crate::mainland::domestic_resolvers(),
             ipv6,
         )
         .expect("domestic DoH");
-        crate::projection::validate_authenticated_dns_pool(
+        crate::projection::dns::validate_authenticated_dns_pool(
             &crate::mainland::foreign_resolvers(),
             ipv6,
         )

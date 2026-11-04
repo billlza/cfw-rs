@@ -43,6 +43,7 @@ MAX_SOURCE_BYTES: Final = 4 * 1024 * 1024
 MAX_RUST_SOURCE_FILES: Final = 512
 MAX_RUST_SOURCE_ENTRIES: Final = 2_048
 MAX_RUST_SOURCE_TOTAL_BYTES: Final = 64 * 1024 * 1024
+MAX_RUST_MODULE_DEPTH: Final = 8
 SWIFT_PACKAGE_TIMEOUT_SECONDS: Final = 60
 SWIFT_PACKAGE_OUTPUT_LIMIT: Final = 4 * 1024 * 1024
 
@@ -1336,7 +1337,9 @@ def _host_control_path_ready(rust_sources: Mapping[str, str]) -> bool:
     ):
         return False
 
-    transport_functions = _rust_functions(rust_sources[HOST_PACKET_TRANSPORT_PATH])
+    transport_functions = _rust_module_tree_functions(
+        rust_sources, HOST_PACKET_TRANSPORT_PATH
+    )
     if HOST_PACKET_ENTRYPOINT not in transport_functions:
         return False
     transport_calls = _rust_reachable_calls(
@@ -1348,8 +1351,44 @@ def _host_control_path_ready(rust_sources: Mapping[str, str]) -> bool:
     ):
         return False
 
-    engine_functions = _rust_functions(rust_sources[HOST_PACKET_ENGINE_PATH])
+    engine_functions = _rust_module_tree_functions(rust_sources, HOST_PACKET_ENGINE_PATH)
     return HOST_PACKET_ENGINE_ENTRYPOINT in engine_functions
+
+
+def _rust_module_tree_functions(
+    rust_sources: Mapping[str, str], path: str, depth: int = 0
+) -> dict[str, set[str]]:
+    """Functions of a module file and of the out-of-line child modules it always compiles.
+
+    A child declared behind any attribute (a cfg, a test module), nested in a
+    block, or without its file contributes nothing, so test-only code never
+    completes a production path.
+    """
+    functions = _rust_functions(rust_sources[path])
+    if depth >= MAX_RUST_MODULE_DEPTH:
+        return functions
+    directory = path[: -len("mod.rs")] if path.endswith("/mod.rs") else path[: -len(".rs")] + "/"
+    for module in _rust_unconditional_modules(rust_sources[path]):
+        child = next(
+            (
+                candidate
+                for candidate in (f"{directory}{module}.rs", f"{directory}{module}/mod.rs")
+                if candidate in rust_sources
+            ),
+            None,
+        )
+        if child is None:
+            continue
+        for name, calls in _rust_module_tree_functions(rust_sources, child, depth + 1).items():
+            functions.setdefault(name, set()).update(calls)
+    return functions
+
+
+def _rust_unconditional_modules(source: str) -> tuple[str, ...]:
+    names = re.findall(r"\bmod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;", _rust_sanitized(source))
+    return tuple(
+        name for name in dict.fromkeys(names) if _rust_unconditional_module(source, name)
+    )
 
 
 def _rust_module_calls(

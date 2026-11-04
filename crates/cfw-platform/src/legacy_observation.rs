@@ -7,17 +7,26 @@ use crate::bounded_command::{BoundedCommandError, BoundedCommandOutput, run_boun
 const PROCESS_LIST: &str = "/bin/ps";
 const TCP_LISTENERS: &str = "/usr/sbin/netstat";
 const OBSERVATION_TIMEOUT: Duration = Duration::from_secs(3);
-const MAX_STDOUT_BYTES: usize = 1024 * 1024;
+/// `ps` writes whole command lines when its output is a pipe, so the table
+/// grows with every process's arguments: with browsers, Electron apps and
+/// parallel compilers running, one Mac's table measured 2.3 MB. The bound
+/// still limits what one observation holds in memory.
+const PROCESS_TABLE_MAX_STDOUT_BYTES: usize = 16 * 1024 * 1024;
+const LISTENER_TABLE_MAX_STDOUT_BYTES: usize = 1024 * 1024;
 const MAX_STDERR_BYTES: usize = 64 * 1024;
 
 pub fn observe_legacy_process_table() -> Result<String> {
+    observe_process_table(PROCESS_LIST, &["-axo", "uid=,pid=,lstart=,command="])
+}
+
+fn observe_process_table(program: &str, arguments: &[&str]) -> Result<String> {
     finish_observation(
         "legacy process table",
         run_bounded_command(
-            PROCESS_LIST,
-            &["-axo", "uid=,pid=,lstart=,command="],
+            program,
+            arguments,
             OBSERVATION_TIMEOUT,
-            MAX_STDOUT_BYTES,
+            PROCESS_TABLE_MAX_STDOUT_BYTES,
             MAX_STDERR_BYTES,
         ),
     )
@@ -30,7 +39,7 @@ pub fn observe_legacy_tcp_listener_table() -> Result<String> {
             TCP_LISTENERS,
             &["-anv", "-p", "tcp"],
             OBSERVATION_TIMEOUT,
-            MAX_STDOUT_BYTES,
+            LISTENER_TABLE_MAX_STDOUT_BYTES,
             MAX_STDERR_BYTES,
         ),
     )
@@ -62,31 +71,4 @@ fn finish_observation(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn typed_observations_propagate_timeout_and_output_bounds() {
-        let timeout = finish_observation(
-            "legacy process table",
-            Err(BoundedCommandError::TimedOut {
-                program: PROCESS_LIST.into(),
-                timeout: OBSERVATION_TIMEOUT,
-                cleanup: "terminated and reaped".into(),
-            }),
-        )
-        .expect_err("timeout");
-        assert!(timeout.to_string().contains("exceeded its 3000ms timeout"));
-
-        let oversized = finish_observation(
-            "legacy TCP listener table",
-            Err(BoundedCommandError::OutputExceeded {
-                program: TCP_LISTENERS.into(),
-                stream: "stdout",
-                limit: MAX_STDOUT_BYTES,
-            }),
-        )
-        .expect_err("oversized output");
-        assert!(oversized.to_string().contains("1048576-byte safety bound"));
-    }
-}
+mod tests;

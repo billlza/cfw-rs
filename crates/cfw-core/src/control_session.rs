@@ -119,19 +119,14 @@ impl LegacyControlSession {
     }
 
     pub fn exists() -> Result<bool, LegacyControlSessionError> {
-        match fs::symlink_metadata(Self::path()) {
-            Ok(_) => Ok(true),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-            Err(error) => Err(error.into()),
-        }
+        session_exists(&Self::path())
     }
 
     /// Read and strictly validate the complete old helper schema. This remains
     /// corroborating evidence only: it is user-owned and is never trusted to
     /// authorize a path or executable without independent process/path checks.
     pub fn observe() -> Result<LegacyControlSessionObservation, LegacyControlSessionError> {
-        let directory = SessionDirectory::open()?;
-        read_observation(&directory)
+        observe_in(Path::new(LEGACY_CONTROL_SESSION_DIR))
     }
 
     /// Byte-for-byte revalidate the prepared request, then atomically publish
@@ -141,57 +136,84 @@ impl LegacyControlSession {
     pub fn request_stop(
         observed: &LegacyControlSessionObservation,
     ) -> Result<LegacyControlSessionObservation, LegacyControlSessionError> {
-        let directory = SessionDirectory::open()?;
-        let current = read_observation(&directory)?;
-        if current.digest != observed.digest || current.value != observed.value {
-            return Err(LegacyControlSessionError::Changed);
-        }
-        if !current.value.want_core {
-            return Err(LegacyControlSessionError::Unsafe(
-                "prepared session no longer requests a core".into(),
-            ));
-        }
-
-        let mut stopped = current.value;
-        stopped.want_core = false;
-        stopped.heartbeat_epoch_secs = now_epoch_seconds()?;
-        let mut bytes = serde_json::to_vec(&stopped)?;
-        if bytes.is_empty() || bytes.len() as u64 > MAX_SESSION_BYTES {
-            return Err(LegacyControlSessionError::Unsafe(
-                "retirement session exceeds its size bound".into(),
-            ));
-        }
-        let write_result = directory.write_atomic(&bytes);
-        bytes.zeroize();
-        write_result?;
-        let written = read_observation(&directory)?;
-        if written.value != stopped || written.value.want_core {
-            return Err(LegacyControlSessionError::Changed);
-        }
-        Ok(written)
+        request_stop_in(Path::new(LEGACY_CONTROL_SESSION_DIR), observed)
     }
 
     pub fn remove() -> Result<(), LegacyControlSessionError> {
-        let directory = match SessionDirectory::open() {
-            Ok(directory) => directory,
-            Err(LegacyControlSessionError::Io(error))
-                if error.kind() == io::ErrorKind::NotFound =>
-            {
-                return Ok(());
-            }
-            Err(error) => return Err(error),
-        };
-        let name = c_string(LEGACY_CONTROL_SESSION_FILE)?;
-        let result = unsafe { libc::unlinkat(directory.file.as_raw_fd(), name.as_ptr(), 0) };
-        if result == -1 {
-            let error = io::Error::last_os_error();
-            if error.kind() != io::ErrorKind::NotFound {
-                return Err(error.into());
-            }
-        }
-        directory.sync()?;
-        Ok(())
+        remove_in(Path::new(LEGACY_CONTROL_SESSION_DIR))
     }
+}
+
+// The steps below take the session directory so the tests can run them in a
+// private directory; the public functions above bind the fixed one.
+
+fn session_exists(path: &Path) -> Result<bool, LegacyControlSessionError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn observe_in(
+    directory: &Path,
+) -> Result<LegacyControlSessionObservation, LegacyControlSessionError> {
+    let directory = SessionDirectory::open(directory)?;
+    read_observation(&directory)
+}
+
+fn request_stop_in(
+    directory: &Path,
+    observed: &LegacyControlSessionObservation,
+) -> Result<LegacyControlSessionObservation, LegacyControlSessionError> {
+    let directory = SessionDirectory::open(directory)?;
+    let current = read_observation(&directory)?;
+    if current.digest != observed.digest || current.value != observed.value {
+        return Err(LegacyControlSessionError::Changed);
+    }
+    if !current.value.want_core {
+        return Err(LegacyControlSessionError::Unsafe(
+            "prepared session no longer requests a core".into(),
+        ));
+    }
+
+    let mut stopped = current.value;
+    stopped.want_core = false;
+    stopped.heartbeat_epoch_secs = now_epoch_seconds()?;
+    let mut bytes = serde_json::to_vec(&stopped)?;
+    if bytes.is_empty() || bytes.len() as u64 > MAX_SESSION_BYTES {
+        return Err(LegacyControlSessionError::Unsafe(
+            "retirement session exceeds its size bound".into(),
+        ));
+    }
+    let write_result = directory.write_atomic(&bytes);
+    bytes.zeroize();
+    write_result?;
+    let written = read_observation(&directory)?;
+    if written.value != stopped || written.value.want_core {
+        return Err(LegacyControlSessionError::Changed);
+    }
+    Ok(written)
+}
+
+fn remove_in(directory: &Path) -> Result<(), LegacyControlSessionError> {
+    let directory = match SessionDirectory::open(directory) {
+        Ok(directory) => directory,
+        Err(LegacyControlSessionError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
+    let name = c_string(LEGACY_CONTROL_SESSION_FILE)?;
+    let result = unsafe { libc::unlinkat(directory.file.as_raw_fd(), name.as_ptr(), 0) };
+    if result == -1 {
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::NotFound {
+            return Err(error.into());
+        }
+    }
+    directory.sync()?;
+    Ok(())
 }
 
 struct SessionDirectory {
@@ -199,8 +221,8 @@ struct SessionDirectory {
 }
 
 impl SessionDirectory {
-    fn open() -> Result<Self, LegacyControlSessionError> {
-        let path = c_string(LEGACY_CONTROL_SESSION_DIR)?;
+    fn open(path: &Path) -> Result<Self, LegacyControlSessionError> {
+        let path = c_string(path)?;
         let descriptor = unsafe {
             libc::open(
                 path.as_ptr(),
@@ -350,59 +372,4 @@ fn c_string(value: impl AsRef<Path>) -> Result<CString, LegacyControlSessionErro
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn fixture() -> &'static [u8] {
-        br#"{
-          "app_home":"/Users/bill/Library/Application Support/Clash for Mac",
-          "config_file":"/Users/bill/Library/Application Support/Clash for Mac/config.yaml",
-          "mixed_port":7900,
-          "controller_port":9090,
-          "secret":null,
-          "want_core":true,
-          "generation":7,
-          "heartbeat_epoch_secs":1700000000
-        }"#
-    }
-
-    #[test]
-    fn legacy_path_is_fixed_and_has_no_starting_api() {
-        assert_eq!(
-            LegacyControlSession::path(),
-            PathBuf::from("/Library/Application Support/com.bill.clashformac/active-session.json")
-        );
-    }
-
-    #[test]
-    fn old_helper_fixture_decodes_strictly() {
-        let value: LegacyControlSessionValue =
-            serde_json::from_slice(fixture()).expect("historical fixture");
-        validate_value(&value).expect("valid old helper request");
-        assert!(value.want_core);
-        assert_eq!(value.mixed_port, 7900);
-
-        let mut unknown: serde_json::Value =
-            serde_json::from_slice(fixture()).expect("fixture value");
-        unknown["binary"] = serde_json::json!("/tmp/attacker");
-        assert!(
-            serde_json::from_value::<LegacyControlSessionValue>(unknown).is_err(),
-            "retirement decoder must never accept a binary field"
-        );
-    }
-
-    #[test]
-    fn retirement_value_changes_only_want_core_and_heartbeat() {
-        let original: LegacyControlSessionValue =
-            serde_json::from_slice(fixture()).expect("fixture value");
-        let mut stopped = original.clone();
-        stopped.want_core = false;
-        stopped.heartbeat_epoch_secs += 1;
-        assert_eq!(stopped.app_home, original.app_home);
-        assert_eq!(stopped.config_file, original.config_file);
-        assert_eq!(stopped.mixed_port, original.mixed_port);
-        assert_eq!(stopped.controller_port, original.controller_port);
-        assert_eq!(stopped.secret, original.secret);
-        assert_eq!(stopped.generation, original.generation);
-    }
-}
+mod tests;

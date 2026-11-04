@@ -11,10 +11,14 @@ mod development_native_ui;
 #[path = "native_product_input.rs"]
 mod native_product_input;
 
+#[path = "source_markers.rs"]
+mod source_markers;
+
 use native_product_input::{
     CandidateNativeProducts, require_real_directory, require_single_link_regular_file,
     require_utf8_relative_artifact_path,
 };
+use source_markers::verify_release_source_markers;
 
 /// The candidate build lanes (`scripts/build_unsigned_candidate.sh` and
 /// `scripts/build_signed_candidate.sh`) export the immutable, candidate-scoped
@@ -352,26 +356,9 @@ fn macos_sdk_root() -> PathBuf {
 }
 
 fn verify_release_native_artifacts(repository_root: &Path) -> Result<(), String> {
-    reject_source_marker(
-        &repository_root.join("apps/cfw-tauri-shell/src/engine.rs"),
-        "MissingNativeBridge",
-    )?;
-    reject_source_marker(
-        &repository_root.join("native/macos/Sources/CFWProxyAgent/ProxyAgentExecutable.swift"),
-        "MissingLibboxProxyEngineFactory",
-    )?;
-    reject_source_marker(
-        &repository_root.join("native/macos/Sources/CFWPacketTunnel/PacketTunnelProvider.swift"),
-        "MissingLibboxEngineFactory",
-    )?;
-    reject_source_marker(
-        &repository_root.join("native/macos/Sources/CFWAppleNetwork/HostBridge.swift"),
-        "MissingSystemExtensionStateTransport",
-    )?;
-    reject_source_marker(
-        &repository_root.join("native/macos/Sources/CFWPacketTunnel/PacketTunnelProvider.swift"),
-        "systemExtensionStateTransportNotLinked",
-    )?;
+    verify_release_source_markers(repository_root, |path| {
+        println!("cargo:rerun-if-changed={}", path.display());
+    })?;
     require_real_directory(&repository_root.join("native/macos/Sources/CFWNativeBridge"))?;
 
     let pins = read_pins(&repository_root.join("scripts/dependency_pins.env"))?;
@@ -806,18 +793,6 @@ fn collect_native_build_inputs(
     {
         let entry = entry.map_err(|error| format!("enumerate native build input: {error}"))?;
         collect_native_build_inputs(repository_root, &entry.path(), output)?;
-    }
-    Ok(())
-}
-
-fn reject_source_marker(path: &Path, marker: &str) -> Result<(), String> {
-    let text = fs::read_to_string(path)
-        .map_err(|error| format!("read release source gate {}: {error}", path.display()))?;
-    if text.contains(marker) {
-        return Err(format!(
-            "release source gate is still wired to {marker}: {}",
-            path.display()
-        ));
     }
     Ok(())
 }

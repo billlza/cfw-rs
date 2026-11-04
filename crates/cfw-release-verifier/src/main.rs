@@ -1,4 +1,5 @@
 use std::env;
+use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::Read;
 use std::os::unix::fs::MetadataExt;
@@ -16,7 +17,7 @@ const MAX_TRUSTED_COMMENT_BYTES: usize = 1024;
 const MAX_ARCHIVE_NAME_BYTES: usize = 255;
 
 fn main() {
-    match run() {
+    match run(&env::args_os().skip(1).collect::<Vec<_>>()) {
         Ok(Some(receipt)) => println!("{receipt}"),
         Ok(None) => {}
         Err(error) => {
@@ -26,9 +27,8 @@ fn main() {
     }
 }
 
-fn run() -> Result<Option<serde_json::Value>, String> {
-    let arguments = env::args_os().skip(1).collect::<Vec<_>>();
-    let (config_path, archive_path, signature_path, emit_json) = match arguments.as_slice() {
+fn run(arguments: &[OsString]) -> Result<Option<serde_json::Value>, String> {
+    let (config_path, archive_path, signature_path, emit_json) = match arguments {
         [config_path, archive_path, signature_path] => {
             (config_path, archive_path, signature_path, false)
         }
@@ -266,8 +266,15 @@ fn read_bounded_regular_file(path: &Path, maximum: u64) -> Result<Vec<u8>, Strin
 }
 
 #[cfg(test)]
+mod fixture;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fixture::{
+        ARCHIVE as FIXTURE_ARCHIVE, ARCHIVE_NAME as FIXTURE_ARCHIVE_NAME,
+        PUBLIC_KEY as FIXTURE_PUBLIC_KEY, SIGNATURE as FIXTURE_SIGNATURE,
+    };
 
     const V035_SIGNATURE: &str = concat!(
         "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkK",
@@ -337,6 +344,40 @@ mod tests {
     }
 
     #[test]
+    fn a_trusted_comment_needs_a_bounded_timestamp_and_a_file_field() {
+        assert_eq!(
+            parse_trusted_comment("timestamp:123456789012345678901\tfile:archive.tar.gz"),
+            Err("updater signature timestamp field is too long".into())
+        );
+        for comment in [
+            "timestamp:1784639874",
+            "timestamp:1784639874\tname:archive.tar.gz",
+        ] {
+            assert_eq!(
+                parse_trusted_comment(comment),
+                Err("updater signature trusted comment lacks a canonical file field".into()),
+                "{comment:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_staged_path_without_a_utf8_file_name_is_refused() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        for path in [
+            Path::new("/"),
+            Path::new(std::ffi::OsStr::from_bytes(b"/tmp/archive-\xff.tar.gz")),
+        ] {
+            let error = archive_file_name(path).expect_err("no UTF-8 file name");
+            assert!(
+                error.starts_with("updater archive path has no canonical UTF-8 file name: "),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
     fn staged_archive_path_must_have_a_safe_utf8_basename() {
         assert_eq!(
             archive_file_name(Path::new("/tmp/archive.tar.gz")),
@@ -364,5 +405,226 @@ mod tests {
         } else {
             Err("updater signature names a different archive".into())
         }
+    }
+
+    /// A private staging directory with a configuration, an archive and its
+    /// signature, removed at the end of the test.
+    struct Staging(std::path::PathBuf);
+
+    impl Staging {
+        fn new(label: &str) -> Self {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let root = std::env::temp_dir().join(format!(
+                "cfw-release-verifier-{label}-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            fs::create_dir(&root).expect("staging directory");
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).expect("private");
+            let staging = Self(root);
+            staging.write_config(FIXTURE_PUBLIC_KEY);
+            fs::write(staging.archive(), FIXTURE_ARCHIVE).expect("archive");
+            fs::write(staging.signature(), FIXTURE_SIGNATURE).expect("signature");
+            staging
+        }
+
+        fn write_config(&self, public_key: &str) {
+            let config = json!({ "plugins": { "updater": { "pubkey": public_key } } });
+            fs::write(self.config(), config.to_string()).expect("configuration");
+        }
+
+        fn config(&self) -> std::path::PathBuf {
+            self.0.join("tauri.conf.json")
+        }
+
+        fn archive(&self) -> std::path::PathBuf {
+            self.0.join(FIXTURE_ARCHIVE_NAME)
+        }
+
+        fn signature(&self) -> std::path::PathBuf {
+            self.0.join(format!("{FIXTURE_ARCHIVE_NAME}.sig"))
+        }
+
+        fn arguments(&self, extra: &[&str]) -> Vec<OsString> {
+            [self.config(), self.archive(), self.signature()]
+                .into_iter()
+                .map(OsString::from)
+                .chain(extra.iter().map(OsString::from))
+                .collect()
+        }
+
+        fn rejection(&self) -> String {
+            run(&self.arguments(&[])).expect_err("verification must fail")
+        }
+    }
+
+    impl Drop for Staging {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).expect("remove staging directory");
+        }
+    }
+
+    #[test]
+    fn a_signed_archive_verifies_and_reports_every_digest() {
+        let staging = Staging::new("verified");
+        assert_eq!(run(&staging.arguments(&[])), Ok(None));
+
+        let receipt = run(&staging.arguments(&["--json"]))
+            .expect("verified")
+            .expect("a receipt");
+        let config = fs::read(staging.config()).expect("configuration");
+        let public_key = decode_base64_utf8(FIXTURE_PUBLIC_KEY, "public key").expect("key");
+        assert_eq!(
+            receipt,
+            json!({
+                "archive_filename": FIXTURE_ARCHIVE_NAME,
+                "archive_sha256": sha256_hex(FIXTURE_ARCHIVE),
+                "archive_size": FIXTURE_ARCHIVE.len(),
+                "document": "cfw-updater-embedded-pubkey-verification-v1",
+                "embedded_public_key_sha256": sha256_hex(public_key.as_bytes()),
+                "result": "verified",
+                "schema_version": 1,
+                "signature_filename": format!("{FIXTURE_ARCHIVE_NAME}.sig"),
+                "signature_sha256": sha256_hex(FIXTURE_SIGNATURE.as_bytes()),
+                "signature_size": FIXTURE_SIGNATURE.len(),
+                "tauri_config_sha256": sha256_hex(&config),
+            })
+        );
+    }
+
+    #[test]
+    fn usage_is_three_paths_and_an_optional_json_flag() {
+        let staging = Staging::new("usage");
+        let usage =
+            "usage: cfw-release-verifier <tauri.conf.json> <archive> <archive.sig> [--json]";
+        assert_eq!(run(&[]), Err(usage.into()));
+        assert_eq!(run(&staging.arguments(&["--text"])), Err(usage.into()));
+        assert_eq!(
+            run(&staging.arguments(&["--json", "--json"])),
+            Err(usage.into())
+        );
+    }
+
+    #[test]
+    fn altered_bytes_or_a_renamed_archive_fail_verification() {
+        let staging = Staging::new("altered");
+        fs::write(staging.archive(), b"cfw-release-verifier fixture archivE\n").expect("tamper");
+        let error = staging.rejection();
+        assert!(
+            error.starts_with("updater signature does not match the embedded public key: "),
+            "{error}"
+        );
+
+        let staging = Staging::new("renamed");
+        let renamed = staging.0.join("Clash.for.Mac_9.9.8_aarch64.app.tar.gz");
+        fs::rename(staging.archive(), &renamed).expect("rename");
+        let arguments = [staging.config(), renamed, staging.signature()].map(OsString::from);
+        assert_eq!(
+            run(&arguments),
+            Err("updater signature names a different archive".into())
+        );
+    }
+
+    #[test]
+    fn a_signature_by_another_key_cannot_start_verification() {
+        let staging = Staging::new("other-key");
+        fs::write(staging.signature(), V035_SIGNATURE).expect("signature by the product key");
+        let error = staging.rejection();
+        assert!(
+            error.starts_with("cannot initialize updater signature verification: "),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn malformed_keys_and_signatures_are_refused() {
+        let staging = Staging::new("malformed");
+        staging.write_config("%%%");
+        assert!(
+            staging
+                .rejection()
+                .starts_with("public key envelope is invalid base64: ")
+        );
+        staging.write_config(&STANDARD.encode("not a minisign key"));
+        assert!(
+            staging
+                .rejection()
+                .starts_with("embedded updater public key is invalid: ")
+        );
+        staging.write_config(FIXTURE_PUBLIC_KEY);
+
+        fs::write(staging.signature(), b"\xff").expect("signature");
+        assert!(
+            staging
+                .rejection()
+                .starts_with("signature envelope is not UTF-8: ")
+        );
+        fs::write(staging.signature(), "%%%").expect("signature");
+        assert!(
+            staging
+                .rejection()
+                .starts_with("signature envelope is invalid base64: ")
+        );
+        fs::write(staging.signature(), STANDARD.encode("not a signature")).expect("signature");
+        assert!(
+            staging
+                .rejection()
+                .starts_with("updater signature is invalid: ")
+        );
+    }
+
+    #[test]
+    fn every_input_must_be_a_bounded_single_link_regular_file() {
+        let staging = Staging::new("inputs");
+        fs::write(staging.signature(), b"").expect("empty signature");
+        assert_eq!(
+            staging.rejection(),
+            format!(
+                "{} size is outside the accepted 1..=16384 byte range",
+                staging.signature().display()
+            )
+        );
+        fs::write(staging.signature(), FIXTURE_SIGNATURE).expect("signature");
+
+        let oversized = vec![b' '; MAX_CONFIG_BYTES as usize + 1];
+        fs::write(staging.config(), &oversized).expect("oversized configuration");
+        assert_eq!(
+            staging.rejection(),
+            format!(
+                "{} size is outside the accepted 1..=1048576 byte range",
+                staging.config().display()
+            )
+        );
+        staging.write_config(FIXTURE_PUBLIC_KEY);
+
+        let linked = staging.0.join("linked.json");
+        fs::rename(staging.config(), &linked).expect("move the configuration");
+        std::os::unix::fs::symlink(&linked, staging.config()).expect("link");
+        assert_eq!(
+            staging.rejection(),
+            format!("{} is not a regular file", staging.config().display())
+        );
+        fs::remove_file(staging.config()).expect("remove link");
+        fs::rename(&linked, staging.config()).expect("restore the configuration");
+
+        let second = staging.0.join("second-link.tar.gz");
+        fs::hard_link(staging.archive(), &second).expect("hard link");
+        assert_eq!(
+            staging.rejection(),
+            format!(
+                "{} must have exactly one hard link",
+                staging.archive().display()
+            )
+        );
+        fs::remove_file(&second).expect("remove hard link");
+
+        fs::remove_file(staging.archive()).expect("remove the archive");
+        let error = staging.rejection();
+        assert!(
+            error.starts_with(&format!("inspect {}: ", staging.archive().display())),
+            "{error}"
+        );
     }
 }

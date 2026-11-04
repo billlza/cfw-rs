@@ -1,6 +1,7 @@
 mod admission;
 #[cfg(target_os = "macos")]
 mod archive;
+mod check;
 mod contract;
 mod download;
 mod error;
@@ -9,6 +10,8 @@ mod finisher;
 mod install_lease;
 #[cfg(target_os = "macos")]
 mod journal;
+#[cfg(target_os = "macos")]
+mod macos_install;
 mod metadata;
 mod outcome;
 #[cfg(target_os = "macos")]
@@ -60,11 +63,19 @@ use admission::{
 };
 #[cfg(target_os = "macos")]
 use archive::extract_bundle;
+use check::{check_for_updates_inner, open_available_update_inner, recheck_presented_update};
 use contract::UpdateAuthorization;
 use download::download_verified_archive;
 use error::{FailureCategory, Result, UpdateError, UpdateFailure};
 #[cfg(target_os = "macos")]
 use journal::{InstallJournal, InstallRecord, UpdateInstallLeaseError};
+#[cfg(all(test, target_os = "macos"))]
+use macos_install::{
+    INSTALLER_LOG, INSTALLER_LOG_LIMIT, LeaseWatch, open_installer_log,
+    wait_for_installer_admission,
+};
+#[cfg(target_os = "macos")]
+use macos_install::{hand_off, stage_release};
 use metadata::check_bounded_update;
 #[cfg(target_os = "macos")]
 use outcome::review_previous_attempt;
@@ -91,22 +102,13 @@ pub(crate) use windows_update::{
 pub(crate) type UpdaterSecurityState = state::UpdaterSecurityState<StagedResources>;
 
 const PROGRESS_EVENT: &str = "cfw://update-progress";
-#[cfg(target_os = "macos")]
-const INSTALLER_LOG: &str = "update-installer.log";
-/// Earlier attempts stay in the installer log until it outgrows this.
-#[cfg(target_os = "macos")]
-const INSTALLER_LOG_LIMIT: u64 = 1024 * 1024;
+
 /// Lets the renderer receive the hand-off result before the window closes.
 const EXIT_AFTER_HANDOFF: Duration = Duration::from_millis(250);
 /// The installer waits for this process to end before it touches anything
 /// and gives the attempt up if the wait is in vain. An exit that hangs in the
 /// window teardown must not be the reason, so the process ends by then.
 const EXIT_DEADLINE: Duration = Duration::from_secs(5);
-/// How long the installer process may take to hold the installation lease.
-#[cfg(target_os = "macos")]
-const INSTALLER_ADMISSION_TIMEOUT: Duration = Duration::from_secs(15);
-#[cfg(target_os = "macos")]
-const INSTALLER_ADMISSION_POLL: Duration = Duration::from_millis(50);
 
 #[tauri::command]
 pub(crate) async fn check_for_updates(
@@ -115,61 +117,6 @@ pub(crate) async fn check_for_updates(
     check_for_updates_inner(app)
         .await
         .map_err(|error| error.to_string())
-}
-
-async fn check_for_updates_inner(app: AppHandle) -> Result<serde_json::Value> {
-    let security = app.state::<UpdaterSecurityState>();
-    let _serialized_check = security.try_serialize_checks()?;
-    security.clear_authorization()?;
-    let update = check_bounded_update().await?;
-    let payload = match update {
-        Some(update) => {
-            security.authorize(update.authorization.clone())?;
-            serde_json::json!({
-                "available": true,
-                "current": env!("CARGO_PKG_VERSION"),
-                "version": update.authorization.version,
-                "notes": update.notes,
-                "date": update.publication_date,
-                "install": install_support(security.is_rejected(&update.authorization)?),
-            })
-        }
-        None => serde_json::json!({
-            "available": false,
-            "current": env!("CARGO_PKG_VERSION"),
-        }),
-    };
-    if app.emit("cfw://update-available", payload.clone()).is_err() {
-        security.clear_authorization()?;
-        return Err(UpdateError::ProgressEvent);
-    }
-    Ok(payload)
-}
-
-/// Whether this installation can install the presented release itself, so
-/// the renderer offers the in-app installation only where it can succeed.
-fn install_support(release_rejected: bool) -> serde_json::Value {
-    let refusal = if release_rejected {
-        Some(UpdateError::ReleaseRejected.failure().code)
-    } else {
-        admission_refusal().err().map(|error| error.failure().code)
-    };
-    match refusal {
-        None => serde_json::json!({ "supported": true }),
-        Some(code) => serde_json::json!({ "supported": false, "code": code }),
-    }
-}
-
-/// Everything that refuses an installation before anything is downloaded:
-/// the running bundle's identity and location, and the volume the staged
-/// release would have to share with it.
-fn admission_refusal() -> Result<()> {
-    admit_running_installation()?;
-    #[cfg(target_os = "macos")]
-    if !staging::on_installed_volume(&app_home()?, ReleaseSignedComponent::Application.path())? {
-        return Err(InstallAdmissionError::StagingVolumeMismatch.into());
-    }
-    Ok(())
 }
 
 /// Opens the exact GitHub release page authorized by the update metadata.
@@ -185,57 +132,6 @@ pub(crate) async fn open_available_update(
     open_available_update_inner(app, expected_version)
         .await
         .map_err(|error| error.to_string())
-}
-
-async fn open_available_update_inner(
-    app: AppHandle,
-    expected_version: String,
-) -> Result<serde_json::Value> {
-    let security = app.state::<UpdaterSecurityState>();
-    let update = recheck_presented_update(&security, &expected_version).await?;
-    if security.is_rejected(&update)? {
-        // Its download page offers the same release that failed authentication.
-        return Err(UpdateError::ReleaseRejected);
-    }
-    let release_url = release_page_url(&update)?;
-    open_trusted_external_url(&release_url)
-        .await
-        .map_err(|_| UpdateError::OpenReleasePage)?;
-    Ok(serde_json::json!({
-        "opened": true,
-        "installed": false,
-        "version": update.version,
-    }))
-}
-
-/// Confirms that the release the user was shown is still the published one
-/// and consumes the authorization. Every action therefore needs a fresh check
-/// and can never replay metadata that changed after it was presented.
-async fn recheck_presented_update(
-    security: &UpdaterSecurityState,
-    expected_version: &str,
-) -> Result<UpdateAuthorization> {
-    let _serialized_check = security.try_serialize_checks()?;
-    let authorized = security.authorization(expected_version)?;
-    let update = match check_bounded_update().await {
-        Ok(Some(update)) => update,
-        Ok(None) => {
-            security.clear_authorization()?;
-            return Err(UpdateError::AuthorizationChanged);
-        }
-        Err(error) => {
-            security.clear_authorization()?;
-            return Err(error);
-        }
-    };
-    security.consume_if_current(&authorized, &update.authorization)?;
-    Ok(update.authorization)
-}
-
-fn release_page_url(authorization: &UpdateAuthorization) -> Result<String> {
-    contract::target()?
-        .release_page_url(&authorization.version)
-        .map_err(|_| UpdateError::InvalidReleaseVersion)
 }
 
 /// Downloads, authenticates and stages the presented release. The core keeps
@@ -323,66 +219,6 @@ async fn prepare_update_install_inner(
             }
         }
     }
-}
-
-#[cfg(target_os = "macos")]
-async fn stage_release(
-    app: &AppHandle,
-    authorization: &UpdateAuthorization,
-    staging: &StagingArea,
-    installed: &BundleIdentity,
-    cancellation: &DownloadCancellation,
-) -> Result<BundleIdentity> {
-    let version = authorization.version.as_str();
-    emit_progress(app, "downloading", version, 0, None)?;
-    let archive = staging.archive();
-    let mut last_percent = None;
-    download_verified_archive(
-        authorization,
-        &archive,
-        cancellation,
-        |downloaded, total| {
-            let percent = total
-                .filter(|total| *total > 0)
-                .map(|total| downloaded.saturating_mul(100) / total);
-            if percent.is_some() && last_percent == percent {
-                return Ok(());
-            }
-            last_percent = percent;
-            emit_progress(app, "downloading", version, downloaded, total)
-        },
-    )
-    .await?;
-    if cancellation.is_cancelled() {
-        return Err(UpdateError::DownloadCancelled);
-    }
-
-    emit_progress(app, "verifying", version, 0, None)?;
-    let payload = staging.payload();
-    let expected_version = version.to_owned();
-    let installed_build = installed.build;
-    let staged = blocking(move || -> Result<BundleIdentity> {
-        let bundle = extract_bundle(&archive, &payload)?;
-        std::fs::remove_file(&archive).map_err(|error| UpdateError::Staging {
-            stage: "remove-archive",
-            kind: error.kind(),
-        })?;
-        let system_version =
-            operating_system_version().map_err(|_| StagedBundleError::SystemVersionUnavailable)?;
-        Ok(verify_staged_bundle(
-            &bundle,
-            StagedExpectation {
-                version: &expected_version,
-                installed_build,
-                system_version: &system_version,
-            },
-        )?)
-    })
-    .await??;
-    if cancellation.is_cancelled() {
-        return Err(UpdateError::DownloadCancelled);
-    }
-    Ok(staged)
 }
 
 #[cfg(windows)]
@@ -604,185 +440,6 @@ enum HandOff {
     ExitRequired(UpdateError),
 }
 
-#[cfg(target_os = "macos")]
-async fn hand_off(app: &AppHandle, staged: &StagedUpdate) -> Result<HandOff> {
-    if admit_running_installation()? != staged.installed {
-        return Err(InstallAdmissionError::InstalledIdentityInvalid.into());
-    }
-    blocking(require_removable_services).await??;
-    let app_home = app_home()?;
-    // Opened while the application still runs normally: a log that cannot
-    // be opened refuses the installation instead of ending the process.
-    let log =
-        open_installer_log(&app_home).map_err(|error| UpdateError::InstallerLog(error.kind()))?;
-    // Owned only from here, so quitting is not refused during the checks above.
-    let mut lifecycle = begin_update_lifecycle(app).map_err(UpdateError::Lifecycle)?;
-    let dashboard = current_process_identity(ReleaseSignedComponent::MainExecutable.path())
-        .map_err(UpdateError::ProcessIdentity)?;
-    let journal = InstallJournal::new(&app_home);
-    journal
-        .begin(&InstallRecord::handed_off(
-            staged.transaction,
-            &staged.installed,
-            &staged.staged,
-            dashboard,
-        ))
-        .map_err(UpdateError::Journal)?;
-
-    let shutdown_warning = match prepare_update_exit(app, &mut lifecycle).await {
-        Ok(warning) => warning,
-        Err(error) => {
-            let stopping = UpdateError::EngineStop(error);
-            return Err(match journal.clear(&staged.transaction) {
-                Ok(()) => stopping,
-                Err(clearing) => {
-                    report(app, &stopping);
-                    UpdateError::Journal(clearing)
-                }
-            });
-        }
-    };
-
-    // From here the core is Off under a retained reservation and the
-    // lifecycle only permits exit: every outcome ends this process.
-    if let Some(warning) = shutdown_warning {
-        crate::diagnostics::record(
-            app,
-            DiagnosticTopic::Update,
-            "engine_stop_reported_error",
-            &format!("the core is Off but its shutdown reported an error: {warning}"),
-        );
-    }
-    Ok(
-        match start_installer(&app_home, &staged.transaction, log).await {
-            Ok(()) => HandOff::Started,
-            Err(detail) => {
-                if let Err(error) = journal.abort(&staged.transaction, "installer_start_failed") {
-                    // The next launch then reports the attempt as interrupted.
-                    report(app, &UpdateError::Journal(error));
-                }
-                HandOff::InstallerDidNotStart(UpdateError::InstallerStart(detail))
-            }
-        },
-    )
-}
-
-/// Starts the installer process and waits until it holds the installation
-/// lease. Only then may this process exit: an installer that never got that
-/// far would leave the user without an application.
-#[cfg(target_os = "macos")]
-async fn start_installer(
-    app_home: &Path,
-    transaction: &Uuid,
-    log: File,
-) -> std::result::Result<(), String> {
-    let mut installer = spawn_installer(transaction, log)
-        .map_err(|error| format!("installer process could not be started: {error}"))?;
-    let admitted =
-        wait_for_installer_admission(&mut installer, app_home, INSTALLER_ADMISSION_TIMEOUT).await;
-    if admitted.is_err()
-        && let Err(error) = installer.kill().and_then(|()| installer.wait())
-    {
-        // Left running it still cannot install: its record is aborted next.
-        eprintln!("an unadmitted update installer could not be stopped: {error}");
-    }
-    admitted
-}
-
-#[cfg(target_os = "macos")]
-async fn wait_for_installer_admission(
-    installer: &mut Child,
-    app_home: &Path,
-    timeout: Duration,
-) -> std::result::Result<(), String> {
-    let deadline = Instant::now() + timeout;
-    let mut lease = LeaseWatch::default();
-    loop {
-        if let Some(status) = installer
-            .try_wait()
-            .map_err(|error| format!("installer process could not be observed: {error}"))?
-        {
-            return Err(format!(
-                "installer process ended before it was admitted ({status})"
-            ));
-        }
-        let held = match UpdateInstallLease::acquire(app_home) {
-            Err(UpdateInstallLeaseError::Held) => true,
-            Ok(probe) => {
-                drop(probe);
-                false
-            }
-            Err(UpdateInstallLeaseError::Unavailable(detail)) => {
-                return Err(format!(
-                    "installation lease could not be observed: {detail}"
-                ));
-            }
-        };
-        if lease.held_by_the_installer(held) {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err("installer process was not admitted in time".into());
-        }
-        tokio::time::sleep(INSTALLER_ADMISSION_POLL).await;
-    }
-}
-
-/// Tells the installer's lasting hold on the lease from the momentary probe
-/// of another dashboard that is just starting: only a lease found held on two
-/// consecutive observations counts.
-#[cfg(target_os = "macos")]
-#[derive(Default)]
-struct LeaseWatch {
-    held_before: bool,
-}
-
-#[cfg(target_os = "macos")]
-impl LeaseWatch {
-    fn held_by_the_installer(&mut self, held: bool) -> bool {
-        let lasting = held && self.held_before;
-        self.held_before = held;
-        lasting
-    }
-}
-
-/// Opens the installer's private log for appending, never through a link.
-/// Earlier attempts stay readable until the log outgrows its bound; then it
-/// starts over.
-#[cfg(target_os = "macos")]
-fn open_installer_log(app_home: &Path) -> std::io::Result<File> {
-    use std::os::unix::fs::OpenOptionsExt as _;
-
-    let path = app_home.join(INSTALLER_LOG);
-    let outgrown = match std::fs::symlink_metadata(&path) {
-        Ok(metadata) => metadata.len() > INSTALLER_LOG_LIMIT,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-        Err(error) => return Err(error),
-    };
-    std::fs::OpenOptions::new()
-        .write(true)
-        .append(!outgrown)
-        .truncate(outgrown)
-        .create(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(&path)
-}
-
-/// Starts the installer mode of the installed executable in its own process
-/// group, so it outlives this dashboard. Its diagnostics go to the log.
-#[cfg(target_os = "macos")]
-fn spawn_installer(transaction: &Uuid, log: File) -> std::io::Result<Child> {
-    Command::new(ReleaseSignedComponent::MainExecutable.path())
-        .arg(FINISH_UPDATE_FLAG)
-        .arg(transaction.hyphenated().to_string())
-        .process_group(0)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log.try_clone()?))
-        .stderr(Stdio::from(log))
-        .spawn()
-}
-
 /// Reports what the previous installation attempt left behind, once, and
 /// which installation this process is still holding.
 ///
@@ -912,300 +569,4 @@ fn report(app: &AppHandle, error: &UpdateError) -> UpdateFailure {
 }
 
 #[cfg(all(test, target_os = "macos"))]
-mod tests {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    use super::*;
-
-    fn authorization(version: &str) -> UpdateAuthorization {
-        UpdateAuthorization {
-            version: version.to_owned(),
-            archive_name: format!("Clash.for.Mac_{version}_aarch64.app.tar.gz"),
-            download_url: format!(
-                "https://github.com/billlza/cfw-rs/releases/download/v{version}/archive.tar.gz"
-            ),
-            signature: "signature".to_owned(),
-        }
-    }
-
-    #[test]
-    fn release_page_is_derived_only_from_a_canonical_version() {
-        assert_eq!(
-            release_page_url(&authorization("0.4.1")).expect("canonical release"),
-            "https://github.com/billlza/cfw-rs/releases/tag/v0.4.1"
-        );
-        for rejected in ["01.4.1", "0.4", "0.4.1+build.1/"] {
-            assert!(
-                release_page_url(&authorization(rejected)).is_err(),
-                "accepted unsafe release version {rejected:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn an_installation_outside_applications_reports_why_it_cannot_update_itself() {
-        // Test binaries never run from the installed bundle.
-        assert_eq!(
-            install_support(false),
-            serde_json::json!({ "supported": false, "code": "not_in_applications" })
-        );
-        assert!(!runs_from_installed_location().expect("current executable observed"));
-    }
-
-    #[test]
-    fn a_release_that_failed_authentication_is_not_offered_for_installation() {
-        assert_eq!(
-            install_support(true),
-            serde_json::json!({
-                "supported": false,
-                "code": "release_failed_authentication",
-            })
-        );
-    }
-
-    fn installer(program: &str, argument: &str) -> Child {
-        Command::new(program)
-            .arg(argument)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("stand-in installer process")
-    }
-
-    fn stop(mut installer: Child) {
-        installer.kill().expect("stop the stand-in installer");
-        installer.wait().expect("reap the stand-in installer");
-    }
-
-    #[test]
-    fn one_passing_probe_of_the_lease_is_not_an_admitted_installer() {
-        let mut watch = LeaseWatch::default();
-        let observed = [true, false, true, false, false, true, true, true]
-            .map(|held| watch.held_by_the_installer(held));
-        assert_eq!(
-            observed,
-            [false, false, false, false, false, false, true, true]
-        );
-    }
-
-    #[tokio::test]
-    async fn the_dashboard_exits_only_for_a_running_installer_that_holds_the_lease() {
-        let home = tempfile::tempdir().expect("app home");
-        let admitted = UpdateInstallLease::acquire(home.path()).expect("the installer's lease");
-        let mut running = installer("/bin/sleep", "30");
-        assert_eq!(
-            wait_for_installer_admission(&mut running, home.path(), Duration::from_secs(10)).await,
-            Ok(())
-        );
-        stop(running);
-        drop(admitted);
-    }
-
-    #[tokio::test]
-    async fn an_installer_that_never_takes_the_lease_is_not_waited_for_forever() {
-        let home = tempfile::tempdir().expect("app home");
-        let mut idle = installer("/bin/sleep", "30");
-        let waited = Instant::now();
-        assert_eq!(
-            wait_for_installer_admission(&mut idle, home.path(), Duration::from_millis(300)).await,
-            Err("installer process was not admitted in time".into())
-        );
-        assert!(waited.elapsed() >= Duration::from_millis(300));
-        stop(idle);
-        UpdateInstallLease::acquire(home.path()).expect("the probe never keeps the lease");
-    }
-
-    #[tokio::test]
-    async fn an_installer_that_ended_is_not_mistaken_for_an_admitted_one() {
-        let home = tempfile::tempdir().expect("app home");
-        // Something else holds the lease, as a second installer would.
-        let other = UpdateInstallLease::acquire(home.path()).expect("another holder");
-        let mut ended = installer("/usr/bin/false", "ignored");
-        ended.wait().expect("the stand-in installer ended");
-        let verdict =
-            wait_for_installer_admission(&mut ended, home.path(), Duration::from_secs(10)).await;
-        assert!(
-            matches!(&verdict, Err(detail) if detail.contains("ended before it was admitted")),
-            "{verdict:?}"
-        );
-        drop(other);
-    }
-
-    #[test]
-    fn a_preparation_owns_the_slot_before_its_slow_checks_and_honours_a_cancellation() {
-        let source = include_str!("updater.rs")
-            .split("\nmod tests {")
-            .next()
-            .expect("production source");
-        let prepare = source
-            .split("async fn prepare_update_install_inner(")
-            .nth(1)
-            .expect("preparation")
-            .split("\n}\n")
-            .next()
-            .expect("preparation body");
-        let order = [
-            "admit_running_installation()",
-            "ensure_previous_attempt_reviewed(app)",
-            ".begin_preparation(&expected_version)",
-            "lease.cancellation.cancelled() => return Err(UpdateError::DownloadCancelled)",
-            "recheck_presented_update(",
-            "security.is_rejected(",
-            "require_removable_services",
-            "lease.cancellation.is_cancelled()",
-            "StagingArea::create(",
-            "stage_release(",
-        ]
-        .map(|step| {
-            prepare
-                .find(step)
-                .unwrap_or_else(|| panic!("{step} is part of the preparation"))
-        });
-        assert!(
-            order.is_sorted(),
-            "the steps of a preparation are out of order: {order:?}"
-        );
-        assert!(
-            prepare.contains("tokio::select! {\n        biased;"),
-            "the cancellation is checked before each poll of the recheck"
-        );
-    }
-
-    #[test]
-    fn the_hand_off_opens_the_installer_log_before_it_owns_the_lifecycle() {
-        let source = include_str!("updater.rs")
-            .split("\nmod tests {")
-            .next()
-            .expect("production source");
-        let hand_off = source
-            .split("async fn hand_off(")
-            .nth(1)
-            .expect("hand-off")
-            .split("\n}\n")
-            .next()
-            .expect("hand-off body");
-        let order = [
-            "require_removable_services",
-            "open_installer_log(&app_home)",
-            "begin_update_lifecycle(app)",
-            "journal\n        .begin(",
-            "prepare_update_exit(app, &mut lifecycle).await",
-        ]
-        .map(|step| {
-            hand_off
-                .find(step)
-                .unwrap_or_else(|| panic!("{step} is part of the hand-off"))
-        });
-        assert!(order.is_sorted(), "{order:?}");
-        let opening = source
-            .split("fn open_installer_log(")
-            .nth(1)
-            .expect("log opening")
-            .split("\n}\n")
-            .next()
-            .expect("log opening body");
-        assert!(opening.contains(".mode(0o600)"));
-        assert!(opening.contains(".custom_flags(libc::O_NOFOLLOW)"));
-        assert!(opening.contains(".append(!outgrown)"));
-    }
-
-    #[test]
-    fn the_installer_log_is_appended_to_until_it_outgrows_its_bound_and_never_a_link() {
-        let home = tempfile::tempdir().expect("app home");
-        let path = home.path().join(INSTALLER_LOG);
-        {
-            use std::io::Write as _;
-            let mut log = open_installer_log(home.path()).expect("new log");
-            log.write_all(b"first\n").expect("write");
-        }
-        {
-            use std::io::Write as _;
-            let mut log = open_installer_log(home.path()).expect("existing log");
-            log.write_all(b"second\n").expect("write");
-        }
-        assert_eq!(std::fs::read(&path).expect("log"), b"first\nsecond\n");
-        assert_eq!(
-            std::fs::metadata(&path)
-                .expect("metadata")
-                .permissions()
-                .mode()
-                & 0o777,
-            0o600
-        );
-
-        let oversized = vec![b'x'; INSTALLER_LOG_LIMIT as usize + 1];
-        std::fs::write(&path, &oversized).expect("outgrown log");
-        {
-            use std::io::Write as _;
-            let mut log = open_installer_log(home.path()).expect("log started over");
-            log.write_all(b"third\n").expect("write");
-        }
-        assert_eq!(std::fs::read(&path).expect("log"), b"third\n");
-
-        std::fs::remove_file(&path).expect("remove");
-        let elsewhere = home.path().join("elsewhere");
-        std::fs::write(&elsewhere, b"").expect("target");
-        std::os::unix::fs::symlink(&elsewhere, &path).expect("link in place");
-        assert!(open_installer_log(home.path()).is_err());
-        assert_eq!(std::fs::read(&elsewhere).expect("untouched"), b"");
-    }
-
-    #[test]
-    fn nothing_can_fail_out_of_the_hand_off_once_the_core_is_stopped() {
-        let source = include_str!("updater.rs")
-            .split("\nmod tests {")
-            .next()
-            .expect("production source");
-        let hand_off = source
-            .split("async fn hand_off(")
-            .nth(1)
-            .expect("hand-off")
-            .split("\n}\n")
-            .next()
-            .expect("hand-off body");
-        let (before, after) = hand_off
-            .split_once("prepare_update_exit(app, &mut lifecycle).await")
-            .expect("the core is stopped inside the hand-off");
-        assert!(before.contains("journal\n        .begin("));
-        let after = after
-            .split_once("// From here the core is Off")
-            .expect("the point of no return is marked")
-            .1;
-        assert!(
-            !after.contains('?'),
-            "a propagated error would leave a stopped application running: {after}"
-        );
-        assert!(
-            after.contains("engine_stop_reported_error"),
-            "a shutdown error with the core Off is recorded, not propagated"
-        );
-        assert!(after.contains("HandOff::Started"));
-        assert!(after.contains("HandOff::InstallerDidNotStart"));
-    }
-
-    #[test]
-    fn the_installer_is_started_only_as_its_exact_mode_with_a_private_log() {
-        let source = include_str!("updater.rs")
-            .split("\nmod tests {")
-            .next()
-            .expect("production source");
-        let spawn = source
-            .split("fn spawn_installer")
-            .nth(1)
-            .expect("installer spawn")
-            .split("\n}\n")
-            .next()
-            .expect("installer spawn body");
-        assert!(spawn.contains("ReleaseSignedComponent::MainExecutable.path()"));
-        assert!(spawn.contains(".arg(FINISH_UPDATE_FLAG)"));
-        assert!(spawn.contains(".process_group(0)"));
-        assert!(spawn.contains("Stdio::from(log"));
-        assert_eq!(source.matches("Command::new(").count(), 1);
-        assert_eq!(
-            source.matches("spawn_installer(").count(),
-            2,
-            "the installer is started from exactly one place"
-        );
-    }
-}
+mod tests;

@@ -14,13 +14,7 @@ import Testing
 // that attests nothing. All Authority (XPC), libbox, and OS side effects are behind
 // injected fakes; no real Network Extension, launchd, or XPC is exercised.
 
-private enum FixtureError: Error { case forced }
-
-private final class FakeMonotonicClock: ProviderMonotonicClock, @unchecked Sendable {
-  let value: UInt64
-  init(value: UInt64) { self.value = value }
-  func nowMilliseconds() -> UInt64 { value }
-}
+private enum RestartFixtureError: Error { case forced }
 
 /// Authority owner client that issues a FRESH redeemed start (new sensitive
 /// buffers) on every redemption, so the same coordinator can be started, stopped,
@@ -64,7 +58,7 @@ private final class RestartableOwnerAuthorityClient: EngineOwnerAuthorityClient,
   }
 }
 
-private final class FakeEngine: PacketEngine, @unchecked Sendable {
+private final class FakeRestartEngine: PacketEngine, @unchecked Sendable {
   private let lock = NSLock()
   private var ownedDescriptor: Int32 = -1
   private var startCountValue = 0
@@ -101,12 +95,12 @@ private final class FakeEngine: PacketEngine, @unchecked Sendable {
   }
 }
 
-private struct FakeEngineFactory: PacketEngineFactory {
-  let engine: FakeEngine
+private struct FakeRestartEngineFactory: PacketEngineFactory {
+  let engine: FakeRestartEngine
   func makeEngine() throws -> any PacketEngine { engine }
 }
 
-private final class FakePump: PacketPumping, @unchecked Sendable {
+private final class FakeRestartPump: PacketPumping, @unchecked Sendable {
   private let lock = NSLock()
   private var transferred = false
   private var startCountValue = 0
@@ -122,7 +116,7 @@ private final class FakePump: PacketPumping, @unchecked Sendable {
       }
       transferred = true
       let descriptor = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
-      guard descriptor >= 0 else { throw FixtureError.forced }
+      guard descriptor >= 0 else { throw RestartFixtureError.forced }
       return descriptor
     }
   }
@@ -136,30 +130,16 @@ private final class FakePump: PacketPumping, @unchecked Sendable {
 /// the single-transfer guard on a reused pump.
 private final class PumpFactory: @unchecked Sendable {
   private let lock = NSLock()
-  private var pumpsValue: [FakePump] = []
-  func make() -> FakePump {
-    let pump = FakePump()
+  private var pumpsValue: [FakeRestartPump] = []
+  func make() -> FakeRestartPump {
+    let pump = FakeRestartPump()
     lock.withLock { pumpsValue.append(pump) }
     return pump
   }
-  var pumps: [FakePump] { lock.withLock { pumpsValue } }
+  var pumps: [FakeRestartPump] { lock.withLock { pumpsValue } }
 }
 
-private final class CompletionRecorder: @unchecked Sendable {
-  private let lock = NSLock()
-  private let semaphore = DispatchSemaphore(value: 0)
-  private var recorded: [PacketTunnelProviderError?] = []
-
-  func record(_ error: Error?) {
-    lock.withLock { recorded.append(error as? PacketTunnelProviderError) }
-    semaphore.signal()
-  }
-
-  func wait() -> Bool { semaphore.wait(timeout: .now() + 2) == .success }
-  var values: [PacketTunnelProviderError?] { lock.withLock { recorded } }
-}
-
-private final class StopResultRecorder: @unchecked Sendable {
+private final class RestartStopResultRecorder: @unchecked Sendable {
   private let lock = NSLock()
   private let semaphore = DispatchSemaphore(value: 0)
   private var resultsValue: [Result<Void, PacketTunnelStopError>] = []
@@ -173,15 +153,7 @@ private final class StopResultRecorder: @unchecked Sendable {
   var results: [Result<Void, PacketTunnelStopError>] { lock.withLock { resultsValue } }
 }
 
-private func stopSucceeded(
-  _ result: Result<Void, PacketTunnelStopError>?
-) -> Bool {
-  guard let result else { return false }
-  if case .success = result { return true }
-  return false
-}
-
-private func tunnelDescriptor() throws -> ConfigurationDescriptor {
+private func restartTunnelDescriptor() throws -> ConfigurationDescriptor {
   try ConfigurationDescriptor(
     slot: .tunnel,
     tunnelOptions: TunnelNetworkOptions(ipv6Enabled: true, mtu: 1_500),
@@ -220,21 +192,22 @@ private func makeRedeemed(
     operation: operation, lease: lease, configuration: configuration, secrets: secrets)
 }
 
-private func makeTicket(byte: UInt8) throws -> StartTicket {
+private func makeRestartTicket(byte: UInt8) throws -> StartTicket {
   try StartTicket(copying: Data(repeating: byte, count: AuthorityV1Limits.ticketBytes))
 }
 
-private struct CoordinatorFixture {
+private struct RestartCoordinatorFixture {
   let coordinator: TunnelTicketStartCoordinator
   let descriptor: ConfigurationDescriptor
   let authority: RestartableOwnerAuthorityClient
-  let engine: FakeEngine
+  let engine: FakeRestartEngine
   let pumps: PumpFactory
 }
 
-private func makeCoordinator(clockValue: UInt64 = 5_000) throws -> CoordinatorFixture {
-  let descriptor = try tunnelDescriptor()
-  let engine = FakeEngine()
+private func makeRestartCoordinator(clockValue: UInt64 = 5_000) throws -> RestartCoordinatorFixture
+{
+  let descriptor = try restartTunnelDescriptor()
+  let engine = FakeRestartEngine()
   let pumps = PumpFactory()
   let authority = RestartableOwnerAuthorityClient(descriptor: descriptor)
   let dependencies = PacketTunnelSessionDependencies(
@@ -247,7 +220,7 @@ private func makeCoordinator(clockValue: UInt64 = 5_000) throws -> CoordinatorFi
     makePump: { _, _ in pumps.make() },
     applyNetworkSettings: { _, completion in completion(nil) })
   let lifecycle = PacketTunnelSessionLifecycle(
-    engineFactory: FakeEngineFactory(engine: engine),
+    engineFactory: FakeRestartEngineFactory(engine: engine),
     dependencies: dependencies,
     cancelTunnel: { _ in },
     endProcess: { _ in Issue.record("every engine in this test closes") })
@@ -255,7 +228,7 @@ private func makeCoordinator(clockValue: UInt64 = 5_000) throws -> CoordinatorFi
     authority: authority,
     sessionLifecycle: lifecycle,
     clock: FakeMonotonicClock(value: clockValue))
-  return CoordinatorFixture(
+  return RestartCoordinatorFixture(
     coordinator: coordinator, descriptor: descriptor,
     authority: authority, engine: engine, pumps: pumps)
 }
@@ -263,12 +236,12 @@ private func makeCoordinator(clockValue: UInt64 = 5_000) throws -> CoordinatorFi
 @Suite(.serialized)
 struct ProviderTicketRestartIntegrationTests {
   @Test func startStopStartAcceptsAFreshTicketAfterAProvenStop() throws {
-    let fixture = try makeCoordinator()
+    let fixture = try makeRestartCoordinator()
 
     // First start with a fresh single-use ticket.
     let firstStart = CompletionRecorder()
     fixture.coordinator.start(
-      ticket: try makeTicket(byte: 0x11), descriptor: fixture.descriptor
+      ticket: try makeRestartTicket(byte: 0x11), descriptor: fixture.descriptor
     ) { firstStart.record($0) }
     #expect(firstStart.wait())
     #expect(firstStart.values == [nil])
@@ -276,7 +249,7 @@ struct ProviderTicketRestartIntegrationTests {
     #expect(fixture.engine.startCount == 1)
 
     // Proven stop returns the coordinator to idle and attests stopped exactly once.
-    let stop = StopResultRecorder()
+    let stop = RestartStopResultRecorder()
     fixture.coordinator.stop { stop.record($0) }
     #expect(stop.wait())
     #expect(stopSucceeded(stop.results.first))
@@ -286,7 +259,7 @@ struct ProviderTicketRestartIntegrationTests {
     // A subsequent start with a DIFFERENT fresh ticket is admitted and redeemed.
     let secondStart = CompletionRecorder()
     fixture.coordinator.start(
-      ticket: try makeTicket(byte: 0x22), descriptor: fixture.descriptor
+      ticket: try makeRestartTicket(byte: 0x22), descriptor: fixture.descriptor
     ) { secondStart.record($0) }
     #expect(secondStart.wait())
     #expect(secondStart.values == [nil])
@@ -295,7 +268,7 @@ struct ProviderTicketRestartIntegrationTests {
     #expect(fixture.authority.readyAttestations.count == 2)
 
     // Clean up the second session.
-    let finalStop = StopResultRecorder()
+    let finalStop = RestartStopResultRecorder()
     fixture.coordinator.stop { finalStop.record($0) }
     #expect(finalStop.wait())
     #expect(stopSucceeded(finalStop.results.first))
@@ -303,9 +276,9 @@ struct ProviderTicketRestartIntegrationTests {
   }
 
   @Test func stopWithoutAnActiveContextAttestsNothing() throws {
-    let fixture = try makeCoordinator()
+    let fixture = try makeRestartCoordinator()
 
-    let stop = StopResultRecorder()
+    let stop = RestartStopResultRecorder()
     fixture.coordinator.stop { stop.record($0) }
     #expect(stop.wait())
     #expect(stopSucceeded(stop.results.first))

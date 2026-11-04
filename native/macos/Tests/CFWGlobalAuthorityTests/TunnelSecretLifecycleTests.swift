@@ -7,20 +7,6 @@ import Testing
 
 private typealias SHA256Digest = CFWSharedProtocol.SHA256Digest
 
-private final class TestMonotonicClock: AuthorityMonotonicClock, @unchecked Sendable {
-  private let lock = NSLock()
-  private var value: UInt64
-
-  init(_ value: UInt64) { self.value = value }
-  func nowMilliseconds() -> UInt64 { lock.withLock { value } }
-  func advance(by amount: UInt64) { lock.withLock { value += amount } }
-}
-
-private struct FixedTicketRandomness: AuthorityTicketRandomness {
-  let value: Data
-  func randomBytes(count _: Int) throws -> Data { value }
-}
-
 private struct SecretFixture {
   let request: PrepareStartRequest
   let leaseID: AuthorityIdentifier
@@ -126,8 +112,6 @@ private func providerTickets(
     try redeemed.withMaterial { _, _ in () }
   }
 }
-
-private enum RequestedTransportFailure: Error { case requested }
 
 @Test func throwingTransportConsumersStillEraseTicketAndSecretBuffers() throws {
   let lifecycle = TunnelSecretLifecycle(

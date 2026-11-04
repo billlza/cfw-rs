@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
-use crate::bounded_command::run_bounded_command;
+use crate::bounded_command::{BoundedCommandError, BoundedCommandOutput, run_bounded_command};
 
 const ID: &str = "/usr/bin/id";
 const LAUNCHCTL: &str = "/bin/launchctl";
@@ -12,14 +12,17 @@ const MAX_STDOUT_BYTES: usize = 64 * 1024;
 const MAX_STDERR_BYTES: usize = 16 * 1024;
 
 pub(crate) fn current_uid() -> Result<String> {
-    let output = run_bounded_command(
+    parse_uid(run_bounded_command(
         ID,
         &["-u"],
         COMMAND_TIMEOUT,
         MAX_STDOUT_BYTES,
         MAX_STDERR_BYTES,
-    )
-    .with_context(|| format!("failed to run {ID} -u"))?;
+    ))
+}
+
+fn parse_uid(result: Result<BoundedCommandOutput, BoundedCommandError>) -> Result<String> {
+    let output = result.with_context(|| format!("failed to run {ID} -u"))?;
     if !output.status.success() {
         bail!(
             "{ID} -u failed with status {}: {}",
@@ -63,32 +66,44 @@ impl LaunchctlFailure {
 
 impl fmt::Display for LaunchctlFailure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "{LAUNCHCTL} {} failed with status {}: {}{}",
-            self.operation,
-            self.exit_code.map_or_else(
-                || "terminated by signal".to_string(),
-                |code| code.to_string()
-            ),
-            self.stderr,
-            self.stdout
-        )
+        write!(formatter, "{LAUNCHCTL} {} failed ", self.operation)?;
+        // No exit code: a signal ended launchctl, or it never ran to completion.
+        match self.exit_code {
+            Some(code) => write!(formatter, "with status {code}")?,
+            None => formatter.write_str("without an exit status")?,
+        }
+        if !self.stderr.is_empty() {
+            write!(formatter, ": {}", self.stderr)?;
+        }
+        if !self.stdout.is_empty() {
+            write!(formatter, "; standard output: {}", self.stdout)?;
+        }
+        Ok(())
     }
 }
 
 impl std::error::Error for LaunchctlFailure {}
 
 fn run(args: &[&str]) -> Result<String, LaunchctlFailure> {
-    let operation = args.join(" ");
-    let output = run_bounded_command(
-        LAUNCHCTL,
-        args,
-        COMMAND_TIMEOUT,
-        MAX_STDOUT_BYTES,
-        MAX_STDERR_BYTES,
+    finish(
+        args.join(" "),
+        run_bounded_command(
+            LAUNCHCTL,
+            args,
+            COMMAND_TIMEOUT,
+            MAX_STDOUT_BYTES,
+            MAX_STDERR_BYTES,
+        ),
     )
-    .map_err(|error| LaunchctlFailure {
+}
+
+/// The standard output of a successful run; any other outcome, including a
+/// success that wrote to standard error, as a failure of `operation`.
+fn finish(
+    operation: String,
+    result: Result<BoundedCommandOutput, BoundedCommandError>,
+) -> Result<String, LaunchctlFailure> {
+    let output = result.map_err(|error| LaunchctlFailure {
         operation: operation.clone(),
         exit_code: None,
         stdout: String::new(),
@@ -153,7 +168,12 @@ fn expected_missing_print_error(target: &str) -> Option<String> {
 }
 
 pub(crate) fn run_allow_absent(args: &[&str]) -> Result<()> {
-    match run(args) {
+    allow_absent(args, run(args))
+}
+
+/// Success, or the structured result of booting out a job that is not loaded.
+fn allow_absent(args: &[&str], result: Result<String, LaunchctlFailure>) -> Result<()> {
+    match result {
         Ok(_) => Ok(()),
         Err(error)
             if args.len() == 2
@@ -182,64 +202,4 @@ pub(crate) fn print_target(service_target: &str) -> Result<Option<String>> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn failure(operation: &str, exit_code: i32, stderr: &str) -> LaunchctlFailure {
-        LaunchctlFailure {
-            operation: operation.into(),
-            exit_code: Some(exit_code),
-            stdout: String::new(),
-            stderr: stderr.into(),
-        }
-    }
-
-    #[test]
-    fn bootout_accepts_only_the_structured_missing_result() {
-        assert!(
-            failure(
-                "bootout system/com.example.missing",
-                3,
-                "Boot-out failed: 3: No such process"
-            )
-            .is_missing_bootout_target("system/com.example.missing")
-        );
-        assert!(
-            !failure("bootout system/x", 5, "Boot-out failed: 5")
-                .is_missing_bootout_target("system/x")
-        );
-        assert!(
-            !failure("disable system/x", 3, "Boot-out failed: 3: No such process")
-                .is_missing_bootout_target("system/x")
-        );
-    }
-
-    #[test]
-    fn print_accepts_only_launchctl_missing_service_output() {
-        assert!(
-            failure(
-                "print gui/501/com.example.missing",
-                113,
-                "Bad request.\nCould not find service \"com.example.missing\" in domain for user gui: 501"
-            )
-            .is_missing_print_target("gui/501/com.example.missing")
-        );
-        assert!(
-            !failure("print gui/501/x", 5, "Load failed: 5").is_missing_print_target("gui/501/x")
-        );
-        assert!(
-            !failure("print gui/501/x", 113, "Bad request.").is_missing_print_target("gui/501/x")
-        );
-    }
-
-    #[test]
-    fn print_missing_result_is_bound_to_the_exact_target() {
-        let error = failure(
-            "print system/com.example.one",
-            113,
-            "Bad request.\nCould not find service \"com.example.one\" in domain for system",
-        );
-        assert!(error.is_missing_print_target("system/com.example.one"));
-        assert!(!error.is_missing_print_target("system/com.example.two"));
-    }
-}
+mod tests;

@@ -23,7 +23,7 @@ use cfw_engine_api::CredentialVaultProvisioner;
 use cfw_profiles::{
     ExactProfileImportOutcome, ProfileImportResult, ProfileRepository, StoredProfile,
 };
-use cfw_singbox_config::{EngineSettings, ProjectionMode, ValidatedSingBoxProfile};
+use cfw_singbox_config::{AppSelector, EngineSettings, ProjectionMode, ValidatedSingBoxProfile};
 use qrcode::QrCode;
 use qrcode::render::svg;
 use serde::Serialize;
@@ -31,11 +31,33 @@ use tauri::State;
 use uuid::Uuid;
 
 mod fetch;
+mod import_transaction;
 mod local_file;
+mod provisioning;
 #[cfg(test)]
 mod proxy_tests;
+mod update_transaction;
+mod validation;
 pub(super) use fetch::{SubscriptionRoute, fetch_provider_resources, validate_subscription_url};
 use fetch::{fetch_subscription_bounded, resolve_provider_documents};
+use import_transaction::{ProfileImportSource, prepare_profile_import};
+#[cfg(test)]
+use import_transaction::{commit_profile_import, profile_import_activation_error};
+use provisioning::{
+    provision_subscription_credentials, provision_subscription_credentials_attempt,
+};
+pub(super) use update_transaction::prepare_subscription_update_attempt;
+use update_transaction::prepare_subscription_update_with_rotation;
+#[cfg(test)]
+use update_transaction::{
+    SubscriptionUpdateCommitError, commit_subscription_update, commit_subscription_update_attempt,
+    commit_subscription_update_with_rotation,
+};
+pub(super) use validation::validated_subscription_import_with_namespace;
+use validation::{
+    validated_profile, validated_subscription_import,
+    validated_subscription_import_with_reusable_references,
+};
 
 use super::ManagedProfiles;
 use super::imported_credentials::{
@@ -64,10 +86,31 @@ pub(crate) struct UiProfileText {
     name: String,
     body: String,
     proxy_selections: std::collections::BTreeMap<String, String>,
+    app_selector: Option<UiAppSelector>,
     active: bool,
     source_url: Option<String>,
     bytes: usize,
     updated_epoch_secs: u64,
+}
+
+/// The selector the running core puts in front of a profile that names no
+/// final route. The saved profile view offers it like a selector group, so a
+/// node can be chosen while the core is off.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct UiAppSelector {
+    tag: String,
+    members: Vec<String>,
+    default: String,
+}
+
+impl From<AppSelector> for UiAppSelector {
+    fn from(selector: AppSelector) -> Self {
+        Self {
+            tag: selector.tag,
+            members: selector.members,
+            default: selector.default,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -297,20 +340,25 @@ pub(crate) async fn read_profile_text(
     id: String,
 ) -> Result<UiProfileText, String> {
     read_repository(profiles.repository(), move |repository| {
-        let stored = load_profile(repository, &id)?;
-        Ok(UiProfileText {
-            digest: stored.record.digest,
-            active: is_selected(repository, &id)?,
-            id: stored.record.id,
-            name: stored.record.name,
-            bytes: stored.record.bytes,
-            updated_epoch_secs: stored.record.created_epoch_secs,
-            source_url: stored.source_url,
-            body: stored.profile.as_json().to_owned(),
-            proxy_selections: stored.profile.proxy_selections().clone(),
-        })
+        profile_text(repository, &id)
     })
     .await
+}
+
+fn profile_text(repository: &ProfileRepository, id: &str) -> Result<UiProfileText, String> {
+    let stored = load_profile(repository, id)?;
+    Ok(UiProfileText {
+        digest: stored.record.digest,
+        active: is_selected(repository, id)?,
+        id: stored.record.id,
+        name: stored.record.name,
+        bytes: stored.record.bytes,
+        updated_epoch_secs: stored.record.created_epoch_secs,
+        source_url: stored.source_url,
+        body: stored.profile.as_json().to_owned(),
+        app_selector: stored.profile.app_selector().map(UiAppSelector::from),
+        proxy_selections: stored.profile.proxy_selections().clone(),
+    })
 }
 
 /// Replaces the document of an existing profile with edited text.
@@ -452,376 +500,6 @@ pub(crate) async fn open_profile_externally(
     })
     .await?;
     crate::startup_state::prepare_off_main(move || open_path(&path, false)).await
-}
-
-/// Parses and validates a document, and proves it projects for both modes before
-/// it can be stored, so an unstartable profile is rejected at import time.
-fn validated_profile(
-    body: &str,
-    settings: &EngineSettings,
-) -> Result<ValidatedSingBoxProfile, String> {
-    let profile = ValidatedSingBoxProfile::parse(body).map_err(|error| error.to_string())?;
-    for mode in [ProjectionMode::SystemProxy, ProjectionMode::Tunnel] {
-        profile
-            .project("00000000-0000-4000-8000-000000000000", mode, settings)
-            .map_err(|error| error.to_string())?;
-    }
-    Ok(profile)
-}
-
-fn validated_subscription_import(
-    body: &str,
-    settings: &EngineSettings,
-) -> Result<crate::subscription_import::ImportedSubscription, String> {
-    let imported = import_subscription_document(body)?;
-    validate_subscription_projection(&imported, settings)?;
-    Ok(imported)
-}
-
-pub(super) fn validated_subscription_import_with_namespace(
-    body: &str,
-    settings: &EngineSettings,
-    credential_namespace: uuid::Uuid,
-) -> Result<crate::subscription_import::ImportedSubscription, String> {
-    let imported =
-        import_subscription_document_with_credential_namespace(body, credential_namespace)?;
-    validate_subscription_projection(&imported, settings)?;
-    Ok(imported)
-}
-
-fn validated_subscription_import_with_reusable_references(
-    body: &str,
-    settings: &EngineSettings,
-    references: Vec<cfw_singbox_config::CredentialRef>,
-) -> Result<crate::subscription_import::ImportedSubscription, String> {
-    let imported = import_subscription_document_with_reusable_references(body, references)?;
-    validate_subscription_projection(&imported, settings)?;
-    Ok(imported)
-}
-
-fn validate_subscription_projection(
-    imported: &crate::subscription_import::ImportedSubscription,
-    settings: &EngineSettings,
-) -> Result<(), String> {
-    for mode in [ProjectionMode::SystemProxy, ProjectionMode::Tunnel] {
-        imported
-            .profile
-            .project("00000000-0000-4000-8000-000000000000", mode, settings)
-            .map_err(|error| error.to_string())?;
-    }
-    Ok(())
-}
-
-/// Local canonical profiles can intentionally omit secret material for later
-/// manual provisioning. Converted sources with extracted credentials, and all
-/// remote subscriptions, must confirm their complete vault audience first.
-#[derive(Clone, Copy)]
-enum ProfileImportSource<'a> {
-    Local,
-    Subscription(&'a str),
-}
-
-async fn prepare_profile_import(
-    repository: &ProfileRepository,
-    vault: &impl CredentialVaultProvisioner,
-    profile_id: &str,
-    name: Option<&str>,
-    source: ProfileImportSource<'_>,
-    imported: &crate::subscription_import::ImportedSubscription,
-    activate: bool,
-) -> Result<cfw_application::ProfileChange<ProfileImportResult>, String> {
-    let mutation = repository
-        .begin_credential_profile_mutation()
-        .map_err(|error| {
-            format!(
-                "profile repository mutation could not begin before credential provisioning: {error}"
-            )
-        })?;
-    if matches!(source, ProfileImportSource::Subscription(_)) || !imported.credentials.is_empty() {
-        provision_subscription_credentials(
-            vault,
-            profile_id,
-            &imported.profile,
-            &imported.credentials,
-        )
-        .await?;
-    }
-    let source_url = match source {
-        ProfileImportSource::Local => None,
-        ProfileImportSource::Subscription(url) => Some(url),
-    };
-    let previous = mutation
-        .selected_profile()
-        .map_err(|error| error.to_string())?
-        .into_valid();
-    let profile_id = profile_id.to_owned();
-    let name = name.map(ToOwned::to_owned);
-    let source_url = source_url.map(ToOwned::to_owned);
-    let profile = imported.profile.clone();
-    let commit_profile = profile.clone();
-    Ok(cfw_application::ProfileChange {
-        profile_id: profile_id.clone(),
-        profile,
-        activate,
-        previous_profile: previous.map(|prior| (prior.record.id, prior.profile)),
-        commit: Box::new(move || {
-            let ExactProfileImportOutcome { profile, created } = mutation
-        .commit_exact_import_and_select(&profile_id, name.as_deref(), &commit_profile, source_url.as_deref(), activate)
-        .map_err(|error| {
-            format!(
-                "profile repository import failed; any unreferenced vault audience is eligible for credential garbage collection: {error}"
-            )
-        })?;
-            if !created {
-                return Err(
-                    "profile repository import rejected an unexpected exact-ID replay".into(),
-                );
-            }
-            Ok(profile)
-        }),
-    })
-}
-
-#[cfg(test)]
-async fn commit_profile_import(
-    repository: &ProfileRepository,
-    vault: &impl CredentialVaultProvisioner,
-    profile_id: &str,
-    name: Option<&str>,
-    source: ProfileImportSource<'_>,
-    imported: &crate::subscription_import::ImportedSubscription,
-    activate: bool,
-) -> Result<ProfileImportResult, String> {
-    let candidate = prepare_profile_import(
-        repository, vault, profile_id, name, source, imported, activate,
-    )
-    .await?;
-    (candidate.commit)()
-}
-
-#[cfg(test)]
-fn profile_import_activation_error(error: impl fmt::Display) -> String {
-    format!("profile import committed, but selection failed: {error}")
-}
-
-#[derive(Debug)]
-pub(super) enum SubscriptionUpdateCommitError {
-    Mutation(String),
-    Credential(ImportedCredentialProvisionError),
-    Repository(String),
-}
-
-impl SubscriptionUpdateCommitError {
-    pub(super) fn is_immutable_conflict(&self) -> bool {
-        matches!(
-            self,
-            Self::Credential(ImportedCredentialProvisionError::Rejected(
-                ImportedCredentialProvisionAttemptError::Vault(
-                    cfw_engine_api::CredentialVaultError::ImmutableConflict
-                )
-            ))
-        )
-    }
-}
-
-impl fmt::Display for SubscriptionUpdateCommitError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Mutation(error) => write!(
-                formatter,
-                "subscription repository mutation could not begin before credential provisioning: {error}"
-            ),
-            Self::Credential(error) => write!(
-                formatter,
-                "subscription credential provisioning failed before repository commit: {error}"
-            ),
-            Self::Repository(error) => write!(
-                formatter,
-                "subscription repository update failed after credential provisioning; the unreferenced vault audience is eligible for credential garbage collection: {error}"
-            ),
-        }
-    }
-}
-
-pub(super) async fn prepare_subscription_update_attempt(
-    repository: &ProfileRepository,
-    vault: &impl CredentialVaultProvisioner,
-    expected: &StoredProfile,
-    source_url: Option<&str>,
-    imported: &crate::subscription_import::ImportedSubscription,
-    rebind_settings: Option<&EngineSettings>,
-) -> Result<cfw_application::ProfileChange<ProfileImportResult>, SubscriptionUpdateCommitError> {
-    let profile_id = &expected.record.id;
-    let mutation = repository
-        .begin_credential_profile_mutation_if_unchanged(expected)
-        .map_err(|error| SubscriptionUpdateCommitError::Mutation(error.to_string()))?;
-    if let Some(settings) = rebind_settings
-        && imported.profile.digest() != expected.profile.digest()
-        && let Some(request) = cfw_engine_api::CredentialRebindRequest::for_retained_credentials(
-            profile_id,
-            &expected.profile,
-            &imported.profile,
-            settings,
-        )
-        .map_err(SubscriptionUpdateCommitError::Mutation)?
-    {
-        super::imported_credentials::rebind_with_exact_replay(vault, request)
-            .await
-            .map_err(SubscriptionUpdateCommitError::Mutation)?;
-    }
-    provision_subscription_credentials_attempt(
-        vault,
-        profile_id,
-        &imported.profile,
-        &imported.credentials,
-    )
-    .await
-    .map_err(SubscriptionUpdateCommitError::Credential)?;
-    let previous = mutation
-        .selected_profile()
-        .map_err(|error| SubscriptionUpdateCommitError::Mutation(error.to_string()))?
-        .into_valid();
-    let activate = previous
-        .as_ref()
-        .is_some_and(|prior| prior.record.id == *profile_id);
-    let expected = expected.clone();
-    let source_url = source_url.map(str::to_owned);
-    let (profile, _) = imported
-        .profile
-        .inherit_proxy_selections(&expected.profile)
-        .map_err(|error| SubscriptionUpdateCommitError::Mutation(error.to_string()))?;
-    let commit_profile = profile.clone();
-    Ok(cfw_application::ProfileChange {
-        profile_id: profile_id.clone(),
-        profile,
-        activate,
-        previous_profile: previous.map(|prior| (prior.record.id, prior.profile)),
-        commit: Box::new(move || {
-            mutation
-                .commit_replace_if_unchanged(
-                    &expected,
-                    None,
-                    &commit_profile,
-                    source_url.as_deref(),
-                )
-                .map(|(updated, _committed)| updated)
-                .map_err(|error| {
-                    SubscriptionUpdateCommitError::Repository(error.to_string()).to_string()
-                })
-        }),
-    })
-}
-
-async fn prepare_subscription_update_with_rotation(
-    repository: &ProfileRepository,
-    vault: &impl CredentialVaultProvisioner,
-    expected: &StoredProfile,
-    source_url: &str,
-    body: &str,
-    settings: &EngineSettings,
-    imported: &crate::subscription_import::ImportedSubscription,
-) -> Result<cfw_application::ProfileChange<ProfileImportResult>, String> {
-    match prepare_subscription_update_attempt(
-        repository,
-        vault,
-        expected,
-        Some(source_url),
-        imported,
-        None,
-    )
-    .await
-    {
-        Ok(profile) => Ok(profile),
-        Err(error) if error.is_immutable_conflict() => {
-            let rotated = validated_subscription_import(body, settings)?;
-            prepare_subscription_update_attempt(
-                repository,
-                vault,
-                expected,
-                Some(source_url),
-                &rotated,
-                None,
-            )
-            .await
-            .map_err(|error| error.to_string())
-        }
-        Err(error) => Err(error.to_string()),
-    }
-}
-
-#[cfg(test)]
-async fn commit_subscription_update_attempt(
-    repository: &ProfileRepository,
-    vault: &impl CredentialVaultProvisioner,
-    expected: &StoredProfile,
-    source_url: &str,
-    imported: &crate::subscription_import::ImportedSubscription,
-) -> Result<ProfileImportResult, SubscriptionUpdateCommitError> {
-    let candidate = prepare_subscription_update_attempt(
-        repository,
-        vault,
-        expected,
-        Some(source_url),
-        imported,
-        None,
-    )
-    .await?;
-    (candidate.commit)().map_err(SubscriptionUpdateCommitError::Repository)
-}
-
-#[cfg(test)]
-async fn commit_subscription_update_with_rotation(
-    repository: &ProfileRepository,
-    vault: &impl CredentialVaultProvisioner,
-    expected: &StoredProfile,
-    source_url: &str,
-    body: &str,
-    settings: &EngineSettings,
-    imported: &crate::subscription_import::ImportedSubscription,
-) -> Result<ProfileImportResult, String> {
-    let candidate = prepare_subscription_update_with_rotation(
-        repository, vault, expected, source_url, body, settings, imported,
-    )
-    .await?;
-    (candidate.commit)()
-}
-
-#[cfg(test)]
-async fn commit_subscription_update(
-    repository: &ProfileRepository,
-    vault: &impl CredentialVaultProvisioner,
-    expected: &StoredProfile,
-    source_url: &str,
-    imported: &crate::subscription_import::ImportedSubscription,
-) -> Result<ProfileImportResult, String> {
-    commit_subscription_update_attempt(repository, vault, expected, source_url, imported)
-        .await
-        .map_err(|error| error.to_string())
-}
-
-async fn provision_subscription_credentials(
-    vault: &impl CredentialVaultProvisioner,
-    profile_id: &str,
-    profile: &ValidatedSingBoxProfile,
-    credentials: &[ImportedCredential],
-) -> Result<(), String> {
-    provision_subscription_credentials_attempt(vault, profile_id, profile, credentials)
-        .await
-        .map_err(|error| {
-            format!("imported credential provisioning failed before repository commit: {error}")
-        })
-}
-
-async fn provision_subscription_credentials_attempt(
-    vault: &impl CredentialVaultProvisioner,
-    profile_id: &str,
-    profile: &ValidatedSingBoxProfile,
-    credentials: &[ImportedCredential],
-) -> Result<(), ImportedCredentialProvisionError> {
-    if credentials.is_empty() && profile.credential_references().is_empty() {
-        return Ok(());
-    }
-    provision_imported_credentials_with_exact_replay(vault, profile_id, profile, credentials).await
 }
 
 fn load_profile(repository: &ProfileRepository, id: &str) -> Result<StoredProfile, String> {

@@ -55,3 +55,16 @@ export function networkDiagnosticsView(diagnostics, serviceProxyLabel) {
     ],
   };
 }
+
+/// Which proxy slots one macOS network service currently has enabled, whoever
+/// owns them. Ownership is not reported, so it is not claimed.
+export function serviceProxyLabel(service) {
+  const enabled = [
+    service?.web?.enabled ? "HTTP" : null,
+    service?.secure_web?.enabled ? "HTTPS" : null,
+    service?.socks?.enabled ? "SOCKS" : null,
+    service?.pac_enabled ? "PAC" : null,
+    service?.wpad_enabled ? "WPAD" : null,
+  ].filter(Boolean);
+  return enabled.length ? enabled.join(", ") : "off";
+}

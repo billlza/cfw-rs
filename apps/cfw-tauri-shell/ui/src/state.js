@@ -120,6 +120,7 @@ export const state = {
   logSearch: "",
   logsPaused: false,
   connectionSearch: "",
+  connectionPanel: "live",
   ruleSearch: "",
   connectionSort: "age",
   connectionSortDesc: false,
@@ -262,3 +263,15 @@ export const runtime = {
     operation: Promise.resolve(),
   },
 };
+
+export function pageById(id) {
+  const page = PAGES.find((candidate) => candidate.id === id);
+  if (!page) throw new TypeError(`unknown renderer page id: ${String(id)}`);
+  return page;
+}
+
+/// The selected valid profile. Another listed profile never stands in for it.
+export function activeProfile() {
+  return state.profiles.find((profile) => profile.active)
+    ?? { id: "none", name: "No Profile", updated: "never", traffic: "0 B", active: false };
+}

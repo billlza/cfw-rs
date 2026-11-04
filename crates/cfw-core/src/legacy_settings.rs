@@ -408,5 +408,4 @@ fn legacy_error<T>(line: usize, message: impl Into<String>) -> Result<T, Setting
 }
 
 #[cfg(test)]
-#[path = "legacy_settings_tests.rs"]
 mod tests;

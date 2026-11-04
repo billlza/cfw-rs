@@ -7,6 +7,8 @@ use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 use crate::envelope::profile_file_name;
+#[cfg(test)]
+use crate::storage::failpoint::{self, Operation};
 use crate::storage_atomic::committed_sync_result;
 use crate::{ProfileError, SELECTED_REPLACE_FILE_NAME, SELECTION_FILE_NAME};
 
@@ -249,6 +251,8 @@ impl RepositoryDirectory {
     }
 
     pub(crate) fn unlink_os(&self, name: &OsStr) -> Result<(), ProfileError> {
+        #[cfg(test)]
+        failpoint::check(Operation::Unlink, &name.to_string_lossy())?;
         let name = relative_c_string(name)?;
         let result = unsafe { libc::unlinkat(self.file.as_raw_fd(), name.as_ptr(), 0) };
         if result == -1 {
@@ -259,6 +263,8 @@ impl RepositoryDirectory {
     }
 
     pub(crate) fn sync_committed(&self, entry: &str) -> Result<(), ProfileError> {
+        #[cfg(test)]
+        committed_sync_result(entry, failpoint::check(Operation::Sync, entry))?;
         committed_sync_result(entry, self.file.sync_all())
     }
 

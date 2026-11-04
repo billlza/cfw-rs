@@ -2,6 +2,8 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::MacOsPlatformService;
+#[cfg(target_os = "macos")]
+use crate::sysproxy_sc::{self, PreferencesSession};
 
 /// A service whose live SystemConfiguration state, rather than a mutable
 /// historical file, proved that all three legacy proxy protocols were applied
@@ -56,7 +58,7 @@ impl LegacyProxyCutoverPlan {
             expected_port,
         };
         #[cfg(target_os = "macos")]
-        crate::sysproxy_sc::validate_plan(&plan)?;
+        sysproxy_sc::validate_plan(&plan)?;
         #[cfg(not(target_os = "macos"))]
         bail!("legacy proxy recovery is only available on macOS");
         Ok(plan)
@@ -76,7 +78,7 @@ impl MacOsPlatformService {
         }
         #[cfg(target_os = "macos")]
         {
-            crate::sysproxy_sc::capture_legacy_applied_proxy(expected_port)
+            sysproxy_sc::capture_legacy_applied_proxy(PreferencesSession::open, expected_port)
         }
         #[cfg(not(target_os = "macos"))]
         bail!("legacy proxy preparation is only available on macOS")
@@ -88,7 +90,7 @@ impl MacOsPlatformService {
     pub fn disable_legacy_proxy(&self, plan: &LegacyProxyCutoverPlan) -> Result<()> {
         #[cfg(target_os = "macos")]
         {
-            crate::sysproxy_sc::disable_legacy_proxy(plan)
+            sysproxy_sc::disable_legacy_proxy(PreferencesSession::open, plan)
         }
         #[cfg(not(target_os = "macos"))]
         bail!("legacy proxy cleanup is only available on macOS")
@@ -97,7 +99,7 @@ impl MacOsPlatformService {
     pub fn verify_legacy_proxy_still_applied(&self, plan: &LegacyProxyCutoverPlan) -> Result<()> {
         #[cfg(target_os = "macos")]
         {
-            crate::sysproxy_sc::verify_legacy_applied_proxy(plan)
+            sysproxy_sc::verify_legacy_applied_proxy(PreferencesSession::open, plan)
         }
         #[cfg(not(target_os = "macos"))]
         bail!("legacy proxy verification is only available on macOS")
@@ -106,7 +108,7 @@ impl MacOsPlatformService {
     pub fn verify_legacy_proxy_disabled(&self, plan: &LegacyProxyCutoverPlan) -> Result<()> {
         #[cfg(target_os = "macos")]
         {
-            crate::sysproxy_sc::verify_legacy_proxy_disabled(plan)
+            sysproxy_sc::verify_legacy_proxy_disabled(PreferencesSession::open, plan)
         }
         #[cfg(not(target_os = "macos"))]
         bail!("legacy proxy cleanup verification is only available on macOS")
@@ -118,7 +120,7 @@ impl MacOsPlatformService {
     pub fn recover_legacy_proxy(&self, plan: &LegacyProxyCutoverPlan) -> Result<()> {
         #[cfg(target_os = "macos")]
         {
-            crate::sysproxy_sc::recover_legacy_proxy(plan)
+            sysproxy_sc::recover_legacy_proxy(PreferencesSession::open, plan)
         }
         #[cfg(not(target_os = "macos"))]
         bail!("legacy proxy recovery is only available on macOS")
@@ -136,7 +138,11 @@ impl MacOsPlatformService {
     ) -> Result<()> {
         #[cfg(target_os = "macos")]
         {
-            crate::sysproxy_sc::verify_no_legacy_owned_proxy(owned_ports, legacy_pac_present)
+            sysproxy_sc::verify_no_legacy_owned_proxy(
+                PreferencesSession::open,
+                owned_ports,
+                legacy_pac_present,
+            )
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -147,23 +153,4 @@ impl MacOsPlatformService {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn plan_contains_only_live_service_identity_and_product_port() {
-        let plan = LegacyProxyCutoverPlan {
-            services: vec![LegacyProxyServiceIdentity {
-                service_id: "service-uuid".into(),
-                display_name: "Wi-Fi".into(),
-            }],
-            expected_port: 7890,
-        };
-
-        assert_eq!(plan.service_ids().collect::<Vec<_>>(), ["service-uuid"]);
-        assert_eq!(plan.expected_port(), 7890);
-        // There is deliberately no field capable of carrying attacker-chosen
-        // historical hosts, ports, bypass domains, PAC URLs, or WPAD state.
-        assert_eq!(std::mem::size_of_val(&plan.expected_port), 2);
-    }
-}
+mod tests;

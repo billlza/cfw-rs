@@ -11,6 +11,7 @@ public enum NativeBridgeCommand: Equatable, Sendable {
   case startSystemProxy(EngineStartRequest)
   case stopSystemProxy(EngineCommandContext)
   case installTunnel(EngineCommandContext)
+  case awaitTunnelApproval(EngineCommandContext)
   case cancelTunnelInstall(EngineCommandContext)
   case authorizeTunnelConfiguration(EngineStartRequest)
   case startTunnel(EngineStartRequest)
@@ -47,6 +48,7 @@ extension NativeBridgeCommand: Codable {
     case startSystemProxy = "start_system_proxy"
     case stopSystemProxy = "stop_system_proxy"
     case installTunnel = "install_tunnel"
+    case awaitTunnelApproval = "await_tunnel_approval"
     case cancelTunnelInstall = "cancel_tunnel_install"
     case authorizeTunnelConfiguration = "authorize_tunnel_configuration"
     case startTunnel = "start_tunnel"
@@ -99,13 +101,15 @@ extension NativeBridgeCommand: Codable {
         self =
           opcode == .startTunnel ? .startTunnel(request) : .authorizeTunnelConfiguration(request)
       }
-    case .stopLocalProxy, .stopSystemProxy, .installTunnel, .cancelTunnelInstall, .stopTunnel:
+    case .stopLocalProxy, .stopSystemProxy, .installTunnel, .awaitTunnelApproval,
+      .cancelTunnelInstall, .stopTunnel:
       let payload = try container.nestedContainer(keyedBy: PayloadKeys.self, forKey: .payload)
       let context = try payload.decode(EngineCommandContext.self, forKey: .context)
       switch opcode {
       case .stopLocalProxy: self = .stopLocalProxy(context)
       case .stopSystemProxy: self = .stopSystemProxy(context)
       case .installTunnel: self = .installTunnel(context)
+      case .awaitTunnelApproval: self = .awaitTunnelApproval(context)
       case .cancelTunnelInstall: self = .cancelTunnelInstall(context)
       case .stopTunnel: self = .stopTunnel(context)
       case .queryStatus, .authorizeSystemProxy, .authorizeSystemProxyRestoration,
@@ -187,6 +191,10 @@ extension NativeBridgeCommand: Codable {
       try payload.encode(context, forKey: .context)
     case .installTunnel(let context):
       try container.encode(Opcode.installTunnel, forKey: .opcode)
+      var payload = container.nestedContainer(keyedBy: PayloadKeys.self, forKey: .payload)
+      try payload.encode(context, forKey: .context)
+    case .awaitTunnelApproval(let context):
+      try container.encode(Opcode.awaitTunnelApproval, forKey: .opcode)
       var payload = container.nestedContainer(keyedBy: PayloadKeys.self, forKey: .payload)
       try payload.encode(context, forKey: .context)
     case .cancelTunnelInstall(let context):

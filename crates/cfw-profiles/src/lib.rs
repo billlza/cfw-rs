@@ -13,8 +13,6 @@ mod selected_replace;
 mod selection;
 mod storage;
 mod storage_atomic;
-#[cfg(test)]
-mod storage_tests;
 
 pub use cfw_singbox_config::ValidatedSingBoxProfile;
 pub use repository::{

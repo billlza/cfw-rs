@@ -188,5 +188,16 @@ mod tests {
             )
             .is_err()
         );
+        assert!(matches!(
+            SelectedProfileReplaceIntent::new(
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                &"a1".repeat(32),
+                &"b2".repeat(32),
+                &"c3".repeat(32),
+                &"c3".repeat(32),
+            ),
+            Err(ProfileError::InvalidSelectedReplace(message))
+                if message == "previous and replacement envelope digests must differ"
+        ));
     }
 }

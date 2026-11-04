@@ -30,11 +30,13 @@ pub(super) fn exercise(progress: &mut Progress) -> Result<serde_json::Value> {
     let initial_diagnostics =
         serde_json::to_value(network_diagnostics::collect()?).map_err(|e| e.to_string())?;
     let prepared = platform_runtime::PlatformRuntime::load(&desktop.paths().root)?.prepare()?;
-    // Windows offers Tunnel on its own; the combined mode stays closed.
+    // Windows offers Tunnel on its own; the combined mode stays closed, and a
+    // Tunnel installation never awaits a person's approval.
     if !prepared.services.proxy_available
         || !prepared.services.tunnel_available
         || prepared.services.tunnel_system_proxy_available
         || prepared.services.legacy_preflight.is_some()
+        || prepared.services.tunnel_approval.is_some()
         || prepared.services.unavailable_reason.is_some()
         || prepared.services.backend.runtime_platform()
             != cfw_engine_api::EngineRuntimePlatform::Windows

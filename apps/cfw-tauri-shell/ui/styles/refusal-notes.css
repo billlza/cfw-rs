@@ -1,0 +1,68 @@
+/* 0.4.0 reconciliation: every control the backend refuses states why, in the
+   row itself, without changing the 0.3.5 layout rhythm. */
+.cfw-row-note {
+  max-width: 190px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.25;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cfw-row-reason {
+  align-items: flex-start;
+  min-height: 0;
+  padding: 8px 0;
+}
+
+.cfw-row-reason .cfw-row-left {
+  display: block;
+  max-width: 100%;
+  color: var(--warn);
+  white-space: normal;
+}
+
+.cfw-row-reason small {
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.cfw-row-right .cfw-select:disabled,
+.cfw-row-right .cfw-text-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.inline-switch.disabled,
+.toggle-row.disabled {
+  opacity: 0.55;
+}
+
+.inline-switch.disabled input,
+.toggle-row.disabled input {
+  cursor: not-allowed;
+}
+
+.profile-note {
+  margin: 0 14px 6px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.glass-menu-item:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.glass-list {
+  max-height: 180px;
+  margin: 4px 0 0;
+  overflow: auto;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}

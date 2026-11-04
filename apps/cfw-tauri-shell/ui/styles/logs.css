@@ -1,0 +1,106 @@
+/* The Logs page: its toolbar, level facets and log lines. */
+.logs-layout .toolbar-panel {
+  min-height: 80px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  row-gap: 8px;
+}
+
+/* The title, the level filter and the actions keep their width; only the
+   search box gives way, and a narrow window wraps the actions to a second
+   row instead of squeezing their labels into columns of characters. */
+.logs-layout .toolbar-panel > div:first-child,
+.logs-layout .segmented,
+.logs-layout .toolbar-actions {
+  flex-shrink: 0;
+}
+
+.logs-layout .toolbar-panel h3,
+.toolbar-actions .button,
+.segmented button {
+  white-space: nowrap;
+}
+
+.logs-layout .search-box {
+  flex: 1 1 140px;
+  min-width: 120px;
+}
+
+.connection-facets {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+.facet-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.facet-row button {
+  border: 1px solid var(--bc);
+  border-radius: 999px;
+  background: #f7f7f7;
+  color: var(--fgc);
+  padding: 4px 9px;
+  font-size: 12px;
+}
+
+.log-stream {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 0;
+}
+
+.log-line {
+  display: grid;
+  grid-template-columns: 76px 70px 88px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  border-bottom: 1px solid var(--log-item-border-c);
+  padding: 7px 12px 7px 20px;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.log-line time,
+.log-line span {
+  color: var(--muted);
+}
+
+.log-line b {
+  text-transform: uppercase;
+}
+
+.log-line.info b {
+  color: var(--blue);
+}
+
+.log-line.warning b {
+  color: var(--warn);
+}
+
+.log-line.error b {
+  color: var(--danger);
+}
+
+.log-line.debug b {
+  color: var(--muted);
+}
+
+.log-line p {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.log-line small {
+  display: block;
+  margin-top: 2px;
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+}

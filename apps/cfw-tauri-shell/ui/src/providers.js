@@ -1,5 +1,6 @@
 import { t } from "./i18n.js";
-import { escapeHtml, errorText, formatRelativeUpdated, providerActionKey, providerBatchSummary, providerBatchSucceeded } from "./format.js";
+import { escapeHtml, errorText, formatRelativeUpdated } from "./text-format.js";
+import { providerActionKey, providerBatchSummary, providerBatchSucceeded } from "./provider-results.js";
 
 // Resource operations are bound to the selected profile, not a transient core
 // generation. An accepted online update deliberately changes that generation.

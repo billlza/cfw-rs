@@ -4,6 +4,7 @@ import { t } from "./i18n.js";
 export function createConnectionsView({
   state, runtime, MAX_CONNECTION_ROWS, safeRegex, escapeHtml, formatBytes, renderPage, bindPageEvents,
   controllerActionAllowed, captureEngineIdentityToken, engineIdentityTokenIsCurrent, invoke, loadControllerSnapshot, appendLog, errorText,
+  renderDiagnostics,
 }) {
 function visibleConnections() {
   const regex = safeRegex(state.connectionSearch);
@@ -81,6 +82,11 @@ function connectionRowHtml(connection, showProcess) {
 }
 
 function renderConnections() {
+  const tabs = `<div class="connection-tabs" role="group" aria-label="${escapeHtml(t("Connections"))}">
+    <button data-action="connections-live" aria-pressed="${state.connectionPanel !== "diagnostics"}">${escapeHtml(t("Live connections"))}</button>
+    <button data-action="connections-diagnostics" aria-pressed="${state.connectionPanel === "diagnostics"}">${escapeHtml(t("Connection diagnostics"))}</button>
+  </div>`;
+  if (state.connectionPanel === "diagnostics") return `<div class="connections-layout">${tabs}${renderDiagnostics()}</div>`;
   const connections = visibleConnections();
   const detail = state.connections.find((connection) => connection.id === state.connectionDetailId);
   const totalUp = formatBytes(state.connectionStream.uploadTotal);
@@ -89,6 +95,7 @@ function renderConnections() {
   runtime.connectionRowEls = null;
   return `
     <div class="connections-layout" data-connections-root>
+      ${tabs}
       <section class="cfw-conn-header">
         <h1>${escapeHtml(t("Connections"))}</h1>
         <div class="cfw-conn-search">
@@ -124,6 +131,7 @@ function renderConnections() {
 }
 
 function patchConnectionsDom() {
+  if (state.activePage === "connections" && state.connectionPanel === "diagnostics") return;
   const root = document.querySelector("[data-connections-root]");
   const scroll = document.querySelector("[data-conn-scroll]");
   if (!root || !scroll || state.activePage !== "connections") {

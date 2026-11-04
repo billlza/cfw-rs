@@ -137,7 +137,7 @@ CONTROLLER_SOURCE = (
     "    })\n"
     "}\n"
 )
-PROJECTION_RELATIVE_PATH = "crates/cfw-singbox-config/src/projection.rs"
+PROJECTION_RELATIVE_PATH = "crates/cfw-singbox-config/src/projection/projector.rs"
 PROJECTION_TRIGGER = (
     'root.insert("experimental".into(), clash_api.experimental_value());'
 )

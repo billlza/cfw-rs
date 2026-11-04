@@ -1,8 +1,8 @@
 use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use cfw_engine_api::{
-    CutoverPreflightRequest, EngineBackend, EngineGenerationStore, EngineMode,
-    EngineRuntimePlatform, EngineSessionIdentity, EngineSnapshot, EngineState,
+    CutoverPreflightRequest, EngineBackend, EngineCommandContext, EngineGenerationStore,
+    EngineMode, EngineRuntimePlatform, EngineSessionIdentity, EngineSnapshot, EngineState,
 };
 use cfw_singbox_config::{EngineSettings, ValidatedSingBoxProfile};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -427,6 +427,26 @@ impl EngineModeCoordinator {
         response_rx
             .await
             .map_err(|_| EngineCoordinatorError::CoordinatorClosed)?
+    }
+
+    /// The exact context of the Tunnel installation whose System Extension
+    /// approval `observed` shows as awaited, while the actor's state still
+    /// equals `observed`; otherwise `None`. The answer is serialized with
+    /// transitions, so it can never name a newer start.
+    pub async fn pending_tunnel_approval(
+        &self,
+        observed: EngineSnapshot,
+    ) -> Result<Option<EngineCommandContext>, EngineCoordinatorError> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.commands
+            .try_send(Command::PendingTunnelApproval {
+                observed,
+                response: response_tx,
+            })
+            .map_err(map_send_error)?;
+        response_rx
+            .await
+            .map_err(|_| EngineCoordinatorError::CoordinatorClosed)
     }
 
     /// Fail-closes the actor after a release-evidence restore cannot be proven.

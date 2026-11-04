@@ -12,40 +12,7 @@ import Testing
 // side effects live behind injected fakes; no real launchd, SystemConfiguration, or
 // XPC is exercised.
 
-private enum CoordinatorFixtureError: Error { case forced }
-
-private final class OrderLog: @unchecked Sendable {
-  private let lock = NSLock()
-  private var events: [String] = []
-  func record(_ event: String) { lock.withLock { events.append(event) } }
-  var values: [String] { lock.withLock { events } }
-}
-
-private enum CoordinatorOutcome: Equatable {
-  case success
-  case failure(ProxySessionLifecycleError)
-}
-
-private final class CoordinatorRecorder: @unchecked Sendable {
-  private let lock = NSLock()
-  private let done = DispatchSemaphore(value: 0)
-  private var outcomes: [CoordinatorOutcome] = []
-
-  func record(_ result: Result<Void, ProxySessionLifecycleError>) {
-    lock.withLock {
-      switch result {
-      case .success: outcomes.append(.success)
-      case .failure(let error): outcomes.append(.failure(error))
-      }
-    }
-    done.signal()
-  }
-
-  func wait() -> Bool { done.wait(timeout: .now() + 2) == .success }
-  var values: [CoordinatorOutcome] { lock.withLock { outcomes } }
-}
-
-private final class FakeProxyOwnerAuthorityClient: ProxyOwnerAuthorityClient, @unchecked Sendable {
+private final class FakeBindingAuthorityClient: ProxyOwnerAuthorityClient, @unchecked Sendable {
   private let lock = NSLock()
   private let orderLog: OrderLog
   private let makeLease: @Sendable () throws -> LeaseView
@@ -118,13 +85,13 @@ private struct PartialEffectiveSystemProxyObserver: EffectiveSystemProxyObservin
   }
 }
 
-private final class FakeClock: ProxyOwnerMonotonicClock, @unchecked Sendable {
+private final class FakeBindingClock: ProxyOwnerMonotonicClock, @unchecked Sendable {
   let value: UInt64
   init(value: UInt64) { self.value = value }
   func nowMilliseconds() -> UInt64 { value }
 }
 
-private final class FakeProxyEngine: ProxyEngine, @unchecked Sendable {
+private final class FakeBindingEngine: ProxyEngine, @unchecked Sendable {
   private let lock = NSLock()
   private let started = DispatchSemaphore(value: 0)
   private let orderLog: OrderLog
@@ -161,20 +128,12 @@ private final class FakeProxyEngine: ProxyEngine, @unchecked Sendable {
   }
 }
 
-private struct FakeProxyEngineFactory: ProxyEngineFactory {
-  let engine: FakeProxyEngine
+private struct FakeBindingEngineFactory: ProxyEngineFactory {
+  let engine: FakeBindingEngine
   func makeEngine(configuration: Data) throws -> any ProxyEngine { engine }
 }
 
-private final class FakeJournalStore: ProxyOwnershipJournalStoring, @unchecked Sendable {
-  private let lock = NSLock()
-  private var journalValue: ProxyOwnershipJournal?
-  func load() throws -> ProxyOwnershipJournal? { lock.withLock { journalValue } }
-  func save(_ journal: ProxyOwnershipJournal) throws { lock.withLock { journalValue = journal } }
-  func remove() throws { lock.withLock { journalValue = nil } }
-}
-
-private final class FakeSystemProxyPreferences: SystemProxyPreferences, @unchecked Sendable {
+private final class FakeBindingPreferences: SystemProxyPreferences, @unchecked Sendable {
   func requireAuthorization() throws {}
   private let lock = NSLock()
   private var values: [SystemProxyField: ProxyPreferenceValue] = [:]
@@ -250,7 +209,7 @@ private final class FakeSystemProxyPreferences: SystemProxyPreferences, @uncheck
   }
 }
 
-private func proxyDescriptor() throws -> ConfigurationDescriptor {
+private func bindingDescriptor() throws -> ConfigurationDescriptor {
   try ConfigurationDescriptor(
     slot: .systemProxy,
     tunnelOptions: nil,
@@ -265,7 +224,7 @@ private func proxyDescriptor() throws -> ConfigurationDescriptor {
     identitySHA256: SHA256Digest(hex: String(repeating: "11", count: 32)))
 }
 
-private func matchingLease(_ descriptor: ConfigurationDescriptor) throws -> LeaseView {
+private func bindingMatchingLease(_ descriptor: ConfigurationDescriptor) throws -> LeaseView {
   let operation = try OperationContext(
     operationID: AuthorityIdentifier(UUID()),
     root: RootContext(
@@ -281,15 +240,11 @@ private func matchingLease(_ descriptor: ConfigurationDescriptor) throws -> Leas
     state: .starting, expiryMonotonic: 10_000)
 }
 
-private func readyEndpoint() throws -> MixedListenerEndpoint {
-  try MixedListenerEndpoint(host: "127.0.0.1", port: 7_890)
-}
-
-private struct CoordinatorFixture {
+private struct BindingFixture {
   let coordinator: ProxySystemProxyOwnerCoordinator
-  let authority: FakeProxyOwnerAuthorityClient
-  let engine: FakeProxyEngine
-  let preferences: FakeSystemProxyPreferences
+  let authority: FakeBindingAuthorityClient
+  let engine: FakeBindingEngine
+  let preferences: FakeBindingPreferences
   let descriptor: ConfigurationDescriptor
   let lease: LeaseView
 
@@ -303,17 +258,17 @@ private struct CoordinatorFixture {
   }
 }
 
-private func makeFixture(
+private func makeBindingFixture(
   observer: any EffectiveSystemProxyObserving,
   revocation: ProxyRevocationChannel = ProxyRevocationChannel(),
   onBind: @escaping @Sendable () -> Void = {}
-) throws -> CoordinatorFixture {
+) throws -> BindingFixture {
   let orderLog = OrderLog()
-  let descriptor = try proxyDescriptor()
-  let engine = FakeProxyEngine(orderLog: orderLog)
-  let preferences = FakeSystemProxyPreferences()
-  let lease = try matchingLease(descriptor)
-  let authority = FakeProxyOwnerAuthorityClient(
+  let descriptor = try bindingDescriptor()
+  let engine = FakeBindingEngine(orderLog: orderLog)
+  let preferences = FakeBindingPreferences()
+  let lease = try bindingMatchingLease(descriptor)
+  let authority = FakeBindingAuthorityClient(
     orderLog: orderLog, onBind: onBind
   ) { lease }
   let lifecycle = ProxySessionLifecycle(
@@ -322,7 +277,7 @@ private func makeFixture(
         PreparedProxyOwnership(lease: UnleasedProxyOwnership())
       },
       recoverCleanupLease: { _ in UnleasedProxyOwnership() },
-      engineFactory: FakeProxyEngineFactory(engine: engine),
+      engineFactory: FakeBindingEngineFactory(engine: engine),
       preferences: preferences,
       journalStore: FakeJournalStore(),
       readinessTimeout: 60,
@@ -332,8 +287,8 @@ private func makeFixture(
     observer: observer,
     lifecycle: lifecycle,
     revocation: revocation,
-    clock: FakeClock(value: 555))
-  return CoordinatorFixture(
+    clock: FakeBindingClock(value: 555))
+  return BindingFixture(
     coordinator: coordinator, authority: authority,
     engine: engine, preferences: preferences, descriptor: descriptor,
     lease: lease)
@@ -343,7 +298,7 @@ private func makeFixture(
 struct ProxyOwnerBindingIntegrationTests {
   @Test func revocationLatchedAfterBindPreventsProxyDataPlaneStart() throws {
     let revocation = ProxyRevocationChannel()
-    let fixture = try makeFixture(
+    let fixture = try makeBindingFixture(
       observer: PartialEffectiveSystemProxyObserver(
         http: true, https: true, socks: true),
       revocation: revocation,
@@ -371,7 +326,7 @@ struct ProxyOwnerBindingIntegrationTests {
   @Test func partialEffectiveApplicationRefusesReadinessAndTearsDown() throws {
     // HTTP and HTTPS applied, but SOCKS is not: `isFullyApplied` is false, so
     // readiness must be refused and the owned runtime/System Proxy torn down.
-    let fixture = try makeFixture(
+    let fixture = try makeBindingFixture(
       observer: PartialEffectiveSystemProxyObserver(http: true, https: true, socks: false))
     let start = CoordinatorRecorder()
     fixture.coordinator.start(
@@ -399,7 +354,7 @@ struct ProxyOwnerBindingIntegrationTests {
   }
 
   @Test func stopWithoutABoundOwnerAttestsNothing() throws {
-    let fixture = try makeFixture(
+    let fixture = try makeBindingFixture(
       observer: PartialEffectiveSystemProxyObserver(http: true, https: true, socks: true))
 
     let stop = CoordinatorRecorder()

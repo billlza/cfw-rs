@@ -1,4 +1,6 @@
 mod cache;
+#[cfg(test)]
+mod failpoint;
 mod keychain;
 
 #[cfg(test)]

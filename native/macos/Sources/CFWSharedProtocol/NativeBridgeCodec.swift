@@ -58,7 +58,8 @@ private enum NativeBridgeRequestShape {
       .authorizeTunnelConfiguration:
       try exactKeys(command, ["opcode", "payload"])
       try validateEngineStartRequest(requestPayload(command))
-    case .stopLocalProxy, .stopSystemProxy, .installTunnel, .cancelTunnelInstall, .stopTunnel:
+    case .stopLocalProxy, .stopSystemProxy, .installTunnel, .awaitTunnelApproval,
+      .cancelTunnelInstall, .stopTunnel:
       try exactKeys(command, ["opcode", "payload"])
       let payload = try object(command["payload"])
       try exactKeys(payload, ["context"])

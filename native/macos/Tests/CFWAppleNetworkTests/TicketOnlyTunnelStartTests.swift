@@ -114,8 +114,16 @@ private func hostBridgeSource() throws -> String {
     .deletingLastPathComponent()  // CFWAppleNetworkTests
     .deletingLastPathComponent()  // Tests
     .deletingLastPathComponent()  // macos
-    .appendingPathComponent("Sources/CFWAppleNetwork/HostBridge.swift")
-  return try String(contentsOf: sourceURL, encoding: .utf8)
+    .appendingPathComponent("Sources/CFWAppleNetwork")
+  // The host is split across its actor, callback I/O and preference codec.
+  // Check the whole production module so moving transport code cannot evade
+  // the negative assertions below.
+  let files = try FileManager.default.contentsOfDirectory(
+    at: sourceURL, includingPropertiesForKeys: nil
+  )
+  .filter { $0.pathExtension == "swift" }
+  .sorted { $0.path < $1.path }
+  return try files.map { try String(contentsOf: $0, encoding: .utf8) }.joined(separator: "\n")
 }
 
 // MARK: - Tests

@@ -1,15 +1,24 @@
 # Changelog
 
-## 0.5.1 — 2026-11-02
+## 0.5.1 — 2026-11-04
 
 ### Interface
 
-- Say, in the TUN Mode row, what to do once the extension is allowed. The row
-  showed `Needs approval` with the `Approve…` button, but the start does not
-  continue by itself after the extension is allowed under System Settings ›
-  General › Login Items & Extensions, so a user who had allowed it saw nothing
-  happen. The row now says to click `Approve…` again, and its note carries the
-  full instruction.
+- Add an on-demand Connection diagnostics tab beside the live connection list:
+  system/CFM exit addresses, IPv4/IPv6, service HTTP responses, optional IP
+  information, authoritative DNS resolver observations and WebRTC UDP exits.
+  Addresses start hidden; failures and unavailable data remain explicit. These
+  observations do not claim account eligibility or an IP trust score.
+
+- Continue a TUN Mode start by itself once the extension is allowed. The row
+  showed `Needs approval` with the `Approve…` button, and after the extension
+  was allowed under System Settings › General › Login Items & Extensions
+  nothing happened until `Approve…` was clicked again: macOS reports the
+  approval only to the activation request, which the start had already left.
+  The app now waits for that request's answer and repeats the start when the
+  extension is allowed, unless TUN Mode was turned off or the engine changed
+  in between. The wait lasts up to about an hour; `Approve…` still repeats the
+  start at once, and the row's note says so.
 - Keep a page where it was scrolled when it refreshes. Every refresh rebuilt
   the page together with the list that scrolls inside it, so switching a
   setting, a status update or opening a dialog sent Settings, Profiles, Rules
@@ -17,6 +26,12 @@
   position across refreshes and dialogs, and an open dialog keeps its own
   while it stays open; another page, or a dialog opened again, still starts at
   the top.
+- Let the node of a profile that declares no selector group be chosen while
+  the core is off. Such a profile runs behind the app's own selector,
+  `cfw-proxy-selector`, but until the core ran the Proxies page listed its
+  nodes without a group to choose from. The page now shows that selector with
+  the saved choice, and a node chosen there is saved with the profile and used
+  at the next start.
 
 ### Profiles
 

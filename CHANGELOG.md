@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.5.1 — 2026-11-04
+## 0.5.1 — 2026-11-05
 
 ### Interface
 
@@ -103,8 +103,14 @@
 
 - Build the network engine from sing-box 1.14.4 instead of 1.14.2. The Go
   modules it requires directly move to their newest releases, among them
-  `golang.org/x/crypto` 0.58.0, `golang.org/x/net` 0.61.0, gRPC 1.84.0 and
+  `golang.org/x/crypto` 0.58.1-0.20261009181718-2f1f834330b2,
+  `golang.org/x/net` 0.62.0, gRPC 1.84.0 and
   uTLS 1.8.8; sing-box's own modules stay at the versions released with it.
+- Resolve the module-level advisories GO-2026-6860 and GO-2026-6866 in
+  `x/net/html`, and GO-2026-5932 in the retired OpenPGP package, with those
+  two fixed module revisions. The affected packages were absent from the
+  macOS libbox compilation graph; the updated dependency graph also removes
+  the module-level findings without an advisory ignore.
 - Build with Rust 1.99.1 instead of 1.98.1. Release builds accept only that
   exact toolchain.
 - Build the app, and the release copies of XcodeGen and the Tauri CLI, with

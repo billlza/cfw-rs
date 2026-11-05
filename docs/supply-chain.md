@@ -173,11 +173,11 @@ The 2026-09-02 SSH advisories `GO-2026-6354` and `GO-2026-6355` prompted the
 isolated `x/crypto v0.56.0` update. Its minimum module Go version is `1.26.0`;
 the Go `1.26.6` compiler, Rust `1.97.1`, and all other selected dependencies
 remain unchanged.
-The sealed cache, source tests, and XCFramework were regenerated from this
-closure. The current scan reports zero symbol and imported-package
-vulnerabilities without an ignore. It still reports `GO-2026-5932` at module
-scope because `golang.org/x/crypto/openpgp` has no fixed version; that package
-is absent from the scanned import graph.
+The sealed cache, source tests, and XCFramework were regenerated from that
+closure. Its scan reported zero symbol and imported-package vulnerabilities
+without an ignore. It retained `GO-2026-5932` at module scope: OpenPGP was
+unmaintained and absent from the scanned import graph. The 0.5.1 review below
+supersedes that historical module-level finding.
 
 Two advisories published after the 0.5.0 GA concern the same distrusted
 certificate authority intermediates. `GO-2026-6809` (2026-10-21) adds a
@@ -187,6 +187,38 @@ moved to the fixed compiler release. `RUSTSEC-2026-0382` (2026-10-20) makes
 `rustls-webpki` reject those intermediates; the shipped Rust graph moved from
 `0.103.15` to `0.103.16`, which changes no other locked package. The released
 0.5.0 artifacts keep their recorded inputs.
+
+The 2026-11-05 review of the 0.5.1 inputs checked the official advisory records
+against both the versioned libbox graph and its generated build workspace,
+using the pinned macOS/arm64 build tags. Both graphs contained 1,043 packages;
+neither imported `golang.org/x/net/html` or any `golang.org/x/crypto/openpgp`
+package. This established an absent-package boundary for the earlier
+`x/net v0.61.0` and `x/crypto v0.58.0` findings, rather than treating a
+module-level scan result as an observed product exploit.
+
+The candidate nevertheless moves only those two module requirements to the
+first selected fixed revisions, leaving the compiler and other module
+requirements unchanged:
+
+- [`GO-2026-6860`](https://pkg.go.dev/vuln/GO-2026-6860) concerns quadratic
+  allocation/copy work in the HTML parser. `x/net v0.62.0` contains the fix.
+- [`GO-2026-6866`](https://pkg.go.dev/vuln/GO-2026-6866) concerns foreign-namespace
+  transitions when rendering HTML for re-parsing. It is also fixed by
+  `x/net v0.62.0`.
+- [`GO-2026-5932`](https://pkg.go.dev/vuln/GO-2026-5932), updated on 2026-11-02,
+  identifies `x/crypto v0.58.1-0.20261009181718-2f1f834330b2` as the main-module
+  boundary. The [upstream commit](https://github.com/golang/crypto/commit/2f1f834330b2d36ab3db8bfb33aaa1ac16794588)
+  splits OpenPGP into its own module; it does not repair or endorse OpenPGP.
+  CFM imports neither that module nor its packages.
+
+The selected revisions pass module checksum verification. The release source
+was re-materialized from the pinned patch, its module cache sealed, the source
+regressions (including race tests and Rust-generated DNS projections) run, and
+the XCFramework rebuilt. The release symbol scans of both the original and
+corrected graphs report no vulnerabilities, including no module-only findings.
+No advisory ID is ignored, and old source/cache/artifact receipts remain bound
+to their original inputs. These checks do not replace the candidate's signed
+and installed runtime acceptance.
 
 The v1.13.15 rebase overlap is explicit. The raw-packet and endpoint-conflict patches share no path
 with the upstream v1.13.14-to-v1.13.15 change set. The DNS patch shares only
@@ -545,8 +577,8 @@ been proved by source checks alone. These runtime boundaries must be assessed
 from the candidate's actual acceptance evidence, not inferred from unit tests.
 Signing, notarization, stapling, Gatekeeper, installation, and publication are
 separate stages whose status comes from the current candidate's receipts.
-The module-only, unfixable `GO-2026-5932` boundary also needs explicit release
-review. Updater
+Fresh dependency findings still need explicit release review; the 0.5.1 input
+update above supersedes the earlier module-only `GO-2026-5932` boundary. Updater
 metadata and its signed artifact contract have project-owned bounds in the
 publication script. Runtime revalidates bounded metadata and consumes a one-use
 authorization before opening the canonical GitHub release page or downloading

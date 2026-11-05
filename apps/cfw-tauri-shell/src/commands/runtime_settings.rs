@@ -17,6 +17,7 @@ pub(crate) struct RuntimeSettingsView {
     pub settings: RuntimePreferences,
     pub revision: Option<String>,
     pub effective: RuntimeSettingsEffective,
+    pub tunnel_mtu_limits: cfw_engine_api::TunnelMtuLimits,
 }
 
 #[derive(Serialize)]
@@ -79,6 +80,7 @@ pub(super) async fn snapshot(
         settings: saved.settings,
         revision: saved.revision,
         effective,
+        tunnel_mtu_limits: engine.coordinator.runtime_platform().tunnel_mtu_limits(),
     })
 }
 

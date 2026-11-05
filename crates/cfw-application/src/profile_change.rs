@@ -36,6 +36,12 @@ pub(crate) async fn apply(
         (candidate.commit)().map_err(Error::ProfileCommit)?;
         return Ok(state.snapshot.clone());
     }
+    if mode.tunnel_enabled() {
+        state
+            .runtime_platform
+            .tunnel_mtu_limits()
+            .validate(settings.tunnel_mtu)?;
+    }
     let mut previous = if mode == EngineMode::Off {
         None
     } else {

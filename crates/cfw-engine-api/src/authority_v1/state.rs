@@ -69,9 +69,11 @@ impl WireValidate for ConfigurationDescriptor {
             || self.credential_slots.len() > MAX_CREDENTIAL_SLOTS
             || !is_digest(&self.config_sha256)
             || !is_digest(&self.identity_sha256)
-            || self
-                .tunnel_options
-                .is_some_and(|options| !(1_280..=1_500).contains(&options.mtu))
+            || self.tunnel_options.is_some_and(|options| {
+                crate::TunnelMtuLimits::AUTHORITY_V1
+                    .validate(options.mtu)
+                    .is_err()
+            })
         {
             return Err(CodecError::BoundViolation);
         }
@@ -190,7 +192,9 @@ impl WireValidate for PacketPumpLimits {
     fn validate(&self) -> Result<(), CodecError> {
         if !(1..=1_024).contains(&self.maximum_queued_packets)
             || !(1..=4 * 1_048_576).contains(&self.maximum_queued_bytes)
-            || !(1_280..=1_500).contains(&self.maximum_packet_bytes)
+            || crate::TunnelMtuLimits::AUTHORITY_V1
+                .validate(self.maximum_packet_bytes)
+                .is_err()
             || !(1..=64).contains(&self.maximum_read_batch)
         {
             Err(CodecError::BoundViolation)

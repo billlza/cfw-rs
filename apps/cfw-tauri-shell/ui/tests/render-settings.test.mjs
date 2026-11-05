@@ -355,7 +355,7 @@ for (const sw of RUNTIME_SWITCHES) {
       let written = null;
       responses.write_runtime_settings_snapshot = (args) => {
         written = args;
-        responses.read_runtime_settings_snapshot = { settings: args.settings, revision: "on",
+        responses.read_runtime_settings_snapshot = { ...original, settings: args.settings, revision: "on",
           effective: { ...original.effective, [sw.key]: args.settings[sw.key] } };
         return structuredClone(responses.read_runtime_settings_snapshot);
       };

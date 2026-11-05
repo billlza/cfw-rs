@@ -80,7 +80,7 @@ pub use start_request::EngineStartRequest;
 pub use state::{EngineEvent, EngineSnapshot, EngineState, NativeEngineStatus};
 pub use tunnel::{
     TunnelApprovalBackend, TunnelApprovalFuture, TunnelApprovalWait, TunnelInstallOutcome,
-    TunnelNetworkOptions,
+    TunnelMtuError, TunnelMtuLimits, TunnelNetworkOptions,
 };
 
 /// Maximum number of exact audience/reference bindings admitted by the native

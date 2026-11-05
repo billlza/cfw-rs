@@ -4,6 +4,55 @@
 use super::*;
 
 #[tokio::test]
+async fn unsupported_macos_mtu_preserves_the_current_owner_and_generation() {
+    for prior in [
+        EngineMode::Off,
+        EngineMode::LocalProxy,
+        EngineMode::SystemProxy,
+    ] {
+        for target in [EngineMode::Tunnel, EngineMode::TunnelSystemProxy] {
+            let backend = Arc::new(FakeBackend::default());
+            let coordinator = coordinator(backend.clone());
+            // A legacy stored value must remain usable for proxy-only recovery.
+            let mut settings = EngineSettings {
+                tunnel_mtu: 9000,
+                ..EngineSettings::default()
+            };
+            let before = coordinator
+                .set_mode(
+                    prior,
+                    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+                    ValidatedSingBoxProfile::direct(),
+                    settings.clone(),
+                )
+                .await
+                .unwrap();
+            let operations = backend.operations();
+            for mtu in [1501, 9000] {
+                settings.tunnel_mtu = mtu;
+                let error = coordinator
+                    .set_mode(
+                        target,
+                        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+                        ValidatedSingBoxProfile::direct(),
+                        settings.clone(),
+                    )
+                    .await
+                    .expect_err("native MTU rejected before a cutover");
+                assert!(error.to_string().contains("1280") && error.to_string().contains("1500"));
+                assert_eq!(coordinator.snapshot(), before);
+                assert_eq!(
+                    backend.operations(),
+                    operations,
+                    "no stop, install, authorization or start"
+                );
+            }
+            coordinator.shutdown().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
 async fn approval_wait_is_not_misclassified_as_an_active_runtime_crash() {
     let backend = Arc::new(FakeBackend::default());
     *backend.awaiting_approval.lock().expect("approval lock") = true;

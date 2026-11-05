@@ -52,6 +52,12 @@ pub(crate) async fn transition(
     if let Some(quarantine) = &state.quarantine {
         return Err(quarantine.clone());
     }
+    if target.tunnel_enabled() {
+        state
+            .runtime_platform
+            .tunnel_mtu_limits()
+            .validate(settings.tunnel_mtu)?;
+    }
     let projected_mode = match target {
         EngineMode::LocalProxy => ProjectionMode::LocalProxy,
         EngineMode::SystemProxy => ProjectionMode::SystemProxy,

@@ -30,6 +30,12 @@ pub(crate) fn prepare_cutover_request(
     if !profile.routes_through_remote() {
         return Err(EngineCoordinatorError::CutoverRequiresRemoteOutbound);
     }
+    // Cutover preparation checks both projections, including the tunnel even
+    // when the requested final mode is System Proxy.
+    state
+        .runtime_platform
+        .tunnel_mtu_limits()
+        .validate(settings.tunnel_mtu)?;
 
     let generation = state
         .snapshot

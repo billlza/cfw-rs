@@ -7,6 +7,43 @@ use serde::{Deserialize, Serialize};
 
 use crate::{BackendError, EngineCommandContext};
 
+/// Admission bounds for a backend's tunnel configuration. Persisted preferences
+/// retain the wider configuration format so older values can still be edited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct TunnelMtuLimits {
+    pub minimum: u16,
+    pub maximum: u16,
+}
+
+impl TunnelMtuLimits {
+    /// Matches the existing AuthorityV1 descriptor and Apple packet pump.
+    /// Increasing this bound requires a native protocol compatibility decision.
+    pub const AUTHORITY_V1: Self = Self {
+        minimum: 1_280,
+        maximum: 1_500,
+    };
+
+    pub fn validate(self, mtu: u16) -> Result<(), TunnelMtuError> {
+        if (self.minimum..=self.maximum).contains(&mtu) {
+            Ok(())
+        } else {
+            Err(TunnelMtuError {
+                mtu,
+                minimum: self.minimum,
+                maximum: self.maximum,
+            })
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("TUN MTU {mtu} must be between {minimum} and {maximum}")]
+pub struct TunnelMtuError {
+    pub mtu: u16,
+    pub minimum: u16,
+    pub maximum: u16,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TunnelNetworkOptions {
     pub ipv6_enabled: bool,

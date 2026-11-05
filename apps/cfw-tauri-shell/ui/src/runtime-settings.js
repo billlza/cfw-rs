@@ -31,7 +31,17 @@ export function runtimeDraft(settings, effective = null) {
   };
 }
 
-export function preferencesFromRuntimeDraft(draft) {
+function validateMtuLimits(limits) {
+  if (!limits || typeof limits !== "object" || Array.isArray(limits)
+    || Object.keys(limits).sort().join(",") !== "maximum,minimum"
+    || !Number.isSafeInteger(limits.minimum) || !Number.isSafeInteger(limits.maximum)
+    || limits.minimum < 1 || limits.maximum > 65535 || limits.minimum > limits.maximum) {
+    throw new TypeError("Runtime settings MTU limits are invalid");
+  }
+}
+
+export function preferencesFromRuntimeDraft(draft, mtuLimits) {
+  validateMtuLimits(mtuLimits);
   if (!RUNTIME_LOG_LEVELS.includes(draft.level)) throw new Error(t("Choose a supported log level"));
   if (typeof draft.ipv6DNS !== "boolean") throw new Error(t("Choose whether to enable IPv6 DNS"));
   if (typeof draft.mainlandChinaDirect !== "boolean" || typeof draft.dnsLeakProtection !== "boolean") {
@@ -52,7 +62,7 @@ export function preferencesFromRuntimeDraft(draft) {
   return {
     preferred_mixed_port: preferred,
     log_level: draft.level,
-    tunnel_mtu: integer(draft.mtu, 1280, 9000, "TUN MTU"),
+    tunnel_mtu: integer(draft.mtu, mtuLimits.minimum, mtuLimits.maximum, "TUN MTU"),
     ...(draft.ipv6DNSInherited && draft.ipv6DNS === draft.initialIPv6DNS ? {} : { ipv6_dns_enabled: draft.ipv6DNS }),
     allow_lan: draft.allow === true,
     lan_proxy: lan,
@@ -89,6 +99,7 @@ export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, 
       || !(snapshot.revision === null || typeof snapshot.revision === "string")) {
       throw new TypeError("Runtime settings response is invalid");
     }
+    validateMtuLimits(snapshot.tunnel_mtu_limits);
   }
   function accept(snapshot) {
     validateSnapshot(snapshot);
@@ -118,7 +129,7 @@ export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, 
     dismissOtherDialogs();
     const draft = runtimeDraft(state.runtimeSettings.settings, state.runtimeSettings.effective);
     if (enableLAN) draft.allow = true;
-    state.runtimeSettingsDialog = { draft, revision: state.runtimeSettings.revision, saving: false, error: null };
+    state.runtimeSettingsDialog = { draft, mtuLimits: { ...state.runtimeSettings.tunnel_mtu_limits }, revision: state.runtimeSettings.revision, saving: false, error: null };
     renderPage();
   }
   function close() {
@@ -198,7 +209,7 @@ export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, 
         <p class="glass-dialog-copy">${escapeHtml(t("Changes apply to the current core. Existing connections may reconnect."))}</p>
         <label class="glass-input-label">${escapeHtml(t("Local proxy port"))} <input class="glass-input" data-runtime-field="port" inputmode="numeric" placeholder="${escapeHtml(t("Automatic"))}" value="${escapeHtml(d.port)}"${disabled}></label>
         <label class="glass-input-label">${escapeHtml(t("Log level"))} <select class="glass-input" data-runtime-field="level"${disabled}>${RUNTIME_LOG_LEVELS.map((level) => `<option value="${level}"${d.level === level ? " selected" : ""}>${level}</option>`).join("")}</select></label>
-        <label class="glass-input-label">TUN MTU <input class="glass-input" data-runtime-field="mtu" inputmode="numeric" value="${escapeHtml(d.mtu)}"${disabled}></label>
+        <label class="glass-input-label">TUN MTU (${dialog.mtuLimits.minimum}–${dialog.mtuLimits.maximum}) <input class="glass-input" data-runtime-field="mtu" inputmode="numeric" value="${escapeHtml(d.mtu)}"${disabled}></label>
         <label class="glass-input-label"><input type="checkbox" data-runtime-field="ipv6DNS"${d.ipv6DNS ? " checked" : ""}${disabled}> ${escapeHtml(t("Enable IPv6 DNS"))}</label>
         <p class="glass-dialog-copy">${escapeHtml(t("Turn off for a proxy server with a broken IPv6 exit. TUN still captures IPv6 traffic."))}</p>
         <label class="glass-input-label"><input type="checkbox" data-runtime-field="allow"${d.allow ? " checked" : ""}${disabled}> ${escapeHtml(t("Share with trusted LAN devices"))}</label>
@@ -228,7 +239,7 @@ export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, 
     if (!dialog || state.runtimeSettingsDialog !== dialog || dialog.saving) return;
     try {
       if (nativeDraft !== undefined) dialog.draft = acceptNativeRuntimeDraft(dialog.draft, nativeDraft);
-      await save(preferencesFromRuntimeDraft(dialog.draft), dialog.revision, dialog);
+      await save(preferencesFromRuntimeDraft(dialog.draft, dialog.mtuLimits), dialog.revision, dialog);
     } catch (error) { dialog.error = errorText(error); renderPage(); }
   }
   function bindPage() {

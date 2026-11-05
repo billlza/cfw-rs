@@ -29,6 +29,39 @@ fn replacement_profile() -> ValidatedSingBoxProfile {
 }
 
 #[tokio::test]
+async fn macos_cutover_rejects_unsupported_mtu_without_reserving_a_generation() {
+    let backend = Arc::new(FakeBackend::default());
+    let coordinator = coordinator(backend.clone());
+    let before = coordinator
+        .set_mode(
+            EngineMode::Off,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+            replacement_profile(),
+            EngineSettings::default(),
+        )
+        .await
+        .unwrap();
+    for mode in [EngineMode::SystemProxy, EngineMode::Tunnel] {
+        let error = coordinator
+            .prepare_cutover(
+                mode,
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+                replacement_profile(),
+                EngineSettings {
+                    tunnel_mtu: 9000,
+                    ..EngineSettings::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, EngineCoordinatorError::InvalidTunnelMtu(_)));
+        assert_eq!(coordinator.snapshot(), before);
+        assert!(backend.operations().is_empty());
+    }
+    coordinator.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn windows_cutover_and_tunnel_start_share_the_same_bound_projection() {
     let backend = Arc::new(FakeBackend::windows());
     let coordinator = coordinator(backend.clone());

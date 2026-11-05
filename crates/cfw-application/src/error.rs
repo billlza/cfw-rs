@@ -88,6 +88,8 @@ pub enum EngineCoordinatorError {
     CommandQueueFull,
     #[error("configuration projection failed: {0}")]
     InvalidConfiguration(#[from] ConfigError),
+    #[error(transparent)]
+    InvalidTunnelMtu(#[from] cfw_engine_api::TunnelMtuError),
     #[error("saved proxy selections could not be applied: {0}")]
     ProxySelectionInitialization(String),
     #[error("cutover preparation requires the replacement engine to be exactly Off")]

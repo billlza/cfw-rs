@@ -49,6 +49,10 @@
 
 ### Reliability
 
+- Validate macOS TUN MTU against the native 1280–1500 range before saving or
+  switching modes. Previously the settings editor accepted values up to 9000,
+  which could fail only after stopping the existing proxy. Old saved values
+  remain visible for correction; proxy-only operation and stopping stay available.
 - Give every node of a latency test its whole timeout. The engine a test
   starts was held to the same deadline, so a large profile tested at a short
   timeout on a busy Mac could fail as a whole while that engine was still

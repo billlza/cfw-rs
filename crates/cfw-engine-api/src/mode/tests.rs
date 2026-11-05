@@ -11,6 +11,26 @@ const MODES: [EngineMode; 5] = [
 ];
 
 #[test]
+fn mtu_admission_matches_the_platform_and_keeps_the_wire_bound() {
+    let mac = EngineRuntimePlatform::MacOs.tunnel_mtu_limits();
+    let windows = EngineRuntimePlatform::Windows.tunnel_mtu_limits();
+    for mtu in [1280, 1500] {
+        assert_eq!(mac.validate(mtu), Ok(()));
+        assert_eq!(windows.validate(mtu), Ok(()));
+    }
+    for mtu in [0, 1279, 1501, 9000, u16::MAX] {
+        assert!(mac.validate(mtu).is_err());
+    }
+    assert_eq!(windows.validate(9000), Ok(()));
+    assert!(windows.validate(9001).is_err());
+    assert_eq!(mac, crate::TunnelMtuLimits::AUTHORITY_V1);
+    assert_eq!(
+        serde_json::to_value(mac).unwrap(),
+        serde_json::json!({"minimum":1280,"maximum":1500})
+    );
+}
+
+#[test]
 fn the_two_switches_select_exactly_one_running_mode() {
     for (system_proxy, tunnel, mode) in [
         (false, false, EngineMode::LocalProxy),

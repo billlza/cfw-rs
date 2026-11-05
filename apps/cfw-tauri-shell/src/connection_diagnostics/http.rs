@@ -1,7 +1,5 @@
 //! Fixed HTTPS destinations, no redirects, ambient proxy, cookie jar or retry.
-use super::types::{
-    HttpObservation, IpInformation, Observation, Route, ServiceObservation, Trace, validate_text,
-};
+use super::types::{HttpObservation, Observation, Route, ServiceObservation, Trace};
 use reqwest::{Client, Response};
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
@@ -40,7 +38,7 @@ pub(super) fn client(route: Route) -> Result<Client, String> {
         .map_err(|_| "diagnostic HTTPS client could not be created".into())
 }
 
-fn transport_failure(error: &reqwest::Error) -> &'static str {
+pub(super) fn transport_failure(error: &reqwest::Error) -> &'static str {
     if error.is_timeout() {
         "timeout"
     } else if error.is_connect() {
@@ -212,42 +210,4 @@ pub(super) async fn services(client: &Client) -> Vec<ServiceObservation> {
         ),
     );
     vec![claude, chatgpt, anthropic, cloudflare]
-}
-
-pub(crate) async fn lookup_ip(route: Route, ip: IpAddr) -> Result<IpInformation, &'static str> {
-    let client = client(route).map_err(|_| "client_unavailable")?;
-    let response = client
-        .get(format!("https://api.ipapi.is/?q={ip}"))
-        .send()
-        .await
-        .map_err(|error| transport_failure(&error))?;
-    // Respect provider quotas. The command gate blocks further attempts for a
-    // day on either refusal, and the UI never retries a lookup automatically.
-    if matches!(response.status().as_u16(), 403 | 429) {
-        return Err("provider_rate_limited");
-    }
-    parse_ip_information(&body(response).await?, ip)
-}
-
-pub(super) fn parse_ip_information(
-    bytes: &[u8],
-    expected: IpAddr,
-) -> Result<IpInformation, &'static str> {
-    let value: IpInformation = serde_json::from_slice(bytes).map_err(|_| "invalid_response")?;
-    if value.ip != expected
-        || [
-            &value.company,
-            &value.asn,
-            &value.city,
-            &value.region,
-            &value.country,
-            &value.timezone,
-        ]
-        .into_iter()
-        .flatten()
-        .any(|text| !validate_text(text))
-    {
-        return Err("invalid_response");
-    }
-    Ok(value)
 }

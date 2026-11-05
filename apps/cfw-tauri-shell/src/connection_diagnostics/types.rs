@@ -59,31 +59,31 @@ pub(crate) struct ConnectivityReport {
     pub services: Vec<ServiceObservation>,
 }
 
-/// ipapi.is anonymous tier: null means the provider has no value. Detection
-/// flags are deliberately absent; missing data must not become `false`.
-#[derive(Debug, Deserialize, Serialize)]
+/// A third-party record for the selected address, not a routing observation or
+/// a service's own account-risk assessment.
+#[derive(Debug, Serialize)]
 pub(crate) struct IpInformation {
     pub ip: IpAddr,
-    #[serde(deserialize_with = "nullable_text")]
     pub company: Option<String>,
-    #[serde(deserialize_with = "nullable_text")]
+    pub isp: Option<String>,
     pub asn: Option<String>,
-    #[serde(deserialize_with = "nullable_text")]
     pub city: Option<String>,
-    #[serde(deserialize_with = "nullable_text")]
     pub region: Option<String>,
-    #[serde(deserialize_with = "nullable_text")]
     pub country: Option<String>,
-    #[serde(deserialize_with = "nullable_text")]
     pub timezone: Option<String>,
+    pub risk: NetworkIndicators,
 }
 
-// Anonymous responses promise these keys, with null for unknown data. A
-// truncated or changed schema must not quietly become a list of unknowns.
-fn nullable_text<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<String>, D::Error> {
-    Option::<String>::deserialize(deserializer)
+/// Required provider fields: omitted/null flags must never default to false.
+/// False means no match in this source, not proof that an address is safe.
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct NetworkIndicators {
+    pub is_mobile: bool,
+    pub is_vpn: bool,
+    pub is_tor: bool,
+    pub is_proxy: bool,
+    pub is_datacenter: bool,
+    pub risk_score: u16,
 }
 
 pub(super) fn validate_text(value: &str) -> bool {

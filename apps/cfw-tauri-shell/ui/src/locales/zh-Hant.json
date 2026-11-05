@@ -909,7 +909,7 @@
   "Not supplied": "未提供",
   "Observed UDP and HTTPS exits match.": "本次觀察到的 UDP 與 HTTPS 出口一致。",
   "Operator": "營運商",
-  "Optional lookup sends the selected IP to ipapi.is. Anonymous data includes location and ASN, not risk or residential-IP verdicts.": "選用查詢會將所選 IP 傳送至 ipapi.is。匿名介面提供地區和 ASN，不提供風險評分或住宅 IP 判斷。",
+  "Optional lookup sends the selected IP to IPQuery for approximate location, ASN and network classifications.": "可選查詢會將所選 IP 傳送至 IPQuery，取得地區估計、ASN 和網路分類。",
   "Rate limited": "請求受到限流",
   "Redirect returned": "傳回重新導向",
   "Region": "地區",
@@ -919,7 +919,7 @@
   "Sends four random system DNS queries to bash.ws and shows the resolvers it observes. This does not establish DNS encryption or prove the absence of leaks.": "向 bash.ws 傳送四次隨機網域的系統 DNS 查詢，顯示其實際觀察到的解析器。這不能證明 DNS 已加密或完全沒有洩漏。",
   "Service connectivity": "服務連通性",
   "Show IP addresses": "顯示 IP",
-  "Source: ipapi.is · approximate third-party data": "來源：ipapi.is · 第三方估計資料",
+  "Source: IPQuery · data and attribution: ipquery.io/sources": "來源：IPQuery · 資料及署名：ipquery.io/sources",
   "System request path": "系統請求出口",
   "System sockets can still traverse a VPN or TUN. Different destination rules may use different exits.": "系統請求仍可能經過 VPN 或 TUN；不同目標的分流規則也可能使用不同出口。",
   "System sockets under the active TUN": "目前 TUN 下的系統請求",
@@ -942,5 +942,13 @@
   "Wait for the engine to finish changing mode.": "請等待核心完成模式切換。",
   "WebRTC could not complete the probe": "WebRTC 未能完成檢測",
   "WebRTC is unavailable in this window": "此視窗不支援 WebRTC",
-  "{count} of 4 system lookups failed or timed out.": "四次系統查詢中有 {count} 次失敗或逾時。"
+  "{count} of 4 system lookups failed or timed out.": "四次系統查詢中有 {count} 次失敗或逾時。",
+  "Network classifications": "網路分類",
+  "IPQuery risk score": "IPQuery 風險分",
+  "Marked by source": "來源已標記",
+  "Not marked by source": "來源未標記",
+  "Hosting network": "機房網路",
+  "Mobile network": "行動網路",
+  "The source's weighted score ranges from 0 to 150. It is not a risk probability or an official Claude score. A missing classification does not prove safety.": "來源的分類加權分為 0–150，不是風險機率或 Claude 官方評分。未被標記不能證明安全。",
+  "Residential status, abuse history and account eligibility are not assessed.": "未評估住宅屬性、濫用歷史和帳號使用資格。"
 }

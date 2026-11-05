@@ -909,7 +909,7 @@
   "Not supplied": "Not supplied",
   "Observed UDP and HTTPS exits match.": "Observed UDP and HTTPS exits match.",
   "Operator": "Operator",
-  "Optional lookup sends the selected IP to ipapi.is. Anonymous data includes location and ASN, not risk or residential-IP verdicts.": "Optional lookup sends the selected IP to ipapi.is. Anonymous data includes location and ASN, not risk or residential-IP verdicts.",
+  "Optional lookup sends the selected IP to IPQuery for approximate location, ASN and network classifications.": "Optional lookup sends the selected IP to IPQuery for approximate location, ASN and network classifications.",
   "Rate limited": "Rate limited",
   "Redirect returned": "Redirect returned",
   "Region": "Region",
@@ -919,7 +919,7 @@
   "Sends four random system DNS queries to bash.ws and shows the resolvers it observes. This does not establish DNS encryption or prove the absence of leaks.": "Sends four random system DNS queries to bash.ws and shows the resolvers it observes. This does not establish DNS encryption or prove the absence of leaks.",
   "Service connectivity": "Service connectivity",
   "Show IP addresses": "Show IP addresses",
-  "Source: ipapi.is · approximate third-party data": "Source: ipapi.is · approximate third-party data",
+  "Source: IPQuery · data and attribution: ipquery.io/sources": "Source: IPQuery · data and attribution: ipquery.io/sources",
   "System request path": "System request path",
   "System sockets can still traverse a VPN or TUN. Different destination rules may use different exits.": "System sockets can still traverse a VPN or TUN. Different destination rules may use different exits.",
   "System sockets under the active TUN": "System sockets under the active TUN",
@@ -942,5 +942,13 @@
   "Wait for the engine to finish changing mode.": "Wait for the engine to finish changing mode.",
   "WebRTC could not complete the probe": "WebRTC could not complete the probe",
   "WebRTC is unavailable in this window": "WebRTC is unavailable in this window",
-  "{count} of 4 system lookups failed or timed out.": "{count} of 4 system lookups failed or timed out."
+  "{count} of 4 system lookups failed or timed out.": "{count} of 4 system lookups failed or timed out.",
+  "Network classifications": "Network classifications",
+  "IPQuery risk score": "IPQuery risk score",
+  "Marked by source": "Marked by source",
+  "Not marked by source": "Not marked by source",
+  "Hosting network": "Hosting network",
+  "Mobile network": "Mobile network",
+  "The source's weighted score ranges from 0 to 150. It is not a risk probability or an official Claude score. A missing classification does not prove safety.": "The source's weighted score ranges from 0 to 150. It is not a risk probability or an official Claude score. A missing classification does not prove safety.",
+  "Residential status, abuse history and account eligibility are not assessed.": "Residential status, abuse history and account eligibility are not assessed."
 }

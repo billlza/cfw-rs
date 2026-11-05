@@ -909,7 +909,7 @@
   "Not supplied": "情報なし",
   "Observed UDP and HTTPS exits match.": "今回観測した UDP と HTTPS の出口は一致しています。",
   "Operator": "運営者",
-  "Optional lookup sends the selected IP to ipapi.is. Anonymous data includes location and ASN, not risk or residential-IP verdicts.": "任意の検索では選択した IP を ipapi.is に送信します。匿名 API は所在地と ASN のみを提供し、リスクや住宅 IP の判定は含みません。",
+  "Optional lookup sends the selected IP to IPQuery for approximate location, ASN and network classifications.": "任意の照会では、選択した IP を IPQuery に送信し、おおよその地域、ASN、ネットワーク分類を取得します。",
   "Rate limited": "レート制限",
   "Redirect returned": "リダイレクト応答",
   "Region": "地域",
@@ -919,7 +919,7 @@
   "Sends four random system DNS queries to bash.ws and shows the resolvers it observes. This does not establish DNS encryption or prove the absence of leaks.": "bash.ws にランダムな名前のシステム DNS 問い合わせを4回送り、観測されたリゾルバーを表示します。暗号化や漏えいがないことの証明にはなりません。",
   "Service connectivity": "サービスへの接続",
   "Show IP addresses": "IP を表示",
-  "Source: ipapi.is · approximate third-party data": "情報元：ipapi.is · 第三者による推定値",
+  "Source: IPQuery · data and attribution: ipquery.io/sources": "出典：IPQuery · データと帰属：ipquery.io/sources",
   "System request path": "システムの通信経路",
   "System sockets can still traverse a VPN or TUN. Different destination rules may use different exits.": "システム通信も VPN や TUN を通る場合があります。宛先ルールによって出口が変わることもあります。",
   "System sockets under the active TUN": "有効な TUN 上のシステム通信",
@@ -942,5 +942,13 @@
   "Wait for the engine to finish changing mode.": "コアのモード変更が終わるまでお待ちください。",
   "WebRTC could not complete the probe": "WebRTC の診断を完了できませんでした",
   "WebRTC is unavailable in this window": "このウインドウでは WebRTC を利用できません",
-  "{count} of 4 system lookups failed or timed out.": "4回のシステム問い合わせのうち {count} 回が失敗またはタイムアウトしました。"
+  "{count} of 4 system lookups failed or timed out.": "4回のシステム問い合わせのうち {count} 回が失敗またはタイムアウトしました。",
+  "Network classifications": "ネットワーク分類",
+  "IPQuery risk score": "IPQuery リスクスコア",
+  "Marked by source": "提供元で分類済み",
+  "Not marked by source": "提供元の分類に該当せず",
+  "Hosting network": "ホスティングネットワーク",
+  "Mobile network": "モバイルネットワーク",
+  "The source's weighted score ranges from 0 to 150. It is not a risk probability or an official Claude score. A missing classification does not prove safety.": "提供元の分類に基づく加重スコアは 0～150 です。リスクの確率や Claude の公式評価ではありません。分類に該当しなくても安全とは限りません。",
+  "Residential status, abuse history and account eligibility are not assessed.": "住宅回線かどうか、不正利用履歴、アカウントの利用資格は評価しません。"
 }

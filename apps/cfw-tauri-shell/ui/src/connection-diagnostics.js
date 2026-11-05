@@ -16,6 +16,9 @@ export function createConnectionDiagnostics({ state, runtime, invoke, renderPage
     if (stale() || kind === "connectivity") {
       model.report = null; model.dns = null; model.udp = null; model.information = null;
     }
+    if (kind === "information") model.information = null;
+    if (kind === "dns") model.dns = null;
+    if (kind === "udp") model.udp = null;
     model.binding = captured;
     model.error = null;
     const id = requestId();
@@ -69,9 +72,16 @@ export function createConnectionDiagnostics({ state, runtime, invoke, renderPage
 
   function renderInformation() {
     const info = model.information;
-    return `<section class="diagnostic-section"><h2>${html(t("IP information"))}</h2><p>${html(t("Optional lookup sends the selected IP to ipapi.is. Anonymous data includes location and ASN, not risk or residential-IP verdicts."))}</p>
+    const facts = (rows) => `<dl class="diagnostic-facts">${rows.map(([label, value]) => `<div><dt>${html(label)}</dt><dd>${html(value || t("Not supplied"))}</dd></div>`).join("")}</dl>`;
+    const classification = (value) => value === true ? t("Marked by source") : value === false ? t("Not marked by source") : t("Not supplied");
+    return `<section class="diagnostic-section"><h2>${html(t("IP information"))}</h2><p>${html(t("Optional lookup sends the selected IP to IPQuery for approximate location, ASN and network classifications."))}</p>
       <div class="diagnostic-actions">${lookupAddresses().map((value, index) => `<button data-diagnostic-ip="${index}" ${model.active ? "disabled" : ""}>${html(t("Look up {name}", { name: value.label }))}</button>`).join("")}</div>
-      ${info ? `<dl class="diagnostic-facts">${[["IP", ip(info.ip)], [t("Region"), [info.country, info.region, info.city].filter(Boolean).join(" · ")], ["ASN", info.asn], [t("Operator"), info.company], [t("Time zone"), info.timezone]].map(([label, value]) => `<div><dt>${html(label)}</dt><dd>${html(value || t("Not supplied"))}</dd></div>`).join("")}</dl><small>${html(t("Source: ipapi.is · approximate third-party data"))}</small>` : ""}</section>`;
+      ${info ? `${facts([["IP", ip(info.ip)], [t("Region"), [info.country, info.region, info.city].filter(Boolean).join(" · ")], ["ASN", info.asn], [t("Operator"), info.company], ["ISP", info.isp], [t("Time zone"), info.timezone]])}
+        <h3>${html(t("Network classifications"))}</h3>
+        ${facts([[t("IPQuery risk score"), String(info.risk.risk_score)], ["VPN", classification(info.risk.is_vpn)], [t("Proxy"), classification(info.risk.is_proxy)], ["Tor", classification(info.risk.is_tor)], [t("Hosting network"), classification(info.risk.is_datacenter)], [t("Mobile network"), classification(info.risk.is_mobile)]])}
+        <p>${html(t("The source's weighted score ranges from 0 to 150. It is not a risk probability or an official Claude score. A missing classification does not prove safety."))}</p>
+        <p class="diagnostic-muted">${html(t("Residential status, abuse history and account eligibility are not assessed."))}</p>
+        <small>${html(t("Source: IPQuery · data and attribution: ipquery.io/sources"))}</small>` : ""}</section>`;
   }
 
   function renderDns() {

@@ -2,11 +2,12 @@
 //! An HTTP response is reachability evidence, never an account/region verdict.
 mod dns;
 mod http;
+mod ip_information;
 mod session;
 mod types;
 
 pub(crate) use dns::{DnsReport, run_dns_check};
-pub(crate) use http::lookup_ip;
+pub(crate) use ip_information::lookup_ip;
 pub(crate) use session::DiagnosticsGate;
 pub(crate) use types::{ConnectivityReport, IpInformation, Route};
 

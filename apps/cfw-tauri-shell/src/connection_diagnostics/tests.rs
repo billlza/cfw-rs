@@ -1,4 +1,4 @@
-use super::{DiagnosticsGate, dns, http};
+use super::{DiagnosticsGate, dns, http, ip_information};
 use std::net::IpAddr;
 use uuid::Uuid;
 
@@ -20,19 +20,92 @@ fn trace_requires_an_unambiguous_ip_and_never_accepts_an_html_challenge() {
 #[test]
 fn metadata_is_bound_to_the_requested_ip_and_bounded_plain_text() {
     let expected: IpAddr = "1.1.1.1".parse().unwrap();
-    let mut document = serde_json::json!({"ip":"1.1.1.1", "company":"Cloudflare", "asn":"AS13335", "city":null, "region":null, "country":"Australia", "timezone":null});
+    let mut document = metadata_document();
     let value =
-        http::parse_ip_information(&serde_json::to_vec(&document).unwrap(), expected).unwrap();
+        ip_information::parse_ip_information(&serde_json::to_vec(&document).unwrap(), expected)
+            .unwrap();
     assert!(value.city.is_none());
+    assert_eq!(value.asn.as_deref(), Some("AS13335"));
+    assert_eq!(value.risk.risk_score, 20);
+    assert!(value.risk.is_datacenter);
+    assert!(!value.risk.is_vpn);
     document["ip"] = serde_json::json!("8.8.8.8");
-    assert!(http::parse_ip_information(&serde_json::to_vec(&document).unwrap(), expected).is_err());
+    assert!(
+        ip_information::parse_ip_information(&serde_json::to_vec(&document).unwrap(), expected)
+            .is_err()
+    );
     document["ip"] = serde_json::json!("1.1.1.1");
-    document["company"] = serde_json::json!("x".repeat(257));
-    assert!(http::parse_ip_information(&serde_json::to_vec(&document).unwrap(), expected).is_err());
-    document["company"] = serde_json::json!(false);
-    assert!(http::parse_ip_information(&serde_json::to_vec(&document).unwrap(), expected).is_err());
-    assert!(http::parse_ip_information(br#"{"error":"quota exceeded"}"#, expected).is_err());
-    assert!(http::parse_ip_information(br#"{"ip":"1.1.1.1"}"#, expected).is_err());
+    for invalid in [
+        serde_json::json!("x".repeat(257)),
+        serde_json::json!("name\nforged"),
+        serde_json::json!(false),
+        serde_json::Value::Null,
+    ] {
+        document["isp"]["org"] = invalid;
+        assert!(
+            ip_information::parse_ip_information(&serde_json::to_vec(&document).unwrap(), expected)
+                .is_err()
+        );
+    }
+    assert!(
+        ip_information::parse_ip_information(br#"{"error":"quota exceeded"}"#, expected).is_err()
+    );
+    assert!(ip_information::parse_ip_information(br#"{"ip":"1.1.1.1"}"#, expected).is_err());
+}
+
+fn metadata_document() -> serde_json::Value {
+    serde_json::json!({"ip":"1.1.1.1",
+        "isp":{"org":"Cloudflare", "isp":"Cloudflare", "asn":"AS13335"},
+        "location":{"city":"", "state":"", "country":"Australia", "timezone":"Australia/Brisbane"},
+        "risk":{"is_mobile":false, "is_vpn":false, "is_tor":false, "is_proxy":false, "is_datacenter":true, "risk_score":20}})
+}
+
+#[test]
+fn missing_or_malformed_risk_fields_cannot_become_negative_classifications() {
+    let expected = "1.1.1.1".parse().unwrap();
+    for field in [
+        "is_mobile",
+        "is_vpn",
+        "is_tor",
+        "is_proxy",
+        "is_datacenter",
+        "risk_score",
+    ] {
+        let mut document = metadata_document();
+        document["risk"].as_object_mut().unwrap().remove(field);
+        assert!(
+            ip_information::parse_ip_information(&serde_json::to_vec(&document).unwrap(), expected)
+                .is_err()
+        );
+        document["risk"][field] = serde_json::Value::Null;
+        assert!(
+            ip_information::parse_ip_information(&serde_json::to_vec(&document).unwrap(), expected)
+                .is_err()
+        );
+        document["risk"][field] = serde_json::json!("false");
+        assert!(
+            ip_information::parse_ip_information(&serde_json::to_vec(&document).unwrap(), expected)
+                .is_err()
+        );
+    }
+    for score in [-1, 151, 65536] {
+        let mut document = metadata_document();
+        document["risk"]["risk_score"] = serde_json::json!(score);
+        assert!(
+            ip_information::parse_ip_information(&serde_json::to_vec(&document).unwrap(), expected)
+                .is_err()
+        );
+    }
+    // Preserve the provider's numeric result, including zero and values over
+    // 100. CFM does not manufacture a /100 trust score or recompute the source.
+    for score in [0, 150] {
+        let mut document = metadata_document();
+        document["risk"]["risk_score"] = serde_json::json!(score);
+        let value =
+            ip_information::parse_ip_information(&serde_json::to_vec(&document).unwrap(), expected)
+                .unwrap();
+        assert_eq!(value.risk.risk_score, score);
+    }
 }
 
 #[test]

@@ -79,6 +79,41 @@ test("HTTP challenges, authentication and throttling do not become availability 
   for (const code of [302, 401, 403, 429, 503]) assert.notEqual(httpVerdict(code).tone, "ok");
 });
 
+test("IP classifications stay attributed, preserve zero and clear the previous result on failure", async () => {
+  let click;
+  let fail = false;
+  const originalDocument = globalThis.document;
+  globalThis.document = { querySelectorAll: () => [{ dataset: { diagnosticIp: "0" }, addEventListener: (_event, listener) => { click = listener; } }] };
+  const calls = [];
+  try {
+    const { view } = setup(async (command, args) => {
+      calls.push([command, args]);
+      if (command === "connection_diagnostics") return report();
+      assert.equal(command, "connection_ip_information");
+      assert.equal(args.ip, "198.51.100.1");
+      if (fail) throw new Error("provider_rate_limited");
+      return { ip: args.ip, company: "<img src=x>", isp: "Example", asn: "AS64496", city: null, region: null, country: "Japan", timezone: "Asia/Tokyo",
+        risk: { is_mobile: false, is_vpn: false, is_tor: false, is_proxy: false, is_datacenter: false, risk_score: 0 } };
+    });
+    await view.actions["diagnostic-run"]();
+    assert.equal(calls.length, 1);
+    view.bindPage(); await click();
+    const result = view.render();
+    assert.match(result, /IPQuery risk score<\/dt><dd>0<\/dd>/u);
+    assert.match(result, /Not marked by source/u);
+    assert.match(result, /not a risk probability or an official Claude score/u);
+    assert.match(result, /ipquery\.io\/sources/u);
+    assert.doesNotMatch(result, /198\.51\.100\.1|<img/u);
+    fail = true;
+    await click();
+    assert.match(view.render(), /refused further lookups/u);
+    assert.doesNotMatch(view.render(), /IPQuery risk score<\/dt>|Not marked by source/u);
+  } finally {
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
+  }
+});
+
 test("UDP comparisons normalize IPv6 and do not compare different address families", () => {
   assert.equal(normalizedIp("2001:db8::1"), normalizedIp("2001:0DB8:0:0:0:0:0:1"));
   assert.equal(normalizedIp("2001:::1"), null);

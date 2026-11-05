@@ -22,11 +22,16 @@ four-slot bound until the OS returns.
 
 Additional checks are explicit actions:
 
-- **IP information** sends the chosen exit address to ipapi.is. The anonymous
-  response provides approximate location, ASN, operator and timezone. Unknown
-  fields remain unknown. It does not provide trust scores, residential-IP,
-  VPN, proxy, Tor or abuse verdicts. Lookups are limited to one per minute in
-  this process; a provider 403/429 blocks further lookups for 24 hours.
+- **IP information** sends the chosen exit address to IPQuery. Its record
+  supplies approximate location, ASN, operator, timezone and separate VPN,
+  proxy, Tor, hosting and mobile-network classifications. CFM displays the
+  provider's score unchanged: the documented weights total 150; it is neither
+  a probability nor a Claude/OpenAI trust score. A false flag means the source
+  has not classified the address that way, not proof of safety. Residential
+  status, abuse history and account eligibility remain unassessed. Empty
+  source strings stay unknown; missing or malformed flags fail the lookup.
+  Lookups are locally limited to one per minute in this process; a provider
+  403/429 blocks further lookups for 24 hours. No bulk lookup or automatic retry.
 - **Check DNS** sends four random system DNS lookups to bash.ws and displays
   the resolvers its authoritative collector observed. Failed/empty observations
   are inconclusive. Resolver geography or ASN alone does not prove a leak,
@@ -44,6 +49,8 @@ service's exit IP.
 
 Provider contracts: [Cloudflare trace](https://developers.cloudflare.com/fundamentals/reference/cdn-cgi-endpoint/),
 [public STUN](https://developers.cloudflare.com/realtime/turn/),
-[ipapi.is anonymous data and quota](https://ipapi.is/free-tier.html),
+[IPQuery fields](https://ipquery.io/developers/fields),
+[IPQuery score definition](https://ipquery.io/glossary/risk-score),
+[IPQuery sources and data attribution](https://ipquery.io/sources),
 [bash.ws CLI protocol](https://github.com/macvk/dnsleaktest/blob/master/dnsleaktest.sh).
 

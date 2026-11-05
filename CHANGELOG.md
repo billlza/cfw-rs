@@ -6,9 +6,10 @@
 
 - Add an on-demand Connection diagnostics tab beside the live connection list:
   system/CFM exit addresses, IPv4/IPv6, service HTTP responses, optional IP
-  information, authoritative DNS resolver observations and WebRTC UDP exits.
+  information and attributed network risk indicators, authoritative DNS resolver
+  observations and WebRTC UDP exits.
   Addresses start hidden; failures and unavailable data remain explicit. These
-  observations do not claim account eligibility or an IP trust score.
+  observations do not claim account eligibility or a service's own trust score.
 
 - Continue a TUN Mode start by itself once the extension is allowed. The row
   showed `Needs approval` with the `Approve…` button, and after the extension

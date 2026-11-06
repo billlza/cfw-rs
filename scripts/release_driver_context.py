@@ -24,6 +24,12 @@ import subprocess
 import sys
 from typing import Final, Mapping, Sequence
 
+from scripts.candidate_freeze import CandidateFreezeError, read_frozen_toolchain_metadata
+from scripts.release_executor_source import (
+    ExecutorSourceError,
+    FrozenReleaseSources,
+    capture_frozen_release_sources,
+)
 from scripts.release_build_identity import (
     ACTIVE_RELEASE_IDENTITY,
     SIGNED_APP_NAME,
@@ -420,10 +426,39 @@ class Context:
         return path
 
 
+def verified_frozen_sources(context: Context) -> tuple[FrozenReleaseSources, dict[str, str]]:
+    """Bind a clean evidence executor to the enrolled product's frozen inputs.
+
+    The individual release entry point still reopens and verifies all of its
+    artifact bytes. This guard establishes source selection without rebuilding
+    the product or relabelling the product's hosted CI as executor validation.
+    """
+    try:
+        sources = capture_frozen_release_sources(context.release.operator)
+        if (
+            sources.executor.repository != context.release.operator
+            or sources.artifact.repository != context.release.artifact
+            or sources.artifact.repository_commit != context.require_commit()
+        ):
+            raise ExecutorSourceError("frozen sources differ from the enrolled artifact")
+        metadata = read_frozen_toolchain_metadata(
+            context.release.artifact, source_identity=sources.artifact.identity
+        )
+    except (ExecutorSourceError, CandidateFreezeError, OSError) as error:
+        raise DriverError(f"cannot bind an evidence executor to the frozen product: {error}", CHECKOUT) from error
+    return sources, metadata
+
+
 def common_guards(context: Context, *, free_gib: int = MIN_FREE_GIB) -> str:
     commit = context.require_commit()
-    for checkout in (context.release.operator, context.release.artifact):
-        require_clean_checkout(context.machine, checkout, commit)
+    require_clean_checkout(context.machine, context.release.artifact, commit)
+    operator_commit = git(context.machine, context.release.operator, "rev-parse", "--verify", "HEAD")
+    require_clean_checkout(context.machine, context.release.operator, operator_commit)
+    if operator_commit != commit:
+        sources, _ = verified_frozen_sources(context)
+        if sources.executor.repository_commit != operator_commit:
+            raise DriverError("evidence executor changed during source admission", CHECKOUT)
+        print(f"frozen product source: {commit}; evidence executor source: {operator_commit}")
     require_no_release_command(context.machine)
     require_pinned_xcode(context.machine, context.pins)
     require_free_space(context.machine, free_gib)

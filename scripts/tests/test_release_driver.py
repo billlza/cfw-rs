@@ -783,7 +783,7 @@ class EntryPointTests(unittest.TestCase):
         modules = sorted((release_driver.REPOSITORY / "scripts").glob("release_driver*.py"))
         self.assertEqual([path.name for path in modules], [
             "release_driver.py", "release_driver_acceptance.py", "release_driver_context.py",
-            "release_driver_review.py"])
+            "release_driver_notarization.py", "release_driver_review.py"])
         for path in modules:
             imported: set[str] = set()
             for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):

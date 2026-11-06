@@ -8948,6 +8948,7 @@ class AttemptConcurrencyTests(unittest.TestCase):
 class NotarizationAdoptedUploadTests(unittest.TestCase):
     STARTED = "2026-07-29T04:02:00Z"
     COMPLETED = "2026-07-29T04:03:00Z"
+    ADOPTION_HISTORY_READS = 0
 
     def setUp(self) -> None:
         self.fixture = Fixture()
@@ -9015,7 +9016,9 @@ class NotarizationAdoptedUploadTests(unittest.TestCase):
         self.assertEqual(self.path.read_bytes(), source_observation)
         self.assertNotIn(CommandRole.SUBMIT, self.fixture.runner.calls)
         self.assertNotIn(CommandRole.WAIT, self.fixture.runner.calls)
-        self.assertNotIn(CommandRole.HISTORY, self.fixture.runner.calls)
+        self.assertEqual(
+            self.fixture.runner.calls.count(CommandRole.HISTORY), self.ADOPTION_HISTORY_READS
+        )
         receipt = json.loads(
             (self.fixture.context.attempt_root / "submission-receipt.json").read_bytes()
         )
@@ -9045,10 +9048,8 @@ class NotarizationAdoptedUploadTests(unittest.TestCase):
 
     def test_invalid_upload_response_and_windows_do_not_enter_recovery(self) -> None:
         evidence = self.observation["resubmission"]
-        prior_id_field = "prior_submission_id" if self.observation["schema_version"] == 3 else "missing_submission_id"
-        for field, value in (
+        invalid_fields = [
             ("prior_unknown_event_sha256", "0" * 64),
-            (prior_id_field, SUBMISSION_ID),
             ("started_at", "2026-07-27T04:02:00Z"),
             ("completed_at", "2026-07-29T04:01:00Z"),
             ("exit_code", 1),
@@ -9056,7 +9057,14 @@ class NotarizationAdoptedUploadTests(unittest.TestCase):
             ("stdout", response("In Progress")),
             ("stdout", submit_response("/different/archive.zip")),
             ("command", ["/bin/echo", "uploaded"]),
-        ):
+        ]
+        if self.observation["schema_version"] in {2, 3}:
+            prior_id_field = (
+                "prior_submission_id" if self.observation["schema_version"] == 3
+                else "missing_submission_id"
+            )
+            invalid_fields.append((prior_id_field, SUBMISSION_ID))
+        for field, value in invalid_fields:
             with self.subTest(field=field, value=value):
                 original = evidence[field]
                 evidence[field] = value
@@ -9192,6 +9200,130 @@ class NotarizationPendingUploadRetryTests(NotarizationAdoptedUploadTests):
         for observed in ("2026-07-28T04:01:00Z", self.COMPLETED):
             with self.subTest(observed=observed):
                 self.observation["resubmission"]["prior_observed_at"] = observed
+                self.write_observation()
+                with self.assertRaises(TransactionError):
+                    self.fixture.recover(adopt_upload_observation=self.path)
+        self.assertEqual(self.fixture.runner.calls, [])
+
+
+class NotarizationUnidentifiedUploadRetryTests(NotarizationAdoptedUploadTests):
+    ADOPTION_HISTORY_READS = 1
+
+    @classmethod
+    def make_observation(cls, fixture: Fixture) -> dict:
+        observation = super().make_observation(fixture)
+        observation["schema_version"] = 4
+        observation["document"] = "cfw-notarization-submission-observation-v4"
+        evidence = observation["resubmission"]
+        del evidence["missing_submission_id"]
+        evidence["prior_observed_at"] = cls.STARTED
+        evidence["prior_history"] = json.dumps({
+            "message": "Successfully received submission history.",
+            "history": [{
+                "id": "aaaaaaaa-2222-3333-4444-555555555555",
+                "name": "previous-release.zip", "status": "Accepted",
+                "createdDate": "2026-07-27T04:02:00Z",
+            }],
+        })
+        return observation
+
+    def test_original_archive_in_history_refuses_an_unidentified_retry(self) -> None:
+        evidence = self.observation["resubmission"]
+        history = json.loads(evidence["prior_history"])
+        history["history"][0]["name"] = self.fixture.context.archive_name
+        evidence["prior_history"] = json.dumps(history)
+        self.write_observation()
+        with self.assertRaises(TransactionError) as rejected:
+            self.fixture.recover(adopt_upload_observation=self.path)
+        self.assertEqual(rejected.exception.code, "submission_causal_binding_unproven")
+        self.assertEqual(self.fixture.runner.calls, [])
+        self.assertFalse((self.fixture.context.attempt_root / "submission-observation.json").exists())
+
+    def test_incomplete_original_history_window_refuses_adoption(self) -> None:
+        evidence = self.observation["resubmission"]
+        history = json.loads(evidence["prior_history"])
+        history["history"] = [{
+            "id": f"aaaaaaaa-2222-3333-4444-{index:012x}",
+            "name": "another-release.zip", "status": "Accepted",
+            "createdDate": "2026-07-29T01:00:00Z",
+        } for index in range(100)]
+        evidence["prior_history"] = json.dumps(history)
+        self.write_observation()
+        with self.assertRaises(TransactionError) as rejected:
+            self.fixture.recover(adopt_upload_observation=self.path)
+        self.assertEqual(rejected.exception.code, "submission_causal_binding_unproven")
+        self.assertEqual(self.fixture.runner.calls, [])
+
+    def test_history_observation_must_follow_failure_and_precede_retry(self) -> None:
+        for value in ("2026-07-28T04:01:00Z", self.COMPLETED):
+            with self.subTest(value=value):
+                self.observation["resubmission"]["prior_observed_at"] = value
+                self.write_observation()
+                with self.assertRaises(TransactionError):
+                    self.fixture.recover(adopt_upload_observation=self.path)
+        self.assertEqual(self.fixture.runner.calls, [])
+
+    def test_an_unobserved_identifier_cannot_be_invented_or_defaulted(self) -> None:
+        for key in ("prior_submission_id", "missing_submission_id"):
+            for value in (None, SUBMISSION_ID):
+                with self.subTest(key=key, value=value):
+                    self.observation["resubmission"][key] = value
+                    self.write_observation()
+                    with self.assertRaises(TransactionError):
+                        self.fixture.recover(adopt_upload_observation=self.path)
+                    del self.observation["resubmission"][key]
+        self.assertEqual(self.fixture.runner.calls, [])
+
+    def test_a_late_original_submission_stops_before_adoption(self) -> None:
+        retry = {
+            "id": SUBMISSION_ID, "name": self.fixture.context.archive_name,
+            "status": "Accepted", "createdDate": self.STARTED,
+        }
+        for status in ("In Progress", "Accepted", "Invalid", "Rejected"):
+            with self.subTest(status=status):
+                self.fixture.runner.history_entries = [retry, {
+                    "id": "aaaaaaaa-2222-3333-4444-555555555555",
+                    "name": self.fixture.context.archive_name,
+                    "status": status, "createdDate": "2026-07-28T04:02:00Z",
+                }]
+                with self.assertRaises(TransactionError) as rejected:
+                    self.fixture.recover(adopt_upload_observation=self.path)
+                self.assertEqual(rejected.exception.code, "submission_causal_binding_unproven")
+                self.assertFalse((self.fixture.context.attempt_root / "submission-observation.json").exists())
+                self.assertEqual(len(list((self.fixture.context.attempt_root / "events").iterdir())), 4)
+        self.assertNotIn(CommandRole.SUBMIT, self.fixture.runner.calls)
+        self.assertNotIn(CommandRole.FETCH_LOG, self.fixture.runner.calls)
+
+    def test_failed_live_history_read_cannot_be_replaced_by_the_retained_snapshot(self) -> None:
+        self.fixture.runner.fail_role = CommandRole.HISTORY
+        with self.assertRaises(TransactionError):
+            self.fixture.recover(adopt_upload_observation=self.path)
+        self.assertEqual(self.fixture.runner.calls, [CommandRole.HISTORY])
+        self.assertFalse((self.fixture.context.attempt_root / "submission-observation.json").exists())
+        self.assertEqual(len(list((self.fixture.context.attempt_root / "events").iterdir())), 4)
+
+    def test_rejected_or_missing_retry_is_not_admitted(self) -> None:
+        for status, identifier in (
+            ("Invalid", SUBMISSION_ID), ("Rejected", SUBMISSION_ID),
+            ("Accepted", "aaaaaaaa-2222-3333-4444-555555555555"),
+        ):
+            with self.subTest(status=status, identifier=identifier):
+                self.fixture.runner.history_entries = [{
+                    "id": identifier, "name": self.fixture.context.archive_name,
+                    "status": status, "createdDate": self.STARTED,
+                }]
+                with self.assertRaises(TransactionError):
+                    self.fixture.recover(adopt_upload_observation=self.path)
+                self.assertFalse((self.fixture.context.attempt_root / "submission-observation.json").exists())
+
+    def test_prior_history_must_be_a_strict_response_from_before_its_observation(self) -> None:
+        evidence = self.observation["resubmission"]
+        original = evidence["prior_history"]
+        future = json.loads(original)
+        future["history"][0]["createdDate"] = self.COMPLETED
+        for value in (None, "not JSON", '{"history": [], "message": "filtered"}', json.dumps(future)):
+            with self.subTest(value=value):
+                evidence["prior_history"] = value
                 self.write_observation()
                 with self.assertRaises(TransactionError):
                     self.fixture.recover(adopt_upload_observation=self.path)

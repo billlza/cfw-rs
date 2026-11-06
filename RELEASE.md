@@ -1305,6 +1305,36 @@ never adopted.
    followed by normal stapling, Gatekeeper and application verification.
    Import the observation only once; subsequent recovery uses its bound ID
    without the adoption flag and never uploads again.
+
+   When the original submit returned no identifier at all, do not invent a
+   missing ID or assign an unrelated one. A v4 upload observation instead
+   retains the full successful Apple history response obtained after the
+   original unknown outcome and before the separate same-archive upload.
+   That response must cover the original submit window and contain no entry
+   with this archive name. Absence is an observation, not a claim that the
+   original request could never have reached Apple. The observation also binds
+   the actual successful retry command, complete stdout/stderr, exit status,
+   and start/completion times to the unchanged archive digest. Adoption makes
+   a fresh history request and requires this retry to be the only named entry,
+   with its ID and creation time in the retry's own window. A late original
+   entry, failed history lookup, truncated window, rejected retry, or uncertain
+   upload remains a failure. The original four events are never rewritten.
+
+   A clean evidence executor may differ from the enrolled product commit only
+   after the driver verifies the fixed artifact checkout, its Git object
+   identities, and consumed freeze/product-input bindings. The driver prints
+   both source identities and keeps the enrolled product's exact hosted CI.
+   Recovery uses the operator's executor and the original frozen artifact;
+   it never invokes the compiler or signer. With the actual observation ready:
+
+   ```bash
+   scripts/cfm_release.sh run build --recover-notarization-id UUID \
+     --adopt-upload-observation /absolute/private/observation.json
+   ```
+
+   The recovery executor's own source and verification evidence are retained
+   separately; changing it does not relabel the signed product or authorize
+   changing any frozen application, archive, or signature bytes.
 5. regenerate and legally review the fixed publication source/SBOM closure,
    then seal `prepackage`. Only that immutable stage may authorize DMG and
    updater package creation:

@@ -598,6 +598,60 @@ class AcceptanceTests(DriverFixture):
         self.assertEqual([item.name for item in instances], list(release_driver_acceptance.GA_INSTANCES))
         self.assertTrue(all(item.project and item.zone and item.address for item in instances))
 
+    def test_confirmation_precedes_every_cloud_operation(self) -> None:
+        self.prepare_collect()
+        self.machine.answer(("/usr/bin/dig",), stdout="192.0.2.1\n")
+        self.machine.answer(("/usr/bin/nc",))
+
+        def confirm(_prompt: str) -> str:
+            self.assertEqual(self.gcloud_calls(), [])
+            self.assertEqual(self.machine.executed, [])
+            return "COLLECT"
+
+        with patch("builtins.input", side_effect=confirm) as confirmation, \
+                contextlib.redirect_stdout(io.StringIO()):
+            result = release_driver_acceptance._collect(self.context())
+        confirmation.assert_called_once()
+        self.assertEqual(result, 0)
+        self.assertEqual([argv[3] for argv in self.gcloud_calls()],
+                         ["start", "start", "describe", "describe", "stop", "stop"])
+        self.assertEqual(self.machine.executed, [
+            (["./scripts/run_ga_runtime_acceptance.sh", "collect"], self.release.operator)
+        ])
+
+    def test_declining_or_interrupting_confirmation_never_touches_cloud(self) -> None:
+        self.prepare_collect()
+        self.machine.answer(("/usr/bin/dig",), stdout="192.0.2.1\n")
+        self.machine.answer(("/usr/bin/nc",))
+        for answer, expected_error in (("NO", DriverError), (EOFError(), DriverError),
+                                       (KeyboardInterrupt(), KeyboardInterrupt)):
+            with self.subTest(answer=type(answer).__name__):
+                self._calls.clear()
+                response = {"return_value": answer} if isinstance(answer, str) else {"side_effect": answer}
+                with patch("builtins.input", **response), \
+                        contextlib.redirect_stdout(io.StringIO()), \
+                        self.assertRaises(expected_error):
+                    release_driver_acceptance._collect(self.context())
+                self.assertEqual(self.gcloud_calls(), [])
+                self.assertEqual(self.machine.executed, [])
+
+    def test_machine_state_is_observed_after_the_confirmation_wait(self) -> None:
+        self.prepare_collect()
+        self.machine.answer(("/usr/bin/dig",), stdout="192.0.2.1\n")
+        self.machine.answer(("/usr/bin/nc",))
+
+        def confirm(_prompt: str) -> str:
+            self.machine.answer(("/bin/ps",), stdout=(
+                "/Applications/Clash for Mac.app/Contents/MacOS/clash-for-mac\n"))
+            return "COLLECT"
+
+        with patch("builtins.input", side_effect=confirm), \
+                contextlib.redirect_stdout(io.StringIO()), \
+                self.assertRaisesRegex(DriverError, "Clash for Mac is running"):
+            release_driver_acceptance._collect(self.context())
+        self.assertEqual(self.gcloud_calls(), [])
+        self.assertEqual(self.machine.executed, [])
+
     def test_collect_stops_the_instances_when_they_never_become_reachable(self) -> None:
         self.prepare_collect()
         self.machine.answer(("/usr/bin/dig",), stdout="")
@@ -679,6 +733,9 @@ class AcceptanceTests(DriverFixture):
         patcher = patch.object(release_driver_acceptance, "installed_build", return_value="90002")
         patcher.start()
         self.addCleanup(patcher.stop)
+        confirmation = patch("builtins.input", return_value="COLLECT")
+        confirmation.start()
+        self.addCleanup(confirmation.stop)
 
     def gcloud_calls(self) -> list[tuple[str, ...]]:
         return [call for call in self._calls if call[0] == release_driver_acceptance.GCLOUD]

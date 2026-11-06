@@ -279,7 +279,7 @@ def wait_until_reachable(context: Context, instances: Sequence[EvidenceInstance]
 
 def _confirm_collect() -> None:
     print(
-        "Collect (about two hours). Keep this Terminal open, the Mac awake, and the network unchanged.\n"
+        "Collect. Keep this Terminal open, the Mac awake, and the network unchanged.\n"
         "When asked:\n"
         "  - 'Authorize bounded CFM packet capture:' -> your administrator password (not echoed);\n"
         "  - 'waiting for macOS approval and Tunnel mode' -> within 10 minutes approve the system\n"
@@ -329,6 +329,9 @@ def _collect(context: Context) -> int:
     for output in ("runtime-collection", "runtime-evidence", "runtime-acceptance.json"):
         if path_present(acceptance / output):
             raise DriverError(f"{output} already exists; `next` names the only allowed step", PREREQUISITE)
+    # Waiting for the operator must consume no evidence-instance uptime. Read
+    # the live machine state afterwards too: it may change during that wait.
+    _confirm_collect()
     if installed_build(context.machine) != context.release.build:
         raise DriverError(f"/Applications does not hold build {context.release.build}", MACHINE)
     require_host_absent(context)
@@ -342,7 +345,6 @@ def _collect(context: Context) -> int:
         set_instances(context, instances, "start")
         require_instance_addresses(context, instances)
         wait_until_reachable(context, instances)
-        _confirm_collect()
         return run_entry(
             context,
             "acceptance-collect",

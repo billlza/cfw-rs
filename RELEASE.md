@@ -1019,7 +1019,7 @@ failure keeps its exit status. Before pushing a release commit,
 | `publication-prepare`, `draft`, `legal-review`, `finalize`, `preserve` | the publication evidence of step 5; the owner approves the exact closure |
 | `seal-prepackage`, `dmg`, `updater` | the prepackage seal and both package sets of step 5 |
 | `install`, `export` | the transactions of step 6 in order, resumed after the last recorded one |
-| `acceptance`, `seal-ga-acceptance` | the runtime collector of step 7 and its seal; the driver first checks every precondition the collector would reject after launch, starts the evidence instances and always stops them again |
+| `acceptance`, `seal-ga-acceptance` | the runtime collector of step 7 and its seal; the driver asks for `COLLECT` before any cloud operation, then freshly checks the machine preconditions, starts the evidence instances and always stops them again |
 | `seal-publication`, `publish`, `verify-remote` | steps 9 and 10 and the remote verification below; the owner uploads the allowlisted files |
 
 Hosted CI runs before freeze: `build` refuses until `ci` has recorded the

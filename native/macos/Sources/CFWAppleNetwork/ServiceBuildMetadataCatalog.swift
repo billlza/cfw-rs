@@ -10,25 +10,30 @@ enum ServiceBuildMetadataCatalog {
   }
 
   private struct Entry: Sendable {
-    let build: Int64
     let cdHash: Data
     let infoPlistBase64: String
 
     func decode() throws -> ServiceCodeMetadata {
       let encoded = infoPlistBase64.replacingOccurrences(of: "\n", with: "")
-      guard let infoPlist = Data(base64Encoded: encoded) else {
+      guard let infoPlist = Data(base64Encoded: encoded),
+        !infoPlist.isEmpty, infoPlist.count <= 64 * 1024,
+        let value = try PropertyListSerialization.propertyList(from: infoPlist, format: nil)
+          as? [String: Any],
+        let buildText = value["CFBundleVersion"] as? String
+      else {
         throw CurrentAppServiceBuildError.identityUnavailable
       }
+      // The version belongs to these original signed bytes. It is not a second
+      // build-allocation authority, and remains untrusted until Security checks it.
       return try ServiceCodeMetadata(
-        identity: .init(build: build, cdHash: cdHash), infoPlist: infoPlist)
+        identity: .init(buildText: buildText, cdHash: cdHash), infoPlist: infoPlist)
     }
   }
 
   private static let proxy: [Entry] = [
-    // Build 51004; original Info.plist SHA-256:
+    // Original Info.plist SHA-256:
     // 12eef3efb03c1dbfad4859f9040c2fb481a91840c60c52a5a5bee80f6a194bb6
     Entry(
-      build: 51004,
       cdHash: Data([
         0x74, 0x4c, 0x3b, 0xf9, 0x6d, 0x3b, 0x8e, 0x46, 0xb0, 0xd3, 0x62, 0xb2, 0xe8, 0xaa, 0x85,
         0xf6, 0x22, 0x17, 0xe8, 0xc6,
@@ -65,10 +70,9 @@ enum ServiceBuildMetadataCatalog {
         a2V5PgoJPHN0cmluZz4xNS4wPC9zdHJpbmc+Cgk8a2V5PkxTTXVsdGlwbGVJbnN0YW5jZXNQcm9oaWJpdGVkPC9r
         ZXk+Cgk8dHJ1ZS8+CjwvZGljdD4KPC9wbGlzdD4K
         """),
-    // Build 50030; original Info.plist SHA-256:
+    // Original Info.plist SHA-256:
     // 6a14f77dd6a743e3bcf45c0d5f9e3ea21404080ba4327a0a96449d372780f397
     Entry(
-      build: 50030,
       cdHash: Data([
         0x4e, 0x2c, 0x99, 0xd7, 0x61, 0x7d, 0x81, 0xe1, 0x99, 0x52, 0xe2, 0x97, 0xf9, 0x98, 0x65,
         0xf8, 0x33, 0xe4, 0x6c, 0x2c,
@@ -108,10 +112,9 @@ enum ServiceBuildMetadataCatalog {
   ]
 
   private static let authority: [Entry] = [
-    // Build 51004; original Info.plist SHA-256:
+    // Original Info.plist SHA-256:
     // 4cc1e9b00a750b4b2a0e6ef2cd55b5898413a40c615094f578eb2d639d86a87c
     Entry(
-      build: 51004,
       cdHash: Data([
         0x6d, 0xb4, 0xc9, 0x69, 0x7b, 0x10, 0x7d, 0x21, 0x17, 0x50, 0x19, 0xb5, 0x8b, 0x1a, 0x1b,
         0x8a, 0x1c, 0x76, 0x3e, 0x63,
@@ -138,10 +141,9 @@ enum ServiceBuildMetadataCatalog {
         bmc+Cgk8a2V5PkxTTWluaW11bVN5c3RlbVZlcnNpb248L2tleT4KCTxzdHJpbmc+MTUuMDwvc3RyaW5nPgo8L2Rp
         Y3Q+CjwvcGxpc3Q+Cg==
         """),
-    // Build 50030; original Info.plist SHA-256:
+    // Original Info.plist SHA-256:
     // a686f2c89d2696d8f1fd87fa6694688b2d2a20d74afedcbd8844fff7fb6edb81
     Entry(
-      build: 50030,
       cdHash: Data([
         0x8f, 0x95, 0xc6, 0xeb, 0xb3, 0x05, 0xf0, 0x10, 0xec, 0x4e, 0x1b, 0xde, 0x50, 0x93, 0x43,
         0x7d, 0x24, 0x74, 0xe1, 0x4a,

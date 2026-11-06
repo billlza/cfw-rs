@@ -116,10 +116,8 @@ enum ServiceCodeIdentityReader {
       let values = information as? [CFString: Any],
       let plist = values[kSecCodeInfoPList] as? [String: Any],
       let text = plist["CFBundleVersion"] as? String,
-      !text.isEmpty, text.utf8.count <= 19, text.utf8.first != 48,
-      text.utf8.allSatisfy({ (48...57).contains($0) }), let build = Int64(text),
       let hash = values[kSecCodeInfoUnique] as? Data
     else { throw CurrentAppServiceBuildError.identityUnavailable }
-    return try .init(build: build, cdHash: hash)
+    return try .init(buildText: text, cdHash: hash)
   }
 }

@@ -14,6 +14,13 @@ public struct CurrentAppServiceCodeIdentity: Equatable, Sendable {
     self.build = build
     self.cdHash = try ServiceCodeHash(cdHash).bytes
   }
+
+  init(buildText: String, cdHash: Data) throws {
+    guard !buildText.isEmpty, buildText.utf8.count <= 19, buildText.utf8.first != 48,
+      buildText.utf8.allSatisfy({ (48...57).contains($0) }), let build = Int64(buildText)
+    else { throw CurrentAppServiceBuildError.identityUnavailable }
+    try self.init(build: build, cdHash: cdHash)
+  }
 }
 
 public struct CurrentAppServiceBuildObservation: Equatable, Sendable {

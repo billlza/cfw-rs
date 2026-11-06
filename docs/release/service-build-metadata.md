@@ -28,10 +28,12 @@ unverified version claim.
 
 `ServiceBuildMetadataCatalog.swift` contains exact original Info.plist bytes from
 the retained signed 50030 and 51004 applications. The first is the published
-predecessor; the second is the installed, retired 0.5.1 candidate. Each entry names
-its build, original CDHash and the SHA-256 of its metadata. Metadata remains a
-candidate until Security checks it against the live process; the catalog alone
-never grants trust.
+predecessor; the second is the installed, retired 0.5.1 candidate. Each entry
+retains the original CDHash and metadata bytes. Its version is parsed from those
+bytes using the same canonical positive-integer validator as OS signing
+information, without a second build-number constant. Regression checks bind each
+metadata SHA-256 to its expected CDHash. Metadata remains a candidate until
+Security checks it against the live process; the catalog alone never grants trust.
 
 For a future supported predecessor, obtain the retained signed bundle bound to
 its release receipt. Verify its expected Developer ID Team ID and component
@@ -39,7 +41,10 @@ identifier with strict signature checks. Copy the ProxyAgent's original
 `Contents/Info.plist` bytes and the GlobalAuthority's original
 `__TEXT,__info_plist` section bytes without parsing and reserializing them. Bind
 each to the verified CDHash and build number, record the raw-byte SHA-256, and
-encode those bytes in the catalog. The source change goes through the normal
+encode those bytes in the catalog. Add the metadata/CDHash pair to the regression
+expectations; retain the build number in its signed metadata rather than
+duplicating the allocation registry in implementation or fixtures.
+The source change goes through the normal
 review, CI and release-source closure. Do not derive historical metadata from the
 new executable, synthesize a version field or accept a re-signed equal build.
 
@@ -52,6 +57,14 @@ metadata, the replacement's metadata, an incorrect CDHash, another identifier,
 and an oversized candidate set. It never registers a service or changes network
 settings. Developer ID / XPC handoff and consumer upgrade acceptance still require
 the actual signed candidate on a real Mac.
+
+The fixture uses synthetic version numbers and a small explicit environment for
+its compiler, ad-hoc signer and child process. The Xcode gate forwards its selected
+`DEVELOPER_DIR` with Apple's documented `TEST_RUNNER_` mechanism, and compilation
+uses `xcrun --sdk macosx`. XCTest's loader paths, SDK overrides and signing-helper
+overrides are not inherited by those subprocesses. A regression exercises the
+real fixture with invalid inherited overrides so multiple installed Xcodes cannot
+silently mix the fixture's toolchain context.
 
 Apple documents the [disk-code mismatch](https://developer.apple.com/documentation/security/errseccsstaticcodechanged)
 and the public [guest attribute keys](https://developer.apple.com/documentation/security/guest-attribute-dictionary-keys).

@@ -21,9 +21,13 @@ struct ServiceIdentityProcessFixture {
     let description: String
   }
 
-  static func start() throws -> Self {
+  static func start(
+    environment: [String: String] = ProcessInfo.processInfo.environment
+  ) throws -> Self {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
       "CFMServiceIdentity-\(UUID().uuidString)", isDirectory: true)
+    let fixtureEnvironment = try subprocessEnvironment(
+      from: environment, temporaryDirectory: directory)
     try FileManager.default.createDirectory(
       at: directory, withIntermediateDirectories: false,
       attributes: [.posixPermissions: 0o700])
@@ -42,9 +46,11 @@ struct ServiceIdentityProcessFixture {
     let executable = directory.appendingPathComponent("cfm-service-build-fixture")
     let replacement = directory.appendingPathComponent("replacement")
     let original = try compile(
-      build: 50030, output: executable, source: source, requirement: requirement)
+      build: 1, output: executable, source: source, requirement: requirement,
+      environment: fixtureEnvironment)
     let newer = try compile(
-      build: 51004, output: replacement, source: source, requirement: requirement)
+      build: 2, output: replacement, source: source, requirement: requirement,
+      environment: fixtureEnvironment)
     let child = Process()
     let ready = Pipe()
     let completion = DispatchSemaphore(value: 0)
@@ -54,6 +60,7 @@ struct ServiceIdentityProcessFixture {
     }
     let errorHandle = try FileHandle(forWritingTo: errors)
     child.executableURL = executable
+    child.environment = fixtureEnvironment
     child.standardOutput = ready
     child.standardError = errorHandle
     child.terminationHandler = { _ in completion.signal() }
@@ -100,7 +107,8 @@ struct ServiceIdentityProcessFixture {
   }
 
   private static func compile(
-    build: Int64, output: URL, source: URL, requirement: SecRequirement
+    build: Int64, output: URL, source: URL, requirement: SecRequirement,
+    environment: [String: String]
   ) throws -> ServiceCodeMetadata {
     let info = Data(
       """
@@ -115,21 +123,42 @@ struct ServiceIdentityProcessFixture {
     let plist = output.deletingLastPathComponent().appendingPathComponent("\(build).plist")
     try info.write(to: plist)
     try runTool(
-      "/usr/bin/clang",
+      "/usr/bin/xcrun",
       [
-        "-Wall", "-Wextra", "-Werror", "-mmacosx-version-min=15.0", source.path,
+        "--sdk", "macosx", "clang", "-Wall", "-Wextra", "-Werror",
+        "-mmacosx-version-min=15.0", source.path,
         "-Wl,-sectcreate,__TEXT,__info_plist,\(plist.path)", "-o", output.path,
-      ], in: output.deletingLastPathComponent())
+      ], in: output.deletingLastPathComponent(), environment: environment)
     try runTool(
       "/usr/bin/codesign",
       ["--force", "--sign", "-", "--timestamp=none", "--identifier", identifier, output.path],
-      in: output.deletingLastPathComponent())
+      in: output.deletingLastPathComponent(), environment: environment)
     return try ServiceCodeMetadata(
       identity: ServiceCodeIdentityReader.staticCode(output, requirement: requirement),
       infoPlist: info)
   }
 
-  private static func runTool(_ path: String, _ arguments: [String], in directory: URL) throws {
+  private static func subprocessEnvironment(
+    from environment: [String: String], temporaryDirectory: URL
+  ) throws -> [String: String] {
+    // XCTest's loader paths belong to its runner, not to developer tools or
+    // the standalone fixture. Preserve only the explicit Xcode selection.
+    var result = [
+      "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+      "LANG": "C", "LC_ALL": "C", "TMPDIR": temporaryDirectory.path,
+    ]
+    if let developer = environment["DEVELOPER_DIR"] {
+      guard developer.hasPrefix("/") else {
+        throw Failure(description: "Fixture developer directory is not absolute")
+      }
+      result["DEVELOPER_DIR"] = developer
+    }
+    return result
+  }
+
+  private static func runTool(
+    _ path: String, _ arguments: [String], in directory: URL, environment: [String: String]
+  ) throws {
     let output = directory.appendingPathComponent("command-\(UUID().uuidString).log")
     guard FileManager.default.createFile(atPath: output.path, contents: Data()) else {
       throw Failure(description: "Could not create fixture command log")
@@ -138,6 +167,7 @@ struct ServiceIdentityProcessFixture {
     let process = Process()
     let completion = DispatchSemaphore(value: 0)
     process.executableURL = URL(fileURLWithPath: path)
+    process.environment = environment
     process.arguments = arguments
     process.standardOutput = handle
     process.standardError = handle

@@ -284,6 +284,9 @@ case "$gate" in
     ;;
   xcode-unsigned-test)
     [[ $# -eq 0 ]] || die "$gate accepts no arguments"
+    # xcodebuild does not otherwise carry the selected developer directory into
+    # XCTest. Fixture subprocesses must use that same Xcode, not the global one.
+    TEST_RUNNER_DEVELOPER_DIR="$DEVELOPER_DIR" \
     /usr/bin/xcodebuild test \
       -project native/macos/CFWNative.xcodeproj \
       -scheme CFWNativeTests \

@@ -79,21 +79,17 @@ public struct CurrentAppServiceBuildObserver: CurrentAppServiceBuildObserving {
 
   public init(services: any CurrentAppServiceMaintaining = CurrentAppServiceMaintainer()) throws {
     let hostRequirement = try Self.requirement(identifier: "com.bill.clashformac")
-    var host: SecCode?
-    guard SecCodeCopySelf([], &host) == errSecSuccess, let host,
-      SecCodeCheckValidity(host, Self.validationFlags, hostRequirement) == errSecSuccess
-    else { throw CurrentAppServiceBuildError.identityUnavailable }
-    let hostIdentity = try Self.runningIdentity(host)
+    let hostIdentity = try ServiceCodeIdentityReader.currentHost(requirement: hostRequirement)
     let bundle = Bundle.main.bundleURL.standardizedFileURL
     guard bundle.isFileURL, bundle == bundle.resolvingSymlinksInPath() else {
       throw CurrentAppServiceBuildError.identityUnavailable
     }
-    expectedProxy = try Self.staticIdentity(
+    expectedProxy = try ServiceCodeIdentityReader.staticCode(
       bundle.appendingPathComponent("Contents/Library/LoginItems/CFWProxyAgent.app"),
-      identifier: "com.bill.clashformac.proxy-agent")
-    expectedAuthority = try Self.staticIdentity(
+      requirement: Self.requirement(identifier: "com.bill.clashformac.proxy-agent"))
+    expectedAuthority = try ServiceCodeIdentityReader.staticCode(
       bundle.appendingPathComponent("Contents/Library/HelperTools/CFWGlobalAuthority"),
-      identifier: "com.bill.clashformac.global-authority")
+      requirement: Self.requirement(identifier: "com.bill.clashformac.global-authority"))
     guard expectedProxy.build == hostIdentity.build, expectedAuthority.build == hostIdentity.build
     else {
       throw CurrentAppServiceBuildError.conflictingVersion
@@ -222,18 +218,10 @@ public struct CurrentAppServiceBuildObserver: CurrentAppServiceBuildObserving {
     else {
       throw CurrentAppServiceBuildError.identityUnavailable
     }
-    let attributes = [kSecGuestAttributePid: NSNumber(value: process.pid)] as CFDictionary
-    var code: SecCode?
-    guard SecCodeCopyGuestWithAttributes(nil, attributes, [], &code) == errSecSuccess, let code,
-      SecCodeCheckValidity(code, validationFlags, try requirement(identifier: identifier(service)))
-        == errSecSuccess
-    else { throw CurrentAppServiceBuildError.identityUnavailable }
-    return try runningIdentity(code)
+    return try ServiceCodeIdentityReader.process(
+      process.pid, requirement: requirement(identifier: identifier(service)),
+      replacedMetadata: { try ServiceBuildMetadataCatalog.metadata(for: service) })
   }
-
-  private static let validationFlags: SecCSFlags = [
-    .noNetworkAccess, SecCSFlags(rawValue: kSecCSStrictValidate),
-  ]
 
   private static func identifier(_ service: CurrentAppService) -> String {
     service == .proxyAgent
@@ -253,38 +241,4 @@ public struct CurrentAppServiceBuildObserver: CurrentAppServiceBuildObserving {
     return value
   }
 
-  private static func runningIdentity(_ code: SecCode) throws -> CurrentAppServiceCodeIdentity {
-    var value: SecStaticCode?
-    guard SecCodeCopyStaticCode(code, [], &value) == errSecSuccess, let value else {
-      throw CurrentAppServiceBuildError.identityUnavailable
-    }
-    return try signingIdentity(value)
-  }
-
-  private static func staticIdentity(_ url: URL, identifier: String) throws
-    -> CurrentAppServiceCodeIdentity
-  {
-    var value: SecStaticCode?
-    guard SecStaticCodeCreateWithPath(url as CFURL, [], &value) == errSecSuccess, let value,
-      SecStaticCodeCheckValidity(value, validationFlags, try requirement(identifier: identifier))
-        == errSecSuccess
-    else { throw CurrentAppServiceBuildError.identityUnavailable }
-    return try signingIdentity(value)
-  }
-
-  private static func signingIdentity(_ code: SecStaticCode) throws -> CurrentAppServiceCodeIdentity
-  {
-    var information: CFDictionary?
-    guard
-      SecCodeCopySigningInformation(
-        code, SecCSFlags(rawValue: kSecCSSigningInformation), &information) == errSecSuccess,
-      let values = information as? [CFString: Any],
-      let plist = values[kSecCodeInfoPList] as? [String: Any],
-      let text = plist["CFBundleVersion"] as? String,
-      !text.isEmpty, text.utf8.count <= 19, text.utf8.first != 48,
-      text.utf8.allSatisfy({ (48...57).contains($0) }), let build = Int64(text),
-      let hash = values[kSecCodeInfoUnique] as? Data
-    else { throw CurrentAppServiceBuildError.identityUnavailable }
-    return try .init(build: build, cdHash: hash)
-  }
 }

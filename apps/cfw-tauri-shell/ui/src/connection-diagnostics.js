@@ -104,7 +104,7 @@ export function createConnectionDiagnostics({ state, runtime, invoke, renderPage
     const route = report?.route.kind === "engine_proxy" ? t("Through the running CFM proxy") : report?.route.kind === "tunnel" ? t("System sockets under the active TUN") : t("System sockets; no explicit proxy");
     return `<div class="connection-diagnostics" data-diagnostics-root aria-busy="${Boolean(model.active)}">
       <div class="diagnostic-heading"><div><h1>${html(t("Connection diagnostics"))}</h1><p>${html(t("Check exit addresses and connectivity on demand."))}</p></div><div class="diagnostic-actions">
-        <button data-action="diagnostic-hide" aria-pressed="${model.hidden}">${html(t(model.hidden ? "Show IP addresses" : "Hide IP addresses"))}</button>
+        <button data-action="diagnostic-hide">${html(t(model.hidden ? "Show IP addresses" : "Hide IP addresses"))}</button>
         ${model.active ? `<button data-action="diagnostic-cancel">${html(t("Cancel"))}</button>` : `<button class="primary" data-action="diagnostic-run">${html(t("Run checks"))}</button>`}</div></div>
       <p class="diagnostic-scope">${html(t("Checks contact Cloudflare, ipify, Claude, ChatGPT and Anthropic. Results stay in this window; nothing runs automatically."))}</p>
       ${model.active ? `<p role="status" class="diagnostic-progress">${html(t("Checking…"))}</p>` : ""}

@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.5.1 — 2026-11-05
+## 0.5.1 — 2026-11-06
 
 ### Interface
 
@@ -10,6 +10,7 @@
   observations and WebRTC UDP exits.
   Addresses start hidden; failures and unavailable data remain explicit. These
   observations do not claim account eligibility or a service's own trust score.
+  Correct the IP visibility control for screen readers.
 
 - Continue a TUN Mode start by itself once the extension is allowed. The row
   showed `Needs approval` with the `Approve…` button, and after the extension
@@ -49,6 +50,12 @@
 
 ### Reliability
 
+- Recognize retained signed background services after a manual app replacement.
+  Previously the new app could fail at startup with `IdentityRejected` while old
+  services remained alive at the replaced pathname. Original sealed metadata is
+  checked against the running code before the existing Off proof and ordered
+  service handoff. Unknown identities, equal-build re-signs and downgrades remain
+  rejected.
 - Validate macOS TUN MTU against the native 1280–1500 range before saving or
   switching modes. Previously the settings editor accepted values up to 9000,
   which could fail only after stopping the existing proxy. Old saved values

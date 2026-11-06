@@ -117,11 +117,14 @@
   `golang.org/x/crypto` 0.58.1-0.20261009181718-2f1f834330b2,
   `golang.org/x/net` 0.62.0, gRPC 1.84.0 and
   uTLS 1.8.8; sing-box's own modules stay at the versions released with it.
-- Resolve the module-level advisories GO-2026-6860 and GO-2026-6866 in
-  `x/net/html`, and GO-2026-5932 in the retired OpenPGP package, with those
-  two fixed module revisions. The affected packages were absent from the
-  macOS libbox compilation graph; the updated dependency graph also removes
-  the module-level findings without an advisory ignore.
+- Resolve GO-2026-6860 and GO-2026-6866 with `x/net` 0.62.0. The affected
+  `x/net/html` package was absent from the macOS libbox compilation graph.
+  The selected `x/crypto` revision moves the retired OpenPGP package out of
+  that module; it does not repair OpenPGP, which remains unused by the engine.
+- Update Brotli to 1.2.7 and klauspost/compress to 1.20.2 for GO-2026-6888
+  and GO-2026-6865. These fix malformed compressed streams that could cause
+  excessive allocations or a decoder panic; both affected libraries were
+  reached by the macOS and Windows engine vulnerability scans.
 - Build with Rust 1.99.1 instead of 1.98.1. Release builds accept only that
   exact toolchain.
 - Build the app, and the release copies of XcodeGen and the Tauri CLI, with

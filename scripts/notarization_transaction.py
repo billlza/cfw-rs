@@ -181,10 +181,12 @@ SUBMISSION_OBSERVATION_DOCUMENT = "cfw-notarization-submission-observation-v1"
 RESUBMISSION_OBSERVATION_DOCUMENT = "cfw-notarization-submission-observation-v2"
 PENDING_UPLOAD_OBSERVATION_DOCUMENT = "cfw-notarization-submission-observation-v3"
 UNIDENTIFIED_UPLOAD_OBSERVATION_DOCUMENT = "cfw-notarization-submission-observation-v4"
+INTERRUPTED_UPLOAD_OBSERVATION_DOCUMENT = "cfw-notarization-submission-observation-v5"
 RESUBMISSION_OBSERVATION_DOCUMENTS = {
     2: RESUBMISSION_OBSERVATION_DOCUMENT,
     3: PENDING_UPLOAD_OBSERVATION_DOCUMENT,
     4: UNIDENTIFIED_UPLOAD_OBSERVATION_DOCUMENT,
+    5: INTERRUPTED_UPLOAD_OBSERVATION_DOCUMENT,
 }
 RESUBMISSION_PATH_BINDING = "exact-same-archive-resubmission"
 RESUBMISSION_CAUSAL_BINDING = "same-archive-resubmission-and-log"
@@ -293,7 +295,13 @@ RESUBMISSION_FIELDS_BY_SCHEMA = {
     2: RESUBMISSION_FIELDS,
     3: PENDING_UPLOAD_FIELDS,
     4: UNIDENTIFIED_UPLOAD_FIELDS,
+    5: UNIDENTIFIED_UPLOAD_FIELDS | {"failed_uploads"},
 }
+INTERRUPTED_UPLOAD_FIELDS = {
+    "submission_id", "started_at", "completed_at", "observed_at", "command",
+    "exit_code", "stdout", "stderr", "info",
+}
+MAX_INTERRUPTED_UPLOADS = 3
 SUBMISSION_RECEIPT_FIELDS = {
     "schema_version",
     "document",
@@ -1608,16 +1616,22 @@ def _require_original_upload_absent(
 def _require_only_observed_retry(
     output: str, *, archive_name: str, submission_id: str,
     original_window_start: datetime, retry_start: datetime, retry_end: datetime,
-    retry_end_rendered: str,
+    retry_end_rendered: str, interrupted: dict[str, str] | None = None,
 ) -> None:
     entries = _parse_notary_history(output)
     _require_history_window_coverage(entries, original_window_start)
     named = [entry for entry in entries if entry.name == archive_name]
+    interrupted = {} if interrupted is None else interrupted
+    previous = [entry for entry in named if entry.identifier in interrupted]
+    current = [entry for entry in named if entry.identifier not in interrupted]
     if (
-        len(named) != 1 or named[0].identifier != submission_id
-        or named[0].status not in {"In Progress", "Accepted"}
+        len(previous) != len(interrupted)
+        or any(entry.created_at != interrupted[entry.identifier]
+               or entry.status not in {"In Progress", "Accepted"} for entry in previous)
+        or len(current) != 1 or current[0].identifier != submission_id
+        or current[0].status not in {"In Progress", "Accepted"}
         or not _timestamp_within_recorded_window(
-            named[0].created, window_start=retry_start, window_end=retry_end,
+            current[0].created, window_start=retry_start, window_end=retry_end,
             window_end_rendered=retry_end_rendered,
         )
     ):
@@ -1625,6 +1639,59 @@ def _require_only_observed_retry(
             "submission_causal_binding_unproven",
             "live history does not uniquely reconcile the original upload and observed retry",
         )
+
+
+def _validate_interrupted_uploads(
+    evidence: dict[str, Any], *, submission_id: str, archive_name: str,
+    allowed_commands: tuple[list[str], list[str]], prior_observed: datetime,
+    retry_started: datetime,
+) -> dict[str, str]:
+    """Bind bounded, explicitly captured S3 transport failures before a retry.
+
+    An Apple pending status is not proof of a complete upload. Every excluded
+    history entry must have its own failed command and matching Apple info;
+    the original unknown POST remains covered by the unfiltered history.
+    """
+    uploads = evidence["failed_uploads"]
+    if not isinstance(uploads, list) or not 1 <= len(uploads) <= MAX_INTERRUPTED_UPLOADS:
+        raise TransactionError("resubmission_observation_invalid", "interrupted upload chain is not bounded")
+    identities: dict[str, str] = {}
+    previous_observed = prior_observed
+    for upload in uploads:
+        if (
+            not isinstance(upload, dict) or set(upload) != INTERRUPTED_UPLOAD_FIELDS
+            or upload["command"] not in allowed_commands
+            or type(upload["exit_code"]) is not int or upload["exit_code"] != 1
+            or upload["stdout"] != "" or not isinstance(upload["stderr"], str)
+            or not upload["stderr"].startswith("Error: abortedUpload(")
+            or not upload["stderr"].endswith("error: HTTPClientError.connectTimeout)\n")
+            or not isinstance(upload["info"], str)
+        ):
+            raise TransactionError(
+                "resubmission_observation_invalid", "interrupted upload lacks a captured S3 connection failure"
+            )
+        identifier = _canonical_uuid(upload["submission_id"], "interrupted submission id")
+        keys = re.findall(r'key: "prod/[^":\s]+:([a-f0-9-]{36})"', upload["stderr"])
+        if identifier == submission_id or identifier in identities or keys != [identifier]:
+            raise TransactionError("resubmission_observation_invalid", "interrupted upload identity differs")
+        _, started = _parse_utc_timestamp(upload["started_at"], "interrupted upload started_at")
+        ended_text, ended = _parse_utc_timestamp(upload["completed_at"], "interrupted upload completed_at")
+        _, observed = _parse_utc_timestamp(upload["observed_at"], "interrupted upload observed_at")
+        _, created = _parse_notary_info_response(
+            upload["info"], submission_id=identifier, archive_name=archive_name,
+            allowed_statuses={"In Progress"},
+        )
+        if (
+            not previous_observed <= started <= ended <= observed <= retry_started
+            or not _timestamp_within_recorded_window(
+                _parse_utc_timestamp(created, "interrupted upload createdDate")[1],
+                window_start=started, window_end=ended, window_end_rendered=ended_text,
+            )
+        ):
+            raise TransactionError("resubmission_observation_invalid", "interrupted upload chronology differs")
+        identities[identifier] = created
+        previous_observed = observed
+    return identities
 
 
 def _run_bounded_process(
@@ -3050,7 +3117,7 @@ def _validate_submission_observation(
             or evidence["exit_code"] != 0
             or evidence["stderr"] != ""
             or (schema == 3 and not isinstance(evidence["prior_info"], str))
-            or (schema == 4 and not isinstance(evidence["prior_history"], str))
+            or (schema in {4, 5} and not isinstance(evidence["prior_history"], str))
         ):
             raise TransactionError(
                 "resubmission_observation_invalid",
@@ -3103,7 +3170,7 @@ def _validate_submission_observation(
                     "resubmission_observation_invalid",
                     "prior pending submission is not bound to the original failed upload",
                 )
-        elif schema == 4:
+        elif schema in {4, 5}:
             _, prior_observed = _parse_utc_timestamp(
                 evidence["prior_observed_at"], "prior history observed_at"
             )
@@ -3116,6 +3183,12 @@ def _validate_submission_observation(
                 evidence["prior_history"], archive_name=context.archive_name,
                 window_start=prefix.submit_window_start, observed_at=prior_observed,
             )
+            if schema == 5:
+                _validate_interrupted_uploads(
+                    evidence, submission_id=submission_id, archive_name=context.archive_name,
+                    allowed_commands=(command, alternate_command), prior_observed=prior_observed,
+                    retry_started=started,
+                )
         if (
             started < prefix.submit_window_end
             or ended < started
@@ -3213,7 +3286,7 @@ def _adopt_upload_observation(
         )
         if created != observed_created:
             raise TransactionError("submission_causal_binding_unproven", "prior Apple submission identity changed")
-    elif observation["schema_version"] == 4:
+    elif observation["schema_version"] in {4, 5}:
         # The original POST may have reached Apple even when no identifier was
         # returned. Preserve that unknown result and recheck the complete old
         # window before accepting the separately observed, same-archive upload.
@@ -3227,6 +3300,13 @@ def _adopt_upload_observation(
             history.stdout, archive_name=attempt.context.archive_name,
             submission_id=submission_id, original_window_start=attempt.submit_window_start,
             retry_start=started, retry_end=ended, retry_end_rendered=ended_text,
+            interrupted={
+                upload["submission_id"]: _parse_notary_info_response(
+                    upload["info"], submission_id=upload["submission_id"],
+                    archive_name=attempt.context.archive_name, allowed_statuses={"In Progress"},
+                )[1]
+                for upload in observation["resubmission"].get("failed_uploads", [])
+            },
         )
     destination = attempt.context.attempt_root / "submission-observation.json"
     _write_json_exclusive(destination, observation)

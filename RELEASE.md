@@ -1320,6 +1320,19 @@ never adopted.
    entry, failed history lookup, truncated window, rejected retry, or uncertain
    upload remains a failure. The original four events are never rewritten.
 
+   If a separately captured retry itself fails during S3 upload, v5 extends
+   that same absent-original history with at most three explicit interrupted
+   uploads. Each retains the exact archive command, real nonzero exit and
+   complete stdout/stderr, a connection-timeout diagnostic containing its
+   Apple submission ID, and a subsequent In Progress info response. Every
+   creation time must fall within that command's own interval; attempts cannot
+   overlap or reuse IDs. Fresh Apple history must contain exactly the retained
+   interrupted IDs and the successful retry, with unchanged creation times.
+   Missing, additional, Invalid or Rejected entries stop adoption. These
+   records preserve failed uploads; they do not classify them as successful or
+   permit automatic retry loops. The final successful upload, Accepted log,
+   archive hash, stapling and Gatekeeper requirements are unchanged.
+
    A clean evidence executor may differ from the enrolled product commit only
    after the driver verifies the fixed artifact checkout, its Git object
    identities, and consumed freeze/product-input bindings. The driver prints

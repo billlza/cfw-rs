@@ -2,7 +2,14 @@ use std::collections::BTreeSet;
 
 use cfw_controller::{ProxyGroup, ProxyNode};
 
-use super::*;
+use super::{
+    app_menu::{APP_MENU_ABOUT_ID, APP_MENU_CHECK_UPDATE_ID, AppMenuAction, app_menu_action},
+    tray::{
+        MAX_TRAY_GROUP_OPTIONS, MAX_TRAY_GROUPS, MAX_TRAY_LABEL_CHARS, TRAY_ABOUT_ID, TrayAction,
+        TrayProxyGroup, TrayProxySelection, tray_action,
+    },
+    *,
+};
 
 fn group(name: &str, now: Option<&str>, options: &[&str]) -> ProxyGroup {
     ProxyGroup {

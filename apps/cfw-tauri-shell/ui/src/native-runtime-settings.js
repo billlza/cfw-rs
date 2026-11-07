@@ -7,7 +7,7 @@ export function runtimeDialogFrame(dialog) {
     labels: {
       title: t("Network settings"),
       description: t("Changes apply to the current core. Existing connections may reconnect."),
-      port: t("Local proxy port"), automatic: t("Automatic"), level: t("Log level"), mtu: "TUN MTU",
+      port: t("Local proxy port"), automatic: t("Automatic"), level: t("Log level"), mtu: `TUN MTU (${dialog.mtuLimits.minimum}–${dialog.mtuLimits.maximum})`,
       ipv6DNS: t("Enable IPv6 DNS"),
       ipv6Note: t("Turn off for a proxy server with a broken IPv6 exit. TUN still captures IPv6 traffic."),
       allow: t("Share with trusted LAN devices"),

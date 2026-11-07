@@ -87,6 +87,7 @@
     ]
   },
   "read_runtime_settings_snapshot": {
+    "tunnel_mtu_limits": { "minimum": 1280, "maximum": 1500 },
     "settings": {
       "preferred_mixed_port": null,
       "log_level": "info",

@@ -1743,6 +1743,24 @@ class DormantInstallValidationTests(unittest.TestCase):
         self.assertEqual(tombstone_error.exception.code, "cfm_legacy_tombstone_invalid")
 
 
+def earlier_version_predecessor() -> PredecessorProfile:
+    """The newest registered predecessor of an earlier product version.
+
+    Builds increase across product versions, so once a version has shipped
+    the registry keeps its installed GA below every later GA. Whether it is
+    still the active predecessor depends on how many GA builds of the active
+    version have been installed since; the tests below patch it in where the
+    cross-version path is the subject.
+    """
+    earlier = [
+        profile
+        for profile in SUPPORTED_PREDECESSORS.values()
+        if profile.product_version != PRODUCT_VERSION
+        and int(profile.build_number) < int(GA_BUILD)
+    ]
+    return max(earlier, key=lambda profile: int(profile.build_number))
+
+
 class InstalledApplicationIdentityTests(unittest.TestCase):
     """The live reader sees an installed application as its bundles record it."""
 
@@ -1759,26 +1777,45 @@ class InstalledApplicationIdentityTests(unittest.TestCase):
             path.chmod(0o644)
         return app
 
-    def test_the_predecessor_from_an_earlier_version_reaches_admission(self) -> None:
-        self.assertNotEqual(ACTIVE_PREDECESSOR.product_version, PRODUCT_VERSION)
+    def test_a_registered_predecessor_of_an_earlier_version_reaches_admission(self) -> None:
+        # The first GA install of a product version replaces the release the
+        # previous version published: the reader admits that registered
+        # identity although its version is not the active one.
+        earlier = earlier_version_predecessor()
         with tempfile.TemporaryDirectory() as directory:
-            app = self.make_app(
-                Path(directory),
-                ACTIVE_PREDECESSOR.product_version,
-                ACTIVE_PREDECESSOR.build_number,
-            )
+            app = self.make_app(Path(directory), earlier.product_version, earlier.build_number)
             observed = install.read_app_identity(app)
             self.assertEqual(
                 (observed.version, observed.build_number),
-                (ACTIVE_PREDECESSOR.product_version, ACTIVE_PREDECESSOR.build_number),
+                (earlier.product_version, earlier.build_number),
             )
             # Admission, not the reader, rejects the fixture's tree.
-            with self.assertRaises(InstallError) as raised:
-                resolve_predecessor(observed, GA_BUILD)
+            with patch.object(install, "ACTIVE_PREDECESSOR", earlier):
+                with self.assertRaises(InstallError) as raised:
+                    resolve_predecessor(observed, GA_BUILD)
             self.assertEqual(raised.exception.code, "predecessor_identity_mismatch")
-            fixture = replace(ACTIVE_PREDECESSOR, tree_sha256=observed.tree_sha256)
+            fixture = replace(earlier, tree_sha256=observed.tree_sha256)
             with patch.object(install, "ACTIVE_PREDECESSOR", fixture):
                 self.assertIs(resolve_predecessor(observed, GA_BUILD), fixture)
+
+    def test_a_registered_predecessor_at_the_active_version_reaches_admission(self) -> None:
+        # A later GA install of a product version replaces its own earlier GA
+        # build, which the reader admits as the active version.
+        build = str(int(GA_BUILD) - 1)
+        with tempfile.TemporaryDirectory() as directory:
+            observed = install.read_app_identity(
+                self.make_app(Path(directory), PRODUCT_VERSION, build)
+            )
+        self.assertEqual((observed.version, observed.build_number), (PRODUCT_VERSION, build))
+        fixture = PredecessorProfile(PRODUCT_VERSION, build, observed.tree_sha256)
+        registry = MappingProxyType({**SUPPORTED_PREDECESSORS, build: fixture})
+        with patch.object(install, "SUPPORTED_PREDECESSORS", registry), patch.object(
+            install, "ACTIVE_PREDECESSOR", fixture
+        ):
+            self.assertIs(resolve_predecessor(observed, GA_BUILD), fixture)
+            with self.assertRaises(InstallError) as raised:
+                resolve_predecessor(replace(observed, tree_sha256="f" * 64), GA_BUILD)
+            self.assertEqual(raised.exception.code, "predecessor_identity_mismatch")
 
     def test_the_installed_candidate_is_read_at_the_active_version(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1788,19 +1825,25 @@ class InstalledApplicationIdentityTests(unittest.TestCase):
         self.assertEqual((observed.version, observed.build_number), (PRODUCT_VERSION, GA_BUILD))
 
     def test_a_predecessor_build_at_the_active_version_is_not_the_predecessor(self) -> None:
+        # A bundle that carries the active version with the build number of a
+        # predecessor recorded at an earlier version is not that predecessor.
+        earlier = earlier_version_predecessor()
         with tempfile.TemporaryDirectory() as directory:
             observed = install.read_app_identity(
-                self.make_app(Path(directory), PRODUCT_VERSION, ACTIVE_PREDECESSOR.build_number)
+                self.make_app(Path(directory), PRODUCT_VERSION, earlier.build_number)
             )
-        with self.assertRaises(InstallError) as raised:
-            resolve_predecessor(observed, GA_BUILD)
+        with patch.object(install, "ACTIVE_PREDECESSOR", earlier):
+            with self.assertRaises(InstallError) as raised:
+                resolve_predecessor(observed, GA_BUILD)
         self.assertEqual(raised.exception.code, "install_identity_mismatch")
 
     def test_an_unregistered_earlier_identity_is_invalid(self) -> None:
-        unregistered_build = str(int(ACTIVE_PREDECESSOR.build_number) + 1)
+        earlier = earlier_version_predecessor()
+        unregistered_build = str(int(earlier.build_number) + 1)
         self.assertNotIn(unregistered_build, SUPPORTED_PREDECESSORS)
         for version, build in (
-            (ACTIVE_PREDECESSOR.product_version, unregistered_build),
+            (earlier.product_version, unregistered_build),
+            (next_patch(PRODUCT_VERSION), earlier.build_number),
             (next_patch(PRODUCT_VERSION), ACTIVE_PREDECESSOR.build_number),
         ):
             with self.subTest(version=version, build=build):

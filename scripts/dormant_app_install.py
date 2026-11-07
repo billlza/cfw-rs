@@ -263,11 +263,39 @@ INSTALLED_50029_PREDECESSOR: Final = PredecessorProfile(
 # Exact installed notarized 0.5.0 GA build 50030, the published 0.5.0 release.
 # Its stapled tree is bound by the signed-app manifest, both package seals and
 # the `candidate` of the completed 50029 -> 50030 install and service journals;
-# the first GA install of the next product version replaces it.
+# the 51001 GA install replaced it.
 INSTALLED_50030_PREDECESSOR: Final = PredecessorProfile(
     product_version="0.5.0",
     build_number="50030",
     tree_sha256="078b0ab7c044a79be83595c68419e908d5c94d442faffa59ec2d5c2e0f7260f3",
+)
+# Exact installed notarized 0.5.1 GA build 51001, retired after GA runtime
+# acceptance and before publication. Its stapled tree is bound by the
+# signed-app manifest, both package seals and the `candidate` of the
+# completed 50030 -> 51001 install and service journals; the 51002 GA
+# install replaced it.
+INSTALLED_51001_PREDECESSOR: Final = PredecessorProfile(
+    product_version="0.5.1",
+    build_number="51001",
+    tree_sha256="274c9ed1bce0630724032a016869acc264682650311c90c87b15d6c8da2fa9c3",
+)
+# Exact installed notarized 0.5.1 GA build 51002, retired after GA runtime
+# acceptance and before publication. Its stapled tree is bound by the
+# signed-app manifest, both package seals and the `candidate` of the completed
+# 51001 -> 51002 install and service journals; the 51004 GA install replaced it.
+INSTALLED_51002_PREDECESSOR: Final = PredecessorProfile(
+    product_version="0.5.1",
+    build_number="51002",
+    tree_sha256="3860382230d212a6607fb27c560cb9bd3bc82b272325b8af90b4d416eac5ed81",
+)
+# Exact installed notarized 0.5.1 GA build 51004, retired after local runtime
+# acceptance because independent manual-upgrade acceptance found a defect.
+# Its stapled tree is bound by the signed-app manifest, both package seals and
+# the candidate of the completed 51002 -> 51004 install and service journals.
+INSTALLED_51004_PREDECESSOR: Final = PredecessorProfile(
+    product_version="0.5.1",
+    build_number="51004",
+    tree_sha256="5cb832cdc1fa8828c8e6f7b61023cd42d03ac22ad463aef0bce4cd1cd5b7fd1e",
 )
 SUPPORTED_PREDECESSORS: Final = MappingProxyType(
     {
@@ -275,6 +303,9 @@ SUPPORTED_PREDECESSORS: Final = MappingProxyType(
         INSTALLED_50028_PREDECESSOR.build_number: INSTALLED_50028_PREDECESSOR,
         INSTALLED_50029_PREDECESSOR.build_number: INSTALLED_50029_PREDECESSOR,
         INSTALLED_50030_PREDECESSOR.build_number: INSTALLED_50030_PREDECESSOR,
+        INSTALLED_51001_PREDECESSOR.build_number: INSTALLED_51001_PREDECESSOR,
+        INSTALLED_51002_PREDECESSOR.build_number: INSTALLED_51002_PREDECESSOR,
+        INSTALLED_51004_PREDECESSOR.build_number: INSTALLED_51004_PREDECESSOR,
     }
 )
 SERVICE_DECOMMISSION_PHASES: Final = (

@@ -33,6 +33,9 @@ STATUSES: Final = frozenset(
         "retired_security_dependency_change_before_notarization",
         "retired_product_change_after_install_before_ga_runtime_acceptance",
         "retired_security_dependency_change_after_install_before_ga_runtime_acceptance",
+        # Installed, accepted and sealed for publication, then superseded by a
+        # product change before anything was published.
+        "retired_product_change_after_ga_runtime_acceptance_before_publication",
         "retired_after_notarization_before_install_lane_test_not_hermetic",
         "retired_before_candidate_build_source_gate_contract_incomplete",
         "retired_unbuilt_policy_superseded",
@@ -48,7 +51,10 @@ STATUSES: Final = frozenset(
 # such build is the recorded predecessor whose journals a later install reads.
 INSTALLED_GA_STATUSES: Final = frozenset(
     status for status in STATUSES if "_after_install_" in status
-) | {"retired_superseded_by_next_product_version"}
+) | {
+    "retired_product_change_after_ga_runtime_acceptance_before_publication",
+    "retired_superseded_by_next_product_version",
+}
 # The fixed 0.4.0 history: the retired validation prefix, the build retired by
 # policy and the retired GA allocations.
 IMMUTABLE_RETIRED_PREFIX: Final = (

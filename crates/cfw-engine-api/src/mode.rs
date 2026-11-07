@@ -50,6 +50,18 @@ pub enum EngineRuntimePlatform {
 }
 
 impl EngineRuntimePlatform {
+    /// Admission policy for the existing platform configuration. This does not
+    /// advertise or authorize Windows TUN availability or change its wire codec.
+    pub const fn tunnel_mtu_limits(self) -> crate::TunnelMtuLimits {
+        match self {
+            Self::MacOs => crate::TunnelMtuLimits::AUTHORITY_V1,
+            Self::Windows => crate::TunnelMtuLimits {
+                minimum: 1_280,
+                maximum: 9_000,
+            },
+        }
+    }
+
     /// This affects the canonical configuration before any digest or lease is
     /// prepared. It does not advertise or authorize platform TUN availability.
     pub const fn tunnel_stack(self) -> cfw_singbox_config::TunnelStack {

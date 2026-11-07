@@ -10,6 +10,8 @@ import { setConnectionsStreamRunning } from "./live-streams.js";
 
 export function createConnectionActions({ renderPage, bindConnectionRowEvents }) {
   const actions = {
+    "connections-live": () => { state.connectionPanel = "live"; renderPage(); },
+    "connections-diagnostics": () => { state.connectionPanel = "diagnostics"; renderPage(); },
     "close-all": async () => {
       if (!controllerActionAllowed(t("Closing all connections"), "connection")) return;
       const token = captureEngineIdentityToken();

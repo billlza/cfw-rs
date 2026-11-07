@@ -173,6 +173,12 @@ fn project_for_mode(
     mode: EngineMode,
     platform: EngineRuntimePlatform,
 ) -> Result<usize, String> {
+    if mode == EngineMode::Off || mode.tunnel_enabled() {
+        platform
+            .tunnel_mtu_limits()
+            .validate(settings.tunnel_mtu)
+            .map_err(|error| error.to_string())?;
+    }
     let modes: &[ProjectionMode] = match mode {
         EngineMode::LocalProxy => &[ProjectionMode::LocalProxy],
         EngineMode::SystemProxy => &[ProjectionMode::SystemProxy],
@@ -352,6 +358,42 @@ mod tests {
             };
             assert!(project_for_mode(&selected, &invalid, EngineMode::Off, platform).is_err());
         }
+    }
+
+    #[test]
+    fn macos_staging_uses_native_mtu_limits_but_keeps_proxy_only_recovery() {
+        let selected = stored();
+        let legacy = EngineSettings {
+            tunnel_mtu: 9000,
+            ..EngineSettings::default()
+        };
+        for mode in [
+            EngineMode::Off,
+            EngineMode::Tunnel,
+            EngineMode::TunnelSystemProxy,
+        ] {
+            assert!(
+                project_for_mode(&selected, &legacy, mode, EngineRuntimePlatform::MacOs)
+                    .unwrap_err()
+                    .contains("1500")
+            );
+        }
+        for mode in [EngineMode::LocalProxy, EngineMode::SystemProxy] {
+            assert!(
+                project_for_mode(&selected, &legacy, mode, EngineRuntimePlatform::MacOs).unwrap()
+                    > 0
+            );
+        }
+        assert!(
+            project_for_mode(
+                &selected,
+                &legacy,
+                EngineMode::Off,
+                EngineRuntimePlatform::Windows
+            )
+            .unwrap()
+                > 0
+        );
     }
 
     #[test]

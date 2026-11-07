@@ -257,6 +257,7 @@ const responses = {
   },
   legacy_retirement_status: { state: "cleared" },
   read_runtime_settings_snapshot: {
+    tunnel_mtu_limits: { minimum: 1280, maximum: 1500 },
     settings: { preferred_mixed_port:null, log_level:"info", tunnel_mtu:1500, allow_lan:false, lan_proxy:null },
     revision: null,
     effective: { mixed_port:7890, log_level:"info", tunnel_mtu:1500, ipv6_dns_enabled:true, lan_proxy:null, mainland_china_direct:false, dns_leak_protection:false },

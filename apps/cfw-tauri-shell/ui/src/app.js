@@ -47,6 +47,7 @@ import { createGeneralView } from "./general.js";
 import { createProxyView } from "./proxies.js";
 import { createEditingRender, createScrollKeeper } from "./editing-render.js";
 import { createConnectionsView } from "./connections.js";
+import { createConnectionDiagnostics } from "./connection-diagnostics.js";
 import { createRulesView } from "./rules.js";
 import { createSettingsView } from "./settings-view.js";
 import { createAutomationSettingsUI } from "./automation-settings.js";
@@ -217,9 +218,11 @@ function closeGlassDialog(dialog) { overlays.closeGlassDialog(dialog); }
 function overlayOpen() { return overlays.overlayOpen(); }
 
 // Page views.
+const connectionDiagnostics = createConnectionDiagnostics({ state, runtime, invoke, renderPage });
 const { renderConnections, scheduleConnectionsPatch, bindConnectionRowEvents } = createConnectionsView({
   state, runtime, MAX_CONNECTION_ROWS, safeRegex, escapeHtml, formatBytes, renderPage, bindPageEvents,
   controllerActionAllowed, captureEngineIdentityToken, engineIdentityTokenIsCurrent, invoke, loadControllerSnapshot, appendLog, errorText,
+  renderDiagnostics: connectionDiagnostics.render,
 });
 
 const { renderRules, changePage: changeRulePage } = createRulesView({state,escapeHtml});
@@ -322,6 +325,7 @@ function bindPageEvents() {
   });
   logActions.bindPage();
   connectionActions.bindPage();
+  connectionDiagnostics.bindPage();
   migrationActions.bindPage();
 }
 
@@ -353,6 +357,7 @@ const dashboardActions = new Map();
 for (const table of [
   shellActions, migrationActions.actions, proxyActions.actions, engineActions.actions, generalActions.actions,
   connectionActions.actions, logActions.actions, ruleActions.actions, profileActions.actions,
+  connectionDiagnostics.actions,
   diagnosticsDialogs.actions, legacyMigrationDialog.actions, credentialSetup.actions, settings.actions, updates.actions,
 ]) {
   for (const [name, run] of Object.entries(table)) {

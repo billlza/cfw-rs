@@ -1253,6 +1253,7 @@ class ActiveLedgerRuleTests(unittest.TestCase):
             {
                 "retired_product_change_after_install_before_ga_runtime_acceptance",
                 "retired_security_dependency_change_after_install_before_ga_runtime_acceptance",
+                "retired_product_change_after_ga_runtime_acceptance_before_publication",
                 "retired_superseded_by_next_product_version",
             },
         )

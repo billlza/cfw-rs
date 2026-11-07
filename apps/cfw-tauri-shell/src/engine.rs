@@ -2,7 +2,16 @@
 mod cutover;
 mod endpoints;
 mod maintenance;
+mod mode_switch;
+mod preparation;
+mod runtime_access;
 mod runtime_settings;
+pub(crate) use mode_switch::{apply_admitted_engine_mode, apply_profile_change};
+pub(crate) use preparation::{
+    EngineCapabilities, EngineShutdownOutcome, EngineStatusPayload, StagedEndpointRebind,
+    prepare_managed_engine,
+};
+pub(crate) use runtime_access::{ready_runtime, start_engine_event_forwarder};
 pub(crate) use runtime_settings::change_runtime_preferences;
 #[cfg(feature = "physical-release-evidence")]
 pub mod packet_evidence;
@@ -44,6 +53,12 @@ use cutover::CutoverPreparationGate;
 use endpoints::{EndpointCandidateCursor, EndpointRole};
 pub(crate) use maintenance::{EngineMaintenanceError, EngineMaintenanceLease, ProfileControlError};
 use maintenance::{EngineMaintenanceGate, EngineModeChangeIntent, EngineModeChangeLease};
+use preparation::{ActiveControllerBinding, EngineEndpointBinding};
+use runtime_access::{
+    commit_endpoint_rebind, engine_snapshot_is_off, read_active_controller_access,
+    read_controller_access, read_engine_settings, record_endpoint_runtime,
+    selected_profile_for_mode, stage_endpoint_rebind,
+};
 
 #[cfg(target_os = "macos")]
 pub(crate) use cutover::{
@@ -133,37 +148,6 @@ pub(crate) fn serialized_switch_transition(
     Ok(switch_transition(current, switch, enabled))
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
-pub(crate) struct EngineCapabilities {
-    local_proxy: bool,
-    system_proxy: bool,
-    tunnel: bool,
-    /// Both integrations in one run; never true unless each alone is.
-    tunnel_system_proxy: bool,
-    provider_management: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct EngineStatusPayload {
-    pub(crate) snapshot: EngineSnapshot,
-    capabilities: EngineCapabilities,
-    startup_recovery_available: bool,
-    cutover_ready: bool,
-    cutover_unavailable_reason: Option<String>,
-    unavailable_reason: Option<String>,
-}
-
-pub(crate) struct EngineShutdownOutcome {
-    result: Result<EngineSnapshot, String>,
-    maintenance: EngineMaintenanceLease,
-}
-
-impl EngineShutdownOutcome {
-    pub(crate) fn into_parts(self) -> (Result<EngineSnapshot, String>, EngineMaintenanceLease) {
-        (self.result, self.maintenance)
-    }
-}
-
 pub struct ManagedEngine {
     pub(crate) coordinator: EngineModeCoordinator,
     capabilities: EngineCapabilities,
@@ -176,31 +160,6 @@ pub struct ManagedEngine {
     cutover: CutoverPreparationGate,
     maintenance: EngineMaintenanceGate,
     endpoints: Arc<RwLock<EngineEndpointBinding>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct EngineEndpointBinding {
-    controller: EngineControllerAccess,
-    cursor: EndpointCandidateCursor,
-    active: Option<ActiveControllerBinding>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ActiveControllerBinding {
-    generation: u64,
-    config_digest: String,
-}
-
-pub(crate) struct StagedEndpointRebind {
-    expected: EngineEndpointBinding,
-    replacement: EngineEndpointBinding,
-}
-
-#[cfg(target_os = "macos")]
-impl StagedEndpointRebind {
-    pub(crate) fn settings(&self) -> &EngineSettings {
-        self.replacement.controller.settings()
-    }
 }
 
 impl ManagedEngine {
@@ -446,275 +405,12 @@ impl ManagedEngine {
     }
 }
 
-/// Preparing filesystem / platform state never starts the coordinator. The
-/// startup owner admits this task only after checking for an intervening quit.
-pub(crate) struct PreparedEngine {
-    pub(crate) engine: ManagedEngine,
-    pub(crate) task: cfw_application::CoordinatorTask,
-}
-
-fn configured_engine_settings(
-    store: &cfw_core::SettingsStore,
-) -> Result<(EngineSettings, EndpointCandidateCursor), String> {
-    #[cfg(target_os = "macos")]
-    if let Some(settings) = load_replacement_engine_settings(&store.paths().app_home)? {
-        let cursor = EndpointCandidateCursor::from_persisted(settings.clone())
-            .map_err(|error| format!("persisted engine endpoints are unusable: {error}"))?;
-        return Ok((settings, cursor));
-    }
-    let preferences = store
-        .runtime_settings::<cfw_singbox_config::RuntimePreferences>()
-        .map_err(|error| error.to_string())?
-        .settings;
-    let settings = preferences
-        .apply_to(EngineSettings::default())
-        .map_err(|error| error.to_string())?;
-    endpoints::select_configured_engine_settings(settings, preferences.preferred_mixed_port)
-        .map_err(|error| format!("engine loopback endpoints are unavailable: {error}"))
-}
-
-pub(crate) fn prepare_managed_engine(
-    services: crate::platform_runtime::PlatformRuntime,
-) -> Result<PreparedEngine, String> {
-    let store = settings_store()?;
-    store.ensure_layout().map_err(|error| error.to_string())?;
-    let (settings, cursor) = configured_engine_settings(&store)?;
-    let controller = EngineControllerAccess::resolve(settings)
-        .map_err(|error| format!("engine settings are unusable: {error}"))?;
-    let crate::platform_runtime::PreparedRuntime {
-        services,
-        coordinator,
-        task,
-    } = services.prepare()?;
-
-    let engine = ManagedEngine {
-        coordinator,
-        capabilities: EngineCapabilities {
-            local_proxy: services.proxy_available,
-            system_proxy: services.proxy_available,
-            tunnel: services.tunnel_available,
-            tunnel_system_proxy: services.tunnel_system_proxy_available
-                && services.tunnel_available
-                && services.proxy_available,
-            // Providers are application-owned resources (commands::providers).
-            // The pinned sing-box 1.14.4 schema has no proxy or rule providers,
-            // so the controller's provider methods stay fail-closed backstops
-            // that nothing probes.
-            provider_management: true,
-        },
-        unavailable_reason: services.unavailable_reason,
-        preflight_backend: services.legacy_preflight,
-        system_proxy_authorization: services.authorization,
-        profile_delay_backend: services.probes,
-        tunnel_approval: services.tunnel_approval,
-        #[cfg(target_os = "macos")]
-        cutover: CutoverPreparationGate::default(),
-        maintenance: EngineMaintenanceGate::default(),
-        endpoints: Arc::new(RwLock::new(EngineEndpointBinding {
-            controller,
-            cursor,
-            active: None,
-        })),
-    };
-    Ok(PreparedEngine { engine, task })
-}
-
-pub(crate) fn start_engine_event_forwarder(app: AppHandle) {
-    let engine = app.state::<ManagedEngine>();
-    let coordinator = engine.coordinator.clone();
-    let mut snapshots = coordinator.subscribe();
-    let default_ipv6_enabled = match engine.engine_settings() {
-        Ok(settings) => settings.enable_ipv6,
-        Err(error) => {
-            eprintln!("failed to read engine endpoint state: {error}");
-            return;
-        }
-    };
-    if let Err(error) = crate::release_observation::emit_engine_snapshot(
-        &snapshots.borrow().clone(),
-        default_ipv6_enabled,
-    ) {
-        eprintln!("failed to publish initial release observation: {error}");
-    }
-    tauri::async_runtime::spawn(async move {
-        while snapshots.changed().await.is_ok() {
-            let snapshot = snapshots.borrow().clone();
-            if let EngineState::Failed {
-                generation,
-                target,
-                error,
-                recheck_pending,
-            } = &snapshot.state
-            {
-                let recheck = if *recheck_pending {
-                    " recheck=pending"
-                } else {
-                    ""
-                };
-                crate::diagnostics::record(
-                    &app,
-                    cfw_core::DiagnosticTopic::Network,
-                    "engine_failed",
-                    &format!("generation={generation} target={target:?}{recheck}: {error}"),
-                );
-            }
-            // Evidence transactions may temporarily use a source-owned settings
-            // variant (notably IPv6-disabled and exact Off). Ask the serialized
-            // actor for the settings it accepted for this exact snapshot instead
-            // of publishing the dashboard's ordinary settings for every state.
-            let ipv6_enabled = coordinator
-                .restart_spec()
-                .await
-                .ok()
-                .flatten()
-                .filter(|spec| spec.matches_ready_snapshot(&snapshot))
-                .map_or(default_ipv6_enabled, |spec| spec.settings().enable_ipv6);
-            if let Err(error) =
-                crate::release_observation::emit_engine_snapshot(&snapshot, ipv6_enabled)
-            {
-                eprintln!("failed to publish release observation: {error}");
-            }
-            let event = EngineEvent::SnapshotChanged { snapshot };
-            if let Err(error) = app.emit("cfw://engine-event", event) {
-                eprintln!("failed to publish engine state event: {error}");
-            }
-        }
-    });
-}
-
 #[tauri::command]
 pub(crate) fn engine_snapshot(
     engine: State<'_, ManagedEngine>,
     retirement: State<'_, PlatformMaintenanceGate>,
 ) -> Result<EngineStatusPayload, String> {
     engine.status_payload(&retirement)
-}
-
-/// The single in-process execution path after a caller transfers its
-/// single-flight transition permit.
-///
-/// Every renderer mutation first acquires an exact target or current-mode
-/// admission, then funnels through here so the live legacy-runtime admission,
-/// capability check, selected profile, and app-owned settings cannot be
-/// skipped. The permit outlives renderer cancellation until the coordinator
-/// actor responds, so accepted native work cannot escape maintenance.
-pub(crate) async fn apply_admitted_engine_mode(
-    engine: &ManagedEngine,
-    retirement: &PlatformMaintenanceGate,
-    profiles: &ManagedProfiles,
-    mode: EngineMode,
-    mode_lease: EngineModeChangeLease,
-) -> Result<EngineStatusPayload, String> {
-    if mode != EngineMode::Off {
-        crate::platform_maintenance::require_start_allowed(retirement)?;
-        engine.require_capability(mode)?;
-    }
-    let (profile_id, profile) = selected_profile_for_mode(profiles.repository(), mode)
-        .map_err(|error| error.to_string())?;
-    let coordinator = engine.coordinator.clone();
-    let endpoints = engine.endpoints.clone();
-    let authorization = engine.system_proxy_authorization.clone();
-    let retry_guard = mode_lease.retry_guard();
-    let completion = mode_lease.run_to_completion(async move {
-        // Authorization precedes the runtime transition, including restoration
-        // after a long session. The existing runtime stays active while macOS
-        // waits; no cleanup deadline or new engine generation has begun.
-        authorize_proxy_transition(authorization.as_ref(), mode != EngineMode::SystemProxy).await?;
-        set_mode_with_endpoint_rebind(
-            &coordinator,
-            &endpoints,
-            mode,
-            &profile_id,
-            &profile,
-            || retry_guard().map_err(|error| error.to_string()),
-            |conflict| {
-                let staged = stage_endpoint_rebind(&endpoints, &coordinator, conflict)?;
-                commit_endpoint_rebind(&endpoints, staged)
-            },
-        )
-        .await
-    });
-    let (result, mode_lease) = completion
-        .await
-        .map_err(|_| "network mode coordinator task ended without a response".to_owned())?;
-    drop(mode_lease);
-    result?;
-    engine.status_payload(retirement)
-}
-
-/// A profile transaction owns the same queue as explicit mode changes. Native
-/// preparation runs in the actor, so status polling cannot mistake bridge Busy
-/// for a crashed active runtime. The owned task survives a dropped UI waiter.
-pub(crate) async fn apply_profile_change<T, F, P>(
-    engine: &ManagedEngine,
-    retirement: &PlatformMaintenanceGate,
-    prepare: P,
-) -> Result<T, String>
-where
-    T: Send + 'static,
-    F: std::future::Future<Output = Result<cfw_application::ProfileChange<T>, String>>
-        + Send
-        + 'static,
-    P: FnOnce(EngineSettings) -> F + Send + 'static,
-{
-    let (mode, lease) = engine
-        .begin_current_mode_change()
-        .await
-        .map_err(|error| error.to_string())?;
-    let start_admission = if mode != EngineMode::Off {
-        crate::platform_maintenance::require_start_allowed(retirement)
-            .and_then(|()| engine.require_capability(mode))
-    } else {
-        Ok(())
-    };
-    let settings = engine.engine_settings()?;
-    let coordinator = engine.coordinator.clone();
-    let endpoints = engine.endpoints.clone();
-    let authorization = engine.system_proxy_authorization.clone();
-    let (result, lease) = lease
-        .run_to_completion(async move {
-            let before = coordinator.snapshot();
-            let preparation_settings = settings.clone();
-            let result = coordinator
-                .change_profile(settings, async move {
-                    let candidate = prepare(preparation_settings)
-                        .await
-                        .map_err(EngineCoordinatorError::ProfilePreparation)?;
-                    if candidate.activate && mode != EngineMode::Off {
-                        start_admission.map_err(EngineCoordinatorError::ProfilePreparation)?;
-                        authorize_proxy_transition(
-                            authorization.as_ref(),
-                            mode != EngineMode::SystemProxy,
-                        )
-                        .await
-                        .map_err(EngineCoordinatorError::ProfilePreparation)?;
-                    }
-                    Ok(candidate)
-                })
-                .await;
-            // Failed replacements may have restored a new generation of the old
-            // source. Always refresh controller identity from the resulting state.
-            let after = coordinator.snapshot();
-            let binding = if after == before {
-                Ok(())
-            } else {
-                record_endpoint_runtime(&endpoints, coordinator.runtime_platform(), &after)
-            };
-            match (result, binding) {
-                (Ok(value), Ok(())) => Ok(value),
-                (Err(error), Ok(())) => Err(error.to_string()),
-                (Ok(_), Err(binding)) => Err(format!(
-                    "profile committed, but controller identity refresh failed: {binding}"
-                )),
-                (Err(error), Err(binding)) => Err(format!(
-                    "{error}; controller identity refresh also failed: {binding}"
-                )),
-            }
-        })
-        .await
-        .map_err(|_| "profile transaction task ended without a response".to_owned())?;
-    drop(lease);
-    result
 }
 
 /// What became of the macOS prompt behind a System Proxy rights request that
@@ -820,202 +516,4 @@ where
         ),
         None => error,
     })
-}
-
-async fn set_mode_with_endpoint_rebind(
-    coordinator: &EngineModeCoordinator,
-    endpoints: &RwLock<EngineEndpointBinding>,
-    mode: EngineMode,
-    profile_id: &str,
-    profile: &ValidatedSingBoxProfile,
-    ensure_retry_current: impl Fn() -> Result<(), String>,
-    mut rebind: impl FnMut(BackendErrorKind) -> Result<(), String>,
-) -> Result<EngineSnapshot, String> {
-    let mut ticket_retry_used = false;
-    let mut conflict_retry_used = false;
-    loop {
-        let settings = read_engine_settings(endpoints)?;
-        match coordinator
-            .set_mode(mode, profile_id.to_owned(), profile.clone(), settings)
-            .await
-        {
-            Ok(snapshot) => {
-                record_endpoint_runtime(endpoints, coordinator.runtime_platform(), &snapshot)?;
-                return Ok(snapshot);
-            }
-            Err(EngineCoordinatorError::StartEndpointConflictAfterOff { conflict, .. }) => {
-                ensure_retry_current()?;
-                if !conflict_retry_used {
-                    // The coordinator has cleaned the failed attempt and proven
-                    // Off; the endpoint it could not bind was most likely the
-                    // listener it just stopped. Try the same endpoint once more
-                    // before the cursor moves on.
-                    conflict_retry_used = true;
-                    tokio::time::sleep(ENDPOINT_CONFLICT_RETRY_DELAY).await;
-                    continue;
-                }
-                rebind(conflict)?;
-            }
-            Err(EngineCoordinatorError::StartTicketExpiredAfterOff) if !ticket_retry_used => {
-                ensure_retry_current()?;
-                ticket_retry_used = true;
-                // The coordinator has already cleaned the failed attempt and
-                // independently proven Off. The next call allocates a fresh
-                // generation/ticket; it never reuses or extends the old ticket.
-            }
-            Err(error) => return Err(error.to_string()),
-        }
-    }
-}
-
-fn read_engine_settings(
-    endpoints: &RwLock<EngineEndpointBinding>,
-) -> Result<EngineSettings, String> {
-    endpoints
-        .read()
-        .map_err(|_| "engine endpoint state lock is poisoned".to_owned())
-        .map(|binding| binding.controller.settings().clone())
-}
-
-fn read_controller_access(
-    endpoints: &RwLock<EngineEndpointBinding>,
-) -> Result<EngineControllerAccess, String> {
-    endpoints
-        .read()
-        .map_err(|_| "engine endpoint state lock is poisoned".to_owned())
-        .map(|binding| binding.controller.clone())
-}
-
-fn read_active_controller_access(
-    endpoints: &RwLock<EngineEndpointBinding>,
-    generation: u64,
-    config_digest: &str,
-) -> Result<EngineControllerAccess, String> {
-    let binding = endpoints
-        .read()
-        .map_err(|_| "engine endpoint state lock is poisoned".to_owned())?;
-    let expected = ActiveControllerBinding {
-        generation,
-        config_digest: config_digest.to_owned(),
-    };
-    if binding.active.as_ref() != Some(&expected) {
-        return Err("active engine identity does not match the controller binding".into());
-    }
-    Ok(binding.controller.clone())
-}
-
-/// Shared desktop identity policy for endpoints, controller commands and tray
-/// state. The platform must come from the coordinator's pinned backend choice.
-pub(crate) fn ready_runtime(
-    platform: EngineRuntimePlatform,
-    snapshot: &EngineSnapshot,
-) -> Option<&RuntimeIdentity> {
-    let (runtime, owner) = match &snapshot.state {
-        EngineState::LocalProxyActive { runtime } | EngineState::ProxyActive { runtime } => {
-            (runtime, platform.proxy_owner())
-        }
-        EngineState::TunnelActive { runtime }
-        | EngineState::TunnelSystemProxyActive { runtime } => (runtime, platform.tunnel_owner()),
-        _ => return None,
-    };
-    (snapshot.desired_mode == snapshot.state.active_mode()
-        && runtime.owner == owner
-        && runtime.ready
-        && runtime.context.generation == snapshot.generation
-        && snapshot.config_digest.as_deref() == Some(runtime.config_digest.as_str()))
-    .then_some(runtime)
-}
-
-fn record_endpoint_runtime(
-    endpoints: &RwLock<EngineEndpointBinding>,
-    platform: EngineRuntimePlatform,
-    snapshot: &EngineSnapshot,
-) -> Result<(), String> {
-    let active = match &snapshot.state {
-        EngineState::Off if snapshot.desired_mode == EngineMode::Off => None,
-        EngineState::AwaitingApproval { .. } if snapshot.desired_mode.tunnel_enabled() => None,
-        _ => {
-            let runtime = ready_runtime(platform, snapshot).ok_or_else(|| {
-                "coordinator returned a state that cannot bind controller access".to_owned()
-            })?;
-            Some(ActiveControllerBinding {
-                generation: runtime.context.generation,
-                config_digest: runtime.config_digest.clone(),
-            })
-        }
-    };
-    endpoints
-        .write()
-        .map_err(|_| "engine endpoint state lock is poisoned".to_owned())?
-        .active = active;
-    Ok(())
-}
-
-fn stage_endpoint_rebind(
-    endpoints: &RwLock<EngineEndpointBinding>,
-    coordinator: &EngineModeCoordinator,
-    conflict: BackendErrorKind,
-) -> Result<StagedEndpointRebind, String> {
-    let role = match conflict {
-        BackendErrorKind::MixedEndpointInUse => EndpointRole::Mixed,
-        BackendErrorKind::ControllerEndpointInUse => EndpointRole::Controller,
-        _ => return Err("non-endpoint failure cannot advance the endpoint cursor".into()),
-    };
-    if coordinator.snapshot().state != EngineState::Off {
-        return Err("endpoint rebind requires a proven Off coordinator snapshot".into());
-    }
-    let expected = endpoints
-        .read()
-        .map_err(|_| "engine endpoint state lock is poisoned".to_owned())?
-        .clone();
-    let (settings, cursor) = expected
-        .cursor
-        .advance(role)
-        .map_err(|error| error.to_string())?;
-    let controller = EngineControllerAccess::resolve(settings)
-        .map_err(|error| format!("replacement engine settings are unusable: {error}"))?;
-    Ok(StagedEndpointRebind {
-        expected,
-        replacement: EngineEndpointBinding {
-            controller,
-            cursor,
-            active: None,
-        },
-    })
-}
-
-fn commit_endpoint_rebind(
-    endpoints: &RwLock<EngineEndpointBinding>,
-    staged: StagedEndpointRebind,
-) -> Result<(), String> {
-    let mut current = endpoints
-        .write()
-        .map_err(|_| "engine endpoint state lock is poisoned".to_owned())?;
-    if *current != staged.expected {
-        return Err("engine endpoint state changed before rebind commit".into());
-    }
-    *current = staged.replacement;
-    Ok(())
-}
-
-/// Off both as requested and as observed; a pending, failed or stopping
-/// engine is not Off.
-fn engine_snapshot_is_off(snapshot: &EngineSnapshot) -> bool {
-    snapshot.desired_mode == EngineMode::Off && snapshot.state == EngineState::Off
-}
-
-fn selected_profile_for_mode(
-    repository: &ProfileRepository,
-    mode: EngineMode,
-) -> Result<(String, ValidatedSingBoxProfile), ProfileError> {
-    if mode == EngineMode::Off {
-        Ok((
-            "00000000-0000-4000-8000-000000000000".to_owned(),
-            ValidatedSingBoxProfile::direct(),
-        ))
-    } else {
-        repository
-            .require_selected()
-            .map(|stored| (stored.record.id, stored.profile))
-    }
 }

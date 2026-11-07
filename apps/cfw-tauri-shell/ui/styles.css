@@ -10,6 +10,7 @@
 @import "./styles/profiles.css";
 @import "./styles/logs.css";
 @import "./styles/connections.css";
+@import "./styles/connection-diagnostics.css";
 @import "./styles/settings.css";
 @import "./styles/glass-menus.css";
 @import "./styles/refusal-notes.css";

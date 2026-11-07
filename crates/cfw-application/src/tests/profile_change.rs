@@ -10,6 +10,39 @@ use std::sync::{
 const OLD: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const NEW: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 
+#[tokio::test]
+async fn unsupported_macos_mtu_cannot_check_restart_or_commit_an_active_tunnel() {
+    let backend = Arc::new(FakeBackend::default());
+    let coordinator = coordinator(backend.clone());
+    let before = coordinator
+        .set_mode(
+            EngineMode::Tunnel,
+            OLD.into(),
+            ValidatedSingBoxProfile::direct(),
+            EngineSettings::default(),
+        )
+        .await
+        .unwrap();
+    let operations = backend.operations();
+    let committed = Arc::new(AtomicBool::new(false));
+    let change = candidate(committed.clone(), false);
+    let error = coordinator
+        .change_profile(
+            EngineSettings {
+                tunnel_mtu: 9000,
+                ..EngineSettings::default()
+            },
+            async { Ok(change) },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, EngineCoordinatorError::InvalidTunnelMtu(_)));
+    assert_eq!(coordinator.snapshot(), before);
+    assert_eq!(backend.operations(), operations);
+    assert!(!committed.load(Ordering::Acquire));
+    coordinator.shutdown().await.unwrap();
+}
+
 fn candidate(committed: Arc<AtomicBool>, fail_commit: bool) -> ProfileChange<String> {
     ProfileChange {
         profile_id: NEW.into(),

@@ -33,6 +33,12 @@ They are not treated as UI-only refresh events. Loading, approval, failure,
 awaiting confirmation, cleaning, manual cleanup required, and Off remain
 distinct user-visible states.
 
+On macOS, the network settings form displays the native TUN MTU range,
+1280–1500. An older saved value outside that range remains visible so it can
+be corrected; it is never silently clamped. A TUN start with such a value is
+rejected before stopping the current proxy. Stopping and proxy-only operation
+remain available.
+
 When an engine cannot be closed, after a failed start or at a stop, the app
 reports that global cleanup could not be proven. So does a close still
 unfinished 2 seconds into a stop, and an interrupted start still inside the

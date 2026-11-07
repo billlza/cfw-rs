@@ -30,7 +30,10 @@ fn the_repository_passes_every_release_source_gate() {
         .expect("the release source gates pass on this repository");
     // The bridge gate covers the whole shell tree, not one file of it.
     assert_eq!(watched[0], repository.join("apps/cfw-tauri-shell/src"));
-    assert_eq!(watched.len(), 5, "{watched:?}");
+    assert!(watched.contains(
+        &repository.join("native/macos/Sources/CFWAppleNetwork/NetworkExtensionHostBridge.swift")
+    ));
+    assert_eq!(watched.len(), 6, "{watched:?}");
 }
 
 #[test]

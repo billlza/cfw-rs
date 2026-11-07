@@ -30,6 +30,10 @@ pub(crate) fn verify_release_source_markers(
             "MissingSystemExtensionStateTransport",
         ),
         (
+            "native/macos/Sources/CFWAppleNetwork/NetworkExtensionHostBridge.swift",
+            "MissingSystemExtensionStateTransport",
+        ),
+        (
             "native/macos/Sources/CFWPacketTunnel/PacketTunnelProvider.swift",
             "systemExtensionStateTransportNotLinked",
         ),

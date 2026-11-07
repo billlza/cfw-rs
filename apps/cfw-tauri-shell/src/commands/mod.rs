@@ -1,3 +1,4 @@
+pub(crate) mod connection_diagnostics;
 mod controller;
 pub(crate) use controller::select_proxy_with_persistence;
 mod imported_credentials;

@@ -120,6 +120,7 @@ export const state = {
   logSearch: "",
   logsPaused: false,
   connectionSearch: "",
+  connectionPanel: "live",
   ruleSearch: "",
   connectionSort: "age",
   connectionSortDesc: false,

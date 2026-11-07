@@ -1,8 +1,16 @@
 # Changelog
 
-## 0.5.1 - Unreleased
+## 0.5.1 — 2026-11-06
 
 ### Interface
+
+- Add an on-demand Connection diagnostics tab beside the live connection list:
+  system/CFM exit addresses, IPv4/IPv6, service HTTP responses, optional IP
+  information and attributed network risk indicators, authoritative DNS resolver
+  observations and WebRTC UDP exits.
+  Addresses start hidden; failures and unavailable data remain explicit. These
+  observations do not claim account eligibility or a service's own trust score.
+  Correct the IP visibility control for screen readers.
 
 - Continue a TUN Mode start by itself once the extension is allowed. The row
   showed `Needs approval` with the `Approve…` button, and after the extension
@@ -42,6 +50,16 @@
 
 ### Reliability
 
+- Recognize retained signed background services after a manual app replacement.
+  Previously the new app could fail at startup with `IdentityRejected` while old
+  services remained alive at the replaced pathname. Original sealed metadata is
+  checked against the running code before the existing Off proof and ordered
+  service handoff. Unknown identities, equal-build re-signs and downgrades remain
+  rejected.
+- Validate macOS TUN MTU against the native 1280–1500 range before saving or
+  switching modes. Previously the settings editor accepted values up to 9000,
+  which could fail only after stopping the existing proxy. Old saved values
+  remain visible for correction; proxy-only operation and stopping stay available.
 - Give every node of a latency test its whole timeout. The engine a test
   starts was held to the same deadline, so a large profile tested at a short
   timeout on a busy Mac could fail as a whole while that engine was still
@@ -96,8 +114,17 @@
 
 - Build the network engine from sing-box 1.14.4 instead of 1.14.2. The Go
   modules it requires directly move to their newest releases, among them
-  `golang.org/x/crypto` 0.58.0, `golang.org/x/net` 0.61.0, gRPC 1.84.0 and
+  `golang.org/x/crypto` 0.58.1-0.20261009181718-2f1f834330b2,
+  `golang.org/x/net` 0.62.0, gRPC 1.84.0 and
   uTLS 1.8.8; sing-box's own modules stay at the versions released with it.
+- Resolve GO-2026-6860 and GO-2026-6866 with `x/net` 0.62.0. The affected
+  `x/net/html` package was absent from the macOS libbox compilation graph.
+  The selected `x/crypto` revision moves the retired OpenPGP package out of
+  that module; it does not repair OpenPGP, which remains unused by the engine.
+- Update Brotli to 1.2.7 and klauspost/compress to 1.20.2 for GO-2026-6888
+  and GO-2026-6865. These fix malformed compressed streams that could cause
+  excessive allocations or a decoder panic; both affected libraries were
+  reached by the macOS and Windows engine vulnerability scans.
 - Build with Rust 1.99.1 instead of 1.98.1. Release builds accept only that
   exact toolchain.
 - Build the app, and the release copies of XcodeGen and the Tauri CLI, with

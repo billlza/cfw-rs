@@ -32,6 +32,12 @@ pub(crate) async fn change_runtime_preferences(
     expected_revision: Option<String>,
 ) -> Result<(), String> {
     preferences.validate().map_err(|error| error.to_string())?;
+    engine
+        .coordinator
+        .runtime_platform()
+        .tunnel_mtu_limits()
+        .validate(preferences.tunnel_mtu)
+        .map_err(|error| error.to_string())?;
     let (mode, lease) = engine
         .begin_current_mode_change()
         .await

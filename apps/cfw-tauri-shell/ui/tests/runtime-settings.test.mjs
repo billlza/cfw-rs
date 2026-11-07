@@ -4,7 +4,71 @@ import { readFile } from "node:fs/promises";
 import { acceptNativeRuntimeDraft, createRuntimeSettingsUI, preferencesFromRuntimeDraft, runtimeDraft } from "../src/runtime-settings.js";
 
 const preferences = { preferred_mixed_port:null, log_level:"info", tunnel_mtu:1500, allow_lan:false, lan_proxy:null };
-const response = () => ({ settings:structuredClone(preferences), revision:null, effective:{mixed_port:7890,log_level:"info",tunnel_mtu:1500,ipv6_dns_enabled:true,lan_proxy:null,mainland_china_direct:false,dns_leak_protection:false} });
+const mtuLimits = { minimum: 1280, maximum: 1500 };
+const response = () => ({ tunnel_mtu_limits: { ...mtuLimits }, settings:structuredClone(preferences), revision:null, effective:{mixed_port:7890,log_level:"info",tunnel_mtu:1500,ipv6_dns_enabled:true,lan_proxy:null,mainland_china_direct:false,dns_leak_protection:false} });
+
+test("runtime MTU validation follows the backend bounds and preserves legacy values for editing", () => {
+  const draft = runtimeDraft({ ...preferences, tunnel_mtu: 9000 });
+  assert.equal(draft.mtu, "9000", "legacy settings are not silently clamped");
+  for (const value of ["1279", "1501", "9000"]) {
+    draft.mtu = value;
+    assert.throws(() => preferencesFromRuntimeDraft(draft, mtuLimits), /1280.*1500/u);
+  }
+  for (const value of ["1280", "1500"]) {
+    draft.mtu = value;
+    assert.equal(preferencesFromRuntimeDraft(draft, mtuLimits).tunnel_mtu, Number(value));
+  }
+  draft.mtu = "9000";
+  assert.equal(preferencesFromRuntimeDraft(draft, { minimum: 1280, maximum: 9000 }).tunnel_mtu, 9000);
+  for (const limits of [undefined, null, {}, [], {minimum: 1280, maximum: "1500"},
+    {minimum: 1500, maximum: 1280}, {minimum: 0, maximum: 1500},
+    {minimum: 1280, maximum: 65536}, {minimum: 1280, maximum: 1500, extra: true}]) {
+    assert.throws(() => preferencesFromRuntimeDraft(draft, limits), /MTU limits are invalid/u);
+  }
+});
+
+test("a missing MTU policy blocks opening settings instead of guessing a range", async () => {
+  const state = { toggles: {}, engineMutationBusy: false, migrationHandoff: false };
+  const snapshot = response();
+  delete snapshot.tunnel_mtu_limits;
+  const ui = createRuntimeSettingsUI({ state, invoke: async () => snapshot,
+    appendLog() {}, renderPage() {}, refreshRuntime() {}, dismissOtherDialogs() { assert.fail("invalid snapshot"); } });
+  await ui.open();
+  assert.equal(state.runtimeSettingsDialog, undefined);
+  assert.match(state.runtimeSettingsError, /MTU limits are invalid/u);
+});
+
+test("native MTU correction rejects unsupported values without writing and keeps the original revision", async () => {
+  globalThis.document = { documentElement: { dataset: { theme: "dark" } } };
+  const state = { toggles: {}, engineMutationBusy: false, migrationHandoff: false };
+  const writes = [];
+  let handlers, frame;
+  let snapshot = { ...response(), settings: { ...preferences, tunnel_mtu: 9000 }, revision: "legacy" };
+  const ui = createRuntimeSettingsUI({ state,
+    invoke: async (command, args) => {
+      if (command === "read_runtime_settings_snapshot") return structuredClone(snapshot);
+      assert.equal(command, "write_runtime_settings_snapshot");
+      writes.push(args);
+      snapshot = { ...response(), settings: args.settings, revision: "corrected" };
+      return structuredClone(snapshot);
+    },
+    nativeDialog: { enabled: () => true, sync: (_dialog, value, callbacks) => { frame = value; handlers = callbacks; return null; } },
+    appendLog() {}, renderPage() {}, refreshRuntime() {}, dismissOtherDialogs() {},
+  });
+  await ui.open();
+  const dialog = state.runtimeSettingsDialog;
+  ui.renderDialog();
+  assert.equal(frame.labels.mtu, "TUN MTU (1280–1500)");
+  assert.equal(frame.draft.mtu, "9000");
+  await handlers.onSubmit(nativeDraft(dialog.draft));
+  assert.equal(writes.length, 0);
+  assert.match(dialog.error, /1280.*1500/u);
+  await handlers.onSubmit(nativeDraft(dialog.draft, { mtu: "1500" }));
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].revision, "legacy");
+  assert.equal(writes[0].settings.tunnel_mtu, 1500);
+  assert.equal(state.runtimeSettingsDialog, null);
+});
 
 // The native form receives exactly the fields runtimeDialogFrame sends.
 function nativeDraft(draft, edits = {}) {
@@ -15,9 +79,9 @@ function nativeDraft(draft, edits = {}) {
 test("native form retains inherited IPv6 unless explicitly touched and rejects expanded drafts", () => {
   const prior = runtimeDraft(preferences, { ipv6_dns_enabled: false });
   const retained = acceptNativeRuntimeDraft(prior, nativeDraft(prior, { level: "debug" }));
-  assert.equal(Object.hasOwn(preferencesFromRuntimeDraft(retained), "ipv6_dns_enabled"), false);
+  assert.equal(Object.hasOwn(preferencesFromRuntimeDraft(retained, mtuLimits), "ipv6_dns_enabled"), false);
   const touched = acceptNativeRuntimeDraft(prior, nativeDraft(prior, { ipv6DNSEdited: true }));
-  assert.equal(preferencesFromRuntimeDraft(touched).ipv6_dns_enabled, false, "choosing then reverting is still explicit");
+  assert.equal(preferencesFromRuntimeDraft(touched, mtuLimits).ipv6_dns_enabled, false, "choosing then reverting is still explicit");
   for (const invalid of [
     { ...nativeDraft(prior), revision: "forged" },
     nativeDraft(prior, { ipv6DNS: "false" }), nativeDraft(prior, { ipv6DNSEdited: 1 }),
@@ -65,17 +129,17 @@ test("native settings submit uses the unchanged LAN validation, save revision an
 
 test("runtime drafts require an explicit LAN scope and preserve automatic port selection", () => {
   const draft = runtimeDraft(preferences);
-  assert.deepEqual(preferencesFromRuntimeDraft(draft), preferences);
+  assert.deepEqual(preferencesFromRuntimeDraft(draft, mtuLimits), preferences);
   draft.allow = true;
-  assert.throws(() => preferencesFromRuntimeDraft(draft), /trusted LAN source ranges/u);
+  assert.throws(() => preferencesFromRuntimeDraft(draft, mtuLimits), /trusted LAN source ranges/u);
   draft.lanSources = "192.168.1.0/24";
-  assert.equal(preferencesFromRuntimeDraft(draft).lan_proxy.listen, "0.0.0.0");
+  assert.equal(preferencesFromRuntimeDraft(draft, mtuLimits).lan_proxy.listen, "0.0.0.0");
   draft.port = "80";
-  assert.throws(() => preferencesFromRuntimeDraft(draft), /Proxy port/u);
+  assert.throws(() => preferencesFromRuntimeDraft(draft, mtuLimits), /Proxy port/u);
   draft.port = "7898";
-  assert.throws(() => preferencesFromRuntimeDraft(draft), /must be different/u);
+  assert.throws(() => preferencesFromRuntimeDraft(draft, mtuLimits), /must be different/u);
   draft.port = "8890"; draft.mtu = "99999";
-  assert.throws(() => preferencesFromRuntimeDraft(draft), /MTU/u);
+  assert.throws(() => preferencesFromRuntimeDraft(draft, mtuLimits), /MTU/u);
 });
 
 test("opening LAN settings while Off does not start or change the engine", async () => {
@@ -93,21 +157,21 @@ test("IPv6 DNS is configurable without silently changing old preferences", () =>
   const draft = runtimeDraft(preferences);
   assert.equal(draft.ipv6DNS, true);
   draft.ipv6DNS = false;
-  assert.equal(preferencesFromRuntimeDraft(draft).ipv6_dns_enabled, false);
+  assert.equal(preferencesFromRuntimeDraft(draft, mtuLimits).ipv6_dns_enabled, false);
   assert.equal(runtimeDraft({ ...preferences, ipv6_dns_enabled:false }).ipv6DNS, false);
   draft.ipv6DNS = "false";
-  assert.throws(() => preferencesFromRuntimeDraft(draft), /IPv6 DNS/u);
+  assert.throws(() => preferencesFromRuntimeDraft(draft, mtuLimits), /IPv6 DNS/u);
 });
 
 test("unrelated settings preserve inherited DNS while an explicit IPv6 choice is retained", () => {
   const draft = runtimeDraft(preferences, { ipv6_dns_enabled:false });
   assert.equal(draft.ipv6DNS, false, "the editor displays the imported policy actually in use");
   draft.level = "debug";
-  assert.equal(Object.hasOwn(preferencesFromRuntimeDraft(draft), "ipv6_dns_enabled"), false);
+  assert.equal(Object.hasOwn(preferencesFromRuntimeDraft(draft, mtuLimits), "ipv6_dns_enabled"), false);
   draft.ipv6DNS = true;
-  assert.equal(preferencesFromRuntimeDraft(draft).ipv6_dns_enabled, true);
+  assert.equal(preferencesFromRuntimeDraft(draft, mtuLimits).ipv6_dns_enabled, true);
   const explicit = runtimeDraft({ ...preferences, ipv6_dns_enabled:true });
-  assert.equal(preferencesFromRuntimeDraft(explicit).ipv6_dns_enabled, true);
+  assert.equal(preferencesFromRuntimeDraft(explicit, mtuLimits).ipv6_dns_enabled, true);
 });
 
 test("IPv6 uses one settings transaction without a dialog and displays On only after success", async () => {
@@ -125,7 +189,7 @@ test("IPv6 uses one settings transaction without a dialog and displays On only a
     assert.equal(command, "write_runtime_settings_snapshot");
     signalWrite();
     await new Promise((resolve) => { finishWrite = resolve; });
-    snapshot = { settings:args.settings, revision:"updated-settings", effective:{...snapshot.effective,ipv6_dns_enabled:args.settings.ipv6_dns_enabled} };
+    snapshot = { ...snapshot, settings:args.settings, revision:"updated-settings", effective:{...snapshot.effective,ipv6_dns_enabled:args.settings.ipv6_dns_enabled} };
     return structuredClone(snapshot);
   },appendLog(){},renderPage(){},refreshRuntime(){},dismissOtherDialogs(){assert.fail("IPv6 does not open a dialog");}});
   const changing = ui.toggleIPv6DNS(true);
@@ -200,7 +264,7 @@ test("a rejected settings transaction retains the saved values and refreshes act
   await ui.open();
   const dialog = state.runtimeSettingsDialog;
   dialog.draft.level = "debug";
-  assert.equal(await ui.save(preferencesFromRuntimeDraft(dialog.draft), "old-revision", dialog), false);
+  assert.equal(await ui.save(preferencesFromRuntimeDraft(dialog.draft, mtuLimits), "old-revision", dialog), false);
   assert.equal(submitted.revision, "old-revision");
   assert.equal(state.runtimeSettings.settings.log_level, "info");
   assert.equal(dialog.draft.level, "debug", "a failed save preserves the editable draft");
@@ -255,7 +319,7 @@ for (const sw of SWITCHES) {
       assert.equal(command, "write_runtime_settings_snapshot");
       signalWrite();
       await new Promise((resolve) => { finishWrite = resolve; });
-      snapshot = { settings:args.settings, revision:"updated-settings", effective:{...snapshot.effective,[sw.key]:args.settings[sw.key]} };
+      snapshot = { ...snapshot, settings:args.settings, revision:"updated-settings", effective:{...snapshot.effective,[sw.key]:args.settings[sw.key]} };
       return structuredClone(snapshot);
     },appendLog(){},renderPage(){},refreshRuntime(){},dismissOtherDialogs(){assert.fail("the switch opens no dialog");}});
     const changing = ui[sw.method](true);
@@ -325,7 +389,7 @@ for (const sw of SWITCHES) {
         const dialog = state.runtimeSettingsDialog;
         if (path === "web dialog") {
           dialog.draft.level = "debug";
-          assert.equal(await ui.save(preferencesFromRuntimeDraft(dialog.draft), dialog.revision, dialog), true);
+          assert.equal(await ui.save(preferencesFromRuntimeDraft(dialog.draft, mtuLimits), dialog.revision, dialog), true);
         } else {
           ui.renderDialog();
           await callbacks.onSubmit(nativeDraft(dialog.draft, { level: "debug" }));
@@ -343,22 +407,22 @@ test("the native settings draft stays closed to the runtime switches", async () 
   const draft = runtimeDraft({ ...preferences, mainland_china_direct: true, dns_leak_protection: true });
   assert.equal(draft.mainlandChinaDirect, true);
   assert.equal(draft.dnsLeakProtection, true);
-  assert.deepEqual(Object.keys(runtimeDialogFrame({ draft, saving:false, error:null }).draft).sort(),
+  assert.deepEqual(Object.keys(runtimeDialogFrame({ draft, mtuLimits, saving:false, error:null }).draft).sort(),
     ["allow", "ipv6DNS", "ipv6DNSEdited", "lanAddress", "lanPort", "lanSources", "level", "mtu", "port"]);
   for (const extra of [{ mainlandChinaDirect: false }, { dnsLeakProtection: false }]) {
     assert.throws(() => acceptNativeRuntimeDraft(draft, { ...nativeDraft(draft), ...extra }), /draft is invalid/u);
   }
-  const kept = preferencesFromRuntimeDraft(acceptNativeRuntimeDraft(draft, nativeDraft(draft)));
+  const kept = preferencesFromRuntimeDraft(acceptNativeRuntimeDraft(draft, nativeDraft(draft)), mtuLimits);
   assert.equal(kept.mainland_china_direct, true);
   assert.equal(kept.dns_leak_protection, true);
   const off = runtimeDraft(preferences);
   for (const key of ["mainland_china_direct", "dns_leak_protection"]) {
-    assert.equal(Object.hasOwn(preferencesFromRuntimeDraft(off), key), false, `${key}: off keeps the legacy shape`);
+    assert.equal(Object.hasOwn(preferencesFromRuntimeDraft(off, mtuLimits), key), false, `${key}: off keeps the legacy shape`);
   }
   for (const field of ["mainlandChinaDirect", "dnsLeakProtection"]) {
     const invalid = runtimeDraft(preferences);
     invalid[field] = "true";
-    assert.throws(() => preferencesFromRuntimeDraft(invalid), TypeError, field);
+    assert.throws(() => preferencesFromRuntimeDraft(invalid, mtuLimits), TypeError, field);
   }
 });
 

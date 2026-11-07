@@ -180,9 +180,13 @@ SUBMISSION_DOCUMENT = "cfw-notarization-submission-receipt-v5"
 SUBMISSION_OBSERVATION_DOCUMENT = "cfw-notarization-submission-observation-v1"
 RESUBMISSION_OBSERVATION_DOCUMENT = "cfw-notarization-submission-observation-v2"
 PENDING_UPLOAD_OBSERVATION_DOCUMENT = "cfw-notarization-submission-observation-v3"
+UNIDENTIFIED_UPLOAD_OBSERVATION_DOCUMENT = "cfw-notarization-submission-observation-v4"
+INTERRUPTED_UPLOAD_OBSERVATION_DOCUMENT = "cfw-notarization-submission-observation-v5"
 RESUBMISSION_OBSERVATION_DOCUMENTS = {
     2: RESUBMISSION_OBSERVATION_DOCUMENT,
     3: PENDING_UPLOAD_OBSERVATION_DOCUMENT,
+    4: UNIDENTIFIED_UPLOAD_OBSERVATION_DOCUMENT,
+    5: INTERRUPTED_UPLOAD_OBSERVATION_DOCUMENT,
 }
 RESUBMISSION_PATH_BINDING = "exact-same-archive-resubmission"
 RESUBMISSION_CAUSAL_BINDING = "same-archive-resubmission-and-log"
@@ -284,6 +288,20 @@ RESUBMISSION_FIELDS = {
 PENDING_UPLOAD_FIELDS = (RESUBMISSION_FIELDS - {"missing_submission_id"}) | {
     "prior_submission_id", "prior_info", "prior_observed_at",
 }
+UNIDENTIFIED_UPLOAD_FIELDS = (RESUBMISSION_FIELDS - {"missing_submission_id"}) | {
+    "prior_history", "prior_observed_at",
+}
+RESUBMISSION_FIELDS_BY_SCHEMA = {
+    2: RESUBMISSION_FIELDS,
+    3: PENDING_UPLOAD_FIELDS,
+    4: UNIDENTIFIED_UPLOAD_FIELDS,
+    5: UNIDENTIFIED_UPLOAD_FIELDS | {"failed_uploads"},
+}
+INTERRUPTED_UPLOAD_FIELDS = {
+    "submission_id", "started_at", "completed_at", "observed_at", "command",
+    "exit_code", "stdout", "stderr", "info",
+}
+MAX_INTERRUPTED_UPLOADS = 3
 SUBMISSION_RECEIPT_FIELDS = {
     "schema_version",
     "document",
@@ -1478,16 +1496,16 @@ def _parse_notary_info_response(
     return status_value, created_at
 
 
-def _require_unique_history_binding(
-    output: str,
-    *,
-    submission_id: str,
-    archive_name: str,
-    window_start: datetime,
-    window_end: datetime,
-    window_end_rendered: str,
-    info_created_at: str,
-) -> None:
+@dataclass(frozen=True, slots=True)
+class NotaryHistoryEntry:
+    identifier: str
+    name: str
+    status: str
+    created_at: str
+    created: datetime
+
+
+def _parse_notary_history(output: str) -> list[NotaryHistoryEntry]:
     value = _parse_command_json(output)
     if not isinstance(value, dict) or set(value) != {"history", "message"}:
         raise TransactionError(
@@ -1504,10 +1522,9 @@ def _require_unique_history_binding(
         raise TransactionError(
             "invalid_notary_response", "notarytool history is malformed"
         )
-    candidates: list[tuple[str, str, str]] = []
+    entries: list[NotaryHistoryEntry] = []
     identifiers: set[str] = set()
     previous_created: datetime | None = None
-    oldest_created: datetime | None = None
     for entry in history:
         if not isinstance(entry, dict) or set(entry) != {
             "createdDate",
@@ -1528,7 +1545,9 @@ def _require_unique_history_binding(
         identifiers.add(identifier)
         name = _bounded_command_string(entry["name"], "history name")
         status_value = entry["status"]
-        if status_value not in {"In Progress", "Accepted", "Invalid", "Rejected"}:
+        if not isinstance(status_value, str) or status_value not in {
+            "In Progress", "Accepted", "Invalid", "Rejected"
+        }:
             raise TransactionError(
                 "invalid_notary_status", "notarytool history status is unsupported"
             )
@@ -1541,28 +1560,138 @@ def _require_unique_history_binding(
                 "notarytool history is not ordered newest first",
             )
         previous_created = created
-        oldest_created = created
-        if name == archive_name and _timestamp_within_recorded_window(
-            created,
-            window_start=window_start,
-            window_end=window_end,
-            window_end_rendered=window_end_rendered,
-        ):
-            candidates.append((identifier, created_at, status_value))
-    if (
-        len(history) == 100
-        and oldest_created is not None
-        and oldest_created >= window_start
-    ):
+        entries.append(NotaryHistoryEntry(identifier, name, status_value, created_at, created))
+    return entries
+
+
+def _require_history_window_coverage(
+    entries: list[NotaryHistoryEntry], window_start: datetime
+) -> None:
+    if len(entries) == 100 and entries[-1].created >= window_start:
         raise TransactionError(
             "submission_causal_binding_unproven",
             "notarytool history does not cover the complete submit window",
         )
+
+
+def _require_unique_history_binding(
+    output: str,
+    *,
+    submission_id: str,
+    archive_name: str,
+    window_start: datetime,
+    window_end: datetime,
+    window_end_rendered: str,
+    info_created_at: str,
+) -> None:
+    entries = _parse_notary_history(output)
+    _require_history_window_coverage(entries, window_start)
+    candidates = [
+        (entry.identifier, entry.created_at, entry.status)
+        for entry in entries
+        if entry.name == archive_name and _timestamp_within_recorded_window(
+            entry.created, window_start=window_start, window_end=window_end,
+            window_end_rendered=window_end_rendered,
+        )
+    ]
     if candidates != [(submission_id, info_created_at, "Accepted")]:
         raise TransactionError(
             "submission_causal_binding_unproven",
             "notarytool history does not uniquely bind the recovery id to the submit window",
         )
+
+
+def _require_original_upload_absent(
+    output: str, *, archive_name: str, window_start: datetime, observed_at: datetime
+) -> None:
+    entries = _parse_notary_history(output)
+    _require_history_window_coverage(entries, window_start)
+    if entries[0].created > observed_at or any(entry.name == archive_name for entry in entries):
+        raise TransactionError(
+            "submission_causal_binding_unproven",
+            "history does not establish an unidentified original upload at its observation time",
+        )
+
+
+def _require_only_observed_retry(
+    output: str, *, archive_name: str, submission_id: str,
+    original_window_start: datetime, retry_start: datetime, retry_end: datetime,
+    retry_end_rendered: str, interrupted: dict[str, str] | None = None,
+) -> None:
+    entries = _parse_notary_history(output)
+    _require_history_window_coverage(entries, original_window_start)
+    named = [entry for entry in entries if entry.name == archive_name]
+    interrupted = {} if interrupted is None else interrupted
+    previous = [entry for entry in named if entry.identifier in interrupted]
+    current = [entry for entry in named if entry.identifier not in interrupted]
+    if (
+        len(previous) != len(interrupted)
+        or any(entry.created_at != interrupted[entry.identifier]
+               or entry.status not in {"In Progress", "Accepted"} for entry in previous)
+        or len(current) != 1 or current[0].identifier != submission_id
+        or current[0].status not in {"In Progress", "Accepted"}
+        or not _timestamp_within_recorded_window(
+            current[0].created, window_start=retry_start, window_end=retry_end,
+            window_end_rendered=retry_end_rendered,
+        )
+    ):
+        raise TransactionError(
+            "submission_causal_binding_unproven",
+            "live history does not uniquely reconcile the original upload and observed retry",
+        )
+
+
+def _validate_interrupted_uploads(
+    evidence: dict[str, Any], *, submission_id: str, archive_name: str,
+    allowed_commands: tuple[list[str], list[str]], prior_observed: datetime,
+    retry_started: datetime,
+) -> dict[str, str]:
+    """Bind bounded, explicitly captured S3 transport failures before a retry.
+
+    An Apple pending status is not proof of a complete upload. Every excluded
+    history entry must have its own failed command and matching Apple info;
+    the original unknown POST remains covered by the unfiltered history.
+    """
+    uploads = evidence["failed_uploads"]
+    if not isinstance(uploads, list) or not 1 <= len(uploads) <= MAX_INTERRUPTED_UPLOADS:
+        raise TransactionError("resubmission_observation_invalid", "interrupted upload chain is not bounded")
+    identities: dict[str, str] = {}
+    previous_observed = prior_observed
+    for upload in uploads:
+        if (
+            not isinstance(upload, dict) or set(upload) != INTERRUPTED_UPLOAD_FIELDS
+            or upload["command"] not in allowed_commands
+            or type(upload["exit_code"]) is not int or upload["exit_code"] != 1
+            or upload["stdout"] != "" or not isinstance(upload["stderr"], str)
+            or not upload["stderr"].startswith("Error: abortedUpload(")
+            or not upload["stderr"].endswith("error: HTTPClientError.connectTimeout)\n")
+            or not isinstance(upload["info"], str)
+        ):
+            raise TransactionError(
+                "resubmission_observation_invalid", "interrupted upload lacks a captured S3 connection failure"
+            )
+        identifier = _canonical_uuid(upload["submission_id"], "interrupted submission id")
+        keys = re.findall(r'key: "prod/[^":\s]+:([a-f0-9-]{36})"', upload["stderr"])
+        if identifier == submission_id or identifier in identities or keys != [identifier]:
+            raise TransactionError("resubmission_observation_invalid", "interrupted upload identity differs")
+        _, started = _parse_utc_timestamp(upload["started_at"], "interrupted upload started_at")
+        ended_text, ended = _parse_utc_timestamp(upload["completed_at"], "interrupted upload completed_at")
+        _, observed = _parse_utc_timestamp(upload["observed_at"], "interrupted upload observed_at")
+        _, created = _parse_notary_info_response(
+            upload["info"], submission_id=identifier, archive_name=archive_name,
+            allowed_statuses={"In Progress"},
+        )
+        if (
+            not previous_observed <= started <= ended <= observed <= retry_started
+            or not _timestamp_within_recorded_window(
+                _parse_utc_timestamp(created, "interrupted upload createdDate")[1],
+                window_start=started, window_end=ended, window_end_rendered=ended_text,
+            )
+        ):
+            raise TransactionError("resubmission_observation_invalid", "interrupted upload chronology differs")
+        identities[identifier] = created
+        previous_observed = observed
+    return identities
 
 
 def _run_bounded_process(
@@ -2982,21 +3111,27 @@ def _validate_submission_observation(
             or any(event["submission_id"] is not None for event in journal.documents[:4])
             or journal.documents[3]["state"] != "outcome_unknown"
             or not isinstance(evidence, dict)
-            or set(evidence) != (PENDING_UPLOAD_FIELDS if schema == 3 else RESUBMISSION_FIELDS)
+            or set(evidence) != RESUBMISSION_FIELDS_BY_SCHEMA[schema]
             or evidence["prior_unknown_event_sha256"] != prefix.prior_event_sha256
             or type(evidence["exit_code"]) is not int
             or evidence["exit_code"] != 0
             or evidence["stderr"] != ""
             or (schema == 3 and not isinstance(evidence["prior_info"], str))
+            or (schema in {4, 5} and not isinstance(evidence["prior_history"], str))
         ):
             raise TransactionError(
                 "resubmission_observation_invalid",
                 "same-archive upload does not follow an unbound unknown submission",
             )
-        prior_id = _canonical_uuid(
-            evidence["prior_submission_id"] if schema == 3 else evidence["missing_submission_id"],
-            "prior submission id",
-        )
+        if schema in {2, 3}:
+            prior_id = _canonical_uuid(
+                evidence["prior_submission_id"] if schema == 3 else evidence["missing_submission_id"],
+                "prior submission id",
+            )
+            if prior_id == submission_id:
+                raise TransactionError(
+                    "resubmission_observation_invalid", "retry reuses the prior submission id"
+                )
         original_archive = context.attempt_root / "work" / context.archive_name
         command = [
             "/usr/bin/xcrun", "notarytool", "submit", str(original_archive), "--no-wait",
@@ -3004,8 +3139,7 @@ def _validate_submission_observation(
         ]
         alternate_command = command[:5] + ["--no-s3-acceleration"] + command[5:]
         if (
-            prior_id == submission_id
-            or evidence["command"] not in (command, alternate_command)
+            evidence["command"] not in (command, alternate_command)
             or not isinstance(evidence["stdout"], str)
             or _parse_notary_submit_response(evidence["stdout"], original_archive) != submission_id
         ):
@@ -3035,6 +3169,25 @@ def _validate_submission_observation(
                 raise TransactionError(
                     "resubmission_observation_invalid",
                     "prior pending submission is not bound to the original failed upload",
+                )
+        elif schema in {4, 5}:
+            _, prior_observed = _parse_utc_timestamp(
+                evidence["prior_observed_at"], "prior history observed_at"
+            )
+            if not prefix.submit_window_end <= prior_observed <= started:
+                raise TransactionError(
+                    "resubmission_observation_invalid",
+                    "prior history must follow the failed upload and precede the retry",
+                )
+            _require_original_upload_absent(
+                evidence["prior_history"], archive_name=context.archive_name,
+                window_start=prefix.submit_window_start, observed_at=prior_observed,
+            )
+            if schema == 5:
+                _validate_interrupted_uploads(
+                    evidence, submission_id=submission_id, archive_name=context.archive_name,
+                    allowed_commands=(command, alternate_command), prior_observed=prior_observed,
+                    retry_started=started,
                 )
         if (
             started < prefix.submit_window_end
@@ -3133,6 +3286,28 @@ def _adopt_upload_observation(
         )
         if created != observed_created:
             raise TransactionError("submission_causal_binding_unproven", "prior Apple submission identity changed")
+    elif observation["schema_version"] in {4, 5}:
+        # The original POST may have reached Apple even when no identifier was
+        # returned. Preserve that unknown result and recheck the complete old
+        # window before accepting the separately observed, same-archive upload.
+        history = _recovery_read_result(
+            command_runner, CommandRole.HISTORY,
+            ["/usr/bin/xcrun", "notarytool", "history", "--keychain-profile",
+             attempt.context.notary_profile, "--output-format", "json"],
+            300,
+        )
+        _require_only_observed_retry(
+            history.stdout, archive_name=attempt.context.archive_name,
+            submission_id=submission_id, original_window_start=attempt.submit_window_start,
+            retry_start=started, retry_end=ended, retry_end_rendered=ended_text,
+            interrupted={
+                upload["submission_id"]: _parse_notary_info_response(
+                    upload["info"], submission_id=upload["submission_id"],
+                    archive_name=attempt.context.archive_name, allowed_statuses={"In Progress"},
+                )[1]
+                for upload in observation["resubmission"].get("failed_uploads", [])
+            },
+        )
     destination = attempt.context.attempt_root / "submission-observation.json"
     _write_json_exclusive(destination, observation)
     if _read_regular_bytes(destination) != data:

@@ -50,6 +50,7 @@ from scripts.release_build_identity import (  # noqa: E402
     canonical_build_version,
 )
 from scripts.release_driver_acceptance import run_acceptance  # noqa: E402
+from scripts.release_driver_notarization import recover_notarization  # noqa: E402
 from scripts.release_driver_context import (  # noqa: E402
     MACHINE,
     MIN_FREE_GIB,
@@ -251,7 +252,8 @@ def _build_partial(context: Context) -> str | None:
             "the candidate is frozen but not yet signed and notarized. Never rerun the builder with --ga: "
             "an interrupted signing attempt resumes only with `run build --resume-signing`, a lost notary "
             "reply only with `run build --recover-notarization-id UUID`, and either only after the "
-            "attempt's recorded state has been read (RELEASE.md, step 4)."
+            "attempt's recorded state has been read (RELEASE.md, step 4). A separately observed "
+            "same-archive upload also requires `--adopt-upload-observation PATH`."
         )
     if path_present(context.release.artifact / f"target/candidates/{context.release.version}/ga-preflight"):
         return (
@@ -274,6 +276,8 @@ def _build(context: Context) -> int:
     common_guards(context, free_gib=BUILD_FREE_GIB)
     if arguments == ["--ga"]:
         _require_hosted_ci_selected(context)
+    if arguments[0] == "--recover-notarization-id":
+        return recover_notarization(context, arguments)
     profile = context.machine.home / HOST_PROFILE_RELATIVE
     if not profile.is_file():
         raise DriverError(f"the Host Developer ID profile is missing: {profile}", PREREQUISITE)

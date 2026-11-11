@@ -229,6 +229,35 @@ fn reviewed() -> UpdaterSecurityState {
     state
 }
 
+#[test]
+fn build_qualified_offer_survives_staging_and_commit() {
+    let state = reviewed();
+    let version = "1.2.3-build.60124";
+    let mut update = staged("1.2.3");
+    update.offer_version = version.into();
+    update.installed = BundleIdentity {
+        version: "1.2.3".into(),
+        build: 60123,
+    };
+    update.staged.build = 60124;
+    state
+        .begin_preparation(version)
+        .unwrap()
+        .stage(update)
+        .unwrap();
+    assert_eq!(state.pending().unwrap().unwrap().version, version);
+    assert!(matches!(
+        state.begin_commit("1.2.3"),
+        Err(UpdateError::AuthorizationChanged)
+    ));
+    let commit = state.begin_commit(version).unwrap();
+    assert_eq!(commit.staged().unwrap().staged.version, "1.2.3");
+    assert_eq!(commit.staged().unwrap().staged.build, 60124);
+    drop(commit);
+    assert_eq!(state.pending().unwrap().unwrap().version, version);
+    state.begin_commit(version).unwrap().handed_off();
+}
+
 fn pending(phase: PendingPhase) -> Option<PendingInstall> {
     Some(PendingInstall {
         phase,

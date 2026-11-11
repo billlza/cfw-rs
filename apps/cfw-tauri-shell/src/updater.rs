@@ -477,14 +477,11 @@ async fn ensure_previous_attempt_reviewed(app: &AppHandle) -> Result<()> {
     };
     let app_home = app_home()?;
     #[cfg(target_os = "macos")]
-    let reviewed = blocking(move || {
-        review_previous_attempt(
-            &app_home,
-            env!("CARGO_PKG_VERSION"),
-            process_identity_exists,
-        )
-    })
-    .await?;
+    let reviewed = {
+        let running = admission::running_bundle_identity()?;
+        blocking(move || review_previous_attempt(&app_home, &running, process_identity_exists))
+            .await?
+    };
     #[cfg(windows)]
     let reviewed = blocking(move || windows_update::review(&app_home)).await?;
     match reviewed {

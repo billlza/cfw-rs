@@ -89,15 +89,7 @@ pub(super) async fn check_bounded_update() -> Result<Option<CheckedUpdate>> {
         });
     }
 
-    let installed_build = option_env!("CFW_RELEASE_BUNDLE_BUILD")
-        .map(|build| {
-            build
-                .parse::<u64>()
-                .ok()
-                .filter(|number| *number > 0 && number.to_string() == build)
-                .ok_or(UpdateError::InvalidMetadata("running bundle build".into()))
-        })
-        .transpose()?;
+    let installed_build = super::admission::compiled_bundle_build()?;
     parse_checked_update(&bytes, installed_build)
 }
 

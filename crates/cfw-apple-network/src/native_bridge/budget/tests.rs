@@ -16,6 +16,9 @@ fn only_waits_for_a_person_take_the_authorization_budget() {
     ));
     assert!(waits_for_person(&NativeBridgeCommand::AuthorizeSystemProxy));
     assert!(waits_for_person(
+        &NativeBridgeCommand::AuthorizeInstallationRecovery
+    ));
+    assert!(waits_for_person(
         &NativeBridgeCommand::AuthorizeSystemProxyRestoration
     ));
     for command in [

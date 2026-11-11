@@ -291,6 +291,7 @@ public struct NativeBridgeFailure: Codable, Equatable, Sendable {
 
 public enum NativeBridgeResult: Equatable, Sendable {
   case status(NativeEngineStatus)
+  case installationRecovery(InstallationRecoveryState)
   case runtime(NativeRuntimeIdentity)
   case tunnelInstall(NativeTunnelInstallOutcome)
   case tunnelApproval(NativeTunnelApprovalWait)
@@ -312,6 +313,7 @@ extension NativeBridgeResult: Codable {
 
   private enum Kind: String, Codable {
     case status
+    case installationRecovery = "installation_recovery"
     case runtime
     case tunnelInstall = "tunnel_install"
     case tunnelApproval = "tunnel_approval"
@@ -328,6 +330,10 @@ extension NativeBridgeResult: Codable {
   public init(from decoder: Decoder) throws {
     let container = try decoder.container(keyedBy: CodingKeys.self)
     switch try container.decode(Kind.self, forKey: .kind) {
+    case .installationRecovery:
+      let identity = try container.decode(InstallationRecoveryState.self, forKey: .value)
+      try identity.validateAuthorityV1()
+      self = .installationRecovery(identity)
     case .status: self = .status(try container.decode(NativeEngineStatus.self, forKey: .value))
     case .runtime:
       self = .runtime(try container.decode(NativeRuntimeIdentity.self, forKey: .value))
@@ -372,6 +378,10 @@ extension NativeBridgeResult: Codable {
   public func encode(to encoder: Encoder) throws {
     var container = encoder.container(keyedBy: CodingKeys.self)
     switch self {
+    case .installationRecovery(let identity):
+      try identity.validateAuthorityV1()
+      try container.encode(Kind.installationRecovery, forKey: .kind)
+      try container.encode(identity, forKey: .value)
     case .status(let status):
       try container.encode(Kind.status, forKey: .kind)
       try container.encode(status, forKey: .value)

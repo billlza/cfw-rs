@@ -7,6 +7,9 @@ use cfw_engine_api::EngineGenerationStore;
 
 use super::*;
 
+#[path = "recovery_tests.rs"]
+mod recovery_tests;
+
 #[derive(Default)]
 struct MemoryAuthority {
     state: Mutex<MemoryAuthorityState>,

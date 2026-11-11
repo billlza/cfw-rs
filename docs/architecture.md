@@ -180,6 +180,24 @@ compare-and-swap semantics across processes. The Application Support copy is
 only a repairable cache and serialization aid: deletion, rollback, or tampering
 cannot select an older installation identity, epoch, or generation.
 
+Explicit macOS installation recovery retains that Keychain authority. The
+signed console Host first reserves engine maintenance and records the exact
+local lineage, then reads the root Authority's enrollment through the additive
+read-only `installation_recovery_identity` RPC. Only current signed services
+and a proven global Off state admit the request. A fresh LocalAuthentication
+`deviceOwnerAuthentication` evaluation is followed by another Off proof and an
+identical enrollment/revision/console-UID observation. The Host retires its
+in-memory engine session before a cache-first Keychain compare-and-swap against
+the pre-authentication lineage. The replacement uses the root installation ID,
+an epoch above both the root cursor and any matching local epoch, and generation
+zero. Generation one is reserved after relaunch. Neither the root journal nor
+other users' credentials change; old starts remain subject to the same replay,
+console-user and lease checks. Failed/ambiguous writes retain the maintenance
+lease until restart, which reloads the actual Keychain record. The RPC adds no
+fallback for older services and changes no existing Authority v1.1 message or
+journal schema. The Rust/Swift Host bridge returns only the typed enrollment;
+renderer IPC accepts no chosen ID, epoch or authorization flag.
+
 Native requests accept only fixed relative slots. Absolute paths, executable
 paths, scripts, arbitrary environment variables, and user-selected commands
 are not part of the contract.

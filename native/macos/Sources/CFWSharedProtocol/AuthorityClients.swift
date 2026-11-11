@@ -124,7 +124,8 @@ public final class NSXPCGlobalAuthorityRemote: AuthorityRemoteCalling,
   ) async throws -> AuthorityXPCReply {
     let requiresCurrentBuild: Bool
     switch buildPolicy {
-    case .currentHost: requiresCurrentBuild = method == .prepareStart
+    case .currentHost:
+      requiresCurrentBuild = method == .prepareStart || method == .installationRecoveryIdentity
     case .protocolPeer: requiresCurrentBuild = false
     }
     let connection = connected(requiresCurrentBuild: requiresCurrentBuild)
@@ -369,6 +370,8 @@ public final class NSXPCGlobalAuthorityRemote: AuthorityRemoteCalling,
       proxy.cancelPrepared(request, reply: simpleReply)
     case .snapshot:
       proxy.snapshot(request, reply: simpleReply)
+    case .installationRecoveryIdentity:
+      proxy.installationRecoveryIdentity(request, reply: simpleReply)
     case .ownerLeaseStatus:
       proxy.ownerLeaseStatus(request, reply: simpleReply)
     }

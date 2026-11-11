@@ -81,3 +81,59 @@ mod callback;
 mod failures;
 mod responses;
 mod results;
+
+#[test]
+fn installation_recovery_rejects_invalid_identity_floors_and_users() {
+    use cfw_engine_api::{InstallationRecoveryIdentity, InstallationRecoveryState};
+    let valid = InstallationRecoveryIdentity {
+        installation_id: request_id(),
+        accepted_epoch: 0,
+        revision: 1,
+        console_uid: 501,
+    };
+    assert!(
+        answered(NativeBridgeResult::InstallationRecovery(
+            InstallationRecoveryState { identity: None }
+        ))
+        .is_ok()
+    );
+    assert!(
+        answered(NativeBridgeResult::InstallationRecovery(
+            InstallationRecoveryState {
+                identity: Some(valid.clone())
+            }
+        ))
+        .is_ok()
+    );
+    for identity in [
+        InstallationRecoveryIdentity {
+            installation_id: uuid::Uuid::nil(),
+            ..valid.clone()
+        },
+        InstallationRecoveryIdentity {
+            accepted_epoch: u64::MAX,
+            ..valid.clone()
+        },
+        InstallationRecoveryIdentity {
+            revision: 0,
+            ..valid.clone()
+        },
+        InstallationRecoveryIdentity {
+            console_uid: 0,
+            ..valid.clone()
+        },
+        InstallationRecoveryIdentity {
+            console_uid: u32::MAX,
+            ..valid
+        },
+    ] {
+        assert_eq!(
+            answered(NativeBridgeResult::InstallationRecovery(
+                InstallationRecoveryState {
+                    identity: Some(identity)
+                }
+            )),
+            non_canonical()
+        );
+    }
+}

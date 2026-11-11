@@ -62,12 +62,22 @@ paragraph explains, and settings the first user's System Proxy left can still
 point at its closed port until that user approves the prompt again, or an
 administrator clears them.
 
-The network Authority stays enrolled to the first installation of the app
-that asked it to start the network on this Mac, and rejects a start from any
-other installation. The app of another macOS user, or of the same user once
-the app's engine lineage is gone from that user's Keychain, therefore cannot
-turn System Proxy, Local Proxy or Tunnel on, also after the Mac restarts. This
-is a known limitation of 0.5.0.
+The network Authority keeps the Mac's original installation identity and replay
+history. From 0.5.1 build 51006, if changing macOS accounts or losing the local
+Keychain installation identity prevents a connection, turn the engine Off and
+open **Settings → Installation identity → Recover and restart**. macOS asks
+for device-owner authentication. Recovery is available only to the current
+console account after the app proves both native owners and the Authority Off.
+The app restores this account's installation lineage and restarts before it
+can connect. It does not restore lost profile passwords or modify another
+account's Keychain. Returning to an account whose lineage is behind the Mac's
+replay history may require this explicit recovery again.
+
+Cancellation leaves the existing identity in use. A failed or uncertain
+Keychain write shows its error and requires an app restart to reload the
+actual stored identity before any connection can start. A damaged Authority
+journal, an unproven stop, or another user's live connection cannot be cleared
+through this recovery action.
 
 Turning System Proxy off gives macOS its proxy settings back before the engine
 stops. If macOS does not take them, System Proxy keeps running and the switch

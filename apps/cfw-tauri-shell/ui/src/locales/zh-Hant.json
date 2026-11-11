@@ -950,5 +950,11 @@
   "Hosting network": "機房網路",
   "Mobile network": "行動網路",
   "The source's weighted score ranges from 0 to 150. It is not a risk probability or an official Claude score. A missing classification does not prove safety.": "來源的分類加權分為 0–150，不是風險機率或 Claude 官方評分。未被標記不能證明安全。",
-  "Residential status, abuse history and account eligibility are not assessed.": "未評估住宅屬性、濫用歷史和帳號使用資格。"
+  "Residential status, abuse history and account eligibility are not assessed.": "未評估住宅屬性、濫用歷史和帳號使用資格。",
+  "Current macOS account": "目前的 macOS 帳號",
+  "If switching macOS accounts or losing your Keychain identity prevents connections, stop the engine, authenticate with macOS, and recover. The app will restart.": "若切換 macOS 帳號或遺失鑰匙圈身分後無法連線，請先停止引擎，再通過 macOS 驗證進行恢復。應用程式將重新啟動。",
+  "Installation identity": "安裝身分",
+  "Recover and restart": "恢復並重新啟動",
+  "Restart app": "重新啟動應用程式",
+  "Restart the app to reload its installation identity before connecting.": "請重新啟動應用程式以載入安裝身分，再進行連線。"
 }

@@ -193,7 +193,8 @@ extension NativeBridgeCoordinator {
   static func requiresCurrentServices(_ command: NativeBridgeCommand) -> Bool {
     switch command {
     case .startSystemProxy, .startLocalProxy, .startTunnel, .installTunnel,
-      .authorizeTunnelConfiguration, .checkConfiguration, .preflightCutover:
+      .authorizeTunnelConfiguration, .checkConfiguration, .preflightCutover,
+      .authorizeInstallationRecovery:
       true
     default:
       false

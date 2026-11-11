@@ -141,6 +141,19 @@ function renderSettings() {
         ),
       ])}
 
+      ${state.payload.product.operating_system === "macos" ? renderSettingsGroup(t("Installation identity"), [
+        renderSettingAction(
+          t("Installation identity"),
+          t("Current macOS account"),
+          state.identityRecoveryError
+            ? `${state.identityRecoveryError} ${state.identityRecoveryRestartRequired ? t("Restart the app to reload its installation identity before connecting.") : ""}`
+            : t("If switching macOS accounts or losing your Keychain identity prevents connections, stop the engine, authenticate with macOS, and recover. The app will restart."),
+          state.identityRecoveryRestartRequired ? "restart-after-identity-recovery" : "recover-installation-identity",
+          state.identityRecoveryRestartRequired ? t("Restart app") : t("Recover and restart"),
+          state.identityRecoveryRestartRequired ? null : (state.engineMutationBusy ? t("Another network operation is in progress") : (!engineOff ? REASONS.engineNotOff : null)),
+        ),
+      ]) : ""}
+
       ${state.payload.product.operating_system === "macos" ? renderSettingsGroup(t("Legacy maintenance"), [
         renderSettingAction(
           t("Older Clash for Mac"),

@@ -12,11 +12,13 @@ public enum AuthorityXPCMethod: Equatable, Sendable {
   case attestStopped
   case cancelPrepared
   case snapshot
+  case installationRecoveryIdentity
   case ownerLeaseStatus
 
   public var operationClass: AuthorityOperationClass {
     switch self {
-    case .handshake, .snapshot, .ownerLeaseStatus: .idempotentReadOnly
+    case .handshake, .snapshot, .ownerLeaseStatus, .installationRecoveryIdentity:
+      .idempotentReadOnly
     default: .mutation
     }
   }
@@ -76,7 +78,14 @@ public protocol AuthorityClient: Sendable {
   func completeStop(_ request: CompleteStopRequest) async throws
   func reconcileOff(_ request: ReconcileOffRequest) async throws -> ReconcileOffReceipt
   func snapshot() async throws -> AuthoritySnapshot
+  func installationRecoveryIdentity() async throws -> InstallationRecoveryState
 }
+extension AuthorityClient {
+  public func installationRecoveryIdentity() async throws -> InstallationRecoveryState {
+    throw AuthorityDomainError(code: .globalAuthorityProtocolMismatch)
+  }
+}
+
 public protocol EngineOwnerAuthorityClient: Sendable {
   func bind(_ capability: OwnerCapability, context: ProxyOwnerContext) async throws -> LeaseView
   func redeem(_ ticket: StartTicket) async throws -> RedeemedTunnelStart

@@ -93,9 +93,11 @@ fn dropped_handoff_lease_records_unexpected_failure_and_restores_admission() {
 #[test]
 fn an_update_owns_the_lifecycle_alone_and_returns_it_when_abandoned() {
     let lifecycle = AppLifecycle::default();
-    let update = lifecycle.begin_update_lease().expect("update admission");
+    let update = lifecycle
+        .begin_maintenance_lease(LIFECYCLE_UPDATE)
+        .expect("update admission");
     assert!(!lifecycle.startup_work_allowed());
-    assert!(lifecycle.begin_update_lease().is_err());
+    assert!(lifecycle.begin_maintenance_lease(LIFECYCLE_UPDATE).is_err());
     #[cfg(target_os = "macos")]
     assert!(lifecycle.begin_handoff_lease().is_err());
     let refused = lifecycle
@@ -108,7 +110,9 @@ fn an_update_owns_the_lifecycle_alone_and_returns_it_when_abandoned() {
         lifecycle.startup_work_allowed(),
         "an abandoned update returns the application to normal operation"
     );
-    let update = lifecycle.begin_update_lease().expect("a second update");
+    let update = lifecycle
+        .begin_maintenance_lease(LIFECYCLE_UPDATE)
+        .expect("a second update");
     drop(update);
 
     assert_eq!(
@@ -116,7 +120,7 @@ fn an_update_owns_the_lifecycle_alone_and_returns_it_when_abandoned() {
         ShutdownAdmission::Started
     );
     let refused = lifecycle
-        .begin_update_lease()
+        .begin_maintenance_lease(LIFECYCLE_UPDATE)
         .err()
         .expect("no update during shutdown");
     assert!(refused.contains("shutdown"), "{refused}");
@@ -187,4 +191,24 @@ fn simultaneous_handoff_and_shutdown_admit_exactly_one_owner() {
         ];
         assert_eq!(admitted.into_iter().filter(|admitted| *admitted).count(), 1);
     }
+}
+
+#[test]
+fn identity_recovery_excludes_updates_and_shutdown_until_abandoned() {
+    let lifecycle = AppLifecycle::default();
+    let recovery = lifecycle
+        .begin_maintenance_lease(LIFECYCLE_IDENTITY_RECOVERY)
+        .unwrap();
+    assert!(!lifecycle.startup_work_allowed());
+    assert!(lifecycle.begin_maintenance_lease(LIFECYCLE_UPDATE).is_err());
+    assert!(
+        lifecycle
+            .begin_maintenance_lease(LIFECYCLE_IDENTITY_RECOVERY)
+            .is_err()
+    );
+    assert!(lifecycle.begin_shutdown().is_err());
+    drop(recovery);
+    assert!(lifecycle.startup_work_allowed());
+    assert!(!lifecycle.identity_recovery_exit.load(Ordering::Acquire));
+    assert!(lifecycle.begin_maintenance_lease(LIFECYCLE_UPDATE).is_ok());
 }

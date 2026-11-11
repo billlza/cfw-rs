@@ -12,11 +12,12 @@ public enum AuthorityCommand: Sendable {
   case attestStopped(StoppedAttestation)
   case cancelPrepared(CancelPreparedRequest)
   case snapshot(SnapshotRequest)
+  case installationRecoveryIdentity(SnapshotRequest)
   case ownerLeaseStatus(OwnerLeaseStatusRequest)
 
   public var isReadOnly: Bool {
     switch self {
-    case .handshake, .snapshot, .ownerLeaseStatus: true
+    case .handshake, .snapshot, .ownerLeaseStatus, .installationRecoveryIdentity: true
     default: false
     }
   }

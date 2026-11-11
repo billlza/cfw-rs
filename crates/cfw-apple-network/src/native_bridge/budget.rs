@@ -13,7 +13,8 @@ const NATIVE_BRIDGE_CLEANUP_GRACE_MILLISECONDS: u64 = 20_000;
 /// budget; every other command gets the operation budget.
 pub(crate) fn waits_for_person(command: &NativeBridgeCommand) -> bool {
     match command {
-        NativeBridgeCommand::AuthorizeSystemProxy
+        NativeBridgeCommand::AuthorizeInstallationRecovery
+        | NativeBridgeCommand::AuthorizeSystemProxy
         | NativeBridgeCommand::AuthorizeSystemProxyRestoration
         | NativeBridgeCommand::AuthorizeTunnelConfiguration { .. }
         | NativeBridgeCommand::AwaitTunnelApproval { .. } => true,

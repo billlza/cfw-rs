@@ -165,6 +165,11 @@ public actor RegistrationGatedAuthorityClient: AuthorityClient {
     return try await authority.snapshot()
   }
 
+  public func installationRecoveryIdentity() async throws -> InstallationRecoveryState {
+    try ensureRegistered()
+    return try await authority.installationRecoveryIdentity()
+  }
+
   private func ensureRegistered() throws {
     do {
       try serviceController.ensureRegistered()

@@ -83,6 +83,8 @@ export const UI_COMMANDS = Object.freeze([
   "request_wifi_name_access",
   "recover_legacy_cutover",
   "reconcile_startup_services",
+  "recover_installation_identity",
+  "restart_after_identity_recovery",
   "refresh_tray_menu",
   "reset_settings_snapshot",
   "reveal_home_directory",

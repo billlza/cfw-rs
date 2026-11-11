@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use cfw_engine_api::EngineEvent;
@@ -13,6 +13,7 @@ use crate::window_state::WindowBoundsManager;
 pub(crate) struct AppLifecycle {
     shared: Arc<LifecycleShared>,
     shutdown_maintenance: Mutex<Option<EngineMaintenanceLease>>,
+    identity_recovery_exit: AtomicBool,
 }
 
 #[derive(Default)]
@@ -26,6 +27,7 @@ const LIFECYCLE_SHUTDOWN: u8 = 1;
 const LIFECYCLE_HANDOFF: u8 = 2;
 const LIFECYCLE_EXIT_READY: u8 = 3;
 const LIFECYCLE_UPDATE: u8 = 4;
+const LIFECYCLE_IDENTITY_RECOVERY: u8 = 5;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -82,11 +84,11 @@ pub(crate) struct HandoffLifecycleLease {
     active: bool,
 }
 
-/// Exclusive ownership of the lifecycle while an update is handed to the
-/// installer process. Dropping it before the exit is prepared returns the
-/// application to normal operation.
-pub(crate) struct UpdateLifecycleLease {
+/// Exclusive ownership during a maintenance operation that requires process
+/// exit. Dropping it before exit is prepared restores normal operation.
+pub(crate) struct MaintenanceLifecycleLease {
     shared: Arc<LifecycleShared>,
+    owner: u8,
     active: bool,
 }
 
@@ -146,23 +148,20 @@ impl AppLifecycle {
         })
     }
 
-    fn begin_update_lease(&self) -> Result<UpdateLifecycleLease, String> {
+    fn begin_maintenance_lease(&self, owner: u8) -> Result<MaintenanceLifecycleLease, String> {
         self.shared
             .owner
-            .compare_exchange(
-                LIFECYCLE_IDLE,
-                LIFECYCLE_UPDATE,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .map_err(|owner| {
+            .compare_exchange(LIFECYCLE_IDLE, owner, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|current| {
                 format!(
-                    "update installation cannot start while application lifecycle is owned by {}",
-                    lifecycle_owner_name(owner)
+                    "{} cannot start while application lifecycle is owned by {}",
+                    lifecycle_owner_name(owner),
+                    lifecycle_owner_name(current)
                 )
             })?;
-        Ok(UpdateLifecycleLease {
+        Ok(MaintenanceLifecycleLease {
             shared: self.shared.clone(),
+            owner,
             active: true,
         })
     }
@@ -264,6 +263,7 @@ fn lifecycle_owner_name(owner: u8) -> &'static str {
         LIFECYCLE_HANDOFF => "migration handoff",
         LIFECYCLE_EXIT_READY => "exit readiness",
         LIFECYCLE_UPDATE => "update installation",
+        LIFECYCLE_IDENTITY_RECOVERY => "installation identity recovery",
         _ => "an invalid lifecycle state",
     }
 }
@@ -298,8 +298,9 @@ pub(crate) async fn prepare_handoff_exit(
     Ok(())
 }
 
-pub(crate) fn begin_update_lifecycle(app: &AppHandle) -> Result<UpdateLifecycleLease, String> {
-    app.state::<AppLifecycle>().begin_update_lease()
+pub(crate) fn begin_update_lifecycle(app: &AppHandle) -> Result<MaintenanceLifecycleLease, String> {
+    app.state::<AppLifecycle>()
+        .begin_maintenance_lease(LIFECYCLE_UPDATE)
 }
 
 /// Stops networking for an update hand-off. On success the engine is Off, no
@@ -307,7 +308,7 @@ pub(crate) fn begin_update_lifecycle(app: &AppHandle) -> Result<UpdateLifecycleL
 /// error reported with the engine Off is returned for the caller's record.
 pub(crate) async fn prepare_update_exit(
     app: &AppHandle,
-    lifecycle_lease: &mut UpdateLifecycleLease,
+    lifecycle_lease: &mut MaintenanceLifecycleLease,
 ) -> Result<Option<String>, String> {
     let shutdown_warning = prepare_owned_exit(app, LIFECYCLE_UPDATE)
         .await
@@ -318,6 +319,51 @@ pub(crate) async fn prepare_update_exit(
         })?;
     lifecycle_lease.active = false;
     Ok(shutdown_warning)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn begin_identity_recovery(
+    app: &AppHandle,
+) -> Result<MaintenanceLifecycleLease, String> {
+    app.state::<AppLifecycle>()
+        .begin_maintenance_lease(LIFECYCLE_IDENTITY_RECOVERY)
+}
+
+/// Called after authentication, before any Keychain mutation. The already-held
+/// Off maintenance reservation remains in AppLifecycle even if the write fails
+/// or its caller disappears. This process can never start with a stale session.
+#[cfg(target_os = "macos")]
+pub(crate) async fn prepare_identity_recovery_exit(
+    app: &AppHandle,
+    lease: &mut MaintenanceLifecycleLease,
+    maintenance: EngineMaintenanceLease,
+) -> Result<(), String> {
+    if lease.owner != LIFECYCLE_IDENTITY_RECOVERY || !lease.active {
+        return Err("installation recovery lost its lifecycle reservation".into());
+    }
+    if !app.state::<ManagedEngine>().is_off_under(&maintenance) {
+        return Err("stop the engine before recovering its installation identity".into());
+    }
+    flush_window_bounds_for_exit(app).await;
+    let lifecycle = app.state::<AppLifecycle>();
+    lifecycle.mark_exit_ready(LIFECYCLE_IDENTITY_RECOVERY, maintenance)?;
+    lease.active = false;
+    lifecycle
+        .identity_recovery_exit
+        .store(true, Ordering::Release);
+    app.state::<LiveStreams>().stop_all();
+    if let Err(error) = app
+        .state::<crate::commands::ManagedProviders>()
+        .stop_refresh()
+    {
+        eprintln!("provider refresh shutdown failed during identity recovery: {error}");
+    }
+    Ok(())
+}
+
+pub(crate) fn identity_recovery_requires_restart(app: &AppHandle) -> bool {
+    let lifecycle = app.state::<AppLifecycle>();
+    lifecycle.exit_ready() && lifecycle.identity_recovery_exit.load(Ordering::Acquire)
 }
 
 enum OwnedExitError {
@@ -511,13 +557,13 @@ impl HandoffLifecycleLease {
     }
 }
 
-impl Drop for UpdateLifecycleLease {
+impl Drop for MaintenanceLifecycleLease {
     fn drop(&mut self) {
         if !self.active {
             return;
         }
-        if let Err(error) = self.shared.reset_owner_after_failure(LIFECYCLE_UPDATE) {
-            eprintln!("failed to release the update installation lifecycle: {error}");
+        if let Err(error) = self.shared.reset_owner_after_failure(self.owner) {
+            eprintln!("failed to release the maintenance lifecycle: {error}");
         }
     }
 }

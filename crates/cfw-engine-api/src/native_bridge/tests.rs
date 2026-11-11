@@ -364,3 +364,44 @@ fn each_request_envelope_carries_the_protocol_version_and_a_fresh_id() {
     assert_ne!(first.request_id, second.request_id);
     assert_eq!(first.command, NativeBridgeCommand::QueryStatus);
 }
+
+#[test]
+fn installation_recovery_contract_matches_native_request_and_response_shapes() {
+    let request: NativeRequestEnvelope = serde_json::from_str(include_str!(
+        "../../../../contracts/native-bridge-v10/installation-recovery-request.json"
+    ))
+    .unwrap();
+    assert_eq!(
+        request.command,
+        NativeBridgeCommand::AuthorizeInstallationRecovery
+    );
+    for (bytes, enrolled) in [
+        (
+            include_str!(
+                "../../../../contracts/native-bridge-v10/installation-recovery-response.json"
+            ),
+            true,
+        ),
+        (
+            include_str!(
+                "../../../../contracts/native-bridge-v10/installation-unenrolled-response.json"
+            ),
+            false,
+        ),
+    ] {
+        let response: NativeResponseEnvelope = serde_json::from_str(bytes).unwrap();
+        assert_eq!(
+            serde_json::to_value(&response).unwrap(),
+            serde_json::from_str::<serde_json::Value>(bytes).unwrap()
+        );
+        let Some(NativeBridgeResult::InstallationRecovery(state)) = response.result else {
+            panic!("recovery result")
+        };
+        assert_eq!(state.identity.is_some(), enrolled);
+        if let Some(identity) = state.identity {
+            assert_eq!(identity.accepted_epoch, 7);
+            assert_eq!(identity.revision, 12);
+            assert_eq!(identity.console_uid, 501);
+        }
+    }
+}

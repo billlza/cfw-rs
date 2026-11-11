@@ -22,6 +22,10 @@ struct GlobalAuthorityEngineLeaseInspector: NativeEngineLeaseInspecting {
     return snapshot.state == .off
   }
 
+  func installationRecoveryIdentity() async throws -> InstallationRecoveryState {
+    try await authority.installationRecoveryIdentity()
+  }
+
   /// Projects the durable Authority snapshot into the non-secret ownership
   /// observation used for exact activation agreement. The bound lease's
   /// `Operation_Context` and configuration digests are surfaced so the coordinator

@@ -67,6 +67,18 @@ fn validate_result(result: &NativeBridgeResult) -> Result<(), NativeBridgeError>
         )
     };
     match result {
+        NativeBridgeResult::InstallationRecovery(state) => state
+            .identity
+            .as_ref()
+            .is_none_or(|identity| {
+                !identity.installation_id.is_nil()
+                    && identity.revision > 0
+                    && identity.accepted_epoch < u64::MAX
+                    && identity.console_uid > 0
+                    && identity.console_uid != u32::MAX
+            })
+            .then_some(())
+            .ok_or_else(rejected),
         NativeBridgeResult::ProfileDelays(results) => (results.len() <= 32
             && results.iter().all(|result| {
                 !result.name.is_empty()

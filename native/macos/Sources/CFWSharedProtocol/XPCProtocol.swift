@@ -24,6 +24,7 @@ public enum SystemProxyAuthorizationFailure: Int, Sendable {
   func attestStopped(_ request: Data, reply: @escaping (Data?, NSError?) -> Void)
   func cancelPrepared(_ request: Data, reply: @escaping (Data?, NSError?) -> Void)
   func snapshot(_ request: Data, reply: @escaping (Data?, NSError?) -> Void)
+  func installationRecoveryIdentity(_ request: Data, reply: @escaping (Data?, NSError?) -> Void)
   /// Answers a ProxyAgent whether the Authority still holds the lease it bound.
   func ownerLeaseStatus(_ request: Data, reply: @escaping (Data?, NSError?) -> Void)
   /// Renews only the liveness of the already authenticated, already bound owner.

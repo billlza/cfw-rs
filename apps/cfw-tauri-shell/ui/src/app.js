@@ -330,6 +330,7 @@ function bindPageEvents() {
 }
 
 const MACOS_MAINTENANCE_ACTIONS = new Set([
+  "recover-installation-identity", "restart-after-identity-recovery",
   "open-legacy-maintenance", "close-legacy-maintenance", "begin-migration-handoff",
   "prepare-cutover", "confirm-cutover", "recover-cutover",
   "migrate-legacy-profiles",

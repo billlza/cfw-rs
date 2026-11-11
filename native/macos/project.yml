@@ -142,6 +142,7 @@ targets:
         link: true
       - target: CFWSharedProtocol
         link: true
+      - sdk: LocalAuthentication.framework
       - sdk: NetworkExtension.framework
       - sdk: Security.framework
       - sdk: ServiceManagement.framework

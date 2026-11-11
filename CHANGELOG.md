@@ -4,6 +4,11 @@
 
 ### Build 51006
 
+- Add Settings → Installation identity → Recover and restart for a new macOS
+  account or a lost local Keychain identity. Recovery requires system user
+  authentication and proven network Off, advances the account's lineage above
+  the Authority's replay cursor, and restarts before networking can resume.
+  Other accounts' credentials and the root replay history remain intact.
 - Mark connection diagnostics stale when the routing mode changes. A new UDP
   check does not compare with HTTPS results from the previous mode.
 - Retry one refused GlobalAuthority registration after a completed service

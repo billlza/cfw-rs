@@ -157,6 +157,7 @@ let package = Package(
         "CFWSharedProtocol",
       ],
       linkerSettings: [
+        .linkedFramework("LocalAuthentication"),
         .linkedFramework("Security"),
         .linkedFramework("ServiceManagement"),
       ]

@@ -950,5 +950,11 @@
   "Hosting network": "ホスティングネットワーク",
   "Mobile network": "モバイルネットワーク",
   "The source's weighted score ranges from 0 to 150. It is not a risk probability or an official Claude score. A missing classification does not prove safety.": "提供元の分類に基づく加重スコアは 0～150 です。リスクの確率や Claude の公式評価ではありません。分類に該当しなくても安全とは限りません。",
-  "Residential status, abuse history and account eligibility are not assessed.": "住宅回線かどうか、不正利用履歴、アカウントの利用資格は評価しません。"
+  "Residential status, abuse history and account eligibility are not assessed.": "住宅回線かどうか、不正利用履歴、アカウントの利用資格は評価しません。",
+  "Current macOS account": "現在の macOS アカウント",
+  "If switching macOS accounts or losing your Keychain identity prevents connections, stop the engine, authenticate with macOS, and recover. The app will restart.": "macOS アカウントの切り替えやキーチェーン ID の紛失で接続できない場合、エンジンを停止し、macOS で認証して復元してください。アプリが再起動します。",
+  "Installation identity": "インストール ID",
+  "Recover and restart": "復元して再起動",
+  "Restart app": "アプリを再起動",
+  "Restart the app to reload its installation identity before connecting.": "接続前にアプリを再起動し、インストール ID を読み込み直してください。"
 }

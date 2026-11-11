@@ -2,6 +2,7 @@ import Foundation
 
 public enum NativeBridgeCommand: Equatable, Sendable {
   case queryStatus
+  case authorizeInstallationRecovery
   case authorizeSystemProxy
   case authorizeSystemProxyRestoration
   case maintainCurrentServices(NativeServiceMaintenanceAction)
@@ -39,6 +40,7 @@ extension NativeBridgeCommand: Codable {
 
   enum Opcode: String, Codable {
     case queryStatus = "query_status"
+    case authorizeInstallationRecovery = "authorize_installation_recovery"
     case authorizeSystemProxy = "authorize_system_proxy"
     case authorizeSystemProxyRestoration = "authorize_system_proxy_restoration"
     case maintainCurrentServices = "maintain_current_services"
@@ -66,6 +68,9 @@ extension NativeBridgeCommand: Codable {
     let container = try decoder.container(keyedBy: CodingKeys.self)
     let opcode = try container.decode(Opcode.self, forKey: .opcode)
     switch opcode {
+    case .authorizeInstallationRecovery:
+      guard !container.contains(.payload) else { throw NativeBridgeProtocolError.invalidCommand }
+      self = .authorizeInstallationRecovery
     case .queryStatus:
       guard !container.contains(.payload) else {
         throw NativeBridgeProtocolError.invalidCommand
@@ -112,7 +117,8 @@ extension NativeBridgeCommand: Codable {
       case .awaitTunnelApproval: self = .awaitTunnelApproval(context)
       case .cancelTunnelInstall: self = .cancelTunnelInstall(context)
       case .stopTunnel: self = .stopTunnel(context)
-      case .queryStatus, .authorizeSystemProxy, .authorizeSystemProxyRestoration,
+      case .queryStatus, .authorizeInstallationRecovery, .authorizeSystemProxy,
+        .authorizeSystemProxyRestoration,
         .authorizeTunnelConfiguration,
         .maintainCurrentServices, .checkConfiguration, .startLocalProxy, .startSystemProxy,
         .startTunnel,
@@ -159,6 +165,8 @@ extension NativeBridgeCommand: Codable {
   public func encode(to encoder: Encoder) throws {
     var container = encoder.container(keyedBy: CodingKeys.self)
     switch self {
+    case .authorizeInstallationRecovery:
+      try container.encode(Opcode.authorizeInstallationRecovery, forKey: .opcode)
     case .queryStatus:
       try container.encode(Opcode.queryStatus, forKey: .opcode)
     case .authorizeSystemProxy:

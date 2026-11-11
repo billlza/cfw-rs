@@ -108,6 +108,18 @@ public actor BoundedAuthorityXPCClient: AuthorityClient, ProxyOwnerAuthorityClie
     return receipt
   }
 
+  public func installationRecoveryIdentity() async throws -> InstallationRecoveryState {
+    try await ensureHandshake()
+    let requestID = AuthorityIdentifier(UUID())
+    let envelope = try AuthorityRequestEnvelope(
+      requestID: requestID, command: .installationRecoveryIdentity(SnapshotRequest()))
+    let reply = try await perform(
+      method: .installationRecoveryIdentity, request: AuthorityV1Codec.encode(envelope))
+    return try correlated(
+      InstallationRecoveryState.self, data: reply.response,
+      requestID: requestID, operationID: nil)
+  }
+
   public func snapshot() async throws -> AuthoritySnapshot {
     try await ensureHandshake()
     let requestID = AuthorityIdentifier(UUID())
@@ -310,6 +322,7 @@ public actor BoundedAuthorityXPCClient: AuthorityClient, ProxyOwnerAuthorityClie
     case .attestStopped: .attestStopped
     case .cancelPrepared: .cancelPrepared
     case .snapshot: .snapshot
+    case .installationRecoveryIdentity: .installationRecoveryIdentity
     case .ownerLeaseStatus: .ownerLeaseStatus
     }
   }

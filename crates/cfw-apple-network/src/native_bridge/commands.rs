@@ -246,3 +246,32 @@ impl NativeBridge for NativeFrameworkBridge {
 
 #[cfg(test)]
 mod tests;
+
+impl NativeFrameworkBridge {
+    pub async fn authorize_installation_recovery(
+        &self,
+    ) -> Result<Option<cfw_engine_api::InstallationRecoveryIdentity>, NativeBridgeError> {
+        match self
+            .invoke(NativeBridgeCommand::AuthorizeInstallationRecovery)
+            .await?
+        {
+            NativeBridgeResult::InstallationRecovery(state) => {
+                if state
+                    .identity
+                    .as_ref()
+                    .is_some_and(|identity| identity.console_uid != unsafe { libc::geteuid() })
+                {
+                    return Err(NativeBridgeError::new(
+                        NativeBridgeErrorCode::IdentityRejected,
+                        "native installation recovery returned another user's identity",
+                    ));
+                }
+                Ok(state.identity)
+            }
+            _ => Err(NativeBridgeError::new(
+                NativeBridgeErrorCode::IdentityRejected,
+                "native installation recovery returned an invalid identity",
+            )),
+        }
+    }
+}

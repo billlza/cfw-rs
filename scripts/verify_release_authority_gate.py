@@ -85,10 +85,11 @@ def require_current_host_authority_binding(
     require_text(
         client_code,
         compact("""switch buildPolicy {
-          case .currentHost: requiresCurrentBuild = method == .prepareStart
+          case .currentHost:
+            requiresCurrentBuild = method == .prepareStart || method == .installationRecoveryIdentity
           case .protocolPeer: requiresCurrentBuild = false
         }"""),
-        "Host Authority start code requirement",
+        "Host Authority start and recovery code requirement",
     )
     require_text(
         client_code,

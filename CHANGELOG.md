@@ -12,6 +12,8 @@
 - Keep the product version at 0.5.1. Install this build from the DMG when
   replacing build 51005. From this build onward the updater can offer newer
   builds of the same product version.
+- Build with Go 1.27.4 and rustix 1.1.6 to address GO-2026-6859 and
+  RUSTSEC-2026-0486.
 
 ### Build 51005 — 2026-11-07
 

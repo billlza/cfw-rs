@@ -645,12 +645,12 @@ index ff5e0f4f46623eb6a4ac98e440576ba47868c417..978b637e4f70aaa75fdcc500ff60680c
 -}
 -
 diff --git a/go.mod b/go.mod
-index 8d74d59a2927c0bc722df0b7298b83f4f11195ce..9e718cd2da1a2812b7fd539d7314aceb3a94b146 100644
+index 8d74d59a2927c0bc722df0b7298b83f4f11195ce..6cb9b43ccf6195a24038ce29ce3de6eb7792ce5e 100644
 --- a/go.mod
 +++ b/go.mod
 @@ -3 +3 @@ module github.com/sagernet/sing-box
 -go 1.25.5
-+go 1.27.3
++go 1.27.4
 @@ -6,6 +6,6 @@ require (
 -	filippo.io/age v1.3.1
 -	github.com/anthropics/anthropic-sdk-go v1.26.0

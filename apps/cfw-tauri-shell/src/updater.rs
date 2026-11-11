@@ -193,14 +193,14 @@ async fn prepare_update_install_inner(
         let recorded = staged.and_then(|staged| {
             lease.stage(StagedUpdate {
                 transaction,
+                offer_version: authorization.version.clone(),
                 installed,
-                staged: staged.clone(),
+                staged,
                 resources: (),
-            })?;
-            Ok(staged)
+            })
         });
         match recorded {
-            Ok(staged) => Ok(serde_json::json!({ "version": staged.version })),
+            Ok(()) => Ok(serde_json::json!({ "version": authorization.version })),
             Err(error) => {
                 if error.failure().category == FailureCategory::Authenticity {
                     security.reject_release(&authorization)?;
@@ -298,6 +298,7 @@ async fn prepare_windows_release(
         let version = identity.version.clone();
         lease.stage(StagedUpdate {
             transaction,
+            offer_version: version.clone(),
             installed,
             staged: identity,
             resources,
@@ -390,8 +391,7 @@ pub(crate) async fn commit_update_install(
             let version = commit
                 .staged()
                 .map_err(|error| report(&app, &error))?
-                .staged
-                .version
+                .offer_version
                 .clone();
             commit.handed_off();
             exit_after_handoff(app.clone());

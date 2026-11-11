@@ -73,6 +73,13 @@ def canonical_product_version(
     return value
 
 
+def macos_update_version(product_version: str, build: str) -> str:
+    """The version used in the updater manifest, archive name, and release tag."""
+    version = canonical_product_version(product_version)
+    number = canonical_build_version(build)
+    return f"{version}-build.{number}"
+
+
 @dataclass(frozen=True)
 class ReleaseIdentity:
     """The one application identity eligible for the active product release."""

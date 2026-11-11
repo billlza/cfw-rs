@@ -12,7 +12,7 @@ pub(crate) enum StagedBundleError {
     WrongProduct,
     #[error("the staged update has an unreadable or invalid Info.plist")]
     InvalidInfo,
-    #[error("the staged update is not the announced version")]
+    #[error("the staged update is not the announced version and build")]
     VersionMismatch,
     #[error("the staged update is not a newer build than the installed application")]
     BuildNotNewer,
@@ -60,6 +60,8 @@ impl StagedBundleError {
 pub(super) struct StagedExpectation<'a> {
     /// The version the signed release metadata announced.
     pub(super) version: &'a str,
+    /// The exact build that the update offer or retained install record names.
+    pub(super) expected_build: u64,
     /// The build of the installed application; the update must exceed it.
     pub(super) installed_build: u64,
     /// The running system's product version.
@@ -106,6 +108,9 @@ fn verify_staged_bundle_with(
     // helpers accept any build signed by this team.
     if identity.build <= expectation.installed_build {
         return Err(StagedBundleError::BuildNotNewer);
+    }
+    if identity.build != expectation.expected_build {
+        return Err(StagedBundleError::VersionMismatch);
     }
     if let Some(minimum) = minimum_system_version(bundle)? {
         let running = parse_system_version(expectation.system_version)
@@ -162,6 +167,7 @@ mod tests {
     fn expectation(system_version: &str) -> StagedExpectation<'_> {
         StagedExpectation {
             version: "0.5.0",
+            expected_build: 50021,
             installed_build: 40074,
             system_version,
         }
@@ -214,6 +220,12 @@ mod tests {
             ),
             (PRODUCT, "0.5.0", "40074", StagedBundleError::BuildNotNewer),
             (PRODUCT, "0.5.0", "40073", StagedBundleError::BuildNotNewer),
+            (
+                PRODUCT,
+                "0.5.0",
+                "50022",
+                StagedBundleError::VersionMismatch,
+            ),
             (PRODUCT, "0.5.0", "x", StagedBundleError::InvalidInfo),
         ];
         for (identifier, version, build, expected) in cases {

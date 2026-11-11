@@ -440,6 +440,8 @@ async function bootstrap() {
 
   await listen("cfw://connections-snapshot", onConnectionsSnapshot);
 
+  await listen("cfw://routing-mode-changed", connectionDiagnostics.onRoutingModeChanged);
+
   await listen("cfw://engine-snapshot", onEngineSnapshot);
 
   await listen("cfw://engine-event", onEngineEvent);

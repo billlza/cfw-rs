@@ -939,6 +939,12 @@ class ActiveLedgerRuleTests(unittest.TestCase):
     """The active ledger rules on synthetic ledgers and notes directories."""
 
     def setUp(self) -> None:
+        # Synthetic ledgers exercise a version's dynamic tail before it has a
+        # published build. LiveLedgerTests exercise the fixed shipped history.
+        policy = dataclasses.replace(allocations.ACTIVE_POLICY, retired_ga=(), published=None)
+        policies = patch.dict(allocations.POLICIES, {policy.product_version: policy})
+        policies.start()
+        self.addCleanup(policies.stop)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.notes = Path(temporary.name)
@@ -1281,7 +1287,7 @@ class LiveLedgerTests(unittest.TestCase):
         ):
             allocations.validate_closed_contract(value)
 
-    def test_a_rewritten_live_retired_status_contradicts_its_note(self) -> None:
+    def test_a_rewritten_live_retired_status_is_rejected(self) -> None:
         for retired in retired_ga_builds():
             with self.subTest(build=retired):
                 value = copy.deepcopy(allocations.load_contract())
@@ -1293,24 +1299,29 @@ class LiveLedgerTests(unittest.TestCase):
                     for status in sorted(allocations.STATUSES)
                     if status.startswith("retired_") and status != record["status"]
                 )
-                ledger = allocations.validate_contract(value, expected_ga=GA_BUILD)
-                with self.assertRaisesRegex(
-                    allocations.ReleaseBuildAllocationError, "does not classify"
-                ):
-                    allocations.validate_retirement_notes(
-                        ledger, allocations.RETIREMENT_NOTES_DIRECTORY
-                    )
+                if retired in {build for build, _, _ in allocations.ACTIVE_POLICY.retired_ga}:
+                    with self.assertRaisesRegex(
+                        allocations.ReleaseBuildAllocationError, "retired GA allocations changed"
+                    ):
+                        allocations.validate_contract(value, expected_ga=GA_BUILD)
+                else:
+                    ledger = allocations.validate_contract(value, expected_ga=GA_BUILD)
+                    with self.assertRaisesRegex(
+                        allocations.ReleaseBuildAllocationError, "does not classify"
+                    ):
+                        allocations.validate_retirement_notes(
+                            ledger, allocations.RETIREMENT_NOTES_DIRECTORY
+                        )
 
     def test_the_gate_binds_the_notes_and_the_registry(self) -> None:
         # The identity names the GA allocated after a retired one, which needs
         # its retirement note.
-        retired = synthetic_ledger(FREEZE, "active_ga")
-        identity = dataclasses.replace(ACTIVE_RELEASE_IDENTITY, ga_build=retired["active_ga"])
-        with tempfile.TemporaryDirectory() as temporary, patch.object(
-            allocations, "ACTIVE_RELEASE_IDENTITY", identity
-        ), self.assertRaisesRegex(allocations.ReleaseBuildAllocationError, "has no retirement note"):
+        with tempfile.TemporaryDirectory() as temporary, self.assertRaisesRegex(
+            allocations.ReleaseBuildAllocationError, "has no retirement note"
+        ):
             allocations.verify_source_bindings(
-                retired, notes_directory=Path(temporary), predecessors=SUPPORTED_PREDECESSORS
+                allocations.load_contract(),
+                notes_directory=Path(temporary), predecessors=SUPPORTED_PREDECESSORS
             )
         unallocated = {
             **SUPPORTED_PREDECESSORS,
@@ -1377,35 +1388,57 @@ class LiveLedgerTests(unittest.TestCase):
         self.assertIsInstance(raised.exception.__cause__, ImportError)
 
     def test_live_retired_ga_builds_cannot_return_or_disappear(self) -> None:
+        fixed = {build for build, _, _ in allocations.ACTIVE_POLICY.retired_ga}
         for build in retired_ga_builds():
             with self.subTest(build=build, mutation="reactivated"):
                 value = copy.deepcopy(allocations.load_contract())
                 next(r for r in value["allocations"] if r["build"] == build)["status"] = "active_ga"
                 with self.assertRaisesRegex(
-                    allocations.ReleaseBuildAllocationError, "exactly one active GA"
+                    allocations.ReleaseBuildAllocationError,
+                    "retired GA allocations changed" if build in fixed else "exactly one active GA",
                 ):
                     allocations.validate_contract(value, expected_ga=GA_BUILD)
             with self.subTest(build=build, mutation="removed"):
                 value = copy.deepcopy(allocations.load_contract())
                 value["allocations"] = [r for r in value["allocations"] if r["build"] != build]
-                with self.assertRaisesRegex(allocations.ReleaseBuildAllocationError, "gap-free"):
+                with self.assertRaisesRegex(
+                    allocations.ReleaseBuildAllocationError,
+                    "retired GA allocations changed" if build in fixed else "gap-free",
+                ):
                     allocations.validate_contract(value, expected_ga=GA_BUILD)
         with self.assertRaisesRegex(allocations.ReleaseBuildAllocationError, "differs from the release identity"):
             allocations.validate_contract(allocations.load_contract(), expected_ga=NEXT_GA_BUILD)
 
     def test_policies_hold_history_but_no_active_build(self) -> None:
         self.assertFalse(allocations.ACTIVE_POLICY.closed)
-        self.assertEqual(allocations.ACTIVE_POLICY.retired_ga, ())
         self.assertEqual(allocations.CONTRACT_RELATIVE_PATH, allocations.ACTIVE_POLICY.relative_path)
         self.assertEqual(allocations.CONTRACT_PATH, allocations.REPOSITORY_ROOT / allocations.CONTRACT_RELATIVE_PATH)
         self.assertNotIn("active_ga", {field.name for field in dataclasses.fields(allocations.LedgerPolicy)})
-        self.assertIsNone(allocations.ACTIVE_POLICY.published)
+        for build, role, status in (
+            *allocations.ACTIVE_POLICY.retired_ga,
+            *((allocations.ACTIVE_POLICY.published,) if allocations.ACTIVE_POLICY.published else ()),
+        ):
+            self.assertLess(int(build), int(GA_BUILD))
+            self.assertEqual(role, "ga")
+            self.assertNotEqual(status, "active_ga")
         for version, policy in allocations.POLICIES.items():
             with self.subTest(version=version):
                 self.assertEqual(policy.product_version, version)
                 self.assertEqual(policy.closed, version != allocations.PRODUCT_VERSION)
                 if policy.immutable_prefix:
                     self.assertEqual(policy.immutable_prefix[0][0], str(policy.first_build))
+
+    def test_published_build_of_the_active_version_cannot_be_retired_or_reused(self) -> None:
+        published = allocations.ACTIVE_POLICY.published
+        self.assertIsNotNone(published)
+        build = published[0]
+        value = copy.deepcopy(allocations.load_contract())
+        record = next(record for record in value["allocations"] if record["build"] == build)
+        record["status"] = NOTARIZED
+        with self.assertRaisesRegex(
+            allocations.ReleaseBuildAllocationError, f"published GA {build} allocation changed"
+        ):
+            allocations.validate_contract(value, expected_ga=GA_BUILD)
 
     def test_builds_increase_across_product_versions(self) -> None:
         # A GA install replaces the newest registered build below it, whatever
@@ -1445,9 +1478,9 @@ ALLOCATION_FILES: Final = frozenset(
         REGISTRY_FILE,
     }
 )
-# The ledger policies fix where each product version's history starts: for a
-# version opened without earlier history, at its first GA allocation, which
-# stays its first build after it retires.
+# The policies may name fixed history, including a GA that has already shipped
+# under the current product version. The active build still lives only in
+# release_identity.env and the ledger.
 POLICY_FILE: Final = "scripts/verify_release_build_allocations.py"
 # A token of 16 or more hexadecimal characters is a digest or an object ID
 # (a checksum, a pbxproj identifier), never a build name, even when a run of
@@ -1536,7 +1569,11 @@ class AllocationLiteralAuditTests(unittest.TestCase):
 
     def test_no_audited_file_outside_the_allocation_files_names_a_ga_build(self) -> None:
         builds = ga_role_ledger_builds()
-        self.assertEqual(builds, (*retired_ga_builds(), GA_BUILD))
+        published = {
+            build for build, version in published_ga_versions().items()
+            if version == allocations.PRODUCT_VERSION
+        }
+        self.assertEqual(builds, tuple(sorted({*retired_ga_builds(), *published, GA_BUILD})))
         files = tracked_audited_files()
         self.assertTrue(ALLOCATION_FILES <= set(files))
         named = {
@@ -1544,12 +1581,18 @@ class AllocationLiteralAuditTests(unittest.TestCase):
             for relative, data in files.items()
             if (found := named_builds(data, builds))
         }
-        first_build = [str(allocations.ACTIVE_POLICY.first_build)]
+        policy = allocations.ACTIVE_POLICY
+        fixed_builds = {
+            str(policy.first_build),
+            *(build for build, _, _ in policy.immutable_prefix),
+            *(build for build, _, _ in policy.retired_ga),
+            *published,
+        }
         unexpected = {
             relative: found
             for relative, found in named.items()
             if relative not in ALLOCATION_FILES
-            and not (relative == POLICY_FILE and found == first_build)
+            and not (relative == POLICY_FILE and set(found) <= fixed_builds)
         }
         self.assertEqual(unexpected, {})
         identity_file = RELEASE_IDENTITY_PATH.relative_to(allocations.REPOSITORY_ROOT)

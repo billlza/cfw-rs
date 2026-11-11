@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import OSLog
+import ServiceManagement
 import SystemConfiguration
 
 public enum CurrentSystemProxySwitchStatus: Equatable, Sendable {
@@ -285,6 +286,7 @@ public enum CurrentAppServiceMaintenanceError: Error, Equatable, Sendable {
   case serviceNotFound(CurrentAppService)
   case statusUnknown(CurrentAppService)
   case mutationFailed(CurrentAppService)
+  case registrationOperationNotPermitted(CurrentAppService)
   case postconditionFailed(CurrentAppService)
   case unregistrationPending(CurrentAppService)
   case unregistrationTimedOut(CurrentAppService)
@@ -430,8 +432,15 @@ public struct CurrentAppServiceMaintainer: CurrentAppServiceMaintaining, Sendabl
         throw CurrentAppServiceMaintenanceError.unregistrationPending(service)
       } catch {
         Self.recordMutationFailure(error, mutation: .register, service: service)
-        if status(of: service) == .requiresApproval {
+        let observed = status(of: service)
+        if observed == .requiresApproval {
           throw CurrentAppServiceMaintenanceError.approvalRequired(service)
+        }
+        let failure = error as NSError
+        if observed == .notRegistered, failure.domain == SMAppServiceErrorDomain,
+          failure.code == Int(EPERM)
+        {
+          throw CurrentAppServiceMaintenanceError.registrationOperationNotPermitted(service)
         }
         throw CurrentAppServiceMaintenanceError.mutationFailed(service)
       }

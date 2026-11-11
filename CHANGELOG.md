@@ -1,6 +1,19 @@
 # Changelog
 
-## 0.5.1 — 2026-11-06
+## 0.5.1 — 2026-11-11
+
+### Build 51006
+
+- Mark connection diagnostics stale when the routing mode changes. A new UDP
+  check does not compare with HTTPS results from the previous mode.
+- Retry one refused GlobalAuthority registration after a completed service
+  unregister during upgrade, after proving that the Tunnel and both services
+  are still Off.
+- Keep the product version at 0.5.1. Install this build from the DMG when
+  replacing build 51005. From this build onward the updater can offer newer
+  builds of the same product version.
+
+### Build 51005 — 2026-11-07
 
 ### Interface
 

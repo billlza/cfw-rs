@@ -19,8 +19,8 @@ fn authorization(version: &str) -> UpdateAuthorization {
 #[test]
 fn release_page_is_derived_only_from_a_canonical_version() {
     assert_eq!(
-        release_page_url(&authorization("0.4.1")).expect("canonical release"),
-        "https://github.com/billlza/cfw-rs/releases/tag/v0.4.1"
+        release_page_url(&authorization("1.2.3-build.60123")).expect("canonical release"),
+        "https://github.com/billlza/cfw-rs/releases/tag/v1.2.3-build.60123"
     );
     for rejected in ["01.4.1", "0.4", "0.4.1+build.1/"] {
         assert!(

@@ -10,10 +10,10 @@ const report = () => ({ observed_at_ms: 1793836800000, route: { kind: "engine_pr
   ipv4: { status: "observed", value: "198.51.100.1" }, ipv6: { status: "failed", reason: "connection_failed" },
   services: [{ name: "Claude", host: "claude.ai", response: { status: "observed", value: { http_status: 403, elapsed_ms: 128 } }, egress: { status: "failed", reason: "http_refused" } }],
 });
-const setup = (invoke) => {
-  const state = { engine: { active: true, generation: 1 }, proxyGroups: [{ name: "default", now: "one" }] };
+const setup = (invoke, webRtc) => {
+  const state = { engine: { active: true, generation: 1 }, mode: "Rule", proxyGroups: [{ name: "default", now: "one" }] };
   const runtime = { engineIdentityEpoch: 1 };
-  const view = createConnectionDiagnostics({ state, runtime, invoke, renderPage() {}, requestId: () => "test-request" });
+  const view = createConnectionDiagnostics({ state, runtime, invoke, webRtc, renderPage() {}, requestId: () => "test-request" });
   return { state, runtime, view };
 };
 
@@ -45,6 +45,36 @@ test("pending requests are deduplicated and engine or selection changes reject t
   assert.match(view.render(), /network configuration changed/u);
   view.actions["diagnostic-hide"]();
   assert.doesNotMatch(view.render(), /198\.51\.100\.1/u);
+});
+
+test("switching routing mode makes the old HTTPS result ineligible for UDP comparison", async () => {
+  const { state, view } = setup(
+    async () => report(),
+    async () => ({ status: "observed", addresses: ["192.0.2.1"] }),
+  );
+  await view.actions["diagnostic-run"]();
+  state.mode = "Direct";
+  assert.match(view.render(), /These results predate a network change/u);
+
+  await view.actions["diagnostic-udp"]();
+  assert.match(view.render(), /No comparable HTTPS result/u);
+  assert.doesNotMatch(view.render(), /Different UDP and HTTPS exits observed/u);
+});
+
+test("a host routing change invalidates results without waiting for the dashboard snapshot", async () => {
+  let finish;
+  const { view } = setup(
+    async () => report(),
+    () => new Promise((resolve) => { finish = resolve; }),
+  );
+  await view.actions["diagnostic-run"]();
+  const pending = view.actions["diagnostic-udp"]();
+  view.onRoutingModeChanged();
+  finish({ status: "observed", addresses: ["198.51.100.1"] });
+  await pending;
+  assert.match(view.render(), /These results predate a network change/u);
+  assert.match(view.render(), /network configuration changed/u);
+  assert.doesNotMatch(view.render(), /Observed UDP and HTTPS exits match/u);
 });
 
 test("cancellation reaches the owned request and a late result never appears", async () => {

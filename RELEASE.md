@@ -858,7 +858,7 @@ the old approval and record the comparison separately. The current closure
 record must name its own digest and current release authorization; it must not
 pretend that the earlier reviewer saw a subsequently rebuilt source archive.
 
-### Single-GA release sequence
+### GA release sequence
 
 Every product version has one allocation ledger,
 `docs/release/build-allocations-v<version>.json` with the dots of the version
@@ -943,6 +943,23 @@ audit rejects any other tracked file of the release source closure, apart
 from `docs/`, the top-level guides and the first build the ledger policy
 fixes, that names a GA-role ledger build outside a digest or object-ID token,
 and any installed tree digest outside the registry.
+
+#### Allocating a successor to a published build
+
+A maintenance release may keep its product version and allocate the next
+monotonic build. Mark the shipped GA as `published`, fix its ledger history
+in the version policy, and register its signed installed tree as the
+predecessor. Append the new active GA and retain the published tag and assets
+at their original URLs. When another GA ships under that product version,
+preserve the earlier published records in the policy's immutable prefix.
+
+Publish each new build at `v<VERSION>-build.<BUILD>` and mark it Latest.
+The signed archive and `latest-macos.json` name that exact version and build.
+The macOS updater requires the staged App to match both fields, refuses
+version or build rollback, and can offer a newer build of the same version.
+Publish the sealed copy of the legacy `latest.json` alongside the new feed.
+It continues to point at the original 0.5.1 release for older clients. Users
+on build 51005 install the next build from its DMG once to join the new feed.
 
 #### Opening a product version
 
@@ -2151,7 +2168,7 @@ through the retained directory descriptor with exclusive, no-follow flags and
 is removed after the final second hash pass. The verifier derives the exact
 12 release-asset names and size limits from `release_artifact_set`, adds the two
 component seals and the trusted distribution seal, and refuses anything other
-than exactly 15 unique files. Any redirect drift, partial response, transform,
+than exactly 16 unique files. Any redirect drift, partial response, transform,
 extra suffix, size mismatch, hash mismatch, symlink/hard-link, or concurrent
 mutation fails closed.
 

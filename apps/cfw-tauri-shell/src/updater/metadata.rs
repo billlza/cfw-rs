@@ -89,10 +89,22 @@ pub(super) async fn check_bounded_update() -> Result<Option<CheckedUpdate>> {
         });
     }
 
-    parse_checked_update(&bytes)
+    let installed_build = option_env!("CFW_RELEASE_BUNDLE_BUILD")
+        .map(|build| {
+            build
+                .parse::<u64>()
+                .ok()
+                .filter(|number| *number > 0 && number.to_string() == build)
+                .ok_or(UpdateError::InvalidMetadata("running bundle build".into()))
+        })
+        .transpose()?;
+    parse_checked_update(&bytes, installed_build)
 }
 
-fn parse_checked_update(bytes: &[u8]) -> Result<Option<CheckedUpdate>> {
+fn parse_checked_update(
+    bytes: &[u8],
+    installed_build: Option<u64>,
+) -> Result<Option<CheckedUpdate>> {
     if bytes.is_empty() || bytes.len() as u64 > MAX_METADATA_BYTES {
         return Err(UpdateError::InvalidMetadata(
             "document size is outside the accepted range".into(),
@@ -123,9 +135,19 @@ fn parse_checked_update(bytes: &[u8]) -> Result<Option<CheckedUpdate>> {
     let authorization = validate_update(version, &parsed_url, signature, &raw_manifest)?;
     let current = Version::parse(env!("CARGO_PKG_VERSION"))
         .map_err(|_| UpdateError::InvalidMetadata("current version".into()))?;
-    let available = Version::parse(&authorization.version)
-        .map_err(|_| UpdateError::InvalidMetadata("release version".into()))?;
-    if available <= current {
+    let newer = if release_target == ReleaseTarget::MacArm64 {
+        let (available, build) = authorization.macos_bundle_identity()?;
+        match installed_build {
+            Some(installed) => available >= current && build > installed,
+            // Development binaries have no release build identity.
+            None => available > current,
+        }
+    } else {
+        let available = Version::parse(&authorization.version)
+            .map_err(|_| UpdateError::InvalidMetadata("release version".into()))?;
+        available > current
+    };
+    if !newer {
         return Ok(None);
     }
     Ok(Some(CheckedUpdate {
@@ -185,6 +207,14 @@ mod tests {
 
     use super::*;
 
+    fn offer(version: &str, build: u64) -> String {
+        if target().expect("qualified test target") == ReleaseTarget::MacArm64 {
+            format!("{version}-build.{build}")
+        } else {
+            version.to_owned()
+        }
+    }
+
     fn manifest(version: &str) -> Vec<u8> {
         let target = target().expect("qualified test target");
         let url = target.download_url(version, &target.archive_name(version));
@@ -209,24 +239,44 @@ mod tests {
 
     #[test]
     fn metadata_parser_rejects_empty_oversized_and_extra_fields() {
-        assert!(parse_checked_update(&[]).is_err());
-        assert!(parse_checked_update(&vec![b' '; MAX_METADATA_BYTES as usize + 1]).is_err());
-        let mut value: Value = serde_json::from_slice(&manifest("9.0.0")).expect("JSON");
+        assert!(parse_checked_update(&[], None).is_err());
+        assert!(parse_checked_update(&vec![b' '; MAX_METADATA_BYTES as usize + 1], None).is_err());
+        let mut value: Value =
+            serde_json::from_slice(&manifest(&offer("9.0.0", 60123))).expect("JSON");
         value["unexpected"] = Value::Bool(true);
-        assert!(parse_checked_update(&serde_json::to_vec(&value).expect("JSON")).is_err());
+        assert!(parse_checked_update(&serde_json::to_vec(&value).expect("JSON"), None).is_err());
     }
 
     #[test]
     fn metadata_parser_returns_only_newer_strictly_valid_releases() {
         assert!(
-            parse_checked_update(&manifest("0.4.0"))
+            parse_checked_update(&manifest(&offer("0.4.0", 60123)), None)
                 .expect("current")
                 .is_none()
         );
-        let checked = parse_checked_update(&manifest("9.0.0"))
+        let version = offer("9.0.0", 60123);
+        let checked = parse_checked_update(&manifest(&version), None)
             .expect("valid")
             .expect("newer");
-        assert_eq!(checked.authorization.version, "9.0.0");
+        assert_eq!(checked.authorization.version, version);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn same_product_version_requires_a_newer_build() {
+        let current = env!("CARGO_PKG_VERSION");
+        let installed = 60123;
+        for (version, build, expected) in [
+            (current, installed + 1, true),
+            (current, installed, false),
+            (current, installed - 1, false),
+            ("0.4.0", installed + 1, false),
+            ("9.0.0", installed - 1, false),
+        ] {
+            let checked = parse_checked_update(&manifest(&offer(version, build)), Some(installed))
+                .expect("valid update metadata");
+            assert_eq!(checked.is_some(), expected, "{version} build {build}");
+        }
     }
 
     #[test]
@@ -240,16 +290,17 @@ mod tests {
         assert!(
             validate_versioned_metadata_url(
                 &Url::parse(
-                    "https://github.com/billlza/cfw-rs/releases/download/v0.4.0/latest.json"
+                    "https://github.com/billlza/cfw-rs/releases/download/v1.2.3-build.60123/latest-macos.json"
                 )
                 .expect("URL")
             )
             .is_ok()
         );
         for value in [
-            "https://example.com/billlza/cfw-rs/releases/download/v0.4.0/latest.json",
-            "https://github.com/billlza/cfw-rs/releases/download/v01.4.0/latest.json",
-            "https://github.com/billlza/cfw-rs/releases/download/v0.4.0/other.json",
+            "https://example.com/billlza/cfw-rs/releases/download/v1.2.3-build.60123/latest-macos.json",
+            "https://github.com/billlza/cfw-rs/releases/download/v01.2.3-build.60123/latest-macos.json",
+            "https://github.com/billlza/cfw-rs/releases/download/v1.2.3/latest-macos.json",
+            "https://github.com/billlza/cfw-rs/releases/download/v1.2.3-build.60123/latest.json",
         ] {
             assert!(validate_versioned_metadata_url(&Url::parse(value).expect("URL")).is_err());
         }

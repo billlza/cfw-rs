@@ -69,8 +69,10 @@ fn windows_metadata_names_one_msi_and_its_independent_versioned_release() {
         "https://github.com/billlza/cfw-rs/releases/tag/cfw-v0.5.1"
     );
     assert_eq!(
-        ReleaseTarget::MacArm64.release_page_url("0.5.1").unwrap(),
-        "https://github.com/billlza/cfw-rs/releases/tag/v0.5.1"
+        ReleaseTarget::MacArm64
+            .release_page_url("1.2.3-build.60123")
+            .unwrap(),
+        "https://github.com/billlza/cfw-rs/releases/tag/v1.2.3-build.60123"
     );
     assert_ne!(
         ReleaseTarget::MacArm64.metadata_url(),
@@ -109,7 +111,12 @@ fn release_families_cannot_accept_each_others_manifests_or_asset_names() {
         (ReleaseTarget::WindowsX64, ReleaseTarget::MacArm64),
         (ReleaseTarget::MacArm64, ReleaseTarget::WindowsX64),
     ] {
-        let value = manifest(target, "0.5.1");
+        let version = if target == ReleaseTarget::MacArm64 {
+            "1.2.3-build.60123"
+        } else {
+            "1.2.3"
+        };
+        let value = manifest(target, version);
         let update = admit(target, &value).unwrap();
         assert_eq!(
             validate_update(
@@ -117,15 +124,15 @@ fn release_families_cannot_accept_each_others_manifests_or_asset_names() {
                 &update.version,
                 &Url::parse(&update.download_url).unwrap(),
                 &update.signature,
-                &manifest(other, "0.5.1")
+                &manifest(other, version)
             ),
             Err(UpdateContractError::UnexpectedPlatforms),
         );
-        let other_url = other.download_url("0.5.1", &other.archive_name("0.5.1"));
+        let other_url = other.download_url(version, &other.archive_name(version));
         assert_eq!(
             validate_update(
                 target,
-                "0.5.1",
+                version,
                 &Url::parse(&other_url).unwrap(),
                 &update.signature,
                 &value
@@ -211,9 +218,10 @@ fn metadata_redirects_cannot_cross_channels_or_extend_the_fixed_chain() {
     let windows = ReleaseTarget::WindowsX64;
     let mac_initial = Url::parse(mac.metadata_url()).unwrap();
     let windows_initial = Url::parse(windows.metadata_url()).unwrap();
-    let versioned =
-        Url::parse("https://github.com/billlza/cfw-rs/releases/download/v0.5.1/latest.json")
-            .unwrap();
+    let versioned = Url::parse(
+        "https://github.com/billlza/cfw-rs/releases/download/v1.2.3-build.60123/latest-macos.json",
+    )
+    .unwrap();
     let asset = Url::parse("https://release-assets.githubusercontent.com/github-production-release-asset/12345/asset?sp=read").unwrap();
     mac.validate_metadata_redirect(std::slice::from_ref(&mac_initial), &versioned)
         .unwrap();

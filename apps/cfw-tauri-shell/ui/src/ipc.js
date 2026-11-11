@@ -120,6 +120,7 @@ export const UI_EVENTS = Object.freeze([
   "cfw://engine-snapshot",
   "cfw://log-lines",
   "cfw://page",
+  "cfw://routing-mode-changed",
   "cfw://settings-changed",
   "cfw://stream-error",
   "cfw://update-available",

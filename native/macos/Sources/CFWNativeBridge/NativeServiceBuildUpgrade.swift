@@ -156,6 +156,7 @@ extension NativeBridgeCoordinator {
         .cleanupUnproven, "Background service update ordering requires explicit recovery.")
     }
     do {
+      var completedAuthorityUnregistration = false
       for action in actions {
         try Task.checkCancellation()
         Self.serviceUpgradeLog.info(
@@ -164,7 +165,11 @@ extension NativeBridgeCoordinator {
           if action == .retireOrphanedServices {
             _ = try await retireOrphanedServicesForUpgrade()
           } else {
-            _ = try await maintainCurrentServices(action)
+            _ = try await maintainCurrentServices(
+              action, authorityWasUnregistered: completedAuthorityUnregistration)
+            if action == .unregisterGlobalAuthority {
+              completedAuthorityUnregistration = true
+            }
           }
         } catch {
           let failure = Self.map(error).responseFailure

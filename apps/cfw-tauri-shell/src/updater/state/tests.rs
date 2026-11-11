@@ -87,6 +87,7 @@ fn consumed_authorization_cannot_be_replayed() {
 fn staged(version: &str) -> StagedUpdate {
     StagedUpdate {
         transaction: Uuid::from_u128(11),
+        offer_version: version.into(),
         resources: (),
         installed: BundleIdentity {
             version: "0.4.0".into(),
@@ -116,6 +117,7 @@ fn tracked_stage(
     let stage = staged("0.5.0");
     super::StagedUpdate {
         transaction: stage.transaction,
+        offer_version: stage.offer_version,
         installed: stage.installed,
         staged: stage.staged,
         resources: TrackedResource {

@@ -7,7 +7,7 @@ extension NativeBridgeCoordinator {
   private static let maintenanceLog = Logger(
     subsystem: "com.bill.clashformac", category: "service-maintenance")
   func maintainCurrentServices(
-    _ action: NativeServiceMaintenanceAction
+    _ action: NativeServiceMaintenanceAction, authorityWasUnregistered: Bool = false
   ) async throws -> NativeServiceMaintenanceResult {
     let before = servicePair()
     switch action {
@@ -127,7 +127,9 @@ extension NativeBridgeCoordinator {
       if before.authority == .notRegistered {
         try await requireCurrentMaintenanceOwnersOff(
           for: before, requireAuthorityProof: false)
-        try await perform(.register, on: .globalAuthority)
+        try await perform(
+          .register, on: .globalAuthority,
+          retryAuthorityRegistrationFrom: authorityWasUnregistered ? before : nil)
       }
       try await requireMaintenanceTunnelOff()
       try requireServiceProcessAbsent(.proxyAgent)
@@ -252,10 +254,28 @@ extension NativeBridgeCoordinator {
 
   private func perform(
     _ mutation: CurrentAppServiceMutation,
-    on service: CurrentAppService
+    on service: CurrentAppService,
+    retryAuthorityRegistrationFrom pair: (
+      proxy: CurrentAppServiceStatus, authority: CurrentAppServiceStatus
+    )? = nil
   ) async throws {
     do {
-      _ = try await serviceMaintainer.perform(mutation, on: service)
+      do {
+        _ = try await serviceMaintainer.perform(mutation, on: service)
+      } catch CurrentAppServiceMaintenanceError.registrationOperationNotPermitted(.globalAuthority)
+        where pair != nil
+      {
+        // On an installed upgrade the OS can still refuse the first register
+        // after unregister has completed. Keep the same Host operation lease
+        // and prove that both jobs and the Tunnel are still Off before retrying.
+        Self.maintenanceLog.notice(
+          "GlobalAuthority register was refused after unregister. Rechecking Off before one retry.")
+        try await Task.sleep(for: .seconds(4))
+        if let pair {
+          try await requireCurrentMaintenanceOwnersOff(for: pair, requireAuthorityProof: false)
+        }
+        _ = try await serviceMaintainer.perform(mutation, on: service)
+      }
       try Task.checkCancellation()
     } catch let error as CurrentAppServiceMaintenanceError {
       Self.maintenanceLog.error(
@@ -271,7 +291,7 @@ extension NativeBridgeCoordinator {
       case .statusUnknown:
         throw NativeBridgeExecutionError.failure(
           .cleanupUnproven, "A fixed service registration status is unknown.")
-      case .mutationFailed, .postconditionFailed:
+      case .mutationFailed, .registrationOperationNotPermitted, .postconditionFailed:
         throw NativeBridgeExecutionError.failure(
           .cleanupUnproven, "A fixed service mutation did not prove its postcondition.")
       case .unregistrationPending:
@@ -286,6 +306,8 @@ extension NativeBridgeCoordinator {
         "Service maintenance wait cancelled: service=\(service.rawValue) mutation=\(mutation.rawValue)"
       )
       throw CancellationError()
+    } catch let error as NativeBridgeExecutionError {
+      throw error
     } catch {
       throw NativeBridgeExecutionError.failure(
         .internal, "A fixed service mutation failed at its native boundary.")

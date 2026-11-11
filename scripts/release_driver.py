@@ -48,6 +48,7 @@ from scripts.release_build_identity import (  # noqa: E402
     SIGNED_APP_NAME,
     BuildIdentityError,
     canonical_build_version,
+    macos_update_version,
 )
 from scripts.release_driver_acceptance import run_acceptance  # noqa: E402
 from scripts.release_driver_notarization import recover_notarization  # noqa: E402
@@ -713,13 +714,13 @@ def _publish(context: Context) -> int:
         return status
     write_record(context.release, "publish", {"allowlist": "printed"})
     commit = context.require_commit()
-    tag = f"v{context.release.version}"
+    tag = f"v{macos_update_version(context.release.version, context.release.build)}"
     print(
         "\nPublish only the allowlisted files above, from your own account:\n"
         f"  gh release create {tag} --repo billlza/cfw-rs --target {commit} --draft --title "
-        f"'Clash for Mac {context.release.version}' --notes-file <release notes>\n"
+        f"'Clash for Mac {context.release.version} (build {context.release.build})' --notes-file <release notes>\n"
         f"  gh release upload {tag} --repo billlza/cfw-rs <each allowlisted file>\n"
-        f"  gh release edit {tag} --repo billlza/cfw-rs --draft=false\n"
+        f"  gh release edit {tag} --repo billlza/cfw-rs --draft=false --latest\n"
         "Then run `run verify-remote --trusted-distribution-seal PATH --sha256 HEX` with the offline copy of "
         f"{context.release.package_seal('distribution').name}."
     )
@@ -875,7 +876,7 @@ def _shipped(context: Context) -> bool:
 
 SHIPPED_MESSAGE: Final = (
     "Clash for Mac {version} build {build} is shipped and verified. The next release starts with a new "
-    "product version and a GA build allocation (RELEASE.md, allocating a GA build)."
+    "GA build allocation (RELEASE.md, allocating a GA build)."
 )
 
 

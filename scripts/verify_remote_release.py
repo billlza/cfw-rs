@@ -191,14 +191,15 @@ def _validated_url(url: str, *, initial: bool) -> tuple[str, int, str]:
     return expected_host, 443, target
 
 
-def _official_asset_url(version: str, filename: str) -> str:
+def _official_asset_url(version: str, build: str, filename: str) -> str:
     expected_origin = "https://github.com/billlza/cfw-rs/releases/download"
     if artifact_set.OFFICIAL_RELEASE_ORIGIN != expected_origin:
         raise RemoteReleaseError("official release origin contract drifted")
     if Path(filename).name != filename or filename in {"", ".", ".."}:
         raise RemoteReleaseError("release asset allowlist contains an unsafe filename")
     encoded = quote(filename, safe="-._~")
-    return f"{artifact_set.OFFICIAL_RELEASE_ORIGIN}/v{version}/{encoded}"
+    update = artifact_set.macos_update_version(version, build)
+    return f"{artifact_set.OFFICIAL_RELEASE_ORIGIN}/v{update}/{encoded}"
 
 
 def _default_connection_factory(
@@ -603,7 +604,7 @@ def load_trust_root(
         )
         if (
             type(seal["schema_version"]) is not int
-            or seal["schema_version"] != 1
+            or seal["schema_version"] != artifact_set.DISTRIBUTION_SEAL_SCHEMA_VERSION
             or seal["document"] != artifact_set.DISTRIBUTION_SEAL_DOCUMENT
             or seal["product"] != artifact_set.PRODUCT
             or seal["version"] != version
@@ -613,6 +614,8 @@ def load_trust_root(
         build_number = artifact_set._require_positive_decimal(
             seal["build_number"], "trusted distribution build number"
         )
+        if build_number != artifact_set.CANDIDATE_BUILD_NUMBER:
+            raise RemoteReleaseError("trusted distribution seal belongs to a different build")
         artifact_set._require_utc_timestamp(
             seal["sealed_at"], "trusted distribution seal time"
         )
@@ -670,9 +673,9 @@ def load_trust_root(
             )
         )
         filenames = [asset.filename for asset in assets]
-        if len(assets) != 15 or len(set(filenames)) != 15:
+        if len(assets) != 16 or len(set(filenames)) != 16:
             raise RemoteReleaseError(
-                "public release allowlist is not exactly 15 unique paths"
+                "public release allowlist is not exactly 16 unique paths"
             )
     except artifact_set.ArtifactSetError as error:
         raise RemoteReleaseError(f"trusted distribution seal is invalid: {error}") from error
@@ -724,7 +727,7 @@ def verify_remote_release(
         for asset in trust.assets:
             with downloads.create(asset.filename) as stream:
                 downloader.download(
-                    _official_asset_url(trust.version, asset.filename),
+                    _official_asset_url(trust.version, trust.build_number, asset.filename),
                     stream,
                     expected_size=asset.size,
                     expected_sha256=asset.sha256,
@@ -782,7 +785,7 @@ def verify_remote_release(
                 raise RemoteReleaseError(str(error)) from error
 
     return {
-        "asset_count": 15,
+        "asset_count": len(trust.assets),
         "build_number": trust.build_number,
         "distribution_seal_sha256": trust.distribution_seal_sha256,
         "repository_commit": trust.repository_commit,

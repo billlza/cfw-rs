@@ -183,7 +183,8 @@ package_root="$ga_root/packages"
 mkdir -p "$package_root"
 package_root="$(cd "$package_root" && pwd -P)"
 
-archive_name="Clash.for.Mac_${version}_aarch64.app.tar.gz"
+update_version="${version}-build.${build_number}"
+archive_name="Clash.for.Mac_${update_version}_aarch64.app.tar.gz"
 updater_root="$package_root/updater"
 [[ ! -L "$updater_root" ]] || die "updater release-set directory must not be a symlink"
 mkdir -p "$updater_root"
@@ -194,6 +195,7 @@ final_set="$updater_root/v$version"
 for legacy_output in \
   "$package_root/$archive_name" \
   "$package_root/$archive_name.sig" \
+  "$package_root/latest-macos.json" \
   "$package_root/latest.json"; do
   [[ ! -e "$legacy_output" && ! -L "$legacy_output" ]] ||
     die "legacy partial updater output must be removed after review: $legacy_output"
@@ -207,7 +209,7 @@ trap cleanup EXIT
 
 staged_archive="$staging/$archive_name"
 staged_signature="$staged_archive.sig"
-staged_latest="$staging/latest.json"
+staged_latest="$staging/latest-macos.json"
 
 echo "==> packing updater archive: $final_set/$archive_name"
 export COPYFILE_DISABLE=1
@@ -246,9 +248,9 @@ set +a
 cfw_verify_tauri_toolchain_tree "$artifact_repository" "$toolchain_root"
 require_regular_file "$staged_signature"
 
-download_url="$official_release_origin/v${version}/${archive_name}"
-notes="${NOTES:-Clash for Mac ${version}}"
-VERSION="$version" NOTES="$notes" SIGNATURE="$(tr -d '\n' <"$staged_signature")" \
+download_url="$official_release_origin/v${update_version}/${archive_name}"
+notes="${NOTES:-Clash for Mac ${version} (build ${build_number})}"
+VERSION="$update_version" NOTES="$notes" SIGNATURE="$(tr -d '\n' <"$staged_signature")" \
 DOWNLOAD_URL="$download_url" LATEST_JSON="$staged_latest" \
   "$python_bin" -I -S -B -W error - <<'PY'
 import json
@@ -283,6 +285,9 @@ with path.open("x", encoding="utf-8") as handle:
     handle.write("\n")
 PY
 require_regular_file "$staged_latest"
+legacy_latest="$artifact_repository/docs/release/macos-legacy-latest.json"
+require_regular_file "$legacy_latest"
+/usr/bin/install -m 0600 "$legacy_latest" "$staging/latest.json"
 
 cfw_run_release_python_script \
   "$repo_root" \
@@ -296,10 +301,12 @@ cfw_run_release_python_script \
 echo "==> updater artifacts ready:"
 echo "    $final_set/$archive_name"
 echo "    $final_set/$archive_name.sig"
+echo "    $final_set/latest-macos.json"
 echo "    $final_set/latest.json"
 echo "    $final_set/updater-set.seal.json"
 shasum -a 256 \
   "$final_set/$archive_name" \
   "$final_set/$archive_name.sig" \
+  "$final_set/latest-macos.json" \
   "$final_set/latest.json" \
   "$final_set/updater-set.seal.json"

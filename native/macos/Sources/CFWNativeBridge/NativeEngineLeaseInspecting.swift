@@ -1,6 +1,7 @@
 import CFWSharedProtocol
 
 protocol NativeEngineLeaseInspecting: Sendable {
+  func installationRecoveryIdentity() async throws -> InstallationRecoveryState
   func isAvailable() async throws -> Bool
   /// Reports the Global Authority's machine-wide ownership observation used to
   /// require exact agreement before declaring an owner Active. A default
@@ -38,6 +39,10 @@ protocol NativeEngineLeaseInspecting: Sendable {
 }
 
 extension NativeEngineLeaseInspecting {
+  func installationRecoveryIdentity() async throws -> InstallationRecoveryState {
+    throw AuthorityDomainError(code: .globalAuthorityProtocolMismatch)
+  }
+
   func reconcileOff(
     managedTunnel: RecoveryManagedTunnelStatus
   ) async throws -> AuthorityOwnershipObservation {

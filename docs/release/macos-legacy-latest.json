@@ -1,0 +1,15 @@
+{
+  "version": "0.5.1",
+  "notes": "Clash for Mac 0.5.1",
+  "pub_date": "2026-11-06T13:26:49Z",
+  "platforms": {
+    "darwin-aarch64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUTEN2S0JSWkkrSTZwQkhqSGQvZ2kwVmNCMTNXeitDNDNWYWpSUUlScUhCOUVzNW5yOUZLSHNXclNXQTBOMG10R0k3MnFLUWVlZnArNitkOWIxR0RkTHBna1pJZ1VhZ0FzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzOTcxNjA5CWZpbGU6Q2xhc2guZm9yLk1hY18wLjUuMV9hYXJjaDY0LmFwcC50YXIuZ3oKczY0NGI2ZXNZd0RkNjlMZjNxSy9kL0RXZGx6MDRxQlJGT0tHNEZiZllWQllRUDFybVVZTWlRVHpaSXFheDdmbjB5NGo4b2s5ZWJEeHlWZUFkc084RGc9PQo=",
+      "url": "https://github.com/billlza/cfw-rs/releases/download/v0.5.1/Clash.for.Mac_0.5.1_aarch64.app.tar.gz"
+    },
+    "darwin-arm64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUTEN2S0JSWkkrSTZwQkhqSGQvZ2kwVmNCMTNXeitDNDNWYWpSUUlScUhCOUVzNW5yOUZLSHNXclNXQTBOMG10R0k3MnFLUWVlZnArNitkOWIxR0RkTHBna1pJZ1VhZ0FzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzOTcxNjA5CWZpbGU6Q2xhc2guZm9yLk1hY18wLjUuMV9hYXJjaDY0LmFwcC50YXIuZ3oKczY0NGI2ZXNZd0RkNjlMZjNxSy9kL0RXZGx6MDRxQlJGT0tHNEZiZllWQllRUDFybVVZTWlRVHpaSXFheDdmbjB5NGo4b2s5ZWJEeHlWZUFkc084RGc9PQo=",
+      "url": "https://github.com/billlza/cfw-rs/releases/download/v0.5.1/Clash.for.Mac_0.5.1_aarch64.app.tar.gz"
+    }
+  }
+}

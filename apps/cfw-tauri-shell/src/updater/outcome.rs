@@ -4,6 +4,8 @@ use std::path::Path;
 use serde::Serialize;
 use thiserror::Error;
 
+#[cfg(target_os = "macos")]
+use super::admission::BundleIdentity;
 use super::error::FailureCategory;
 #[cfg(target_os = "macos")]
 use super::journal::{
@@ -65,13 +67,12 @@ impl ReviewError {
     }
 }
 
-/// Resolves the recorded attempt against the version that is now running,
+/// Resolves the recorded attempt against the version and build now running,
 /// removes every staging directory (after a successful exchange one of them
 /// holds the replaced bundle) and clears the record.
 ///
-/// The running version, not the recorded phase, decides whether the exchange
-/// happened: the installer may have been interrupted between the exchange and
-/// its last record update.
+/// The running identity decides whether the exchange happened even when the
+/// installer was interrupted before its last record update.
 ///
 /// An attempt that is still in flight is left alone. The installer holds the
 /// installation lease while it works, and before it is admitted the dashboard
@@ -79,7 +80,7 @@ impl ReviewError {
 #[cfg(target_os = "macos")]
 pub(super) fn review_previous_attempt(
     app_home: &Path,
-    running_version: &str,
+    running: &BundleIdentity,
     dashboard_running: impl FnOnce(&ProcessIdentity) -> Result<bool, String>,
 ) -> Result<InstallOutcome, ReviewError> {
     let _lease = UpdateInstallLease::acquire(app_home).map_err(|error| match error {
@@ -113,7 +114,7 @@ pub(super) fn review_previous_attempt(
     {
         return Err(ReviewError::InstallationInProgress);
     }
-    let outcome = classify(&record, running_version);
+    let outcome = classify(&record, running);
     staging_removed()?;
     journal
         .clear(&record.transaction)
@@ -122,12 +123,12 @@ pub(super) fn review_previous_attempt(
 }
 
 #[cfg(target_os = "macos")]
-fn classify(record: &InstallRecord, running_version: &str) -> InstallOutcome {
+fn classify(record: &InstallRecord, running: &BundleIdentity) -> InstallOutcome {
     let failed = |code: &str| InstallOutcome::Failed {
         version: record.to.version.clone(),
         code: code.to_owned(),
     };
-    if running_version == record.to.version {
+    if running.version == record.to.version && running.build == record.to.build {
         return match record.phase {
             InstallPhase::Aborted => InstallOutcome::None,
             InstallPhase::HandedOff | InstallPhase::Decommissioned | InstallPhase::Swapped => {
@@ -137,7 +138,7 @@ fn classify(record: &InstallRecord, running_version: &str) -> InstallOutcome {
             }
         };
     }
-    if running_version != record.from.version {
+    if running.version != record.from.version || running.build != record.from.build {
         // Another copy was installed by other means; the record is obsolete.
         return InstallOutcome::None;
     }
@@ -159,7 +160,7 @@ mod tests {
 
     use uuid::Uuid;
 
-    use super::super::journal::tests::record;
+    use super::super::journal::tests::{identity, record};
     use super::super::staging::StagingArea;
     use super::*;
 
@@ -199,8 +200,12 @@ mod tests {
     }
 
     /// Reviews with the recorded dashboard gone, as after a completed hand-off.
-    fn review(home: &Path, running_version: &str) -> Result<InstallOutcome, ReviewError> {
-        review_previous_attempt(home, running_version, |_| Ok(false))
+    fn review(
+        home: &Path,
+        running_version: &str,
+        build: u64,
+    ) -> Result<InstallOutcome, ReviewError> {
+        review_previous_attempt(home, &identity(running_version, build), |_| Ok(false))
     }
 
     fn installed() -> InstallOutcome {
@@ -226,7 +231,7 @@ mod tests {
             let attempt = attempt();
             advance(&attempt, phases);
             assert_eq!(
-                review(attempt.home.path(), "0.5.0"),
+                review(attempt.home.path(), "0.5.0", 50021),
                 Ok(installed()),
                 "{phases:?}"
             );
@@ -236,7 +241,7 @@ mod tests {
             );
             assert_eq!(attempt.journal.load().expect("load"), None);
             assert_eq!(
-                review(attempt.home.path(), "0.5.0"),
+                review(attempt.home.path(), "0.5.0", 50021),
                 Ok(InstallOutcome::None),
                 "the outcome is reported once"
             );
@@ -251,7 +256,7 @@ mod tests {
             .abort(&aborted.transaction, "application_reopened")
             .expect("abort");
         assert_eq!(
-            review(aborted.home.path(), "0.4.0"),
+            review(aborted.home.path(), "0.4.0", 40074),
             Ok(failed("application_reopened"))
         );
         assert!(
@@ -270,11 +275,69 @@ mod tests {
             let attempt = attempt();
             advance(&attempt, phases);
             assert_eq!(
-                review(attempt.home.path(), "0.4.0"),
+                review(attempt.home.path(), "0.4.0", 40074),
                 Ok(failed(code)),
                 "{phases:?}"
             );
             assert_eq!(attempt.journal.load().expect("load"), None);
+        }
+    }
+
+    #[test]
+    fn an_interrupted_same_version_update_reports_failure() {
+        let attempt = attempt();
+        attempt
+            .journal
+            .clear(&attempt.transaction)
+            .expect("clear fixture");
+        let mut same_version = record(31);
+        same_version.from.version = same_version.to.version.clone();
+        attempt
+            .journal
+            .begin(&same_version)
+            .expect("same-version hand-off");
+
+        assert_eq!(
+            review(
+                attempt.home.path(),
+                &same_version.from.version,
+                same_version.from.build
+            ),
+            Ok(failed("installer_interrupted"))
+        );
+    }
+
+    #[test]
+    fn same_version_outcomes_distinguish_installed_failed_and_unrelated_builds() {
+        let mut same_version = record(31);
+        same_version.from.version = same_version.to.version.clone();
+        for (phase, build, expected) in [
+            (
+                InstallPhase::Decommissioned,
+                40074,
+                failed("installer_interrupted"),
+            ),
+            (
+                InstallPhase::Swapped,
+                40074,
+                failed("installed_version_reverted"),
+            ),
+            (InstallPhase::Aborted, 40074, failed("exchange_failed")),
+            (InstallPhase::HandedOff, 50021, installed()),
+            (InstallPhase::Decommissioned, 50021, installed()),
+            (InstallPhase::Swapped, 50021, installed()),
+            (InstallPhase::Aborted, 50021, InstallOutcome::None),
+            (InstallPhase::Swapped, 50022, InstallOutcome::None),
+            (InstallPhase::Aborted, 50022, InstallOutcome::None),
+        ] {
+            same_version.phase = phase;
+            same_version.failure =
+                (phase == InstallPhase::Aborted).then(|| "exchange_failed".into());
+            assert_eq!(
+                classify(&same_version, &identity("0.5.0", build)),
+                expected,
+                "{phase:?} build {build}"
+            );
         }
     }
 
@@ -285,10 +348,14 @@ mod tests {
             advance(&attempt, phases);
             let before = attempt.journal.load().expect("load");
             assert_eq!(
-                review_previous_attempt(attempt.home.path(), "0.4.0", |dashboard| {
-                    assert_eq!(dashboard, &record(31).dashboard);
-                    Ok(true)
-                }),
+                review_previous_attempt(
+                    attempt.home.path(),
+                    &identity("0.4.0", 40074),
+                    |dashboard| {
+                        assert_eq!(dashboard, &record(31).dashboard);
+                        Ok(true)
+                    }
+                ),
                 Err(ReviewError::InstallationInProgress),
                 "{phases:?}"
             );
@@ -299,7 +366,7 @@ mod tests {
             );
 
             assert_eq!(
-                review_previous_attempt(attempt.home.path(), "0.4.0", |_| {
+                review_previous_attempt(attempt.home.path(), &identity("0.4.0", 40074), |_| {
                     Err("observation failed".into())
                 }),
                 Err(ReviewError::Unavailable("observation failed".into()))
@@ -316,7 +383,7 @@ mod tests {
             &[InstallPhase::Decommissioned, InstallPhase::Swapped],
         );
         assert_eq!(
-            review_previous_attempt(swapped.home.path(), "0.5.0", |_| {
+            review_previous_attempt(swapped.home.path(), &identity("0.5.0", 50021), |_| {
                 panic!("an exchanged attempt does not observe its dashboard")
             }),
             Ok(installed())
@@ -328,14 +395,14 @@ mod tests {
         let attempt = attempt();
         let installer = UpdateInstallLease::acquire(attempt.home.path()).expect("installer lease");
         assert_eq!(
-            review(attempt.home.path(), "0.4.0"),
+            review(attempt.home.path(), "0.4.0", 40074),
             Err(ReviewError::InstallationInProgress)
         );
         assert!(attempt.journal.load().expect("load").is_some());
         assert!(attempt.staging.bundle().exists());
         drop(installer);
         assert_eq!(
-            review(attempt.home.path(), "0.4.0"),
+            review(attempt.home.path(), "0.4.0", 40074),
             Ok(failed("installer_interrupted"))
         );
     }
@@ -344,7 +411,7 @@ mod tests {
     fn an_unrelated_running_version_discards_the_obsolete_record_silently() {
         let attempt = attempt();
         assert_eq!(
-            review(attempt.home.path(), "0.6.0"),
+            review(attempt.home.path(), "0.6.0", 60001),
             Ok(InstallOutcome::None)
         );
         assert_eq!(attempt.journal.load().expect("load"), None);
@@ -358,7 +425,10 @@ mod tests {
         fs::create_dir(&installed).expect("installed bundle");
         let abandoned =
             StagingArea::create(home.path(), &Uuid::from_u128(32), &installed).expect("staging");
-        assert_eq!(review(home.path(), "0.4.0"), Ok(InstallOutcome::None));
+        assert_eq!(
+            review(home.path(), "0.4.0", 40074),
+            Ok(InstallOutcome::None)
+        );
         assert!(!abandoned.payload().exists());
         assert!(installed.is_dir());
     }
@@ -369,13 +439,13 @@ mod tests {
         let path = attempt.home.path().join("update-install-v1.json");
         fs::write(&path, br#"{"schema_version":2}"#).expect("a record of another schema");
         assert!(matches!(
-            review(attempt.home.path(), "0.4.0"),
+            review(attempt.home.path(), "0.4.0", 40074),
             Err(ReviewError::RecordDiscarded(_))
         ));
         assert!(!path.exists());
         assert!(!attempt.staging.bundle().exists());
         assert_eq!(
-            review(attempt.home.path(), "0.4.0"),
+            review(attempt.home.path(), "0.4.0", 40074),
             Ok(InstallOutcome::None),
             "later reviews and installations are no longer blocked"
         );
@@ -393,7 +463,7 @@ mod tests {
         fs::rename(&updates, &moved).expect("move staging aside");
         std::os::unix::fs::symlink(&moved, &updates).expect("a link in place of staging");
         assert!(matches!(
-            review(attempt.home.path(), "0.4.0"),
+            review(attempt.home.path(), "0.4.0", 40074),
             Err(ReviewError::Unavailable(_))
         ));
         assert!(

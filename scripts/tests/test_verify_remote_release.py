@@ -24,8 +24,8 @@ from scripts.verify_remote_release import (  # noqa: E402
 )
 
 
-VERSION = "0.4.0"
-BUILD_NUMBER = "40002"
+VERSION = artifact_set.CANDIDATE_VERSION
+BUILD_NUMBER = artifact_set.CANDIDATE_BUILD_NUMBER
 REPOSITORY_COMMIT = "a" * 40
 RELEASE_SOURCE_SHA256 = "b" * 64
 
@@ -79,7 +79,7 @@ class ReleaseFixture:
                 "release_source_sha256": RELEASE_SOURCE_SHA256,
                 "repository_commit": REPOSITORY_COMMIT,
             },
-            "schema_version": 1,
+            "schema_version": 2,
             "sealed_at": "2026-07-29T12:00:00Z",
             "set_seals": {
                 "dmg": _record(
@@ -266,7 +266,7 @@ class RemoteReleaseTests(unittest.TestCase):
         current_identity.assert_called_once_with(REPOSITORY, require_clean=True)
         return result
 
-    def test_exact_fifteen_asset_set_is_verified_without_authentication(self) -> None:
+    def test_exact_sixteen_asset_set_is_verified_without_authentication(self) -> None:
         fixture = MaliciousHTTPFixture(self.release.bodies)
         old_token = os.environ.get("GITHUB_TOKEN")
         os.environ["GITHUB_TOKEN"] = "must-not-be-read"
@@ -280,11 +280,16 @@ class RemoteReleaseTests(unittest.TestCase):
 
         result = self.verify(fixture)
 
-        self.assertEqual(result["asset_count"], 15)
+        self.assertEqual(result["asset_count"], 16)
         self.assertEqual(result["build_number"], BUILD_NUMBER)
         self.assertEqual(result["repository_commit"], REPOSITORY_COMMIT)
         self.assertEqual(result["release_source_sha256"], RELEASE_SOURCE_SHA256)
-        self.assertEqual(len(fixture.requests), 30)
+        self.assertEqual(len(fixture.requests), 32)
+        prefix = f"/billlza/cfw-rs/releases/download/v{VERSION}-build.{BUILD_NUMBER}/"
+        self.assertTrue(all(
+            target.startswith(prefix)
+            for host, _method, target, _headers in fixture.requests if host == "github.com"
+        ))
         self.assertEqual(
             {request[0] for request in fixture.requests},
             {"github.com", "release-assets.githubusercontent.com"},
@@ -308,7 +313,7 @@ class RemoteReleaseTests(unittest.TestCase):
         self.assertEqual(fixture.requests, [])
 
     def test_trusted_seal_schema_version_requires_a_json_integer(self) -> None:
-        for invalid in (1.0, True):
+        for invalid in (2.0, True):
             with self.subTest(invalid=invalid):
                 document = json.loads(self.release.seal_bytes)
                 document["schema_version"] = invalid

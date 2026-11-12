@@ -48,7 +48,8 @@ private enum NativeBridgeRequestShape {
       throw NativeBridgeProtocolError.invalidCommand
     }
     switch opcode {
-    case .queryStatus, .authorizeSystemProxy, .authorizeSystemProxyRestoration:
+    case .queryStatus, .authorizeSystemProxy, .authorizeSystemProxyRestoration,
+      .authorizeInstallationRecovery:
       try exactKeys(command, ["opcode"])
     case .maintainCurrentServices:
       try exactKeys(command, ["opcode", "payload"])

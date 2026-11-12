@@ -69,8 +69,8 @@ pub use identity::{
 };
 pub use mode::{EngineMode, EngineOwner, EngineRuntimePlatform};
 pub use native_bridge::{
-    NativeBridgeCommand, NativeBridgeFailure, NativeBridgeResult, NativeRequestEnvelope,
-    NativeResponseEnvelope,
+    InstallationRecoveryIdentity, InstallationRecoveryState, NativeBridgeCommand,
+    NativeBridgeFailure, NativeBridgeResult, NativeRequestEnvelope, NativeResponseEnvelope,
 };
 pub use native_service::{
     NativeServiceEngineStatus, NativeServiceMaintenanceAction, NativeServiceMaintenanceResult,

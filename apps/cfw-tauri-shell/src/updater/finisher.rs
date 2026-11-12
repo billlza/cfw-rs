@@ -401,18 +401,16 @@ impl FinisherPorts for InstalledApplication {
         }
         let system_version =
             operating_system_version().map_err(|_| "system_version_unavailable")?;
-        let staged = verify_staged_bundle(
+        verify_staged_bundle(
             &self.staging.bundle(),
             StagedExpectation {
                 version: &record.to.version,
+                expected_build: record.to.build,
                 installed_build: installed.build,
                 system_version: &system_version,
             },
         )
         .map_err(|error| error.code())?;
-        if staged.build != record.to.build {
-            return Err("staged_bundle_changed");
-        }
         Ok(())
     }
 

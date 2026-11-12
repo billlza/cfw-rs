@@ -5,7 +5,11 @@ import { diagnosticFailure, httpVerdict, udpComparison } from "./connection-diag
 
 export function createConnectionDiagnostics({ state, runtime, invoke, renderPage, webRtc = probeWebRtc, requestId = () => crypto.randomUUID() }) {
   const model = { active: null, hidden: true, report: null, dns: null, udp: null, information: null, error: null, binding: null };
-  const binding = () => JSON.stringify([runtime.engineIdentityEpoch, state.engine, state.proxyGroups?.map((group) => [group.name, group.now])]);
+  let routingChanges = 0;
+  const binding = () => JSON.stringify([
+    runtime.engineIdentityEpoch, state.engine, state.mode, routingChanges,
+    state.proxyGroups?.map((group) => [group.name, group.now]),
+  ]);
   const stale = () => model.binding !== null && model.binding !== binding();
   const ip = (value) => model.hidden ? t("Hidden") : value;
   const html = (value) => escapeHtml(String(value));
@@ -92,7 +96,7 @@ export function createConnectionDiagnostics({ state, runtime, invoke, renderPage
 
   function renderUdp() {
     const value = model.udp;
-    const comparison = value?.status === "observed" ? udpComparison(value.addresses, model.report) : null;
+    const comparison = value?.status === "observed" ? udpComparison(value.addresses, stale() ? null : model.report) : null;
     const messages = { matched: t("Observed UDP and HTTPS exits match."), different: t("Different UDP and HTTPS exits observed. Review your routing and TUN settings."), unconfirmed: t("No comparable HTTPS result; run connectivity checks first.") };
     return `<section class="diagnostic-section"><div class="diagnostic-section-head"><h2>WebRTC / UDP</h2><button data-action="diagnostic-udp" ${model.active ? "disabled" : ""}>${html(t("Check UDP"))}</button></div>
       <p>${html(t("Uses Cloudflare STUN to observe this window's UDP path. No camera or microphone. Other browsers may behave differently."))}</p>
@@ -139,5 +143,10 @@ export function createConnectionDiagnostics({ state, runtime, invoke, renderPage
       if (address) return run("information", address.ip);
     }));
   }
-  return { render, actions, bindPage };
+  function onRoutingModeChanged() {
+    routingChanges += 1;
+    if (state.activePage === "connections" && state.connectionPanel === "diagnostics") renderPage();
+  }
+
+  return { render, actions, bindPage, onRoutingModeChanged };
 }

@@ -274,6 +274,8 @@ extension AuthorityV1Codec {
     case .attestStopped(let value): return try tagged("attest_stopped", value)
     case .cancelPrepared(let value): return try tagged("cancel_prepared", value)
     case .snapshot(let value): return try tagged("snapshot", value)
+    case .installationRecoveryIdentity(let value):
+      return try tagged("installation_recovery_identity", value)
     case .ownerLeaseStatus(let value): return try tagged("owner_lease_status", value)
     }
   }
@@ -299,6 +301,8 @@ extension AuthorityV1Codec {
     case "cancel_prepared":
       return .cancelPrepared(try decodeObject(CancelPreparedRequest.self, payload))
     case "snapshot": return .snapshot(try decodeObject(SnapshotRequest.self, payload))
+    case "installation_recovery_identity":
+      return .installationRecoveryIdentity(try decodeObject(SnapshotRequest.self, payload))
     case "owner_lease_status":
       return .ownerLeaseStatus(try decodeObject(OwnerLeaseStatusRequest.self, payload))
     default: throw AuthorityV1ValidationError.unknownCommand

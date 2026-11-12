@@ -132,6 +132,7 @@ actor NativeBridgeCoordinator {
   let serviceRuntimeObserver: any CurrentAppServiceRuntimeObserving
   let serviceBuildObserver: any CurrentAppServiceBuildObserving
   let systemProxySwitchObserver: any CurrentSystemProxySwitchObserving
+  let recoveryAuthenticator: any InstallationRecoveryAuthenticating
   /// Arms the Host's wait of the given length for Packet Tunnel readiness.
   let armTunnelReadinessDeadline: @Sendable (Duration) -> NativeReadinessDeadline
   var serviceBuildPollCheckpoint: ServiceBuildRegistrationCheckpoint?
@@ -160,6 +161,8 @@ actor NativeBridgeCoordinator {
     systemProxySwitchObserver: any CurrentSystemProxySwitchObserving =
       CurrentSystemProxySwitchObserver(),
     serviceBuildObserver: any CurrentAppServiceBuildObserving,
+    recoveryAuthenticator: any InstallationRecoveryAuthenticating =
+      DeviceOwnerRecoveryAuthenticator(),
     armTunnelReadinessDeadline: @escaping @Sendable (Duration) -> NativeReadinessDeadline = {
       .awake(after: $0)
     }
@@ -177,6 +180,7 @@ actor NativeBridgeCoordinator {
     self.serviceRuntimeObserver = serviceRuntimeObserver
     self.serviceBuildObserver = serviceBuildObserver
     self.systemProxySwitchObserver = systemProxySwitchObserver
+    self.recoveryAuthenticator = recoveryAuthenticator
     self.armTunnelReadinessDeadline = armTunnelReadinessDeadline
   }
 
@@ -236,6 +240,8 @@ actor NativeBridgeCoordinator {
       throw NativeBridgeProtocolError.invalidCommand
     case .queryStatus:
       return .status(try await queryExternalStatus())
+    case .authorizeInstallationRecovery:
+      return .installationRecovery(try await authorizeInstallationRecovery())
     case .authorizeSystemProxy, .authorizeSystemProxyRestoration:
       do {
         try await proxy.authorizeSystemProxy(

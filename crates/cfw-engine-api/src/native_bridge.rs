@@ -26,6 +26,7 @@ pub enum NativeBridgeCommand {
     CheckConfiguration {
         request: EngineStartRequest,
     },
+    AuthorizeInstallationRecovery,
     AuthorizeSystemProxy,
     AuthorizeSystemProxyRestoration,
     StartLocalProxy {
@@ -84,6 +85,9 @@ pub enum NativeBridgeCommand {
 impl fmt::Debug for NativeBridgeCommand {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::AuthorizeInstallationRecovery => {
+                formatter.write_str("AuthorizeInstallationRecovery")
+            }
             Self::QueryStatus => formatter.write_str("QueryStatus"),
             Self::CheckConfiguration { request } => formatter
                 .debug_struct("CheckConfiguration")
@@ -165,6 +169,25 @@ impl fmt::Debug for NativeBridgeCommand {
     }
 }
 
+/// Authenticated, Off-only observation from the signed native Host. It cannot
+/// select a root installation or reset the Authority's replay cursor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstallationRecoveryIdentity {
+    pub installation_id: uuid::Uuid,
+    pub accepted_epoch: u64,
+    pub revision: u64,
+    pub console_uid: u32,
+}
+
+/// Absence is valid only for an Off Authority that has never enrolled an ID.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstallationRecoveryState {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity: Option<InstallationRecoveryIdentity>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NativeRequestEnvelope {
     pub schema_version: u16,
@@ -186,6 +209,7 @@ impl NativeRequestEnvelope {
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum NativeBridgeResult {
     Status(NativeEngineStatus),
+    InstallationRecovery(InstallationRecoveryState),
     Runtime(RuntimeIdentity),
     TunnelInstall(TunnelInstallOutcome),
     TunnelApproval(TunnelApprovalWait),

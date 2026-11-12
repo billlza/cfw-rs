@@ -7,7 +7,7 @@
 use cfw_core::UiPreferences;
 use cfw_engine_api::{EngineMode, EngineState};
 use serde::Serialize;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 
 use super::controller::{controller_client, ipc_error};
 use super::settings::{UiSettingsSnapshot, settings_snapshot_with_live_status};
@@ -201,6 +201,7 @@ pub(crate) async fn reconcile_startup_services(
 /// mode.
 #[tauri::command]
 pub(crate) async fn set_proxy_mode(
+    app: AppHandle,
     engine: State<'_, ManagedEngine>,
     mode: String,
 ) -> Result<(), String> {
@@ -212,27 +213,40 @@ pub(crate) async fn set_proxy_mode(
     let client = controller_client(&engine).map_err(|error| error.to_ipc())?;
     let (result, lease) = lease
         .run_to_completion(async move {
-            client
-                .patch_configs(cfw_controller::ConfigPatch {
-                    mode: Some(normalized.to_owned()),
-                    ..cfw_controller::ConfigPatch::default()
-                })
-                .await
-                .map_err(ipc_error)?;
-            let observed = client.configs().await.map_err(ipc_error)?;
-            if !observed
-                .mode
-                .as_deref()
-                .is_some_and(|mode| mode.eq_ignore_ascii_case(normalized))
-            {
-                return Err("routing mode change was not confirmed by the running engine".into());
+            let result = apply_live_proxy_mode(client, normalized).await;
+            // The tray and dashboard share this command. An ambiguous controller
+            // error may still have changed the mode, so invalidate either way.
+            if let Err(error) = app.emit("cfw://routing-mode-changed", ()) {
+                eprintln!("could not notify the dashboard of a routing mode change: {error}");
             }
-            Ok(())
+            result
         })
         .await
         .map_err(|_| "routing mode task ended without a response".to_owned())?;
     drop(lease);
     result
+}
+
+async fn apply_live_proxy_mode(
+    client: cfw_controller::ControllerClient,
+    normalized: &str,
+) -> Result<(), String> {
+    client
+        .patch_configs(cfw_controller::ConfigPatch {
+            mode: Some(normalized.to_owned()),
+            ..cfw_controller::ConfigPatch::default()
+        })
+        .await
+        .map_err(ipc_error)?;
+    let observed = client.configs().await.map_err(ipc_error)?;
+    if !observed
+        .mode
+        .as_deref()
+        .is_some_and(|mode| mode.eq_ignore_ascii_case(normalized))
+    {
+        return Err("routing mode change was not confirmed by the running engine".into());
+    }
+    Ok(())
 }
 
 fn normalize_proxy_mode(mode: &str) -> Result<&'static str, String> {

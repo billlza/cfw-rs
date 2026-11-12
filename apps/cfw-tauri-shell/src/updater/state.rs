@@ -80,6 +80,7 @@ pub(super) struct ReviewLease<R> {
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct StagedUpdate<R = super::StagedResources> {
     pub(super) transaction: Uuid,
+    pub(super) offer_version: String,
     pub(super) installed: BundleIdentity,
     pub(super) staged: BundleIdentity,
     pub(super) resources: R,
@@ -291,7 +292,7 @@ impl<R> UpdaterSecurityState<R> {
                 Some(pending(PendingPhase::Preparing, version))
             }
             InstallState::Staged(staged) => {
-                Some(pending(PendingPhase::Staged, &staged.staged.version))
+                Some(pending(PendingPhase::Staged, &staged.offer_version))
             }
             InstallState::Committing { version } => {
                 Some(pending(PendingPhase::Committing, version))
@@ -345,8 +346,8 @@ impl<R> UpdaterSecurityState<R> {
     pub(super) fn begin_commit(&self, expected_version: &str) -> Result<CommitLease<R>> {
         let mut inner = self.inner.lock().map_err(|_| UpdateError::StateLock)?;
         let version = match &inner.install {
-            InstallState::Staged(staged) if staged.staged.version == expected_version => {
-                staged.staged.version.clone()
+            InstallState::Staged(staged) if staged.offer_version == expected_version => {
+                staged.offer_version.clone()
             }
             InstallState::Staged(_) => return Err(UpdateError::AuthorizationChanged),
             InstallState::Idle => return Err(UpdateError::NoStagedUpdate),
@@ -426,7 +427,7 @@ impl<R> PreparationLease<R> {
             return Err(UpdateError::DownloadCancelled);
         }
         if !matches!(&inner.install, InstallState::Preparing { version, .. }
-            if version == &staged.staged.version)
+            if version == &staged.offer_version)
         {
             return Err(UpdateError::AuthorizationChanged);
         }

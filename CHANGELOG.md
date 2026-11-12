@@ -1,6 +1,29 @@
 # Changelog
 
-## 0.5.1 — 2026-11-06
+## 0.5.1 — 2026-11-11
+
+### Build 51006
+
+- Add Settings → Installation identity → Recover and restart for a new macOS
+  account or a lost local Keychain identity. Recovery requires system user
+  authentication and proven network Off, advances the account's lineage above
+  the Authority's replay cursor, and restarts before networking can resume.
+  Other accounts' credentials and the root replay history remain intact.
+- Mark connection diagnostics stale when the routing mode changes. A new UDP
+  check does not compare with HTTPS results from the previous mode.
+- Retry one refused GlobalAuthority registration after a completed service
+  unregister during upgrade, after proving that the Tunnel and both services
+  are still Off.
+- Keep the product version at 0.5.1. Install this build from the DMG when
+  replacing build 51005. From this build onward the updater can offer newer
+  builds of the same product version.
+- Match the running executable's build when admitting an update and reporting
+  its result after relaunch. An interrupted same-version update reports its
+  failure even when the old and new product versions match.
+- Build with Go 1.27.4 and rustix 1.1.6 to address GO-2026-6859 and
+  RUSTSEC-2026-0486.
+
+### Build 51005 — 2026-11-07
 
 ### Interface
 

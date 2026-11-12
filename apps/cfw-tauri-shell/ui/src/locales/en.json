@@ -950,5 +950,11 @@
   "Hosting network": "Hosting network",
   "Mobile network": "Mobile network",
   "The source's weighted score ranges from 0 to 150. It is not a risk probability or an official Claude score. A missing classification does not prove safety.": "The source's weighted score ranges from 0 to 150. It is not a risk probability or an official Claude score. A missing classification does not prove safety.",
-  "Residential status, abuse history and account eligibility are not assessed.": "Residential status, abuse history and account eligibility are not assessed."
+  "Residential status, abuse history and account eligibility are not assessed.": "Residential status, abuse history and account eligibility are not assessed.",
+  "Current macOS account": "Current macOS account",
+  "If switching macOS accounts or losing your Keychain identity prevents connections, stop the engine, authenticate with macOS, and recover. The app will restart.": "If switching macOS accounts or losing your Keychain identity prevents connections, stop the engine, authenticate with macOS, and recover. The app will restart.",
+  "Installation identity": "Installation identity",
+  "Recover and restart": "Recover and restart",
+  "Restart app": "Restart app",
+  "Restart the app to reload its installation identity before connecting.": "Restart the app to reload its installation identity before connecting."
 }

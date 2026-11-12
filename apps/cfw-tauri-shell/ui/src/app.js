@@ -330,6 +330,7 @@ function bindPageEvents() {
 }
 
 const MACOS_MAINTENANCE_ACTIONS = new Set([
+  "recover-installation-identity", "restart-after-identity-recovery",
   "open-legacy-maintenance", "close-legacy-maintenance", "begin-migration-handoff",
   "prepare-cutover", "confirm-cutover", "recover-cutover",
   "migrate-legacy-profiles",
@@ -439,6 +440,8 @@ async function bootstrap() {
   await listen("cfw://update-progress", onUpdateProgress);
 
   await listen("cfw://connections-snapshot", onConnectionsSnapshot);
+
+  await listen("cfw://routing-mode-changed", connectionDiagnostics.onRoutingModeChanged);
 
   await listen("cfw://engine-snapshot", onEngineSnapshot);
 

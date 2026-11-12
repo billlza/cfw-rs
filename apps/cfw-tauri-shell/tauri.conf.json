@@ -70,7 +70,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDIzM0U5MjQ1ODFGMjBBQ0IKUldUTEN2S0JSWkkrSXhYUFFZTWFUWkI2d2tycWVFcnJTVmVZcTFwdndKSVB3aXhnWWhaTW5UL0oK",
       "endpoints": [
-        "https://github.com/billlza/cfw-rs/releases/latest/download/latest.json"
+        "https://github.com/billlza/cfw-rs/releases/latest/download/latest-macos.json"
       ]
     }
   }

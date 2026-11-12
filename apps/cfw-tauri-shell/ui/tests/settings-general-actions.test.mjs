@@ -145,3 +145,51 @@ test("flushing the fake-IP cache needs a running engine and reports for that eng
   assert.deepEqual(applyUiToggle.calls, [["tunMode", true]]);
   void bindPage;
 });
+
+test("identity recovery restarts only after the host retired the old session", async () => {
+  host.reset();
+  state.engineMutationBusy = false;
+  state.identityRecoveryRestartRequired = false;
+  host.respond("recover_installation_identity", { recovered: true, requires_restart: true, error: null });
+  host.respond("restart_after_identity_recovery", null);
+  const { actions } = createGeneralActions({ renderPage: spy(), renderGlassOverlays: spy() });
+  await actions["recover-installation-identity"]();
+  assert.deepEqual(host.commands(), ["recover_installation_identity", "restart_after_identity_recovery"]);
+  assert.equal(state.identityRecoveryRestartRequired, true);
+  assert.equal(state.engineMutationBusy, true);
+  state.engineMutationBusy = false;
+  state.identityRecoveryRestartRequired = false;
+});
+
+test("cancelled authentication allows retry without claiming recovery or restarting", async () => {
+  host.reset();
+  state.engineMutationBusy = false;
+  state.identityRecoveryRestartRequired = false;
+  host.respond("recover_installation_identity", new Error("authentication cancelled"));
+  const { actions } = createGeneralActions({ renderPage: spy(), renderGlassOverlays: spy() });
+  await actions["recover-installation-identity"]();
+  assert.deepEqual(host.commands(), ["recover_installation_identity"]);
+  assert.equal(state.identityRecoveryRestartRequired, false);
+  assert.equal(state.engineMutationBusy, false);
+  assert.match(state.identityRecoveryError, /cancelled/u);
+});
+
+test("uncertain Keychain writes retain the restart requirement and explicit failure", async () => {
+  host.reset();
+  state.engineMutationBusy = false;
+  state.identityRecoveryRestartRequired = false;
+  host.respond("recover_installation_identity", { recovered: false, requires_restart: true, error: "readback failed" });
+  host.respond("restart_after_identity_recovery", null);
+  const { actions } = createGeneralActions({ renderPage: spy(), renderGlassOverlays: spy() });
+  await actions["recover-installation-identity"]();
+  assert.deepEqual(host.commands(), ["recover_installation_identity"]);
+  assert.equal(state.identityRecoveryRestartRequired, true);
+  assert.equal(state.engineMutationBusy, true);
+  assert.equal(state.identityRecoveryError, "readback failed");
+  await actions["recover-installation-identity"]();
+  assert.equal(host.commands().length, 1, "do not repeat the write in the retired process");
+  await actions["restart-after-identity-recovery"]();
+  assert.equal(host.commands().at(-1), "restart_after_identity_recovery");
+  state.engineMutationBusy = false;
+  state.identityRecoveryRestartRequired = false;
+});

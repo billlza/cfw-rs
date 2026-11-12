@@ -945,6 +945,33 @@ public final class GlobalAuthorityServiceCore: @unchecked Sendable {
     unboundPreparationOffProof(for: mode)
   }
 
+  public func installationRecoveryIdentity(peer: PeerIdentity) throws -> InstallationRecoveryState {
+    guard peer.role == .host, let consoleUID = peer.consoleUID,
+      peer.euid == consoleUID, consoleUID > 0, consoleUID != UInt32.max,
+      peer.auditSessionID != 0, peer.auditSessionID != UInt32.max
+    else { throw AuthorityDomainError(code: .globalAuthorityIdentityRejected) }
+    return try lock.withLock {
+      guard reducer.state != .quarantined else {
+        throw AuthorityDomainError(code: .quarantined)
+      }
+      guard reducer.state != .recovering else {
+        throw AuthorityDomainError(code: .globalAuthorityRecovering)
+      }
+      guard reducer.state == .off, reducer.lease == nil,
+        !reducer.retainsCapabilityOrTicket, proxyCapability == nil,
+        !reducer.retainsSecretBuffer, !secrets.hasPendingMaterial,
+        reducer.ownerBinding == nil, boundPeerID == nil, ownerAuditSessionID == nil,
+        configurationDescriptor == nil
+      else { throw AuthorityDomainError(code: .cleanupUnproven) }
+      return try InstallationRecoveryState(
+        identity: reducer.installationID.map {
+          try InstallationRecoveryIdentity(
+            installationID: $0, acceptedEpoch: reducer.replayCursor?.acceptedEpoch ?? 0,
+            revision: reducer.revision, consoleUID: consoleUID)
+        })
+    }
+  }
+
   public func snapshot(peer: PeerIdentity) throws -> AuthoritySnapshot {
     try lock.withLock {
       if let lease = reducer.lease {

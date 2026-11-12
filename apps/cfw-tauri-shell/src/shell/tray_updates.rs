@@ -130,7 +130,7 @@ pub(crate) fn handle_tray_engine_event(app: &AppHandle, action: TrayEngineAction
                     .map(|_| ())
             }
             TrayEngineAction::RouteMode(mode) => {
-                crate::commands::set_proxy_mode(app.state(), mode.into()).await
+                crate::commands::set_proxy_mode(app.clone(), app.state(), mode.into()).await
             }
         };
         if let Err(error) = result {

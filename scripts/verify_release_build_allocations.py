@@ -324,6 +324,13 @@ RETIRED_GA_ALLOCATIONS_V050: Final = (
     ("50029", "ga", "retired_product_change_after_install_before_ga_runtime_acceptance"),
 )
 PUBLISHED_GA_V050: Final = ("50030", "ga", "published")
+RETIRED_GA_ALLOCATIONS_V051: Final = (
+    ("51001", "ga", "retired_product_change_after_ga_runtime_acceptance_before_publication"),
+    ("51002", "ga", "retired_product_change_after_ga_runtime_acceptance_before_publication"),
+    ("51003", "ga", "retired_product_change_notarization_outcome_unknown"),
+    ("51004", "ga", "retired_product_change_after_ga_runtime_acceptance_before_publication"),
+)
+PUBLISHED_GA_V051: Final = ("51005", "ga", "published")
 
 
 @dataclass(frozen=True)
@@ -378,8 +385,8 @@ POLICIES: Final = {
         first_build=51001,
         immutable_prefix=(),
         superseded=None,
-        retired_ga=(),
-        published=None,
+        retired_ga=RETIRED_GA_ALLOCATIONS_V051,
+        published=PUBLISHED_GA_V051,
         closed=False,
     ),
 }
@@ -633,7 +640,9 @@ def validate_contract(
         active_ga=active_ga,
         builds=frozenset(records),
         retired_ga=tuple(
-            (str(retired["build"]), str(retired["status"])) for retired in retired_ga
+            (str(record["build"]), str(record["status"]))
+            for record in allocations
+            if record["role"] == "ga" and str(record["status"]).startswith("retired_")
         ),
     )
 
@@ -744,23 +753,26 @@ def validate_predecessor_registry(
 def validate_published_predecessors(
     predecessors: Mapping[str, RegisteredPredecessor],
 ) -> None:
-    """Requires the GA every closed product version published to be registered.
+    """Requires every fixed published GA to be registered.
 
     A published GA was installed on the release Mac, and the first GA install
-    of the next product version replaces it and archives its journals, so
-    opening that version without registering the profile fails here, before
+    of the next release replaces it and archives its journals, so
+    allocating that build without registering the profile fails here, before
     anything is signed.
     """
     for policy in POLICIES.values():
-        if policy.published is None:
-            continue
-        build = policy.published[0]
-        profile = predecessors.get(build)
-        if profile is None or profile.product_version != policy.product_version:
-            raise ReleaseBuildAllocationError(
-                f"published GA build {build} is not a registered "
-                f"{policy.product_version} install predecessor"
-            )
+        fixed = policy.immutable_prefix
+        if policy.published is not None:
+            fixed += (policy.published,)
+        for build, role, status in fixed:
+            if role != "ga" or status != "published":
+                continue
+            profile = predecessors.get(build)
+            if profile is None or profile.product_version != policy.product_version:
+                raise ReleaseBuildAllocationError(
+                    f"published GA build {build} is not a registered "
+                    f"{policy.product_version} install predecessor"
+                )
 
 
 def validate_closed_contract(value: dict[str, object]) -> None:

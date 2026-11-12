@@ -481,7 +481,8 @@ struct CurrentAppServiceMaintenanceTests {
       case .approvalRequired, .serviceNotFound, .statusUnknown:
         #expect(proxy.registerCalls == 0)
         #expect(proxy.unregisterCalls == 0)
-      case .mutationFailed, .postconditionFailed, .unregistrationPending, .unregistrationTimedOut:
+      case .mutationFailed, .registrationOperationNotPermitted, .postconditionFailed,
+        .unregistrationPending, .unregistrationTimedOut:
         #expect(proxy.unregisterCalls == 1)
       }
     }

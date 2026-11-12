@@ -310,6 +310,26 @@ public final class AuthenticatedAuthorityPeerService: NSObject,
     }
   }
 
+  public func installationRecoveryIdentity(
+    _ request: Data, reply: @escaping (Data?, NSError?) -> Void
+  ) {
+    let preObservation = core.releaseObservationState()
+    do {
+      let envelope = try decode(request, expected: .installationRecoveryIdentity)
+      let peer = try reauthorize(.ownedLease)
+      let response = try concurrency.withRead {
+        try self.response(
+          self.core.installationRecoveryIdentity(peer: peer),
+          envelope: envelope, operationID: nil)
+      }
+      reply(response, nil)
+    } catch {
+      let observationError = recordRejectedOperation(
+        request: request, error: error, preObservation: preObservation)
+      reply(nil, observationError ?? xpcError(error))
+    }
+  }
+
   public func snapshot(
     _ request: Data, reply: @escaping (Data?, NSError?) -> Void
   ) {
@@ -443,6 +463,7 @@ public final class AuthenticatedAuthorityPeerService: NSObject,
     case .attestStopped: .attestStopped
     case .cancelPrepared: .cancelPrepared
     case .snapshot: .snapshot
+    case .installationRecoveryIdentity: .installationRecoveryIdentity
     case .ownerLeaseStatus: .ownerLeaseStatus
     }
   }

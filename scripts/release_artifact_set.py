@@ -64,6 +64,7 @@ if __package__:
         ACTIVE_RELEASE_IDENTITY,
         ga_root,
         ga_signed_root,
+        macos_update_version,
     )
     from .release_apple_toolchain import (
         DEVELOPER_DIRECTORY_PLACEHOLDER,
@@ -129,6 +130,7 @@ else:
         ACTIVE_RELEASE_IDENTITY,
         ga_root,
         ga_signed_root,
+        macos_update_version,
     )
     from release_apple_toolchain import (
         DEVELOPER_DIRECTORY_PLACEHOLDER,
@@ -164,13 +166,17 @@ else:
 PRODUCT = "Clash for Mac"
 TEAM_ID = "YKUPL7Z869"
 OFFICIAL_RELEASE_ORIGIN = "https://github.com/billlza/cfw-rs/releases/download"
-UPDATER_SEAL_DOCUMENT = "cfw-updater-release-set-seal-v2"
+UPDATER_SEAL_DOCUMENT = "cfw-updater-release-set-seal-v3"
+UPDATER_SEAL_SCHEMA_VERSION = 3
+LEGACY_UPDATER_MANIFEST = "latest.json"
+LEGACY_UPDATER_MANIFEST_SHA256 = "db68706d0960c6446de20bea002d7f6e46fc6c7b40c8245a9b3b3730321da785"
 UPDATER_VERIFICATION_DOCUMENT = "cfw-updater-embedded-pubkey-verification-v1"
 RELEASE_VERIFIER_BINDING_DOCUMENT = "cfw-release-verifier-build-binding-v3"
 RELEASE_VERIFIER_BINDING_SCHEMA_VERSION = 4
 DMG_SEAL_DOCUMENT = "cfw-dmg-release-set-seal-v2"
 DMG_SUBMISSION_DOCUMENT = "cfw-dmg-notarization-submission-receipt-v2"
-DISTRIBUTION_SEAL_DOCUMENT = "cfw-ga-distribution-package-set-seal-v1"
+DISTRIBUTION_SEAL_DOCUMENT = "cfw-ga-distribution-package-set-seal-v2"
+DISTRIBUTION_SEAL_SCHEMA_VERSION = 2
 UPDATER_SEAL_NAME = "updater-set.seal.json"
 UPDATER_VERIFICATION_NAME = "embedded-pubkey-verification.json"
 DMG_SEAL_NAME = "dmg-set.seal.json"
@@ -1882,13 +1888,14 @@ def _require_canonical_document(path: Path, value: object, data: bytes, label: s
 
 
 def _updater_names(version: str) -> tuple[str, str, str]:
-    archive = f"Clash.for.Mac_{version}_aarch64.app.tar.gz"
-    return archive, f"{archive}.sig", "latest.json"
+    update = macos_update_version(version, CANDIDATE_BUILD_NUMBER)
+    archive = f"Clash.for.Mac_{update}_aarch64.app.tar.gz"
+    return archive, f"{archive}.sig", "latest-macos.json"
 
 
 def _reset_updater_generated_documents(staging: Path, version: str) -> None:
     """Remove only transaction-owned documents before deterministic replay."""
-    payload = set(_updater_names(version))
+    payload = {*_updater_names(version), LEGACY_UPDATER_MANIFEST}
     generated = {UPDATER_VERIFICATION_NAME, UPDATER_SEAL_NAME}
     inventory = _inventory(staging)
     if not payload.issubset(inventory) or inventory - payload - generated:
@@ -1927,7 +1934,8 @@ def _dmg_names(version: str) -> tuple[str, str, str, str, str, str]:
 
 
 def _official_url(version: str, filename: str) -> str:
-    return f"{OFFICIAL_RELEASE_ORIGIN}/v{version}/{filename}"
+    update = macos_update_version(version, CANDIDATE_BUILD_NUMBER)
+    return f"{OFFICIAL_RELEASE_ORIGIN}/v{update}/{filename}"
 
 
 def read_updater_app_manifest(archive: Path) -> dict[str, object]:
@@ -2195,6 +2203,13 @@ def _read_updater_signature(path: Path) -> str:
     return signature
 
 
+def _legacy_manifest_record(directory: Path) -> dict[str, Any]:
+    record = _artifact_record(directory / LEGACY_UPDATER_MANIFEST, MAX_SMALL_DOCUMENT_BYTES)
+    if record["sha256"] != LEGACY_UPDATER_MANIFEST_SHA256:
+        raise ArtifactSetError("legacy updater manifest differs from the published compatibility feed")
+    return record
+
+
 def _build_updater_seal(
     directory: Path,
     version: str,
@@ -2217,6 +2232,7 @@ def _build_updater_seal(
     archive_record = _artifact_record(archive, MAX_UPDATER_ARCHIVE_BYTES)
     signature_record = _artifact_record(signature_path, MAX_SIGNATURE_BYTES)
     latest_record = _artifact_record(latest, MAX_SMALL_DOCUMENT_BYTES)
+    legacy_record = _legacy_manifest_record(directory)
     verification_record = _artifact_record(
         verification_path, MAX_SMALL_DOCUMENT_BYTES
     )
@@ -2224,7 +2240,7 @@ def _build_updater_seal(
     official_url = _official_url(version, archive_name)
     _validate_latest(
         latest,
-        version=version,
+        version=macos_update_version(version, CANDIDATE_BUILD_NUMBER),
         signature=signature,
         official_url=official_url,
     )
@@ -2257,6 +2273,7 @@ def _build_updater_seal(
         "artifacts": {
             "archive": archive_record,
             "embedded_public_key_verification": verification_record,
+            "legacy_manifest": legacy_record,
             "manifest": latest_record,
             "signature": signature_record,
         },
@@ -2268,7 +2285,7 @@ def _build_updater_seal(
         "product": PRODUCT,
         "release_verifier": release_verifier,
         "repository": _source_identity(source_identity),
-        "schema_version": 2,
+        "schema_version": UPDATER_SEAL_SCHEMA_VERSION,
         "sealed_at": _require_utc_timestamp(sealed_at, "updater seal time"),
         "tauri_config_sha256": verification["tauri_config_sha256"],
         "version": version,
@@ -2445,6 +2462,7 @@ def verify_updater_set(
         archive_name,
         signature_name,
         latest_name,
+        LEGACY_UPDATER_MANIFEST,
         UPDATER_VERIFICATION_NAME,
         UPDATER_SEAL_NAME,
     }
@@ -2478,7 +2496,7 @@ def verify_updater_set(
     )
     if (
         type(seal["schema_version"]) is not int
-        or seal["schema_version"] != 2
+        or seal["schema_version"] != UPDATER_SEAL_SCHEMA_VERSION
         or seal["document"] != UPDATER_SEAL_DOCUMENT
         or seal["product"] != PRODUCT
         or seal["version"] != version
@@ -2504,7 +2522,7 @@ def verify_updater_set(
     )
     artifacts = _require_exact_keys(
         seal["artifacts"],
-        {"archive", "embedded_public_key_verification", "manifest", "signature"},
+        {"archive", "embedded_public_key_verification", "legacy_manifest", "manifest", "signature"},
         "updater sealed artifacts",
     )
     archive_record = _validate_artifact_record(
@@ -2525,6 +2543,8 @@ def verify_updater_set(
         MAX_SMALL_DOCUMENT_BYTES,
         "updater manifest",
     )
+    if artifacts["legacy_manifest"] != _legacy_manifest_record(directory):
+        raise ArtifactSetError("sealed legacy updater manifest differs from its compatibility feed")
     _validate_artifact_record(
         artifacts["embedded_public_key_verification"],
         directory / UPDATER_VERIFICATION_NAME,
@@ -2534,7 +2554,7 @@ def verify_updater_set(
     signature = _read_updater_signature(directory / signature_name)
     _validate_latest(
         directory / latest_name,
-        version=version,
+        version=macos_update_version(version, CANDIDATE_BUILD_NUMBER),
         signature=signature,
         official_url=seal["official_url"],
     )
@@ -3801,6 +3821,9 @@ def _release_asset_paths(
             MAX_SMALL_DOCUMENT_BYTES,
         ),
         "updater_manifest": (updater / latest_name, MAX_SMALL_DOCUMENT_BYTES),
+        "updater_legacy_manifest": (
+            updater / LEGACY_UPDATER_MANIFEST, MAX_SMALL_DOCUMENT_BYTES
+        ),
         "updater_signature": (updater / signature_name, MAX_SIGNATURE_BYTES),
     }
     if distribution_directory is not None:
@@ -4019,7 +4042,7 @@ def _build_distribution_seal(
         "publication_closure": publication,
         "release_assets": release_assets,
         "repository": source,
-        "schema_version": 1,
+        "schema_version": DISTRIBUTION_SEAL_SCHEMA_VERSION,
         "sealed_at": _require_utc_timestamp(
             sealed_at, "distribution seal time"
         ),
@@ -4085,7 +4108,7 @@ def verify_distribution_set(
     )
     if (
         type(seal["schema_version"]) is not int
-        or seal["schema_version"] != 1
+        or seal["schema_version"] != DISTRIBUTION_SEAL_SCHEMA_VERSION
         or seal["document"] != DISTRIBUTION_SEAL_DOCUMENT
         or seal["product"] != PRODUCT
         or seal["version"] != version
@@ -4410,6 +4433,7 @@ def verify_release_sets(
         archive_name,
         signature_name,
         latest_name,
+        LEGACY_UPDATER_MANIFEST,
         *dmg_names,
     }
     for name in forbidden_legacy:
@@ -4474,15 +4498,15 @@ def self_check() -> None:
         >= MAX_PUBLICATION_BUNDLE_BYTES
     ):
         raise ArtifactSetError("public release bundle has no container overhead reserve")
-    if DISTRIBUTION_SEAL_DOCUMENT != "cfw-ga-distribution-package-set-seal-v1":
+    if DISTRIBUTION_SEAL_DOCUMENT != "cfw-ga-distribution-package-set-seal-v2":
         raise ArtifactSetError("distribution seal contract drifted")
-    if UPDATER_SEAL_DOCUMENT != "cfw-updater-release-set-seal-v2":
+    if UPDATER_SEAL_DOCUMENT != "cfw-updater-release-set-seal-v3":
         raise ArtifactSetError("updater seal contract drifted")
     if DMG_SEAL_DOCUMENT != "cfw-dmg-release-set-seal-v2":
         raise ArtifactSetError("DMG seal contract drifted")
-    if _official_url("0.5.0", _updater_names("0.5.0")[0]) != (
-        "https://github.com/billlza/cfw-rs/releases/download/v0.5.0/"
-        "Clash.for.Mac_0.5.0_aarch64.app.tar.gz"
+    if _official_url("1.2.3", _updater_names("1.2.3")[0]) != (
+        f"https://github.com/billlza/cfw-rs/releases/download/v1.2.3-build.{CANDIDATE_BUILD_NUMBER}/"
+        f"Clash.for.Mac_1.2.3-build.{CANDIDATE_BUILD_NUMBER}_aarch64.app.tar.gz"
     ):
         raise ArtifactSetError("official release URL contract drifted")
     print("release artifact set self-check ok")

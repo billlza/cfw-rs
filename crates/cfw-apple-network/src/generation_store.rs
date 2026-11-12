@@ -47,6 +47,10 @@ pub enum GenerationStoreError {
     GenerationConflict { expected: u64, actual: u64 },
     #[error("engine lineage generation counter is exhausted")]
     GenerationExhausted,
+    #[error("engine lineage changed while installation recovery was being authorized")]
+    RecoveryConflict,
+    #[error("engine lineage epoch counter is exhausted")]
+    EpochExhausted,
     #[error("engine lineage Keychain load failed: {0}")]
     AuthorityLoad(String),
     #[error("engine lineage Keychain creation failed: {0}")]
@@ -176,6 +180,11 @@ enum CompareExchangeOutcome {
     Conflict,
 }
 
+enum CommitOutcome {
+    Committed,
+    Conflict(EngineLineage),
+}
+
 trait LineageAuthority: Send + Sync + 'static {
     fn load(&self) -> Result<Option<AuthorityRecord>, GenerationStoreError>;
     fn create(&self, record: &AuthorityRecord) -> Result<CreateOutcome, GenerationStoreError>;
@@ -200,6 +209,47 @@ pub struct KeychainEngineGenerationStore {
 impl KeychainEngineGenerationStore {
     pub fn new(root: impl Into<PathBuf>) -> Result<Self, GenerationStoreError> {
         Self::with_authority(root.into(), Arc::new(MacOsKeychainAuthority))
+    }
+
+    /// Rebinds only this user's Keychain lineage after the signed Host has
+    /// authenticated the console user and proven native owners globally Off.
+    /// The caller must retain exclusive engine maintenance until process exit:
+    /// a running coordinator's session is immutable, even if a write fails.
+    /// No root journal, other user's Keychain, or profile credential is changed.
+    pub fn recover_installation(
+        &self,
+        expected: &EngineLineage,
+        installation_id: Uuid,
+        accepted_epoch: u64,
+    ) -> Result<EngineLineage, GenerationStoreError> {
+        self.with_lock(|| {
+            // Do not create or replace a missing/corrupt item after consent.
+            // The baseline was loaded before authentication, and must still
+            // exist byte-for-byte when the atomic update is attempted.
+            let current = self.reload_authority()?;
+            let document = current.document()?;
+            if &document.lineage() != expected {
+                return Err(GenerationStoreError::RecoveryConflict);
+            }
+            let floor = if document.installation_id == installation_id {
+                accepted_epoch.max(document.config_epoch)
+            } else {
+                accepted_epoch
+            };
+            let replacement_document = LineageDocument {
+                schema_version: SCHEMA_VERSION,
+                installation_id,
+                config_epoch: floor
+                    .checked_add(1)
+                    .ok_or(GenerationStoreError::EpochExhausted)?,
+                generation: 0,
+            };
+            let replacement = AuthorityRecord::from_document(&replacement_document)?;
+            match self.commit_replacement(&current, &replacement)? {
+                CommitOutcome::Committed => Ok(replacement_document.lineage()),
+                CommitOutcome::Conflict(_) => Err(GenerationStoreError::RecoveryConflict),
+            }
+        })
     }
 
     fn with_authority(
@@ -276,6 +326,43 @@ impl KeychainEngineGenerationStore {
         self.synchronize_cache(&record)?;
         Ok(record)
     }
+
+    fn commit_replacement(
+        &self,
+        current: &AuthorityRecord,
+        replacement: &AuthorityRecord,
+    ) -> Result<CommitOutcome, GenerationStoreError> {
+        // Cache-first: a crash before CAS leaves only a repairable cache ahead
+        // of authority. No fallible filesystem operation follows a committed CAS.
+        self.synchronize_cache(replacement)?;
+        match self
+            .authority
+            .compare_exchange(&current.revision, replacement)
+        {
+            Ok(CompareExchangeOutcome::Swapped) => Ok(CommitOutcome::Committed),
+            Ok(CompareExchangeOutcome::Conflict) => Ok(CommitOutcome::Conflict(
+                self.reload_and_repair()?.document()?.lineage(),
+            )),
+            Err(write_error) => match self.reload_authority() {
+                // An error may arrive after the atomic Keychain update. Only
+                // authoritative readback of our exact replacement proves success.
+                Ok(record) if &record == replacement => Ok(CommitOutcome::Committed),
+                Ok(record) => match self.synchronize_cache(&record) {
+                    Ok(()) => Err(write_error),
+                    Err(recovery_error) => {
+                        Err(GenerationStoreError::AuthoritySaveAndRecoveryFailed {
+                            write_error: write_error.to_string(),
+                            recovery_error: recovery_error.to_string(),
+                        })
+                    }
+                },
+                Err(recovery_error) => Err(GenerationStoreError::AuthoritySaveAndRecoveryFailed {
+                    write_error: write_error.to_string(),
+                    recovery_error: recovery_error.to_string(),
+                }),
+            },
+        }
+    }
 }
 
 impl EngineGenerationStore for KeychainEngineGenerationStore {
@@ -305,45 +392,12 @@ impl EngineGenerationStore for KeychainEngineGenerationStore {
             replacement_document.generation = next;
             let replacement = AuthorityRecord::from_document(&replacement_document)?;
 
-            // Cache-first ordering is intentional. A crash before the Keychain CAS
-            // leaves only a repairable cache ahead of authority. Once CAS succeeds,
-            // no fallible filesystem operation remains on the success path.
-            self.synchronize_cache(&replacement)?;
-            match self
-                .authority
-                .compare_exchange(&current.revision, &replacement)
-            {
-                Ok(CompareExchangeOutcome::Swapped) => Ok(next),
-                Ok(CompareExchangeOutcome::Conflict) => {
-                    let actual = self.reload_and_repair()?.document()?.generation;
-                    Err(GenerationStoreError::GenerationConflict {
-                        expected: expected_generation,
-                        actual,
-                    })
-                }
-                Err(write_error) => match self.reload_authority() {
-                    // Security.framework may report an error after the atomic
-                    // update has committed. The authoritative read resolves
-                    // that ambiguous outcome: only the exact replacement is
-                    // accepted as success. Cache-first ordering means no
-                    // fallible filesystem repair is needed on this path.
-                    Ok(record) if record == replacement => Ok(next),
-                    Ok(record) => match self.synchronize_cache(&record) {
-                        Ok(()) => Err(write_error),
-                        Err(recovery_error) => {
-                            Err(GenerationStoreError::AuthoritySaveAndRecoveryFailed {
-                                write_error: write_error.to_string(),
-                                recovery_error: recovery_error.to_string(),
-                            })
-                        }
-                    },
-                    Err(recovery_error) => {
-                        Err(GenerationStoreError::AuthoritySaveAndRecoveryFailed {
-                            write_error: write_error.to_string(),
-                            recovery_error: recovery_error.to_string(),
-                        })
-                    }
-                },
+            match self.commit_replacement(&current, &replacement)? {
+                CommitOutcome::Committed => Ok(next),
+                CommitOutcome::Conflict(actual) => Err(GenerationStoreError::GenerationConflict {
+                    expected: expected_generation,
+                    actual: actual.generation,
+                }),
             }
         })
         .map_err(|error| error.to_string())

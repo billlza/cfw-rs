@@ -26,6 +26,7 @@ final class ServiceUpgradeFixture: CurrentAppServiceMaintaining,
   private let cancelAfterProxyUnregister: Bool
   private let conflictingInspection: Int?
   private let failedMutation: String?
+  private var authorityRegistrationRefusals: Int
   private var inspections = 0
   private var events: [String] = []
 
@@ -35,7 +36,8 @@ final class ServiceUpgradeFixture: CurrentAppServiceMaintaining,
     proxyStatus: CurrentAppServiceStatus = .enabled,
     authorityStatus: CurrentAppServiceStatus = .enabled,
     conflictingInspection: Int? = nil,
-    failedMutation: String? = nil
+    failedMutation: String? = nil,
+    authorityRegistrationRefusals: Int = 0
   ) {
     remainingInspectionFailures = inspectionFailures
     self.failAfterProxyUnregister = failAfterProxyUnregister
@@ -44,6 +46,7 @@ final class ServiceUpgradeFixture: CurrentAppServiceMaintaining,
     self.authorityStatus = authorityStatus
     self.conflictingInspection = conflictingInspection
     self.failedMutation = failedMutation
+    self.authorityRegistrationRefusals = authorityRegistrationRefusals
   }
 
   var inspectionCount: Int { lock.withLock { inspections } }
@@ -108,6 +111,10 @@ final class ServiceUpgradeFixture: CurrentAppServiceMaintaining,
       events.append("\(mutation):\(service)")
       if failedMutation == "\(mutation):\(service)" {
         throw CurrentAppServiceMaintenanceError.mutationFailed(service)
+      }
+      if service == .globalAuthority, mutation == .register, authorityRegistrationRefusals > 0 {
+        authorityRegistrationRefusals -= 1
+        throw CurrentAppServiceMaintenanceError.registrationOperationNotPermitted(service)
       }
       let status: CurrentAppServiceStatus = mutation == .register ? .enabled : .notRegistered
       if service == .proxyAgent {

@@ -335,6 +335,9 @@ cat >"$app_path/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 printf '%s\n' "fixture app" >"$app_path/Contents/fixture.txt"
+/bin/mkdir -p "$fixture_artifact_repository/docs/release"
+/bin/cp "$repo_root/docs/release/macos-legacy-latest.json" \
+  "$fixture_artifact_repository/docs/release/macos-legacy-latest.json"
 
 run_fixture() {
   run_clean_environment \
@@ -350,8 +353,9 @@ if ! run_fixture >"$positive_log" 2>&1; then
 fi
 final_set="$ga_root/packages/updater/v$CFW_PRODUCT_VERSION"
 for required in \
-  "Clash.for.Mac_${CFW_PRODUCT_VERSION}_aarch64.app.tar.gz" \
-  "Clash.for.Mac_${CFW_PRODUCT_VERSION}_aarch64.app.tar.gz.sig" \
+  "Clash.for.Mac_${CFW_PRODUCT_VERSION}-build.${CFW_GA_BUILD}_aarch64.app.tar.gz" \
+  "Clash.for.Mac_${CFW_PRODUCT_VERSION}-build.${CFW_GA_BUILD}_aarch64.app.tar.gz.sig" \
+  latest-macos.json \
   latest.json \
   updater-set.seal.json
 do

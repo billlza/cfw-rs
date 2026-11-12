@@ -118,6 +118,54 @@ import Testing
     #expect(services.inspectionCount == 2)
     #expect(await subject.serviceBuildUpgradePending)
   }
+
+  @Test func authorityRegistrationRefusalAfterUnregisterRetriesTheSameHandoff() async throws {
+    let request = try startRequest(tunnelOptions: nil)
+    let descriptor = try request.descriptor(slot: .systemProxy)
+    let services = ServiceUpgradeFixture(authorityRegistrationRefusals: 1)
+    let proxy = StartableProxyAgent(descriptor: descriptor)
+    let subject = makeCoordinator(
+      proxy: proxy, tunnel: StartableTunnelHost(descriptor: descriptor),
+      observation: AuthorityOwnershipObservation(state: .off, lease: nil),
+      serviceBuildObserver: services, serviceMaintainer: services)
+
+    #expect(try await subject.execute(.queryStatus) == .status(.off))
+    #expect(
+      services.mutations == [
+        "unregister:proxyAgent", "unregister:globalAuthority",
+        "register:globalAuthority", "register:globalAuthority", "register:proxyAgent",
+      ])
+    #expect(try services.inspect().isCurrent)
+    #expect(await proxy.counters().start == 0)
+  }
+
+  @Test(arguments: [false, true])
+  func authorityRegistrationRefusalDoesNotRetryOutsideHandoffOrBeyondOnce(handoff: Bool)
+    async throws
+  {
+    let request = try startRequest(tunnelOptions: nil)
+    let descriptor = try request.descriptor(slot: .systemProxy)
+    let status: CurrentAppServiceStatus = handoff ? .enabled : .notRegistered
+    let services = ServiceUpgradeFixture(
+      proxyStatus: status, authorityStatus: status, authorityRegistrationRefusals: 2)
+    let subject = makeCoordinator(
+      proxy: StartableProxyAgent(descriptor: descriptor),
+      tunnel: StartableTunnelHost(descriptor: descriptor),
+      observation: AuthorityOwnershipObservation(state: .off, lease: nil),
+      serviceBuildObserver: services, serviceMaintainer: services)
+
+    #expect(await failureCode(subject, .queryStatus) == .cleanupUnproven)
+    let expected =
+      handoff
+      ? [
+        "unregister:proxyAgent", "unregister:globalAuthority", "register:globalAuthority",
+        "register:globalAuthority",
+      ]
+      : ["register:globalAuthority"]
+    #expect(services.mutations == expected)
+    #expect(services.status(of: .globalAuthority) == .notRegistered)
+    #expect(services.status(of: .proxyAgent) == .notRegistered)
+  }
 }
 
 extension ServiceBuildUpgradeTests {

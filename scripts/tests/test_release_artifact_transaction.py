@@ -78,7 +78,7 @@ from scripts.tests.notary_fixture import (
     response,
     submit_response,
 )
-from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY, PRODUCT_VERSION
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY, PRODUCT_VERSION, macos_update_version
 
 
 GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
@@ -1619,10 +1619,15 @@ class UpdaterArtifactSetTests(unittest.TestCase):
         self.staging = updater_root / "updater-stage.fixture"
         self.staging.mkdir(mode=0o700)
         self.destination = updater_root / f"v{PRODUCT_VERSION}"
-        self.archive_name = f"Clash.for.Mac_{PRODUCT_VERSION}_aarch64.app.tar.gz"
+        self.update_version = macos_update_version(PRODUCT_VERSION, GA_BUILD)
+        self.archive_name = f"Clash.for.Mac_{self.update_version}_aarch64.app.tar.gz"
         self.archive = self.staging / self.archive_name
         self.signature = self.staging / f"{self.archive_name}.sig"
-        self.latest = self.staging / "latest.json"
+        self.latest = self.staging / "latest-macos.json"
+        self.legacy_latest = self.staging / "latest.json"
+        self.legacy_latest.write_bytes(
+            (Path(__file__).resolve().parents[2] / "docs/release/macos-legacy-latest.json").read_bytes()
+        )
         self.verification = self.staging / "embedded-pubkey-verification.json"
         self.verifier_build = create_release_verifier_build(self.root)
 
@@ -1641,7 +1646,7 @@ class UpdaterArtifactSetTests(unittest.TestCase):
         self.signature.write_text("fixture-signature\n", encoding="utf-8")
         signature = self.signature.read_text(encoding="utf-8").strip()
         url = (
-            f"https://github.com/billlza/cfw-rs/releases/download/v{PRODUCT_VERSION}/"
+            f"https://github.com/billlza/cfw-rs/releases/download/v{self.update_version}/"
             + self.archive_name
         )
         self.latest.write_text(
@@ -1653,7 +1658,7 @@ class UpdaterArtifactSetTests(unittest.TestCase):
                         for target in ("darwin-aarch64", "darwin-arm64")
                     },
                     "pub_date": CLOCK,
-                    "version": PRODUCT_VERSION,
+                    "version": self.update_version,
                 },
                 sort_keys=True,
             )
@@ -1707,16 +1712,22 @@ class UpdaterArtifactSetTests(unittest.TestCase):
         destination = self.seal()
         self.assertFalse(self.staging.exists())
         seal = self.verify(destination)
-        self.assertEqual(seal["schema_version"], 2)
-        self.assertEqual(seal["document"], "cfw-updater-release-set-seal-v2")
+        self.assertEqual(seal["schema_version"], 3)
+        self.assertEqual(seal["document"], "cfw-updater-release-set-seal-v3")
         self.assertEqual(seal["prepackage"], self.prepackage)
         self.assertEqual(
             seal["official_url"],
             (
-                f"https://github.com/billlza/cfw-rs/releases/download/v{PRODUCT_VERSION}/"
+                f"https://github.com/billlza/cfw-rs/releases/download/v{self.update_version}/"
                 + self.archive_name
             ),
         )
+
+    def test_legacy_updater_manifest_cannot_be_retargeted(self) -> None:
+        self.legacy_latest.write_bytes(b"{}\n")
+        with self.assertRaisesRegex(ArtifactSetError, "legacy updater manifest differs"):
+            self.seal()
+        self.assertFalse(self.destination.exists())
 
     def test_missing_prepackage_fails_before_updater_verifier_or_publication(self) -> None:
         self.prepackage_manifest.unlink()
@@ -2571,7 +2582,8 @@ class DistributionArtifactSetTests(unittest.TestCase):
             )["sha256"],
         )
         uploadable = self.fixture.verify_release()
-        self.assertEqual(len(uploadable), 15)
+        self.assertEqual(len(uploadable), 16)
+        self.assertIn(self.fixture.dmg.package_root / "updater" / f"v{PRODUCT_VERSION}" / "latest.json", uploadable)
         self.assertIn(destination / DISTRIBUTION_SEAL_NAME, uploadable)
         private_gatekeeper = (
             self.fixture.dmg.package_root

@@ -36,7 +36,7 @@ impl ReleaseTarget {
     pub const fn metadata_url(self) -> &'static str {
         match self {
             Self::MacArm64 => {
-                "https://github.com/billlza/cfw-rs/releases/latest/download/latest.json"
+                "https://github.com/billlza/cfw-rs/releases/latest/download/latest-macos.json"
             }
             // A separately published channel pointer. Windows releases must
             // not change the repository's Mac `latest` selection.
@@ -115,16 +115,40 @@ impl ReleaseTarget {
     }
 
     fn require_version(self, parsed: &Version, version: &str) -> Result<(), UpdateContractError> {
-        if self == Self::WindowsX64
-            && (version.len() > 128
-                || parsed.major > 255
-                || parsed.minor > 255
-                || parsed.patch > 65_535)
+        if self == Self::MacArm64 {
+            macos_offer_identity(parsed)?;
+        } else if version.len() > 128
+            || parsed.major > 255
+            || parsed.minor > 255
+            || parsed.patch > 65_535
         {
             return Err(UpdateContractError::InvalidMsiVersion);
         }
         Ok(())
     }
+}
+
+fn macos_offer_identity(version: &Version) -> Result<(Version, u64), UpdateContractError> {
+    let build = version
+        .pre
+        .as_str()
+        .strip_prefix("build.")
+        .and_then(|value| {
+            value.parse::<u64>().ok().filter(|build| {
+                *build > 0 && i64::try_from(*build).is_ok() && build.to_string() == value
+            })
+        })
+        .filter(|_| {
+            version.build.is_empty()
+                && [version.major, version.minor, version.patch]
+                    .into_iter()
+                    .all(|part| part <= 999_999_999)
+        })
+        .ok_or(UpdateContractError::InvalidMacBuildVersion)?;
+    Ok((
+        Version::new(version.major, version.minor, version.patch),
+        build,
+    ))
 }
 
 #[derive(Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -149,6 +173,14 @@ impl std::fmt::Debug for UpdateAuthorization {
 }
 
 impl UpdateAuthorization {
+    /// A macOS offer names both signed bundle fields using a build-qualified
+    /// release tag. The OS-visible product version remains MAJOR.MINOR.PATCH.
+    pub fn macos_bundle_identity(&self) -> Result<(Version, u64), UpdateContractError> {
+        let parsed =
+            Version::parse(&self.version).map_err(|_| UpdateContractError::InvalidVersion)?;
+        macos_offer_identity(&parsed)
+    }
+
     /// Recheck persisted release-byte expectations without inventing presentation
     /// metadata. This validates fields only; the signature still needs verification.
     pub fn validate_for(&self, target: ReleaseTarget) -> Result<(), UpdateContractError> {
@@ -168,6 +200,8 @@ pub enum UpdateContractError {
     UnsupportedTarget,
     #[error("update version is outside the Windows MSI identity limits")]
     InvalidMsiVersion,
+    #[error("macOS update version must be MAJOR.MINOR.PATCH-build.BUILD")]
+    InvalidMacBuildVersion,
     #[error("update version is not strict SemVer")]
     InvalidVersion,
     #[error("update version is not in canonical SemVer form")]
@@ -388,14 +422,16 @@ fn validate_versioned_mac_metadata_url(url: &Url) -> std::result::Result<(), Str
     let version = url
         .path()
         .strip_prefix("/billlza/cfw-rs/releases/download/v")
-        .and_then(|tail| tail.strip_suffix("/latest.json"))
+        .and_then(|tail| tail.strip_suffix("/latest-macos.json"))
         .ok_or_else(|| "versioned metadata URL has a forbidden path".to_owned())?;
     let parsed = Version::parse(version)
         .map_err(|_| "versioned metadata URL is not strict SemVer".to_owned())?;
     if parsed.to_string() != version {
         return Err("versioned metadata URL is not canonical SemVer".into());
     }
-    Ok(())
+    macos_offer_identity(&parsed)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

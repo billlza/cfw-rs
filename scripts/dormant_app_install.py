@@ -297,6 +297,13 @@ INSTALLED_51004_PREDECESSOR: Final = PredecessorProfile(
     build_number="51004",
     tree_sha256="5cb832cdc1fa8828c8e6f7b61023cd42d03ac22ad463aef0bce4cd1cd5b7fd1e",
 )
+# Published 0.5.1 predecessor. The installed, notarized tree matches the
+# public DMG and updater package seals and the retained signed-app manifest.
+INSTALLED_51005_PREDECESSOR: Final = PredecessorProfile(
+    product_version="0.5.1",
+    build_number="51005",
+    tree_sha256="2fb5521d55b06c464044e0ebfe902bf244e8cdb9d3975f9c56bfb384deb22c00",
+)
 SUPPORTED_PREDECESSORS: Final = MappingProxyType(
     {
         INSTALLED_50025_PREDECESSOR.build_number: INSTALLED_50025_PREDECESSOR,
@@ -306,6 +313,7 @@ SUPPORTED_PREDECESSORS: Final = MappingProxyType(
         INSTALLED_51001_PREDECESSOR.build_number: INSTALLED_51001_PREDECESSOR,
         INSTALLED_51002_PREDECESSOR.build_number: INSTALLED_51002_PREDECESSOR,
         INSTALLED_51004_PREDECESSOR.build_number: INSTALLED_51004_PREDECESSOR,
+        INSTALLED_51005_PREDECESSOR.build_number: INSTALLED_51005_PREDECESSOR,
     }
 )
 SERVICE_DECOMMISSION_PHASES: Final = (

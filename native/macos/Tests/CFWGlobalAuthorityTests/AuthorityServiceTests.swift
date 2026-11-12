@@ -403,3 +403,152 @@ func tunnelPreparationSharesTheTicketIssuanceTime(clockStep: UInt64) throws {
   #expect(try objects.core.snapshot(peer: host).state == .off)
   #expect(objects.journal.states.contains { $0.mode == .localProxy && $0.state == .active })
 }
+
+@Test func recoveryIdentityReadIncludesEnrollmentWithoutMutatingItsJournal() throws {
+  let installation = AuthorityIdentifier(UUID())
+  let journal = ServiceJournal()
+  let core = GlobalAuthorityServiceCore(
+    reducer: try .enrolledOff(installationID: installation), journal: journal,
+    randomness: ServiceRandomness(), clock: ServiceClock(),
+    processTable: EmptyAuthorityProcessTable())
+  let identity = try #require(core.installationRecoveryIdentity(peer: servicePeer()).identity)
+  #expect(identity.installationID == installation)
+  #expect(identity.acceptedEpoch == 0)
+  #expect(identity.revision == 1)
+  #expect(identity.consoleUID == 501)
+  #expect(journal.count == 0)
+  #expect(try core.snapshot(peer: servicePeer()).replayCursor == nil)
+}
+
+@Test func recoveryIdentityReadNeverResetsTheReplayCursor() throws {
+  let cursor = try ReplayCursor(
+    installationID: AuthorityIdentifier(UUID()), acceptedEpoch: 6, acceptedGeneration: 19,
+    revision: 8, previousRecordSHA256: serviceDigest(Data("journal-head".utf8)))
+  let journal = ServiceJournal()
+  let core = GlobalAuthorityServiceCore(
+    reducer: try GlobalAuthorityReducer(state: .off, revision: 9, replayCursor: cursor),
+    journal: journal, randomness: ServiceRandomness(), clock: ServiceClock(),
+    processTable: EmptyAuthorityProcessTable())
+  let identity = try #require(core.installationRecoveryIdentity(peer: servicePeer()).identity)
+  #expect(identity.installationID == cursor.installationID)
+  #expect(identity.acceptedEpoch == 6)
+  #expect(identity.revision == 9)
+  #expect(try core.snapshot(peer: servicePeer()).replayCursor == cursor)
+  #expect(journal.count == 0)
+}
+
+@Test func recoveryReadRejectsOtherRolesAndNonConsoleHosts() throws {
+  let objects = try serviceObjects()
+  for role in [AuthorityRole.proxyAgent, .provider] {
+    #expect(throws: AuthorityDomainError(code: .globalAuthorityIdentityRejected)) {
+      try objects.core.installationRecoveryIdentity(peer: servicePeer(role))
+    }
+  }
+  for (uid, session) in [(UInt32(502), UInt32(7)), (501, 0), (501, UInt32.max)] {
+    let peer = PeerIdentity(
+      connectionIdentityDigest: try serviceDigest(Data("peer".utf8)), pid: 43,
+      euid: uid, auditSessionID: session, role: .host, consoleUID: 501)
+    #expect(throws: AuthorityDomainError(code: .globalAuthorityIdentityRejected)) {
+      try objects.core.installationRecoveryIdentity(peer: peer)
+    }
+  }
+  #expect(objects.journal.count == 0)
+}
+
+@Test func recoveryReadRefusesPreparedAndUnreconciledAuthorityStates() throws {
+  let objects = try serviceObjects()
+  let fixture = try serviceFixture()
+  let prepared = try objects.core.prepare(
+    fixture.request, configuration: fixture.configuration,
+    secretPayload: fixture.secretPayload, peer: servicePeer())
+  defer { prepared.erase() }
+  #expect(throws: AuthorityDomainError(code: .cleanupUnproven)) {
+    try objects.core.installationRecoveryIdentity(peer: servicePeer())
+  }
+  for state in [AuthorityState.recovering, .quarantined] {
+    let core = GlobalAuthorityServiceCore(
+      reducer: try GlobalAuthorityReducer(state: state, revision: 1), journal: ServiceJournal(),
+      randomness: ServiceRandomness(), clock: ServiceClock(),
+      processTable: EmptyAuthorityProcessTable())
+    #expect(
+      throws: AuthorityDomainError(
+        code: state == .recovering ? .globalAuthorityRecovering : .quarantined)
+    ) {
+      try core.installationRecoveryIdentity(peer: servicePeer())
+    }
+  }
+}
+
+@Test func recoveryReadWireCorrelatesAndDistinguishesNeverEnrolled() throws {
+  let objects = try serviceObjects()
+  let requestID = AuthorityIdentifier(UUID())
+  let envelope = try AuthorityRequestEnvelope(
+    requestID: requestID, command: .installationRecoveryIdentity(SnapshotRequest()))
+  #expect(envelope.command.isReadOnly)
+  var response: Data?
+  objects.service.installationRecoveryIdentity(try AuthorityV1Codec.encode(envelope)) {
+    data, error in
+    #expect(error == nil)
+    response = data
+  }
+  let decoded = try AuthorityV1Codec.decodeResponse(
+    InstallationRecoveryState.self, from: #require(response))
+  #expect(decoded.requestID == requestID)
+  #expect(decoded.operationID == nil)
+  #expect(decoded.result.identity == nil)
+  #expect(objects.journal.count == 0)
+}
+
+@Test func aNewAccountCanStartOnlyAfterRejoiningThePreservedInstallationAboveItsReplayEpoch() throws
+{
+  let fixture = try serviceFixture()
+  let installation = AuthorityIdentifier(UUID())
+  let cursor = try ReplayCursor(
+    installationID: installation, acceptedEpoch: 7, acceptedGeneration: 42,
+    revision: 8, previousRecordSHA256: serviceDigest(Data("prior-account".utf8)))
+  let journal = ServiceJournal()
+  let core = GlobalAuthorityServiceCore(
+    reducer: try GlobalAuthorityReducer(state: .off, revision: 9, replayCursor: cursor),
+    journal: journal, randomness: ServiceRandomness(), clock: ServiceClock(),
+    processTable: EmptyAuthorityProcessTable())
+  let peer = PeerIdentity(
+    connectionIdentityDigest: try serviceDigest(Data("new-console-account".utf8)),
+    pid: 43, euid: 502, auditSessionID: 8, role: .host, consoleUID: 502)
+  func request(installationID: AuthorityIdentifier, epoch: UInt64) throws -> PrepareStartRequest {
+    try PrepareStartRequest(
+      operation: OperationContext(
+        operationID: AuthorityIdentifier(UUID()),
+        root: RootContext(installationID: installationID, epoch: epoch, generation: 1),
+        mode: .tunnel, configSHA256: fixture.request.operation.configSHA256,
+        identitySHA256: fixture.request.operation.identitySHA256,
+        ownerUID: peer.euid, authorityRevision: 9),
+      expectedRevision: 9, configuration: fixture.request.configuration)
+  }
+  // This is the original failure after Keychain loss or an account switch.
+  let foreign = try request(installationID: AuthorityIdentifier(UUID()), epoch: 1)
+  #expect(
+    throws: AuthorityDomainError(
+      code: .replayRejected,
+      context: AuthorityDiagnosticContext(
+        operationID: foreign.operation.operationID, generation: 1,
+        digest: foreign.operation.configSHA256))
+  ) {
+    try core.prepare(
+      foreign, configuration: fixture.configuration, secretPayload: fixture.secretPayload,
+      peer: peer)
+  }
+  let identity = try #require(core.installationRecoveryIdentity(peer: peer).identity)
+  #expect(try core.snapshot(peer: peer).replayCursor == cursor)
+  #expect(journal.count == 0)
+  // The authenticated Host/Keychain recovery advances its local epoch. Root
+  // admission, user binding, replay checks and journal writes remain unchanged.
+  let prepared = try core.prepare(
+    request(installationID: identity.installationID, epoch: identity.acceptedEpoch + 1),
+    configuration: fixture.configuration, secretPayload: fixture.secretPayload, peer: peer)
+  defer { prepared.erase() }
+  #expect(prepared.operation.ownerUID == 502)
+  #expect(prepared.operation.root.installationID == installation)
+  #expect(prepared.operation.root.epoch == 8)
+  #expect(try core.snapshot(peer: peer).replayCursor?.acceptedEpoch == 8)
+  #expect(journal.states.map(\.transition) == [.prepare])
+}

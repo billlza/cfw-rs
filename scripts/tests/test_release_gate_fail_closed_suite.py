@@ -174,6 +174,8 @@ class AuthorityGateWholeTreeIntegration(unittest.TestCase):
         mutations = (
             ("AuthorityClients.swift", "buildPolicy = .currentHost(currentHostCodeHash)",
              "buildPolicy = .protocolPeer", "Host Authority role and build policy"),
+            ("AuthorityClients.swift", " || method == .installationRecoveryIdentity",
+             "", "Host Authority start and recovery code requirement"),
             ("ServiceCodeHash.swift", "requiresCurrentBuild = requiresCurrentBuild || requestingCurrentBuild",
              "requiresCurrentBuild = requestingCurrentBuild", "Host Authority reconnect code constraint"),
         )

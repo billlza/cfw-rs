@@ -9,6 +9,40 @@ import { platformPresentation, proxyEnvironmentCommands } from "./platform-prese
 
 export function createGeneralActions({ renderPage, renderGlassOverlays, automationSettingsUI, runtimeSettingsUI }) {
   const actions = {
+    "recover-installation-identity": async () => {
+      if (state.engineMutationBusy || state.identityRecoveryRestartRequired) return;
+      state.engineMutationBusy = true;
+      state.identityRecoveryError = null;
+      renderPage();
+      try {
+        const result = await invoke("recover_installation_identity");
+        if (typeof result?.recovered !== "boolean" || result.requires_restart !== true
+          || (result.recovered ? result.error !== null : typeof result.error !== "string")) {
+          throw new Error("Invalid installation recovery response");
+        }
+        state.identityRecoveryRestartRequired = true;
+        if (result.recovered) {
+          await invoke("restart_after_identity_recovery");
+        } else {
+          state.identityRecoveryError = result.error;
+          appendLog("error", "identity-recovery", result.error);
+        }
+      } catch (error) {
+        state.identityRecoveryError = errorText(error);
+        appendLog("error", "identity-recovery", state.identityRecoveryError);
+      } finally {
+        state.engineMutationBusy = state.identityRecoveryRestartRequired;
+        renderPage();
+      }
+    },
+    "restart-after-identity-recovery": async () => {
+      try {
+        await invoke("restart_after_identity_recovery");
+      } catch (error) {
+        state.identityRecoveryError = errorText(error);
+        renderPage();
+      }
+    },
     "copy-proxy-exports": async () => {
       const port = state.projection.mixedPort;
       if (!port) {

@@ -193,14 +193,14 @@ async fn prepare_update_install_inner(
         let recorded = staged.and_then(|staged| {
             lease.stage(StagedUpdate {
                 transaction,
+                offer_version: authorization.version.clone(),
                 installed,
-                staged: staged.clone(),
+                staged,
                 resources: (),
-            })?;
-            Ok(staged)
+            })
         });
         match recorded {
-            Ok(staged) => Ok(serde_json::json!({ "version": staged.version })),
+            Ok(()) => Ok(serde_json::json!({ "version": authorization.version })),
             Err(error) => {
                 if error.failure().category == FailureCategory::Authenticity {
                     security.reject_release(&authorization)?;
@@ -298,6 +298,7 @@ async fn prepare_windows_release(
         let version = identity.version.clone();
         lease.stage(StagedUpdate {
             transaction,
+            offer_version: version.clone(),
             installed,
             staged: identity,
             resources,
@@ -390,8 +391,7 @@ pub(crate) async fn commit_update_install(
             let version = commit
                 .staged()
                 .map_err(|error| report(&app, &error))?
-                .staged
-                .version
+                .offer_version
                 .clone();
             commit.handed_off();
             exit_after_handoff(app.clone());
@@ -477,14 +477,11 @@ async fn ensure_previous_attempt_reviewed(app: &AppHandle) -> Result<()> {
     };
     let app_home = app_home()?;
     #[cfg(target_os = "macos")]
-    let reviewed = blocking(move || {
-        review_previous_attempt(
-            &app_home,
-            env!("CARGO_PKG_VERSION"),
-            process_identity_exists,
-        )
-    })
-    .await?;
+    let reviewed = {
+        let running = admission::running_bundle_identity()?;
+        blocking(move || review_previous_attempt(&app_home, &running, process_identity_exists))
+            .await?
+    };
     #[cfg(windows)]
     let reviewed = blocking(move || windows_update::review(&app_home)).await?;
     match reviewed {

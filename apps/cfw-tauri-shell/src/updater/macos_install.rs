@@ -50,7 +50,8 @@ pub(super) async fn stage_release(
 
     emit_progress(app, "verifying", version, 0, None)?;
     let payload = staging.payload();
-    let expected_version = version.to_owned();
+    let (expected_version, expected_build) = authorization.macos_bundle_identity()?;
+    let expected_version = expected_version.to_string();
     let installed_build = installed.build;
     let staged = blocking(move || -> Result<BundleIdentity> {
         let bundle = extract_bundle(&archive, &payload)?;
@@ -64,6 +65,7 @@ pub(super) async fn stage_release(
             &bundle,
             StagedExpectation {
                 version: &expected_version,
+                expected_build,
                 installed_build,
                 system_version: &system_version,
             },

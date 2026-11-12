@@ -2,6 +2,10 @@ pub(crate) mod connection_diagnostics;
 mod controller;
 pub(crate) use controller::select_proxy_with_persistence;
 mod imported_credentials;
+mod installation_recovery;
+pub(crate) use installation_recovery::{
+    recover_installation_identity, restart_after_identity_recovery,
+};
 mod legacy_profiles;
 mod profiles;
 mod providers;

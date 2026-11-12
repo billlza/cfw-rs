@@ -4,7 +4,7 @@ use super::*;
 
 mod platform;
 
-const VERSION: &str = "1.2.3-beta.4+build.5";
+const VERSION: &str = "1.2.3-build.60123";
 const SIGNATURE: &str = "encoded-minisign-envelope";
 
 fn manifest(url: &str) -> Value {
@@ -42,6 +42,28 @@ fn accepts_only_the_canonical_github_release_asset() {
     );
     assert_eq!(authorization.download_url, expected);
     assert_eq!(authorization.signature, SIGNATURE);
+    assert_eq!(
+        authorization.macos_bundle_identity().unwrap(),
+        (Version::new(1, 2, 3), 60123)
+    );
+}
+
+#[test]
+fn rejects_mac_offers_without_one_canonical_build() {
+    let target = ReleaseTarget::MacArm64;
+    for version in [
+        "1.2.3",
+        "1.2.3-build.0",
+        "1.2.3-build.1.extra",
+        "1.2.3-build.1+other",
+        "1.2.3-build.9223372036854775808",
+    ] {
+        assert_eq!(
+            target.release_page_url(version),
+            Err(UpdateContractError::InvalidMacBuildVersion),
+            "{version}"
+        );
+    }
 }
 
 #[test]

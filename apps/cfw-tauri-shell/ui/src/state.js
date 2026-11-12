@@ -73,6 +73,8 @@ export const state = {
   // Renderer-side feedback only. Rust admission remains the correctness
   // boundary for duplicate shortcuts, direct IPC, and multiple webviews.
   engineMutationBusy: false,
+  identityRecoveryRestartRequired: false,
+  identityRecoveryError: null,
   // The last refused mode request may leave the coordinator Off. Keep its
   // bounded diagnostic visible until the next explicit mode request.
   engineMutationError: null,

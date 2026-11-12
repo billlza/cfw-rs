@@ -78,6 +78,28 @@ pub(crate) struct BundleIdentity {
     pub(crate) build: u64,
 }
 
+pub(super) fn compiled_bundle_build() -> Result<Option<u64>, InstallAdmissionError> {
+    option_env!("CFW_RELEASE_BUNDLE_BUILD")
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .ok()
+                .filter(|build| *build > 0 && build.to_string() == value)
+                .ok_or(InstallAdmissionError::InstalledIdentityInvalid)
+        })
+        .transpose()
+}
+
+/// The running executable retains its own identity even when another process
+/// has replaced the bundle at its path. Development binaries have no build.
+#[cfg(target_os = "macos")]
+pub(super) fn running_bundle_identity() -> Result<BundleIdentity, InstallAdmissionError> {
+    Ok(BundleIdentity {
+        version: env!("CARGO_PKG_VERSION").into(),
+        build: compiled_bundle_build()?.ok_or(InstallAdmissionError::InstalledIdentityInvalid)?,
+    })
+}
+
 /// The bundle an update replaces and the directory that contains it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg(target_os = "macos")]
@@ -152,13 +174,19 @@ pub(super) fn admit_running_installation() -> Result<BundleIdentity, InstallAdmi
 pub(super) fn admit_running_installation() -> Result<BundleIdentity, InstallAdmissionError> {
     let executable = std::env::current_exe()
         .map_err(|error| InstallAdmissionError::CurrentExecutableUnavailable(error.kind()))?;
+    let location = InstallLocation::canonical();
+    // A development copy can report its actual location before release-build
+    // metadata is required for an installed copy.
+    if executable != location.executable {
+        return Err(InstallAdmissionError::NotInApplications);
+    }
     // SAFETY: geteuid has no preconditions and only reads process credentials.
     let effective_uid = unsafe { libc::geteuid() };
     admit_installation(
-        &InstallLocation::canonical(),
+        &location,
         &executable,
         effective_uid,
-        env!("CARGO_PKG_VERSION"),
+        &running_bundle_identity()?,
     )
 }
 
@@ -167,7 +195,7 @@ fn admit_installation(
     location: &InstallLocation,
     running_executable: &Path,
     effective_uid: u32,
-    running_version: &str,
+    running: &BundleIdentity,
 ) -> Result<BundleIdentity, InstallAdmissionError> {
     if running_executable != location.executable {
         return Err(InstallAdmissionError::NotInApplications);
@@ -199,7 +227,7 @@ fn admit_installation(
     }
     let identity = read_bundle_identity(&location.bundle)
         .map_err(|_| InstallAdmissionError::InstalledIdentityInvalid)?;
-    if identity.version != running_version {
+    if &identity != running {
         return Err(InstallAdmissionError::InstalledIdentityInvalid);
     }
     Ok(identity)
@@ -276,6 +304,7 @@ pub(super) fn read_bundle_identity(bundle: &Path) -> Result<BundleIdentity, Bund
 pub(super) mod tests {
     use std::os::unix::fs::PermissionsExt as _;
 
+    use super::super::journal::tests::identity;
     use super::*;
 
     pub(in crate::updater) fn write_bundle(
@@ -316,7 +345,12 @@ pub(super) mod tests {
         let (_guard, root) = scratch();
         let location = write_bundle(&root, BUNDLE_IDENTIFIER, "0.4.0", "40074");
         assert_eq!(
-            admit_installation(&location, &location.executable, uid(), "0.4.0"),
+            admit_installation(
+                &location,
+                &location.executable,
+                uid(),
+                &identity("0.4.0", 40074)
+            ),
             Ok(BundleIdentity {
                 version: "0.4.0".into(),
                 build: 40074,
@@ -334,7 +368,7 @@ pub(super) mod tests {
                 .to_path_buf(),
         ] {
             assert_eq!(
-                admit_installation(&location, &elsewhere, uid(), "0.4.0"),
+                admit_installation(&location, &elsewhere, uid(), &identity("0.4.0", 40074)),
                 Err(InstallAdmissionError::NotInApplications)
             );
         }
@@ -345,22 +379,37 @@ pub(super) mod tests {
         let (_guard, root) = scratch();
         let location = write_bundle(&root, BUNDLE_IDENTIFIER, "0.4.0", "40074");
         assert_eq!(
-            admit_installation(&location, &location.executable, uid() + 1, "0.4.0"),
+            admit_installation(
+                &location,
+                &location.executable,
+                uid() + 1,
+                &identity("0.4.0", 40074)
+            ),
             Err(InstallAdmissionError::BundleNotUserOwned)
         );
         for loose in [&location.bundle, &location.executable] {
             let original = fs::metadata(loose).expect("metadata").permissions();
             fs::set_permissions(loose, fs::Permissions::from_mode(0o775)).expect("loose mode");
             assert_eq!(
-                admit_installation(&location, &location.executable, uid(), "0.4.0"),
+                admit_installation(
+                    &location,
+                    &location.executable,
+                    uid(),
+                    &identity("0.4.0", 40074)
+                ),
                 Err(InstallAdmissionError::BundleNotUserOwned),
                 "{}",
                 loose.display()
             );
             fs::set_permissions(loose, original).expect("restore mode");
         }
-        admit_installation(&location, &location.executable, uid(), "0.4.0")
-            .expect("the restored bundle is admitted again");
+        admit_installation(
+            &location,
+            &location.executable,
+            uid(),
+            &identity("0.4.0", 40074),
+        )
+        .expect("the restored bundle is admitted again");
     }
 
     #[test]
@@ -376,7 +425,12 @@ pub(super) mod tests {
             bundle: link,
         };
         assert_eq!(
-            admit_installation(&location, &location.executable, uid(), "0.4.0"),
+            admit_installation(
+                &location,
+                &location.executable,
+                uid(),
+                &identity("0.4.0", 40074)
+            ),
             Err(InstallAdmissionError::BundleNotUserOwned)
         );
     }
@@ -388,7 +442,12 @@ pub(super) mod tests {
         fs::create_dir(&parent).expect("parent");
         let location = write_bundle(&parent, BUNDLE_IDENTIFIER, "0.4.0", "40074");
         fs::set_permissions(&parent, fs::Permissions::from_mode(0o555)).expect("read-only");
-        let outcome = admit_installation(&location, &location.executable, uid(), "0.4.0");
+        let outcome = admit_installation(
+            &location,
+            &location.executable,
+            uid(),
+            &identity("0.4.0", 40074),
+        );
         fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).expect("restore");
         assert_eq!(outcome, Err(InstallAdmissionError::ApplicationsNotWritable));
     }
@@ -398,7 +457,27 @@ pub(super) mod tests {
         let (_guard, root) = scratch();
         let location = write_bundle(&root, BUNDLE_IDENTIFIER, "0.4.1", "40080");
         assert_eq!(
-            admit_installation(&location, &location.executable, uid(), "0.4.0"),
+            admit_installation(
+                &location,
+                &location.executable,
+                uid(),
+                &identity("0.4.0", 40074)
+            ),
+            Err(InstallAdmissionError::InstalledIdentityInvalid)
+        );
+    }
+
+    #[test]
+    fn a_different_build_of_the_running_product_version_is_refused() {
+        let (_guard, root) = scratch();
+        let location = write_bundle(&root, BUNDLE_IDENTIFIER, "0.4.0", "40080");
+        assert_eq!(
+            admit_installation(
+                &location,
+                &location.executable,
+                uid(),
+                &identity("0.4.0", 40074)
+            ),
             Err(InstallAdmissionError::InstalledIdentityInvalid)
         );
     }

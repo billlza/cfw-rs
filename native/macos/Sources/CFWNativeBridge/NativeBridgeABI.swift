@@ -189,7 +189,7 @@ enum NativeBridgeABITiming {
   static func waitsForPerson(_ command: NativeBridgeCommand) -> Bool {
     switch command {
     case .authorizeSystemProxy, .authorizeSystemProxyRestoration, .authorizeTunnelConfiguration,
-      .awaitTunnelApproval:
+      .awaitTunnelApproval, .authorizeInstallationRecovery:
       true
     case .queryStatus, .maintainCurrentServices, .checkConfiguration, .startLocalProxy,
       .stopLocalProxy, .startSystemProxy, .stopSystemProxy, .installTunnel, .cancelTunnelInstall,

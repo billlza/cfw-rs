@@ -372,8 +372,8 @@ _SOURCE_CLOSURE_PLANS = {
     },
     "node": {
         "classification": "official-release-source-archive",
-        "upstream": "https://nodejs.org/dist/v26.12.1/",
-        "reference": "node-v26.12.1.tar.gz",
+        "upstream": "https://nodejs.org/dist/v26.13.1/",
+        "reference": "node-v26.13.1.tar.gz",
         "closure_action": (
             "bind the signed SHASUMS256.txt entry, executable SHA-256, and version output as "
             "external build-tool provenance"
@@ -382,8 +382,8 @@ _SOURCE_CLOSURE_PLANS = {
     },
     "npm": {
         "classification": "official-registry-source-archive",
-        "upstream": "https://registry.npmjs.org/npm/-/npm-12.2.1.tgz",
-        "reference": "npm-12.2.1.tgz",
+        "upstream": "https://registry.npmjs.org/npm/-/npm-12.2.2.tgz",
+        "reference": "npm-12.2.2.tgz",
         "closure_action": (
             "bind the npm registry integrity, official archive SHA-256, sealed tree digest, "
             "and version as external build-tool provenance"

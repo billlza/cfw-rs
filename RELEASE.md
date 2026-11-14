@@ -872,7 +872,9 @@ historical retirement records and artifacts; none may be relabelled, rebuilt,
 resubmitted, installed, or reused. Build 40030 is retired unbuilt by policy.
 The consumed 0.5.0 preview validation lineages 50001–50025 form the fixed
 prefix of the v0.5.0 ledger, which closed with its published GA build 50030
-(status `published`). The v0.5.1 ledger starts at its first GA build, 51001.
+(status `published`). The v0.5.1 ledger starts at its first GA build, 51001,
+and closed with its two published GA builds, 51005 and the maintenance build
+51006. The v0.5.2 ledger starts at its first GA build, 52001.
 Every retired GA build, in any ledger, keeps its cause, consumed lineage and
 retained evidence in its own `docs/release/ga-build-<build>-retirement.md`;
 those notes, not this guide, are the per-build history. The original v0.5.0
@@ -971,7 +973,9 @@ first GA build needs the release owner's approval. One commit changes:
    the ledger is closed from then on;
 2. `scripts/verify_release_build_allocations.py`: the published version's
    policy becomes closed and fixes its retired GA allocations and its
-   published GA; a new policy names the new version's ledger and first build;
+   published GA, which is the last one when the version published more than
+   one: the history up to the earlier ones is its immutable prefix. A new
+   policy names the new version's ledger and first build;
 3. `docs/release/build-allocations-v<version>.json` for the new version, with
    the first GA build as its one `active_ga` record;
 4. `scripts/release_identity.env`: the new `CFW_PRODUCT_VERSION` and its first
@@ -979,8 +983,10 @@ first GA build needs the release owner's approval. One commit changes:
 5. `scripts/dormant_app_install.py`: the published GA's `PredecessorProfile`
    with the installed tree SHA-256 that its signed-app manifest, package seals
    and completed install journals bind;
-6. the surfaces `scripts/verify_version_contract.py` checks: the eleven
-   product package versions in their `Cargo.toml` files and `Cargo.lock`,
+6. the surfaces `scripts/verify_version_contract.py` checks: the fourteen
+   product package versions in their `Cargo.toml` files and `Cargo.lock`
+   (the three Windows crates among them: the Windows runtime reads the
+   product version from its own crate),
    `PRODUCT_VERSION` in `cfw-core`, `tauri.conf.json`, `MARKETING_VERSION` in
    `native/macos/project.yml` and the project it generates, the runtime
    admission `RELEASE_VERSION`, the native observation version with the

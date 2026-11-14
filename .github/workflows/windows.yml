@@ -43,11 +43,11 @@ jobs:
           New-Item -ItemType Directory -Path $evidence -ErrorAction Stop | Out-Null
           [ordered]@{ source=$source; phase='initialized'; release_accepted=$false } | ConvertTo-Json |
             Set-Content -LiteralPath (Join-Path $evidence 'source.json') -Encoding utf8NoBOM
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
         with:
           toolchain: ${{ steps.pins.outputs.RUST_VERSION }}
           components: clippy,rustfmt
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ steps.pins.outputs.PYTHON_VERSION }}
       - name: Verify and stage the official driver distribution
@@ -87,7 +87,7 @@ jobs:
             -Payload (Join-Path $evidence 'distribution/payload') -Output (Join-Path $evidence 'lifecycle') -Source (git rev-parse HEAD)
       - name: Preserve driver lifecycle observations
         if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: cfw-wintun-validation-windows-x64
           path: ${{ runner.temp }}/cfw-wintun-validation/
@@ -119,10 +119,10 @@ jobs:
             if ($versions.Count -ne 1) { throw "Missing or ambiguous tool pin: $name" }
             "$name=$($versions[0].Groups[1].Value)" >> $env:GITHUB_OUTPUT
           }
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ steps.engine-pins.outputs.PYTHON_VERSION }}
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: ${{ steps.engine-pins.outputs.RUST_VERSION }}
       - name: Build and test the exact CFM engine source on Windows
@@ -272,7 +272,7 @@ jobs:
           }
           "Verified Windows IPv4/IPv6 TCP and UDP through Wintun, the packet pump and the native engine at MTU $(@($result.cases).mtu -join '/')" | Out-Host
       - name: Upload the verified unsigned engine component
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: cfw-engine-ci-windows-x64
           path: ${{ runner.temp }}/cfw-windows-engine/artifacts/
@@ -286,7 +286,7 @@ jobs:
           "Windows engine validation failed. The workflow job log contains the failed phase and diagnostic output. Run: $env:GITHUB_RUN_ID" | Set-Content -Path (Join-Path $failureDirectory 'engine-ci-failure.txt') -Encoding utf8NoBOM
       - name: Preserve native engine failure details
         if: failure()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: cfw-engine-windows-failure-logs
           path: |
@@ -343,7 +343,7 @@ jobs:
           if ($versions.Count -ne 1) { throw "Missing or ambiguous Rust pin" }
           "version=$($versions[0].Groups[1].Value)" >> $env:GITHUB_OUTPUT
           "source=$actualSource" >> $env:GITHUB_OUTPUT
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: ${{ steps.service-pins.outputs.version }}
       - name: Verify SCM peer authentication with disposable SYSTEM services
@@ -365,7 +365,7 @@ jobs:
           cargo run --locked -p cfw-windows-engine --features native-service-validation --example native-service-fixture 2>&1 | Tee-Object -FilePath (Join-Path $artifactRoot 'service-peer-tests.txt')
           if ($LASTEXITCODE -ne 0) { throw "Native SCM service-peer authentication failed" }
       - name: Upload verified service peer validation
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: cfw-service-peer-ci-windows-x64
           path: ${{ runner.temp }}/cfw-service-peer/
@@ -379,7 +379,7 @@ jobs:
           "Windows SCM validation failed; see the workflow job and native log. Run: $env:GITHUB_RUN_ID" | Set-Content -Path (Join-Path $artifactRoot 'service-peer-failure.txt') -Encoding utf8NoBOM
       - name: Preserve failed service validation
         if: failure()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: cfw-service-peer-windows-failure-logs
           path: ${{ runner.temp }}/cfw-service-peer/
@@ -441,7 +441,7 @@ jobs:
             if ($values.Count -ne 1) { throw "Missing or ambiguous pin: $name" }
             "$name=$($values[0].Groups[1].Value)" >> $env:GITHUB_OUTPUT
           }
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: ${{ steps.pins.outputs.RUST_VERSION }}
           components: clippy,rustfmt
@@ -499,10 +499,10 @@ jobs:
           persist-credentials: false
       - name: Assert exact CI source and workflow identity ${{ github.workflow_sha }}
         run: /bin/test "$(/usr/bin/git rev-parse HEAD)" = "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         id: validation-python
         with:
-          python-version: "3.14.9"
+          python-version: "3.14.10"
           architecture: arm64
           update-environment: false
       - name: Select latest available Xcode
@@ -517,7 +517,7 @@ jobs:
             --output "$RUNNER_TEMP/cfw-ci-xcode.json"
       - name: Record Apple validation toolchain ${{ env.CFW_UNSIGNED_VALIDATION_XCODE_VERSION }} (${{ env.CFW_UNSIGNED_VALIDATION_XCODE_BUILD_VERSION }})
         run: /bin/cat "$RUNNER_TEMP/cfw-ci-xcode.json"
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: "1.99.1"
           components: clippy,rustfmt,llvm-tools-preview

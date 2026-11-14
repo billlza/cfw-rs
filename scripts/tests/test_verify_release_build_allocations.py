@@ -857,6 +857,62 @@ class ReleaseBuildAllocationTests(unittest.TestCase):
         with self.assertRaisesRegex(allocations.ReleaseBuildAllocationError, "outside its fixed record"):
             allocations.validate_closed_contract(extended)
 
+    def test_closed_0_5_1_keeps_both_published_ga_builds(self) -> None:
+        path = allocations.CLOSED_CONTRACT_PATHS["0.5.1"]
+        first = allocations.FIRST_PUBLISHED_GA_V051
+        last = allocations.PUBLISHED_GA_V051
+        retired_status = allocations.RETIRED_GA_ALLOCATIONS_V051[-1][2]
+        value = allocations.load_contract(path)
+        allocations.validate_closed_contract(value)
+        self.assertIsNone(value["active_ga"])
+        self.assertEqual(
+            [tuple(record.values()) for record in value["allocations"]],
+            [*allocations.RETIRED_GA_ALLOCATIONS_V051, first, last],
+        )
+        self.assertLess(int(first[0]), int(last[0]))
+        # The earlier published build is fixed history; the last one is the
+        # published GA of the closed version. Neither may change.
+        for (build, _role, status), message in (
+            (first, "immutable retired allocation prefix changed"),
+            (last, "published GA .* changed"),
+        ):
+            for mutation in (
+                {"build": build, "role": "ga", "status": "active_ga"},
+                {"build": build, "role": "ga", "status": retired_status},
+                {"build": build, "role": "final", "status": status},
+            ):
+                with self.subTest(build=build, mutation=mutation):
+                    changed = copy.deepcopy(value)
+                    self.replace_allocation(changed, build, mutation)
+                    with self.assertRaisesRegex(allocations.ReleaseBuildAllocationError, message):
+                        allocations.validate_closed_contract(changed)
+        removed = copy.deepcopy(value)
+        del removed["allocations"][-1]
+        with self.assertRaisesRegex(
+            allocations.ReleaseBuildAllocationError, "published GA allocation is absent"
+        ):
+            allocations.validate_closed_contract(removed)
+        without_first = copy.deepcopy(value)
+        del without_first["allocations"][-2]
+        with self.assertRaisesRegex(
+            allocations.ReleaseBuildAllocationError, "immutable retired allocation prefix changed"
+        ):
+            allocations.validate_closed_contract(without_first)
+        reopened = copy.deepcopy(value)
+        reopened["active_ga"] = last[0]
+        with self.assertRaisesRegex(
+            allocations.ReleaseBuildAllocationError, "cannot have an active GA"
+        ):
+            allocations.validate_closed_contract(reopened)
+        extended = copy.deepcopy(value)
+        extended["allocations"].append(
+            {"build": str(int(last[0]) + 1), "role": "ga", "status": retired_status}
+        )
+        with self.assertRaisesRegex(
+            allocations.ReleaseBuildAllocationError, "outside its fixed record"
+        ):
+            allocations.validate_closed_contract(extended)
+
     def test_non_string_role_is_a_stable_contract_error(self) -> None:
         value = copy.deepcopy(allocations.load_contract(allocations.CLOSED_CONTRACT_PATHS["0.4.0"]))
         self.allocation_for_build(value, "40021")["role"] = []
@@ -914,11 +970,18 @@ def synthetic_ledger(*ga_statuses: str) -> dict[str, object]:
 
 
 def published_ga_versions() -> dict[str, str]:
-    """The GA build each closed product version published, with that version."""
+    """Every GA build a tracked ledger records as published, with its version.
+
+    Read from the ledgers, not from the policies: a product version that
+    published more than one GA keeps the earlier ones in its fixed prefix.
+    """
     return {
-        policy.published[0]: policy.product_version
+        record["build"]: policy.product_version
         for policy in allocations.POLICIES.values()
-        if policy.published is not None
+        for record in allocations.load_contract(
+            allocations.REPOSITORY_ROOT / policy.relative_path
+        )["allocations"]
+        if record["role"] == "ga" and record["status"] == "published"
     }
 
 
@@ -1058,6 +1121,55 @@ class ActiveLedgerRuleTests(unittest.TestCase):
             allocations.ReleaseBuildAllocationError, "immutable retired allocation prefix|gap-free"
         ):
             allocations.validate_contract(earlier, expected_ga=earlier["active_ga"])
+
+    def test_the_gate_requires_the_note_of_a_retired_ga(self) -> None:
+        # The identity names the GA allocated after a retired one, which needs
+        # its retirement note. The live ledger has no retired GA while the
+        # first build of its product version is active, so this is synthetic.
+        value = synthetic_ledger(FREEZE, "active_ga")
+        identity = dataclasses.replace(ACTIVE_RELEASE_IDENTITY, ga_build=value["active_ga"])
+        with patch.object(allocations, "ACTIVE_RELEASE_IDENTITY", identity), self.assertRaisesRegex(
+            allocations.ReleaseBuildAllocationError, "has no retirement note"
+        ):
+            allocations.verify_source_bindings(
+                value, notes_directory=self.notes, predecessors=SUPPORTED_PREDECESSORS
+            )
+
+    def test_a_published_build_of_the_active_version_cannot_be_retired_or_reused(self) -> None:
+        # A maintenance release keeps its product version: the policy fixes the
+        # GA that version already published, and the next GA follows it.
+        value = synthetic_ledger("published", "active_ga")
+        published, active = self.ga_builds(value)
+        with self.assertRaisesRegex(
+            allocations.ReleaseBuildAllocationError,
+            f"build {published} between the fixed history and the active GA "
+            "is not a retired GA allocation",
+        ):
+            allocations.validate_contract(value, expected_ga=active)
+        policy = dataclasses.replace(
+            allocations.POLICIES[allocations.PRODUCT_VERSION],
+            published=(published, "ga", "published"),
+        )
+        with patch.dict(allocations.POLICIES, {policy.product_version: policy}):
+            ledger = allocations.validate_contract(value, expected_ga=active)
+            self.assertEqual(ledger.active_ga, active)
+            self.assertEqual(ledger.retired_ga, ())
+            for status in (NOTARIZED, "active_ga"):
+                with self.subTest(status=status):
+                    changed = copy.deepcopy(value)
+                    changed["allocations"][-2]["status"] = status
+                    with self.assertRaisesRegex(
+                        allocations.ReleaseBuildAllocationError,
+                        f"published GA {published} allocation changed",
+                    ):
+                        allocations.validate_contract(changed, expected_ga=active)
+            removed = copy.deepcopy(value)
+            del removed["allocations"][-2]
+            with self.assertRaisesRegex(
+                allocations.ReleaseBuildAllocationError,
+                f"published GA {published} allocation changed",
+            ):
+                allocations.validate_contract(removed, expected_ga=active)
 
     def test_a_closed_product_ledger_is_never_the_active_ledger(self) -> None:
         for version, path in allocations.CLOSED_CONTRACT_PATHS.items():
@@ -1313,16 +1425,7 @@ class LiveLedgerTests(unittest.TestCase):
                             ledger, allocations.RETIREMENT_NOTES_DIRECTORY
                         )
 
-    def test_the_gate_binds_the_notes_and_the_registry(self) -> None:
-        # The identity names the GA allocated after a retired one, which needs
-        # its retirement note.
-        with tempfile.TemporaryDirectory() as temporary, self.assertRaisesRegex(
-            allocations.ReleaseBuildAllocationError, "has no retirement note"
-        ):
-            allocations.verify_source_bindings(
-                allocations.load_contract(),
-                notes_directory=Path(temporary), predecessors=SUPPORTED_PREDECESSORS
-            )
+    def test_the_gate_binds_the_registry(self) -> None:
         unallocated = {
             **SUPPORTED_PREDECESSORS,
             GA_BUILD: PredecessorProfile(allocations.PRODUCT_VERSION, GA_BUILD, "a" * 64),
@@ -1427,18 +1530,6 @@ class LiveLedgerTests(unittest.TestCase):
                 self.assertEqual(policy.closed, version != allocations.PRODUCT_VERSION)
                 if policy.immutable_prefix:
                     self.assertEqual(policy.immutable_prefix[0][0], str(policy.first_build))
-
-    def test_published_build_of_the_active_version_cannot_be_retired_or_reused(self) -> None:
-        published = allocations.ACTIVE_POLICY.published
-        self.assertIsNotNone(published)
-        build = published[0]
-        value = copy.deepcopy(allocations.load_contract())
-        record = next(record for record in value["allocations"] if record["build"] == build)
-        record["status"] = NOTARIZED
-        with self.assertRaisesRegex(
-            allocations.ReleaseBuildAllocationError, f"published GA {build} allocation changed"
-        ):
-            allocations.validate_contract(value, expected_ga=GA_BUILD)
 
     def test_builds_increase_across_product_versions(self) -> None:
         # A GA install replaces the newest registered build below it, whatever

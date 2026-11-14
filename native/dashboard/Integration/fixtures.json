@@ -103,7 +103,8 @@
       "ipv6_dns_enabled": true,
       "lan_proxy": null,
       "mainland_china_direct": false,
-      "dns_leak_protection": false
+      "dns_leak_protection": false,
+      "webrtc_leak_protection": false
     }
   },
   "profiles_snapshot": {

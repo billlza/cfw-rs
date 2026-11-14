@@ -22,11 +22,10 @@ cfw_run_native_ui_development_check() (
     [[ "$(cd "$parent" && /bin/pwd -P)" == "$parent" ]] || return 1
   done
   target="$(/usr/bin/mktemp -d "$repository/target/development/ci-${operation}_XXXXXXXX")"
-  # The producer accepts canonical alphanumeric/hyphen/underscore target names.
-  # mktemp's separator is an underscore to remain inside that exact contract.
   # No caller-provided existing target or native artifact can replace this one.
+  # The producer writes only its own attempt directory, never this target.
   products="$(cfw_run_release_python_script "$repository" \
-    "$repository/scripts/prepare_development_native_ui.py" --cargo-target-dir "$target")"
+    "$repository/scripts/prepare_development_native_ui.py")"
   printf '%s\n' "$products" > "$target/native-ui-products.txt"
   export CARGO_TARGET_DIR="$target"
   export CFW_DEVELOPMENT_NATIVE_UI_PRODUCTS="$products"

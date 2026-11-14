@@ -179,17 +179,17 @@ export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, 
   // One switch of the stored preferences. A background refresh cannot cancel
   // a user's choice: the write is bound to the exact snapshot read for this
   // action, and the backend enforces its revision.
-  async function toggleSwitch(field, label, enabled) {
-    if (typeof enabled !== "boolean") throw new TypeError(`${label} must be enabled or disabled`);
+  async function toggleSwitch(field, enabled) {
+    if (typeof enabled !== "boolean") throw new TypeError(`${field} must be enabled or disabled`);
     if (state.engineMutationBusy || state.migrationHandoff) throw new Error(t("Another network operation is in progress"));
     const snapshot = await invoke("read_runtime_settings_snapshot");
     validateSnapshot(snapshot);
     return save({ ...snapshot.settings, [field]: enabled }, snapshot.revision);
   }
-  const toggleIPv6DNS = (enabled) => toggleSwitch("ipv6_dns_enabled", "IPv6 DNS", enabled);
-  const toggleMainlandChinaDirect = (enabled) => toggleSwitch("mainland_china_direct", "Mainland China direct", enabled);
-  const toggleDnsLeakProtection = (enabled) => toggleSwitch("dns_leak_protection", "DNS leak protection", enabled);
-  const toggleWebRtcLeakProtection = (enabled) => toggleSwitch("webrtc_leak_protection", "WebRTC leak protection", enabled);
+  const toggleIPv6DNS = (enabled) => toggleSwitch("ipv6_dns_enabled", enabled);
+  const toggleMainlandChinaDirect = (enabled) => toggleSwitch("mainland_china_direct", enabled);
+  const toggleDnsLeakProtection = (enabled) => toggleSwitch("dns_leak_protection", enabled);
+  const toggleWebRtcLeakProtection = (enabled) => toggleSwitch("webrtc_leak_protection", enabled);
   function renderDialog() {
     const dialog = state.runtimeSettingsDialog;
     if (!dialog) { nativeDialog?.sync(null); return ""; }

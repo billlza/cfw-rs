@@ -17,7 +17,7 @@ export function createLogActions({ renderPage, patchLogStream }) {
       try {
         const changed = await setLogStreamRunning(!pause);
         if (!changed) return;
-        appendLog("info", "logs", t("Request logs {value1}", { value1: pause ? "stopped" : "started" }));
+        appendLog("info", "logs", t(pause ? "Request logs stopped" : "Request logs started"));
       } catch (error) {
         if (!pause) state.logsPaused = previous;
         appendLog("error", "logs", t("Log stream change failed: {error}", { error: errorText(error) }));
@@ -36,7 +36,7 @@ export function createLogActions({ renderPage, patchLogStream }) {
         return `[${time}] ${level} ${message}`;
       }).join("\n");
       try {
-        await navigator.clipboard.writeText(text || "(no logs)");
+        await navigator.clipboard.writeText(text || t("(no logs)"));
         appendLog("info", "logs", t("Copied {count} log line(s) to clipboard", { count: state.logs.length }));
       } catch (error) {
         appendLog("warning", "logs", t("Copy logs refused: {error}", { error: errorText(error) }));

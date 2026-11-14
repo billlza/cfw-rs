@@ -2,6 +2,26 @@
 
 ## 0.5.2 - Unreleased
 
+### Interface
+
+- Translate the interface text that never reached the language catalogs:
+  more than sixty labels, notes and messages now follow the display language
+  in Simplified Chinese, Traditional Chinese and Japanese. Among them are the
+  version line of the About dialog, which read `版本` in every language, and
+  its `Checking…` buttons; the notes under Start at Login on macOS, and the
+  message when its state cannot be read; the busy buttons and the unavailable
+  state of the Providers page; the latency test's tooltips and the empty
+  states of the Proxies page; a profile's source and state on the Profiles
+  page and the title of its inspector, which reads `QR code` where it read
+  `qrcode`; the legacy maintenance banner; what a credential dialog answers
+  to an empty or malformed secret; and the words that log lines put into an
+  otherwise translated sentence, such as `on`, `started` and `recovered`.
+- Show a profile without groups under `Configured nodes` in the display
+  language. The group keeps one name inside the app, so a chosen group stays
+  chosen when the language changes.
+- Write `Updating…` and `Checking…` on the Providers page with an ellipsis
+  character in English too, where they had three full stops.
+
 ### Profiles
 
 - Refuse a Clash subscription that contains a NUL character. The YAML parser

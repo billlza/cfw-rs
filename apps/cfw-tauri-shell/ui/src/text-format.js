@@ -22,7 +22,7 @@ export function redactDiagnosticText(value) {
 export function errorText(error) {
   if (error instanceof Error && error.message) return redactDiagnosticText(error.message);
   if (typeof error === "string" && error.trim()) return redactDiagnosticText(error);
-  return "An unknown error occurred.";
+  return t("An unknown error occurred.");
 }
 
 export function formatRuntime(seconds) {

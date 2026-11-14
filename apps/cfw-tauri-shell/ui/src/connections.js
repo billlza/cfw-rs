@@ -239,7 +239,7 @@ function renderConnectionDetail(connection) {
     [t("Chains"), (connection.chains ?? []).join(" / ")],
     [t("Upload"), connection.upload],
     [t("Download"), connection.download],
-    ["Speed", connection.speed],
+    [t("Speed"), connection.speed],
     ...Object.entries(metadata).filter(([, value]) => value !== null && value !== undefined && value !== ""),
   ];
   return `

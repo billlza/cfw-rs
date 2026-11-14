@@ -40,7 +40,7 @@ export function createConnectionActions({ renderPage, bindConnectionRowEvents })
       try {
         const changed = await setConnectionsStreamRunning(!pause);
         if (!changed) return;
-        appendLog("info", "connections", t("Connection stream {value1}", { value1: pause ? "stopped" : "started" }));
+        appendLog("info", "connections", t(pause ? "Connection stream stopped" : "Connection stream started"));
       } catch (error) {
         if (!pause) state.connectionPaused = previous;
         appendLog("error", "connections", t("Connection stream change failed: {error}", { error: errorText(error) }));

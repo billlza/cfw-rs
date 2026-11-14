@@ -70,13 +70,13 @@ export function renderMigrationBanner() {
       && !profileUnavailable
       && !state.profiles.some((profile) => profile.active === true);
     const detail = starting
-      ? "The signed maintenance session is starting. This dashboard closes after the new window is ready and the current CFM engine is safely Off."
+      ? t("The signed maintenance session is starting. This dashboard closes after the new window is ready and the current CFM engine is safely Off.")
       : recovery
-        ? "Review and resume the previous legacy CFM operation in its signed maintenance session."
+        ? t("Review and resume the previous legacy CFM operation in its signed maintenance session.")
         : profileUnavailable
           ? t("Profile state could not be verified: {profileUnavailable}. Open Profiles and reload it before legacy maintenance.", { profileUnavailable: profileUnavailable })
           : selectedProfileMissing
-            ? "Import and select a replacement profile on Profiles before retiring older CFM components. Normal networking uses the System Proxy and TUN switches."
+            ? t("Import and select a replacement profile on Profiles before retiring older CFM components. Normal networking uses the System Proxy and TUN switches.")
             : t("Optional maintenance retires older Clash for Mac components and managed data. Opening its signed session stops the current CFM engine and closes this dashboard; retirement still requires a separate confirmation. Use the network switches for normal starts.");
     const button = starting
       ? t("Starting…")
@@ -110,7 +110,7 @@ export function renderMigrationBanner() {
           <small>${escapeHtml(retirement.message ?? t("The unfinished legacy transaction requires explicit recovery."))}</small>
           ${cutover.message ? `<small>${escapeHtml(cutover.message)}</small>` : ""}
         </div>
-        <button type="button" class="cfw-big-button" data-action="recover-cutover" ${cutover.busy ? "disabled" : ""}>${cutover.busy ? "Recovering…" : t("Recover Replacement")}</button>
+        <button type="button" class="cfw-big-button" data-action="recover-cutover" ${cutover.busy ? "disabled" : ""}>${t(cutover.busy ? "Recovering…" : "Recover Replacement")}</button>
       </div>
     `;
   }
@@ -131,7 +131,7 @@ export function renderMigrationBanner() {
         <button type="button" class="cfw-big-button danger" data-action="confirm-cutover" ${cutover.busy ? "disabled" : ""}>${cutover.busy ? t("Migrating…") : t("Confirm one-way cutover to {value1}", { value1: escapeHtml(targetLabel) })}</button>
       `
     : `
-        <button type="button" class="cfw-big-button" data-action="prepare-cutover" ${cutover.busy ? "disabled" : ""}>${cutover.busy ? "Preparing…" : t("Prepare cutover to {value1}", { value1: escapeHtml(targetLabel) })}</button>
+        <button type="button" class="cfw-big-button" data-action="prepare-cutover" ${cutover.busy ? "disabled" : ""}>${cutover.busy ? t("Preparing…") : t("Prepare cutover to {value1}", { value1: escapeHtml(targetLabel) })}</button>
       `;
   const approvalNote = cutover.awaitingApproval
     ? `<small>${escapeHtml(t("System Extension approval is required in System Settings. Approve it, then Prepare again."))}</small>`

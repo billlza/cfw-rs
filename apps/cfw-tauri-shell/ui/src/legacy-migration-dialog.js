@@ -50,7 +50,7 @@ export function createLegacyMigrationDialog({
           appendLog(
             "info",
             "migration",
-            t("{name} {value2}, credentials verified, and selected", { name: outcome.name, value2: outcome.reused ? "recovered" : "imported" }),
+            t(outcome.reused ? "{name} recovered, credentials verified, and selected" : "{name} imported, credentials verified, and selected", { name: outcome.name }),
           );
           state.legacyProfileMigrationPreview = null;
           closeGlassOverlays();
@@ -59,7 +59,7 @@ export function createLegacyMigrationDialog({
           appendLog(
             "error",
             "migration",
-            `${committed ? "Migrated profile staging failed" : t("Legacy profile migration failed")}: ${message}`,
+            `${t(committed ? "Migrated profile staging failed" : "Legacy profile migration failed")}: ${message}`,
           );
           state.legacyProfileMigrationPreview = null;
           state.glassDialog = {

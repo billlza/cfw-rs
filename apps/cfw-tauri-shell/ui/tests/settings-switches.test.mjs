@@ -5,6 +5,7 @@ import { runEngine } from "./support/engine.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { state, runtime } from "../src/state.js";
+import { setLocale } from "../src/i18n.js";
 import { createToggles } from "../src/toggles.js";
 import {
   SETTINGS, lastLog, snapshotOf,
@@ -47,6 +48,10 @@ test("a network switch is refused while unavailable or busy, and applies the hos
   state.engine = { ...state.engine, systemProxyAvailable: true, localProxyAvailable: true, tunnelAvailable: true };
   state.engineMutationBusy = true;
   await assert.rejects(() => applyToggle("systemProxy", true, "ui"), /already in progress/u);
+  setLocale("zh-Hans");
+  try {
+    await assert.rejects(() => applyToggle("systemProxy", true, "ui"), { message: "网络模式正在切换中" });
+  } finally { setLocale("en"); }
   state.engineMutationBusy = false;
   host.respond("set_system_proxy_enabled", { mode: "system_proxy" });
   host.respond("network_diagnostics", { services: [] });
@@ -103,6 +108,22 @@ test("a refused network switch restores its state, records the reason and re-rea
   assert.equal(lastLog().message, "Could not refresh mode state after refusal: status unreadable");
 });
 
+test("a stored switch reports its new state in the display language", async () => {
+  const { applyToggle } = createToggles(toggleDeps());
+  host.respond("write_settings_snapshot", snapshotOf({ silent_start: true }));
+  await applyToggle("silentStart", true, "ui");
+  assert.equal(lastLog().message, "silentStart changed to on");
+  setLocale("zh-Hans");
+  try {
+    host.respond("write_settings_snapshot", snapshotOf({ silent_start: false }));
+    await applyToggle("silentStart", false, "ui");
+    assert.equal(lastLog().message, "silentStart已更改为关闭");
+    host.respond("write_settings_snapshot", snapshotOf({ silent_start: true }));
+    await applyToggle("silentStart", true, "ui");
+    assert.equal(lastLog().message, "silentStart已更改为开启");
+  } finally { setLocale("en"); }
+});
+
 test("preferences switch through the settings store, session switches stay in this window", async () => {
   const d = toggleDeps();
   const { applyToggle, applyUiToggle } = createToggles(d);
@@ -112,6 +133,13 @@ test("preferences switch through the settings store, session switches stay in th
   assert.deepEqual(host.argsOf("write_settings_snapshot")[0], { settings: { ...SETTINGS } });
   assert.equal(await applyToggle("breakOnProxyChange", true, "ui"), undefined);
   assert.equal(lastLog().message, "breakOnProxyChange changed to on for this session");
+  setLocale("zh-Hans");
+  try {
+    await applyToggle("breakOnProxyChange", false, "ui");
+    assert.equal(lastLog().message, "本次运行的breakOnProxyChange已更改为关闭", "the state is named in the display language");
+    await applyToggle("breakOnProxyChange", true, "ui");
+    assert.equal(lastLog().message, "本次运行的breakOnProxyChange已更改为开启");
+  } finally { setLocale("en"); }
   assert.deepEqual(host.argsOf("write_settings_snapshot").length, 1, "a session switch is never written");
   host.respond("set_launch_at_login_enabled", snapshotOf({ launch_at_login: true }));
   assert.equal(await applyToggle("startAtLogin", true, "ui"), true);

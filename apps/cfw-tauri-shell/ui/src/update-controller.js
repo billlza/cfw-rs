@@ -135,7 +135,7 @@ export function createUpdateController({ renderPage, renderGlassOverlays, overla
     const installAction = phase === "checking" ? null : installView.primary;
     const notes = update?.notes ? `<p class="product-about-notes">${escapeHtml(String(update.notes).slice(0, 280))}</p>` : "";
     const primaryLabel = phase === "checking"
-      ? "Checking…"
+      ? t("Checking…")
       : canOpen
         ? t("Open Download v{value1}", { value1: escapeHtml(String(update.version)) })
         : "";
@@ -146,7 +146,7 @@ export function createUpdateController({ renderPage, renderGlassOverlays, overla
           <div class="product-about-name">${escapeHtml(product.name)}</div>
           <div class="product-about-sub">${escapeHtml(t("Powered by sing-box"))}</div>
           <div class="product-about-meta">
-            <div>版本 ${escapeHtml(String(version))}</div>
+            <div>${escapeHtml(t("Version {version}", { version: String(version) }))}</div>
             <div>${escapeHtml(product.architecture)} · ${presentation.name}${product.minimum_os_version === null ? "" : ` ${escapeHtml(product.minimum_os_version)}+`}</div>
           </div>
           <div class="product-about-status">${escapeHtml(status)}</div>
@@ -156,7 +156,7 @@ export function createUpdateController({ renderPage, renderGlassOverlays, overla
             ${canOpen ? `<button type="button" class="glass-btn${installAction ? " ghost" : ""}" data-glass-open-update>${primaryLabel}</button>` : ""}
             ${phase === "checking" ? `<button type="button" class="glass-btn" disabled>${primaryLabel}</button>` : ""}
             ${installView.cancel ? `<button type="button" class="glass-btn ghost" data-glass-update-cancel>${escapeHtml(t("Cancel"))}</button>` : ""}
-            <button type="button" class="glass-btn ghost" data-glass-check-update ${busy ? "disabled" : ""}>${phase === "checking" ? "Checking…" : t("Check for Update")}</button>
+            <button type="button" class="glass-btn ghost" data-glass-check-update ${busy ? "disabled" : ""}>${t(phase === "checking" ? "Checking…" : "Check for Update")}</button>
             <button type="button" class="glass-btn ghost" data-glass-dismiss ${busy ? "disabled" : ""}>${escapeHtml(t("Close"))}</button>
           </div>
           <div class="product-about-copy">© ${escapeHtml(product.name)} · ${escapeHtml(product.license)}</div>
@@ -176,7 +176,7 @@ export function createUpdateController({ renderPage, renderGlassOverlays, overla
             "updater",
             result?.available
               ? t("Update {version} available", { version: result.version })
-              : t("Already up to date ({value1})", { value1: result?.current ?? "current" }),
+              : t("Already up to date ({value1})", { value1: result?.current ?? t("current") }),
           );
           openProductAboutDialog({ autoCheck: true, phase: "idle", result });
         } catch (error) {

@@ -120,7 +120,7 @@ export function createSettingsController({ windowGlass, renderPage, renderGlassO
       if (state.settingsSnapshot === expectedSettings) {
         state.launchAtLogin.observationError = state.payload?.product?.operating_system === "windows"
           ? t("Windows startup registration could not be read. Reload to retry; the failure is recorded in local diagnostics.")
-          : "macOS Login Item status could not be read. Reload to retry; the failure is recorded in local diagnostics.";
+          : t("macOS Login Item status could not be read. Reload to retry; the failure is recorded in local diagnostics.");
         appendLog("warning", "settings", state.launchAtLogin.observationError);
       }
     }

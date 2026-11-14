@@ -3,6 +3,7 @@ import { replaceEngineIdentity, runEngine, stopEngine, streamBinding } from "./s
 import assert from "node:assert/strict";
 import { beforeEach, test } from "node:test";
 import { PAGES, state, runtime } from "../src/state.js";
+import { setLocale } from "../src/i18n.js";
 import { createGlobalEvents } from "../src/global-events.js";
 import { createHostEvents } from "../src/host-events.js";
 import { createPageShell } from "../src/page-shell.js";
@@ -441,6 +442,14 @@ test("the About dialog checks again, opens the download page and reports a refus
   await check.fire("click");
   assert.equal(lastLog().message, "Already up to date (0.5.1)");
   assert.equal(state.glassDialog.payload.phase, "idle");
+  host.respond("check_for_updates", { available: false });
+  await check.fire("click");
+  assert.equal(lastLog().message, "Already up to date (current)", "a reply that names no version");
+  setLocale("zh-Hans");
+  try {
+    await check.fire("click");
+    assert.equal(lastLog().message, "已是最新版本（当前版本）", "and the word for it follows the display language");
+  } finally { setLocale("en"); }
   host.respond("check_for_updates", { available: true, version: "0.5.2" });
   await check.fire("click");
   assert.equal(lastLog().message, "Update 0.5.2 available");

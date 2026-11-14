@@ -64,7 +64,7 @@ export function createProfileMenu({ renderPage, renderGlassOverlays, resolveProf
     const profile = state.profiles.find((item) => item.id === context.id);
     const action = profile && currentProfileMenuItems(profile).find((item) => item.id === result.action);
     if (!action || action.reason) {
-      reportProfileMenuFailure(action?.reason ?? "The profile action is no longer available");
+      reportProfileMenuFailure(action?.reason ?? t("The profile action is no longer available"));
       renderPage(); return;
     }
     try { await runProfileMenuAction(result.action, context.id); }

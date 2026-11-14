@@ -119,7 +119,7 @@ export function createProxyDelayTest({ state, runtime, view, invoke, activeProfi
           appendLog(
             failed ? "error" : "info",
             "proxy",
-            t("Delay test ({value1}): {ok} ok{value3} · concurrency {value4}", { value1: activeGroup?.name ?? "group", ok: ok, value3: failed ? t(", {count} failed", { count: failed }) + (failureSummary ? ` (${failureSummary})` : "") : "", value4: delayConcurrency() }),
+            t("Delay test ({value1}): {ok} ok{value3} · concurrency {value4}", { value1: activeGroup.name, ok: ok, value3: failed ? t(", {count} failed", { count: failed }) + (failureSummary ? ` (${failureSummary})` : "") : "", value4: delayConcurrency() }),
           );
         }
       } catch (error) {

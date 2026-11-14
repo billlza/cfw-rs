@@ -180,17 +180,48 @@ struct OverviewView: View {
 }
 
 enum DashboardStrings {
-  // Packaged hosts carry resources inside Contents/Resources. Unbundled
-  // development and test executables retain SwiftPM's standard lookup.
+  private static let resourceBundleName = "CFMNativeDashboard_CFMNativeDashboard"
+  private static let libraryName = "libCFMNativeDashboard.dylib"
+
+  /// Where the resource bundle is, by the kind of host this code runs in.
+  enum ResourceLocation: Equatable {
+    /// A packaged app carries the bundle inside Contents/Resources.
+    case applicationResources
+    /// An unbundled development or test executable loads this code from the
+    /// dashboard library, and the bundle sits beside that library. A bundle
+    /// beside the executable is never read: where the build tool puts an
+    /// executable is its own business, and nothing keeps a copy there current.
+    case besideLibrary(URL)
+    /// SwiftPM's own products compile this code in and keep its lookup.
+    case package
+  }
+
+  static func resourceLocation(mainBundle: URL, image: String?) -> ResourceLocation {
+    if mainBundle.pathExtension == "app" { return .applicationResources }
+    guard let image else { return .package }
+    let library = URL(fileURLWithPath: image)
+    guard library.lastPathComponent == libraryName else { return .package }
+    return .besideLibrary(
+      library.deletingLastPathComponent().appendingPathComponent(
+        resourceBundleName + ".bundle", isDirectory: true))
+  }
+
+  /// The file this code was loaded from.
+  private static var imagePath: String? {
+    var info = Dl_info()
+    guard dladdr(#dsohandle, &info) != 0, let name = info.dli_fname else { return nil }
+    return String(cString: name)
+  }
+
   private static var resourceBundle: Bundle? {
-    if Bundle.main.bundleURL.pathExtension == "app" {
-      guard
-        let url = Bundle.main.url(
-          forResource: "CFMNativeDashboard_CFMNativeDashboard", withExtension: "bundle")
+    switch resourceLocation(mainBundle: Bundle.main.bundleURL, image: imagePath) {
+    case .applicationResources:
+      guard let url = Bundle.main.url(forResource: resourceBundleName, withExtension: "bundle")
       else { return nil }
       return Bundle(url: url)
+    case .besideLibrary(let url): return Bundle(url: url)
+    case .package: return Bundle.module
     }
-    return Bundle.module
   }
 
   static func text(_ key: String, locale: String) -> String {

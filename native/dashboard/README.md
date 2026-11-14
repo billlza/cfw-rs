@@ -83,21 +83,20 @@ Prepare the development library explicitly before invoking Cargo with either
 native feature. From the repository root, using the admitted Python launcher:
 
 ```sh
-export CARGO_TARGET_DIR="$PWD/target"
 CFW_DEVELOPMENT_NATIVE_UI_PRODUCTS="$(
-  cfw_run_release_python_script "$PWD" "$PWD/scripts/prepare_development_native_ui.py" \
-    --cargo-target-dir "$CARGO_TARGET_DIR"
+  cfw_run_release_python_script "$PWD" "$PWD/scripts/prepare_development_native_ui.py"
 )"
 export CFW_DEVELOPMENT_NATIVE_UI_PRODUCTS
 ```
 
-If Cargo uses `--target aarch64-apple-darwin`, pass the same `--target` to preparation.
 The script builds Swift debug code into a fresh attempt under
-`target/native-ui-development/`, and places localization resources beside both
-Cargo binaries and test executables. It keeps compiler logs and publishes a
-completion receipt only after source and copied resources are checked. Existing
-resources with different bytes are preserved: select a fresh absolute
-`$PWD/target/development/<name>` for both commands in that case.
+`target/native-ui-development/` and keeps the library and its localization
+resources together in that attempt's `products` directory. In an unbundled
+executable the library reads its resources from beside itself, so one
+preparation serves every Cargo target directory, `--target` and test
+executable, and nothing is written into Cargo's output. The script keeps
+compiler logs and publishes a completion receipt only after the sources and
+the products are checked.
 
 Cargo's build script only verifies and links these already prepared products;
 it never runs Swift or copies files. It revalidates content manifests for the

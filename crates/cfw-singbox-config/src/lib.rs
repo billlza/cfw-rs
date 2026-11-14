@@ -30,6 +30,7 @@ mod release_dns;
 mod release_packet;
 mod routing;
 mod validation;
+mod webrtc_leak;
 
 /// Product-owned minimum for every remote TLS connection emitted by the
 /// runtime projection. Profiles deliberately cannot override this policy.

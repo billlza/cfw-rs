@@ -40,7 +40,11 @@ Additional checks are explicit actions:
   STUN, without camera or microphone access. It compares only matching IP
   families against the HTTPS observations. A timeout, unavailable WebRTC, or
   absent candidate never becomes a protection verdict. Other applications and
-  browsers can have different routes.
+  browsers can have different routes. While Settings › Engine › WebRTC leak
+  protection refuses STUN (the switch on, TUN Mode active, Rule or Global
+  mode), a timeout or an absent candidate is reported as the expected refusal,
+  and an observed exit as STUN that left outside TUN. The note describes the
+  protection in force while the check ran, and this window only.
 
 HTTP 2xx establishes endpoint reachability; redirects, authentication, challenges,
 rate limits and other failures stay distinct. None proves account access or

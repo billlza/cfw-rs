@@ -2,6 +2,24 @@
 
 ## 0.5.2 - Unreleased
 
+### Security
+
+- Add Settings › Engine › WebRTC leak protection, off by default. In TUN Mode
+  the core refuses STUN outside Direct mode, so a page cannot ask a STUN
+  server which address this Mac's traffic comes from: neither the real
+  address, through a server that is routed directly, nor the proxy's exit,
+  through a proxied one. It also refuses UDP to the seven mail ports the core
+  never inspects, where a STUN server would go unrecognised. Calls and other
+  peer-to-peer connections that rely on STUN go through a relay over TCP or
+  TLS instead, or fail. The switch changes nothing in System Proxy mode,
+  where a browser's WebRTC traffic never passes through the app, and nothing
+  in release evidence projections. It does not hide an address a browser
+  reads from the Mac's own interfaces once a page has camera or microphone
+  permission. Connection diagnostics reports a UDP check that finds no exit
+  as the expected refusal, and one that finds an exit as STUN that left
+  outside TUN. Earlier builds refuse a settings file saved with it on, so
+  turn it off before installing one.
+
 ## 0.5.1 — 2026-11-11
 
 ### Build 51006

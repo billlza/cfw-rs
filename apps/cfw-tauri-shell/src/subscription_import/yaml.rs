@@ -208,7 +208,7 @@ pub(super) fn load_single_document(body: &str) -> Result<YamlValue, String> {
                 {
                     return Err("subscription YAML uses an unsupported tag".to_owned());
                 }
-                // saphyr 0.1 emits empty text for implicit null nodes. Keep the
+                // The parser emits empty text for implicit null nodes. Keep the
                 // existing importer text/key contract; explicit strings stay
                 // empty and must not become the legacy null placeholder.
                 let text = if resolvable && value.is_empty() {

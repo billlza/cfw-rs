@@ -27,6 +27,9 @@ fn empty_scalar_text_and_resolution_preserve_existing_import_behavior() {
             false,
         ),
         ("empty literal", "value: |-\n", "", false, false),
+        // A block scalar with no content lines has no line break to clip.
+        ("empty clipped literal", "value: |\n", "", false, false),
+        ("empty folded", "value: >\n", "", false, false),
         ("plain null", "value: null\n", "null", true, true),
         ("tagged null", "value: !!str null\n", "null", false, false),
     ] {
@@ -82,6 +85,60 @@ fn implicit_empty_keys_stay_distinct_from_empty_strings_and_null_spelling() {
         assert_eq!(scalar(&entries[0].1).text(), "first");
         assert_eq!(scalar(&entries[1].1).text(), "second");
     }
+}
+
+#[test]
+fn a_nul_character_fails_the_document_instead_of_ending_it() {
+    // A parser that reads NUL as the end of input would import the first
+    // mapping entry and silently drop everything after it.
+    for body in ["a: 1\n\0b: 2\n", "a: 1\0\nb: 2\n", "a: \"1\0\"\n", "\0"] {
+        let error = load_single_document(body).expect_err("NUL must fail the document");
+        assert!(
+            error.starts_with("subscription YAML is invalid: "),
+            "{body:?}: {error}"
+        );
+    }
+}
+
+#[test]
+fn a_byte_order_mark_is_accepted_only_before_the_document() {
+    let YamlValue::Mapping(mapping) =
+        load_single_document("\u{feff}a: 1\n").expect("a leading byte order mark is skipped")
+    else {
+        panic!("expected a mapping");
+    };
+    assert_eq!(
+        mapping.into_entries()[0].0,
+        "a",
+        "the mark is not part of the key"
+    );
+
+    // Anywhere else the mark would become an invisible part of a key or a
+    // value, so the document fails.
+    for body in ["a: 1\n\u{feff}b: 2\n", "a: \u{feff}1\n", "a: [\u{feff}]\n"] {
+        let error = load_single_document(body).expect_err("a byte order mark inside a document");
+        assert!(error.contains("byte order mark"), "{body:?}: {error}");
+    }
+}
+
+#[test]
+fn a_flow_sequence_pair_keeps_a_flow_mapping_value_whole() {
+    // `[a: {b: c, d: e}, f]` holds the single-pair mapping `a: {b: c, d: e}`
+    // and the string `f`. The pair must not end at the comma inside its value.
+    let root = load_single_document("[a: {b: c, d: e}, f]").expect("document loads");
+    let YamlValue::Sequence(items) = root else {
+        panic!("expected a sequence");
+    };
+    assert_eq!(items.len(), 2);
+    let YamlValue::Mapping(pair) = &items[0] else {
+        panic!("expected a single-pair mapping");
+    };
+    let Some(YamlValue::Mapping(value)) = pair.get("a") else {
+        panic!("expected the pair's value to be a mapping");
+    };
+    assert_eq!(scalar(value.get("b").expect("first entry")).text(), "c");
+    assert_eq!(scalar(value.get("d").expect("second entry")).text(), "e");
+    assert_eq!(scalar(&items[1]).text(), "f");
 }
 
 #[test]

@@ -236,7 +236,11 @@ downloaded again after one interval for as long as the core keeps running the
 profile. What the cards show is kept in memory only: after a restart the
 schedule starts again from each profile's saved time. Updating a profile by
 hand, or changing its name or address, clears its note at once; saving it in
-the editor clears it at the next look. Turning updates off clears every note.
+the editor clears it at the next look. Turning updates off clears every note
+and ends the look that is under way: a download that ends after that is
+neither saved nor noted, while a save that has already begun is completed.
+Choosing another interval ends that look in the same way, and the look that
+follows at once downloads again what is still due.
 
 Limits:
 

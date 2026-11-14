@@ -117,8 +117,9 @@ struct UiProfileUpdate {
 
 pub(crate) struct SubscriptionUpdates {
     /// The interval the scheduler follows: the stored preference, once it was
-    /// read.
+    /// read. It changes only under the lock of `attempts`.
     interval: watch::Sender<UpdateInterval>,
+    /// What the attempts left. Empty for as long as updates are off.
     attempts: Mutex<BTreeMap<String, Attempt>>,
     /// Held while the stored preference is read or written and handed to the
     /// scheduler, so the two never disagree.
@@ -137,12 +138,19 @@ impl Default for SubscriptionUpdates {
 
 impl SubscriptionUpdates {
     /// Has the scheduler follow `interval`. Only a different one wakes it.
-    pub(super) fn follow(&self, interval: UpdateInterval) {
+    /// Turning updates off forgets what they reported, and an attempt that
+    /// still runs then leaves nothing behind: see [`Self::remember`].
+    pub(super) fn follow(&self, interval: UpdateInterval) -> Result<(), String> {
+        let mut attempts = self.attempts()?;
         self.interval.send_if_modified(|followed| {
             let different = *followed != interval;
             *followed = interval;
             different
         });
+        if interval == UpdateInterval::Off {
+            attempts.clear();
+        }
+        Ok(())
     }
 
     /// The interval the scheduler follows.
@@ -205,14 +213,19 @@ impl SubscriptionUpdates {
     }
 
     /// Keeps what an attempt that ended at `now` left for the profile `record`
-    /// describes.
+    /// describes. False when updates were turned off while the attempt ran:
+    /// it then leaves nothing.
     pub(super) fn remember(
         &self,
         record: &ProfileRecord,
         now: u64,
         outcome: Outcome,
-    ) -> Result<(), String> {
-        self.attempts()?.insert(
+    ) -> Result<bool, String> {
+        let mut attempts = self.attempts()?;
+        if self.followed() == UpdateInterval::Off {
+            return Ok(false);
+        }
+        attempts.insert(
             record.id.clone(),
             Attempt {
                 at: now,
@@ -220,7 +233,7 @@ impl SubscriptionUpdates {
                 outcome,
             },
         );
-        Ok(())
+        Ok(true)
     }
 
     /// Forgets what the last attempt left for `id`. True when there was
@@ -229,19 +242,12 @@ impl SubscriptionUpdates {
         Ok(self.attempts()?.remove(id).is_some())
     }
 
-    /// Forgets every attempt. True when there was one.
-    pub(super) fn clear(&self) -> Result<bool, String> {
-        let mut attempts = self.attempts()?;
-        let any = !attempts.is_empty();
-        attempts.clear();
-        Ok(any)
-    }
-
-    pub(super) fn view(&self, interval: UpdateInterval) -> Result<UiSubscriptionUpdates, String> {
+    /// The followed interval and what the attempts left, read together.
+    pub(super) fn view(&self) -> Result<UiSubscriptionUpdates, String> {
+        let attempts = self.attempts()?;
         Ok(UiSubscriptionUpdates {
-            interval,
-            profiles: self
-                .attempts()?
+            interval: self.followed(),
+            profiles: attempts
                 .iter()
                 .map(|(id, attempt)| UiProfileUpdate {
                     id: id.clone(),

@@ -68,15 +68,14 @@ struct Looked {
 
 /// Reads the stored interval and has the scheduler follow it, so that what
 /// the dashboard shows is what happens.
-async fn follow_stored_interval(updates: &SubscriptionUpdates) -> Result<UpdateInterval, String> {
+async fn follow_stored_interval(updates: &SubscriptionUpdates) -> Result<(), String> {
     let _preference = updates.preference.lock().await;
     let store = settings_store()?;
     let interval = tauri::async_runtime::spawn_blocking(move || UpdateInterval::stored(&store))
         .await
         .map_err(|error| format!("subscription update preference read did not complete: {error}"))?
         .map_err(|error| error.to_string())?;
-    updates.follow(interval);
-    Ok(interval)
+    updates.follow(interval)
 }
 
 /// The interval and what the last attempts left for the stored subscriptions.
@@ -85,7 +84,7 @@ pub(crate) async fn subscription_updates(
     updates: State<'_, SubscriptionUpdates>,
     profiles: State<'_, ManagedProfiles>,
 ) -> Result<UiSubscriptionUpdates, String> {
-    let interval = follow_stored_interval(&updates).await?;
+    follow_stored_interval(&updates).await?;
     let records = read_repository(profiles.repository(), |repository| {
         repository
             .snapshot()
@@ -94,7 +93,7 @@ pub(crate) async fn subscription_updates(
     })
     .await?;
     updates.prune(&records)?;
-    updates.view(interval)
+    updates.view()
 }
 
 /// Stores the interval and hands it to the scheduler, which looks for due
@@ -110,11 +109,8 @@ pub(crate) async fn set_subscription_update_interval(
         .await
         .map_err(|error| format!("subscription update preference write did not complete: {error}"))?
         .map_err(|error| error.to_string())?;
-    if interval == UpdateInterval::Off {
-        updates.clear()?;
-    }
-    updates.follow(interval);
-    updates.view(interval)
+    updates.follow(interval)?;
+    updates.view()
 }
 
 /// The user updated profile `id` or changed where it comes from: what a
@@ -135,8 +131,7 @@ pub(super) fn settled_by_user(app: &AppHandle, id: &str) {
 }
 
 fn publish(app: &AppHandle, updated: Vec<UiUpdatedProfile>) -> Result<(), String> {
-    let updates = app.state::<SubscriptionUpdates>();
-    let view = updates.view(updates.followed())?;
+    let view = app.state::<SubscriptionUpdates>().view()?;
     app.emit(
         CHANGED_EVENT,
         UiSubscriptionUpdatesChanged { view, updated },
@@ -151,10 +146,10 @@ pub(crate) fn start_subscription_updates(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         let updates = app.state::<SubscriptionUpdates>();
         if let Err(error) = follow_stored_interval(&updates).await {
-            // The dashboard reads the same store and shows this reason beside
+            // The dashboard asks for the same and shows this reason beside
             // the setting.
             eprintln!(
-                "subscription update preference is unreadable; background updates stay off: {error}"
+                "the stored subscription update interval is not followed; background updates stay off: {error}"
             );
         }
         // Subscribed once the stored interval is followed, so only a later
@@ -213,7 +208,8 @@ async fn look(app: &AppHandle, interval: u64) -> Result<(), String> {
         due,
         // An exit in progress or a changed preference ends this look.
         || lifecycle.startup_work_allowed() && updates.followed().seconds() == Some(interval),
-        |record| refresh(&engine, &profiles, record),
+        |record| download(&engine, &profiles, record),
+        |record, downloaded| save_download(&engine, &profiles, record, downloaded),
         now,
         &mut looked,
     )
@@ -224,48 +220,65 @@ async fn look(app: &AppHandle, interval: u64) -> Result<(), String> {
     attempted
 }
 
-/// Attempts each due subscription in turn for as long as `proceed` allows and
-/// keeps what each attempt left. `looked` holds what was done, also when the
-/// ledger or the clock fails part of the way.
-async fn attempt_each<F>(
+/// Attempts each due subscription in turn for as long as `proceed` allows:
+/// downloads it, saves the download and keeps what the attempt left. A look
+/// that ended while a download ran drops that download unsaved. `looked`
+/// holds what was done, also when the ledger or the clock fails part of the
+/// way.
+async fn attempt_each<T, D, S>(
     updates: &SubscriptionUpdates,
     due: Vec<ProfileRecord>,
     proceed: impl Fn() -> bool,
-    mut refresh: impl FnMut(ProfileRecord) -> F,
+    mut download: impl FnMut(ProfileRecord) -> D,
+    mut save: impl FnMut(ProfileRecord, Result<T, String>) -> S,
     clock: impl Fn() -> Result<u64, String>,
     looked: &mut Looked,
 ) -> Result<(), String>
 where
-    F: Future<Output = Refresh>,
+    D: Future<Output = Result<T, String>>,
+    S: Future<Output = Refresh>,
 {
     for record in due {
         if !proceed() {
             break;
         }
-        let different = match refresh(record.clone()).await {
+        let downloaded = download(record.clone()).await;
+        // A download takes its time: the look may have ended meanwhile.
+        if !proceed() {
+            break;
+        }
+        let different = match save(record.clone(), downloaded).await {
             Refresh::NotAdmitted => break,
             Refresh::Updated(profile) => {
                 looked.updated.push(profile);
                 updates.forget(&record.id)?
             }
             Refresh::Superseded => updates.forget(&record.id)?,
-            Refresh::Left(outcome) => {
-                updates.remember(&record, clock()?, outcome)?;
-                true
-            }
+            Refresh::Left(outcome) => updates.remember(&record, clock()?, outcome)?,
         };
         looked.changed |= different;
     }
     Ok(())
 }
 
-/// One attempt: download the subscription, then save the download.
-async fn refresh(
+/// The first half of an attempt: the subscription's current document.
+async fn download(
     engine: &ManagedEngine,
     profiles: &ManagedProfiles,
     record: ProfileRecord,
+) -> Result<FetchedUpdate, String> {
+    fetch_update(engine, profiles, &record.id).await
+}
+
+/// The second half: saves the download, if there is one, and says what the
+/// attempt came to.
+async fn save_download(
+    engine: &ManagedEngine,
+    profiles: &ManagedProfiles,
+    record: ProfileRecord,
+    downloaded: Result<FetchedUpdate, String>,
 ) -> Refresh {
-    let result = match fetch_update(engine, profiles, &record.id).await {
+    let result = match downloaded {
         Ok(fetched) => {
             save_keeping_engine(
                 engine,

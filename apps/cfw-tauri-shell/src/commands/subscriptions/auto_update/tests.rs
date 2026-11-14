@@ -117,11 +117,27 @@ async fn a_profile_changed_meanwhile_once_it_is_no_longer_the_stored_record() {
     assert!(!changed_meanwhile(&unreadable, record).await);
 }
 
+fn following(interval: UpdateInterval) -> SubscriptionUpdates {
+    let updates = SubscriptionUpdates::default();
+    updates.follow(interval).expect("follow");
+    updates
+}
+
+/// What the dashboard reads: the interval and the notes.
+fn view(updates: &SubscriptionUpdates) -> serde_json::Value {
+    serde_json::to_value(updates.view().expect("view")).expect("serialize")
+}
+
+/// What the ledger shows for each subscription, as the dashboard reads it.
+fn notes(updates: &SubscriptionUpdates) -> serde_json::Value {
+    view(updates)["profiles"].take()
+}
+
 #[test]
 fn the_dashboard_is_told_the_view_and_the_profiles_saved_again() {
-    let updates = SubscriptionUpdates::default();
+    let updates = following(UpdateInterval::Weekly);
     let event = UiSubscriptionUpdatesChanged {
-        view: updates.view(UpdateInterval::Weekly).expect("view"),
+        view: updates.view().expect("view"),
         updated: vec![updated()],
     };
     assert_eq!(
@@ -158,21 +174,28 @@ fn saved_again(id: &str) -> UiUpdatedProfile {
     }
 }
 
-/// What the ledger shows for each subscription, as the dashboard reads it.
-fn notes(updates: &SubscriptionUpdates) -> serde_json::Value {
-    serde_json::to_value(updates.view(UpdateInterval::Daily).expect("view")).expect("serialize")
-        ["profiles"]
-        .take()
+/// What a scripted download brings: the subscription's document, or the
+/// reason it could not be fetched.
+fn document_of(id: &str) -> Result<String, String> {
+    if id == "unreachable" {
+        Err("timed out".into())
+    } else {
+        Ok(format!("document of {id}"))
+    }
 }
 
 struct Run {
-    attempted: Vec<String>,
+    /// The subscriptions whose download began.
+    downloaded: Vec<String>,
+    /// What each save was handed: the subscription and its download.
+    saved: Vec<(String, Result<String, String>)>,
     looked: Looked,
     result: Result<(), String>,
 }
 
-/// Runs `due` through scripted attempts. The look may proceed `allowed`
-/// times; an attempt beyond the script fails the test.
+/// Runs `due` through scripted attempts. The look is asked before each
+/// download and before each save, and may proceed `allowed` times; a save
+/// beyond the script fails the test.
 async fn run(
     updates: &SubscriptionUpdates,
     due: &[&str],
@@ -181,7 +204,8 @@ async fn run(
     clock: Result<u64, String>,
 ) -> Run {
     let asked = Cell::new(0_usize);
-    let attempted = RefCell::new(Vec::new());
+    let downloaded = RefCell::new(Vec::new());
+    let saved = RefCell::new(Vec::new());
     let mut script = script.into_iter();
     let mut looked = Looked::default();
     let result = attempt_each(
@@ -192,16 +216,22 @@ async fn run(
             asked.get() <= allowed
         },
         |record| {
-            attempted.borrow_mut().push(record.id);
-            std::future::ready(script.next().expect("an attempt the script expects"))
+            let document = document_of(&record.id);
+            downloaded.borrow_mut().push(record.id);
+            std::future::ready(document)
+        },
+        |record, document| {
+            saved.borrow_mut().push((record.id, document));
+            std::future::ready(script.next().expect("a save the script expects"))
         },
         || clock.clone(),
         &mut looked,
     )
     .await;
-    assert!(script.next().is_none(), "every scripted attempt was made");
+    assert!(script.next().is_none(), "every scripted save was made");
     Run {
-        attempted: attempted.into_inner(),
+        downloaded: downloaded.into_inner(),
+        saved: saved.into_inner(),
         looked,
         result,
     }
@@ -209,10 +239,10 @@ async fn run(
 
 #[tokio::test]
 async fn each_due_subscription_is_attempted_in_turn_and_what_it_left_is_kept() {
-    let updates = SubscriptionUpdates::default();
+    let updates = following(UpdateInterval::Daily);
     let run = run(
         &updates,
-        &["a", "b", "c"],
+        &["a", "b", "unreachable"],
         usize::MAX,
         vec![
             Refresh::Updated(saved_again("a")),
@@ -223,7 +253,17 @@ async fn each_due_subscription_is_attempted_in_turn_and_what_it_left_is_kept() {
     )
     .await;
     assert_eq!(run.result, Ok(()));
-    assert_eq!(run.attempted, ["a", "b", "c"]);
+    assert_eq!(run.downloaded, ["a", "b", "unreachable"]);
+    // Each save is handed the download of its own subscription, and a
+    // download that failed is concluded like any other.
+    assert_eq!(
+        run.saved,
+        [
+            ("a".to_owned(), Ok("document of a".to_owned())),
+            ("b".to_owned(), Ok("document of b".to_owned())),
+            ("unreachable".to_owned(), Err("timed out".to_owned())),
+        ]
+    );
     assert_eq!(
         run.looked,
         Looked {
@@ -235,18 +275,19 @@ async fn each_due_subscription_is_attempted_in_turn_and_what_it_left_is_kept() {
         notes(&updates),
         serde_json::json!([
             { "id": "b", "attempted_epoch_secs": CLOCK, "state": "waiting" },
-            { "id": "c", "attempted_epoch_secs": CLOCK, "state": "failed", "error": "timed out" },
+            { "id": "unreachable", "attempted_epoch_secs": CLOCK, "state": "failed", "error": "timed out" },
         ])
     );
 }
 
 #[tokio::test]
 async fn a_profile_saved_again_or_changed_meanwhile_loses_what_was_noted_about_it() {
-    let updates = SubscriptionUpdates::default();
+    let updates = following(UpdateInterval::Daily);
     for id in ["a", "b", "c"] {
-        updates
-            .remember(&subscription(id), SAVED, Outcome::Waiting)
-            .expect("remember");
+        assert_eq!(
+            updates.remember(&subscription(id), SAVED, Outcome::Waiting),
+            Ok(true)
+        );
     }
     let run_with_notes = run(
         &updates,
@@ -300,7 +341,7 @@ async fn a_profile_saved_again_or_changed_meanwhile_loses_what_was_noted_about_i
 
 #[tokio::test]
 async fn a_refused_turn_ends_the_look_and_leaves_the_rest_for_the_next_one() {
-    let updates = SubscriptionUpdates::default();
+    let updates = following(UpdateInterval::Daily);
     let run = run(
         &updates,
         &["a", "b", "c"],
@@ -313,7 +354,7 @@ async fn a_refused_turn_ends_the_look_and_leaves_the_rest_for_the_next_one() {
     )
     .await;
     assert_eq!(run.result, Ok(()));
-    assert_eq!(run.attempted, ["a", "b"]);
+    assert_eq!(run.downloaded, ["a", "b"]);
     assert_eq!(
         run.looked,
         Looked {
@@ -331,21 +372,30 @@ async fn a_refused_turn_ends_the_look_and_leaves_the_rest_for_the_next_one() {
 
 #[tokio::test]
 async fn a_look_ends_as_soon_as_it_may_not_proceed() {
-    let updates = SubscriptionUpdates::default();
+    let updates = following(UpdateInterval::Daily);
     let stopped = run(&updates, &["a", "b"], 0, Vec::new(), Ok(CLOCK)).await;
     assert_eq!(stopped.result, Ok(()));
-    assert!(stopped.attempted.is_empty());
+    assert!(stopped.downloaded.is_empty());
     assert_eq!(stopped.looked, Looked::default());
+
+    // A download that ends after the look did is dropped: it is neither
+    // saved nor noted.
+    let ended_meanwhile = run(&updates, &["a", "b"], 1, Vec::new(), Ok(CLOCK)).await;
+    assert_eq!(ended_meanwhile.result, Ok(()));
+    assert_eq!(ended_meanwhile.downloaded, ["a"]);
+    assert!(ended_meanwhile.saved.is_empty());
+    assert_eq!(ended_meanwhile.looked, Looked::default());
+    assert_eq!(notes(&updates), serde_json::json!([]));
 
     let interrupted = run(
         &updates,
         &["a", "b"],
-        1,
+        2,
         vec![Refresh::Left(Outcome::Waiting)],
         Ok(CLOCK),
     )
     .await;
-    assert_eq!(interrupted.attempted, ["a"]);
+    assert_eq!(interrupted.downloaded, ["a"]);
     assert_eq!(
         notes(&updates),
         serde_json::json!([{ "id": "a", "attempted_epoch_secs": CLOCK, "state": "waiting" }])
@@ -353,8 +403,70 @@ async fn a_look_ends_as_soon_as_it_may_not_proceed() {
 }
 
 #[tokio::test]
+async fn updates_turned_off_while_an_attempt_runs_end_the_look_and_leave_no_note() {
+    fn left_waiting(_downloaded: Result<(), String>) -> std::future::Ready<Refresh> {
+        std::future::ready(Refresh::Left(Outcome::Waiting))
+    }
+    let due = || vec![subscription("a"), subscription("b")];
+    let off = serde_json::json!({ "interval": "off", "profiles": [] });
+
+    // Turned off during a download: the look ends before anything is saved.
+    let updates = following(UpdateInterval::Daily);
+    let saves = Cell::new(0_usize);
+    let mut looked = Looked::default();
+    let result = attempt_each(
+        &updates,
+        due(),
+        || updates.followed() == UpdateInterval::Daily,
+        |_record| {
+            updates.follow(UpdateInterval::Off).expect("off");
+            std::future::ready(Ok(()))
+        },
+        |_record, downloaded| {
+            saves.set(saves.get() + 1);
+            left_waiting(downloaded)
+        },
+        || Ok(CLOCK),
+        &mut looked,
+    )
+    .await;
+    assert_eq!(result, Ok(()));
+    assert_eq!(saves.get(), 0);
+    assert_eq!(looked, Looked::default());
+    assert_eq!(view(&updates), off);
+
+    // Turned off during a save: what the attempts leave is not kept, whatever
+    // the look goes on to do. The answer to turning updates off has already
+    // told the dashboard that every note is gone.
+    let updates = following(UpdateInterval::Daily);
+    assert_eq!(
+        updates.remember(&subscription("earlier"), SAVED, Outcome::Waiting),
+        Ok(true)
+    );
+    let mut looked = Looked::default();
+    let result = attempt_each(
+        &updates,
+        due(),
+        || true,
+        |_record| std::future::ready(Ok(())),
+        |record, downloaded| {
+            if record.id == "a" {
+                updates.follow(UpdateInterval::Off).expect("off");
+            }
+            left_waiting(downloaded)
+        },
+        || Ok(CLOCK),
+        &mut looked,
+    )
+    .await;
+    assert_eq!(result, Ok(()));
+    assert_eq!(looked, Looked::default());
+    assert_eq!(view(&updates), off);
+}
+
+#[tokio::test]
 async fn a_clock_that_fails_ends_the_look_and_keeps_what_was_done() {
-    let updates = SubscriptionUpdates::default();
+    let updates = following(UpdateInterval::Daily);
     let run = run(
         &updates,
         &["a", "b", "c"],
@@ -367,7 +479,7 @@ async fn a_clock_that_fails_ends_the_look_and_keeps_what_was_done() {
     )
     .await;
     assert_eq!(run.result, Err("the clock is before 1970".into()));
-    assert_eq!(run.attempted, ["a", "b"]);
+    assert_eq!(run.downloaded, ["a", "b"]);
     assert_eq!(
         run.looked,
         Looked {

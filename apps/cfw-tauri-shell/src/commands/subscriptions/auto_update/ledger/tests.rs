@@ -22,6 +22,17 @@ fn subscription(id: &str, saved: u64) -> ProfileRecord {
     record(id, saved, ProfileSourceKind::Subscription)
 }
 
+fn following(interval: UpdateInterval) -> SubscriptionUpdates {
+    let updates = SubscriptionUpdates::default();
+    updates.follow(interval).expect("follow");
+    updates
+}
+
+/// What the dashboard reads: the interval and the notes.
+fn view(updates: &SubscriptionUpdates) -> serde_json::Value {
+    serde_json::to_value(updates.view().expect("view")).expect("serialize")
+}
+
 fn due(
     updates: &SubscriptionUpdates,
     now: u64,
@@ -95,7 +106,7 @@ fn a_subscription_is_due_one_interval_after_it_was_saved_and_a_local_profile_nev
 
 #[test]
 fn a_failed_attempt_is_retried_after_half_an_hour_or_after_one_shorter_interval() {
-    let updates = SubscriptionUpdates::default();
+    let updates = following(UpdateInterval::SixHours);
     let records = [subscription("a", NOW - 2 * INTERVAL)];
     updates
         .remember(&records[0], NOW, Outcome::failed("timed out"))
@@ -115,7 +126,7 @@ fn a_failed_attempt_is_retried_after_half_an_hour_or_after_one_shorter_interval(
 
 #[test]
 fn a_waiting_change_is_fetched_once_the_engine_no_longer_runs_it_or_after_one_interval() {
-    let updates = SubscriptionUpdates::default();
+    let updates = following(UpdateInterval::SixHours);
     let records = [subscription("a", NOW - INTERVAL)];
     updates
         .remember(&records[0], NOW, Outcome::Waiting)
@@ -140,7 +151,7 @@ fn a_waiting_change_is_fetched_once_the_engine_no_longer_runs_it_or_after_one_in
 
 #[test]
 fn what_an_attempt_left_is_dropped_once_the_profile_was_saved_again_is_local_or_is_gone() {
-    let updates = SubscriptionUpdates::default();
+    let updates = following(UpdateInterval::Daily);
     for id in ["kept", "saved", "local", "gone"] {
         updates
             .remember(&subscription(id, NOW), NOW + 10, Outcome::Waiting)
@@ -153,9 +164,8 @@ fn what_an_attempt_left_is_dropped_once_the_profile_was_saved_again_is_local_or_
         subscription("unrelated", NOW),
     ];
     assert_eq!(updates.prune(&records), Ok(true));
-    let view = updates.view(UpdateInterval::Daily).expect("view");
     assert_eq!(
-        serde_json::to_value(&view).expect("serialize")["profiles"],
+        view(&updates)["profiles"],
         serde_json::json!([{ "id": "kept", "attempted_epoch_secs": NOW + 10, "state": "waiting" }])
     );
     assert_eq!(updates.prune(&records), Ok(false));
@@ -165,7 +175,7 @@ fn what_an_attempt_left_is_dropped_once_the_profile_was_saved_again_is_local_or_
 
 #[test]
 fn the_view_names_the_interval_and_each_attempt_with_its_state() {
-    let updates = SubscriptionUpdates::default();
+    let updates = following(UpdateInterval::TwelveHours);
     updates
         .remember(
             &subscription("b", NOW),
@@ -177,8 +187,7 @@ fn the_view_names_the_interval_and_each_attempt_with_its_state() {
         .remember(&subscription("a", NOW), NOW, Outcome::Waiting)
         .expect("remember");
     assert_eq!(
-        serde_json::to_value(updates.view(UpdateInterval::TwelveHours).expect("view"))
-            .expect("serialize"),
+        view(&updates),
         serde_json::json!({
             "interval": "twelve_hours",
             "profiles": [
@@ -192,9 +201,57 @@ fn the_view_names_the_interval_and_each_attempt_with_its_state() {
         .remember(&subscription("a", NOW), NOW + 9, Outcome::failed("refused"))
         .expect("remember");
     assert_eq!(
-        serde_json::to_value(updates.view(UpdateInterval::Off).expect("view")).expect("serialize")
-            ["profiles"][0],
+        view(&updates)["profiles"][0],
         serde_json::json!({ "id": "a", "attempted_epoch_secs": NOW + 9, "state": "failed", "error": "refused" })
+    );
+}
+
+#[test]
+fn notes_are_kept_only_while_an_interval_is_followed() {
+    let updates = SubscriptionUpdates::default();
+    let profile = subscription("a", NOW);
+    let note =
+        serde_json::json!({ "id": "a", "attempted_epoch_secs": NOW + 1, "state": "waiting" });
+    // Updates are off until an interval is followed.
+    assert_eq!(
+        updates.remember(&profile, NOW + 1, Outcome::Waiting),
+        Ok(false)
+    );
+    assert_eq!(
+        view(&updates),
+        serde_json::json!({ "interval": "off", "profiles": [] })
+    );
+
+    updates.follow(UpdateInterval::Daily).expect("daily");
+    assert_eq!(
+        updates.remember(&profile, NOW + 1, Outcome::Waiting),
+        Ok(true)
+    );
+    // The same interval again, as every read of the stored one follows it,
+    // and another interval keep what was noted.
+    updates.follow(UpdateInterval::Daily).expect("daily again");
+    assert_eq!(view(&updates)["profiles"], serde_json::json!([note]));
+    updates.follow(UpdateInterval::Weekly).expect("weekly");
+    assert_eq!(
+        view(&updates),
+        serde_json::json!({ "interval": "weekly", "profiles": [note] })
+    );
+
+    // Off forgets it, and an attempt that ends afterwards leaves nothing.
+    updates.follow(UpdateInterval::Off).expect("off");
+    assert_eq!(
+        view(&updates),
+        serde_json::json!({ "interval": "off", "profiles": [] })
+    );
+    assert_eq!(
+        updates.remember(&profile, NOW + 2, Outcome::failed("late")),
+        Ok(false)
+    );
+    // Turned on again, the ledger starts empty.
+    updates.follow(UpdateInterval::SixHours).expect("six hours");
+    assert_eq!(
+        view(&updates),
+        serde_json::json!({ "interval": "six_hours", "profiles": [] })
     );
 }
 
@@ -211,17 +268,17 @@ fn a_long_reason_is_cut_and_forgetting_says_whether_there_was_something() {
         }
     );
 
-    let updates = SubscriptionUpdates::default();
-    assert_eq!(updates.clear(), Ok(false));
+    let updates = following(UpdateInterval::Daily);
+    assert_eq!(updates.forget("a"), Ok(false));
     for id in ["a", "b"] {
-        updates
-            .remember(&subscription(id, NOW), NOW, Outcome::Waiting)
-            .expect("remember");
+        assert_eq!(
+            updates.remember(&subscription(id, NOW), NOW, Outcome::Waiting),
+            Ok(true)
+        );
     }
     assert_eq!(updates.forget("a"), Ok(true));
     assert_eq!(updates.forget("a"), Ok(false));
-    assert_eq!(updates.clear(), Ok(true));
-    assert_eq!(updates.forget("b"), Ok(false));
+    assert_eq!(view(&updates)["profiles"][0]["id"], "b");
 }
 
 fn temporary_store() -> (tempfile::TempDir, SettingsStore) {
@@ -301,17 +358,22 @@ fn only_a_different_interval_wakes_the_scheduler() {
     let updates = SubscriptionUpdates::default();
     assert_eq!(updates.followed(), UpdateInterval::Off);
     let mut heard = updates.subscribe();
-    updates.follow(UpdateInterval::Off);
+    updates.follow(UpdateInterval::Off).expect("off");
     assert!(!heard.has_changed().expect("the ledger lives"));
-    updates.follow(UpdateInterval::Daily);
+    updates.follow(UpdateInterval::Daily).expect("daily");
     assert!(heard.has_changed().expect("the ledger lives"));
     assert_eq!(*heard.borrow_and_update(), UpdateInterval::Daily);
-    updates.follow(UpdateInterval::Daily);
+    updates.follow(UpdateInterval::Daily).expect("daily again");
     assert!(!heard.has_changed().expect("the ledger lives"));
     assert_eq!(updates.followed(), UpdateInterval::Daily);
     // A scheduler that starts now hears only what changes from here on.
     let later = updates.subscribe();
     assert!(!later.has_changed().expect("the ledger lives"));
-    updates.follow(UpdateInterval::Weekly);
+    updates.follow(UpdateInterval::Weekly).expect("weekly");
     assert!(later.has_changed().expect("the ledger lives"));
+    // Turning updates off wakes it as well: the look under way ends.
+    let mut last = updates.subscribe();
+    updates.follow(UpdateInterval::Off).expect("off");
+    assert!(last.has_changed().expect("the ledger lives"));
+    assert_eq!(*last.borrow_and_update(), UpdateInterval::Off);
 }

@@ -2,8 +2,8 @@
 //! settings. They were captured from the 0.5 line before GEOSITE rules and the
 //! mainland China direct switch existed, so every later change to routing, DNS
 //! or dataset resources must leave these bytes unchanged while the switches
-//! are off; the one captured with DNS leak protection on binds that switch's
-//! rule. A mismatch writes the actual output to
+//! are off; the ones captured with a leak protection switch on bind that
+//! switch's rules. A mismatch writes the actual output to
 //! `target/tmp/projection-goldens/` and fails; the goldens are never rewritten
 //! automatically.
 
@@ -195,6 +195,15 @@ fn cases() -> Vec<Case> {
             ProjectionMode::Tunnel,
             EngineSettings {
                 dns_leak_protection: true,
+                ..default()
+            },
+        ),
+        case(
+            "shadowsocks-tunnel-webrtc-leak-protection",
+            &shadowsocks(),
+            ProjectionMode::Tunnel,
+            EngineSettings {
+                webrtc_leak_protection: true,
                 ..default()
             },
         ),

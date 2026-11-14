@@ -36,6 +36,7 @@ export function createToggles({ renderPage, runtimeSettingsUI, applyEngineStatus
     if (key === "ipv6DNS") return runtimeSettingsUI.toggleIPv6DNS(checked);
     if (key === "mainlandChinaDirect") return runtimeSettingsUI.toggleMainlandChinaDirect(checked);
     if (key === "dnsLeakProtection") return runtimeSettingsUI.toggleDnsLeakProtection(checked);
+    if (key === "webrtcLeakProtection") return runtimeSettingsUI.toggleWebRtcLeakProtection(checked);
     const isEngineMutation = key === "coreRunning" || key === "systemProxy" || key === "tunMode";
     if (PERSISTED_TOGGLES.has(key) && state.settingsUnavailableReason) {
       throw new Error(state.settingsUnavailableReason);
@@ -45,7 +46,7 @@ export function createToggles({ renderPage, runtimeSettingsUI, applyEngineStatus
       return false;
     }
     if (isEngineMutation && state.engineMutationBusy) {
-      throw new Error("A network mode change is already in progress");
+      throw new Error(t("A network mode change is already in progress"));
     }
     const previous = state.toggles[key];
     if (!isEngineMutation) state.toggles[key] = checked;
@@ -80,7 +81,7 @@ export function createToggles({ renderPage, runtimeSettingsUI, applyEngineStatus
         const snapshot = await invoke("set_launch_at_login_enabled", { enabled: checked });
         applyPersistedSettings(snapshot);
       } else if (SESSION_TOGGLES.has(key)) {
-        appendLog("info", source, t("{key} changed to {value2} for this session", { key: key, value2: checked ? "on" : "off" }));
+        appendLog("info", source, t("{key} changed to {value2} for this session", { key: key, value2: t(checked ? "on" : "off") }));
         return;
       } else if (PERSISTED_TOGGLES.has(key)) {
         const snapshot = await invoke("write_settings_snapshot", { settings: persistedSettingsFromUi() });
@@ -91,7 +92,7 @@ export function createToggles({ renderPage, runtimeSettingsUI, applyEngineStatus
       }
       appendLog("info", source, isEngineMutation
         ? t("{key} request completed; engine {state}", { key: key, state: engineStateLabel(state.engine) })
-        : t("{key} changed to {value2}", { key: key, value2: checked ? "on" : "off" }));
+        : t("{key} changed to {value2}", { key: key, value2: t(checked ? "on" : "off") }));
       return true;
     } catch (error) {
       state.toggles[key] = previous;

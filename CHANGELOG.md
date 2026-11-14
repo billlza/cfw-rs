@@ -1,5 +1,73 @@
 # Changelog
 
+## 0.5.2 - Unreleased
+
+### Interface
+
+- Translate the interface text that never reached the language catalogs:
+  more than sixty labels, notes and messages now follow the display language
+  in Simplified Chinese, Traditional Chinese and Japanese. Among them are the
+  version line of the About dialog, which read `版本` in every language, and
+  its `Checking…` buttons; the notes under Start at Login on macOS, and the
+  message when its state cannot be read; the busy buttons and the unavailable
+  state of the Providers page; the latency test's tooltips and the empty
+  states of the Proxies page; a profile's source and state on the Profiles
+  page and the title of its inspector, which reads `QR code` where it read
+  `qrcode`; the legacy maintenance banner; what a credential dialog answers
+  to an empty or malformed secret; and the words that log lines put into an
+  otherwise translated sentence, such as `on`, `started` and `recovered`.
+- Show a profile without groups under `Configured nodes` in the display
+  language. The group keeps one name inside the app, so a chosen group stays
+  chosen when the language changes.
+- Write `Updating…` and `Checking…` on the Providers page with an ellipsis
+  character in English too, where they had three full stops.
+
+### Profiles
+
+- Refuse a Clash subscription that contains a NUL character. The YAML parser
+  read the NUL as the end of the document, so the import took what came
+  before it and dropped the rest without a word.
+- Read a flow sequence that holds a `key: {…}` pair whose mapping has more
+  than one entry, as in `[a: {b: c, d: e}, f]`. The import refused such a
+  document, saying its mapping keys must be scalars.
+- Fail the import when a byte order mark appears anywhere but at the start of
+  a Clash subscription. It used to become an invisible part of a key or a
+  value.
+- Read a block scalar without content lines (`key: |`) as the empty string
+  instead of a line break.
+
+### Security
+
+- Add Settings › Engine › WebRTC leak protection, off by default. In TUN Mode
+  the core refuses STUN outside Direct mode, so a page cannot ask a STUN
+  server which address this Mac's traffic comes from: neither the real
+  address, through a server that is routed directly, nor the proxy's exit,
+  through a proxied one. It also refuses UDP to the seven mail ports the core
+  never inspects, where a STUN server would go unrecognised. Calls and other
+  peer-to-peer connections that rely on STUN go through a relay over TCP or
+  TLS instead, or fail. The switch changes nothing in System Proxy mode,
+  where a browser's WebRTC traffic never passes through the app, and nothing
+  in release evidence projections. It does not hide an address a browser
+  reads from the Mac's own interfaces once a page has camera or microphone
+  permission. Connection diagnostics reports a UDP check that finds no exit
+  as the expected refusal, and one that finds an exit as STUN that left
+  outside TUN. Earlier builds refuse a settings file saved with it on, so
+  turn it off before installing one.
+
+### Supply chain
+
+- Move the Rust crates to the newest releases their requirements allow,
+  among them wry 0.57.2, rustls-webpki 0.103.17 with webpki-root-certs
+  1.0.12, mio 1.2.5 and uuid 1.29.2. wry 0.57.2 cancels a file upload on
+  macOS instead of panicking when the open panel cannot be created.
+- Move the crates pinned to an exact version that have a newer release: the
+  single-instance plugin 2.5.5 and cc 1.11.2. Tauri stays at 2.12.3 with
+  tauri-build 2.7.2, because `static_vcruntime` 3.0.0 still ships both
+  `README.md` and `Readme.md`.
+- Read Clash subscriptions with saphyr-parser 0.3.4 instead of 0.1.2.
+- Build the interface with Node 26.13.1 and npm 12.2.2, run the release tools
+  on Python 3.14.10, and audit the Rust graph with cargo-audit 0.23.0.
+
 ## 0.5.1 — 2026-11-11
 
 ### Build 51006

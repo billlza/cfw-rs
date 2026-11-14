@@ -133,31 +133,31 @@ export function credentialProvisionBatch(requirements, secrets) {
     const secret = secrets[index];
     if (typeof secret !== "string") throw new TypeError("credential value is invalid");
     const bytes = new TextEncoder().encode(secret).byteLength;
-    if (bytes === 0) throw new TypeError(`${credentialLabel(reference.kind)} is required`);
+    if (bytes === 0) throw new TypeError(t("{label} is required", { label: credentialLabel(reference.kind) }));
     if (bytes > MAX_CREDENTIAL_SECRET_BYTES) {
-      throw new TypeError(`${credentialLabel(reference.kind)} is larger than 16 KiB`);
+      throw new TypeError(t("{label} is larger than 16 KiB", { label: credentialLabel(reference.kind) }));
     }
     if ((reference.kind === "socks5_username" || reference.kind === "socks5_password") && bytes > 255) {
-      throw new TypeError(`${credentialLabel(reference.kind)} is larger than 255 UTF-8 bytes`);
+      throw new TypeError(t("{label} is larger than 255 UTF-8 bytes", { label: credentialLabel(reference.kind) }));
     }
     if ((reference.kind === "http_proxy_username" && (bytes > 1024 || secret.includes(":")))
       || (reference.kind === "http_proxy_password" && bytes > 4096)) {
-      throw new TypeError(`${credentialLabel(reference.kind)} is invalid`);
+      throw new TypeError(t("{label} is invalid", { label: credentialLabel(reference.kind) }));
     }
     if (reference.kind === "wireguard_private_key" || reference.kind === "wireguard_pre_shared_key") {
       if (!/^[A-Za-z0-9+/]{43}=$/u.test(secret)) {
-        throw new TypeError("WireGuard key must contain 32 bytes in canonical base64");
+        throw new TypeError(t("WireGuard key must contain 32 bytes in canonical base64"));
       }
       const decoded = atob(secret);
       if (btoa(decoded) !== secret || [...decoded].every((character) => character.charCodeAt(0) === 0)) {
-        throw new TypeError("WireGuard key must be a nonzero canonical base64 value");
+        throw new TypeError(t("WireGuard key must be a nonzero canonical base64 value"));
       }
     }
     if (reference.kind === "tailscale_auth_key" && !/^[\x21-\x7e]{1,256}$/u.test(secret)) {
-      throw new TypeError("Tailscale auth key must be one token of up to 256 printable ASCII characters");
+      throw new TypeError(t("Tailscale auth key must be one token of up to 256 printable ASCII characters"));
     }
     if (/[\u0000-\u001f\u007f-\u009f]/u.test(secret)) {
-      throw new TypeError(`${credentialLabel(reference.kind)} contains control characters`);
+      throw new TypeError(t("{label} contains control characters", { label: credentialLabel(reference.kind) }));
     }
     return { reference: { id: reference.id, kind: reference.kind }, secret };
   });

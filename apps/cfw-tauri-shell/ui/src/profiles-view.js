@@ -84,16 +84,20 @@ function renderInvalidProfileCard(profile) {
 function profileSourceLabel(profile) {
   switch (profile.sourceKind) {
     case "local": return t("local file");
-    case "subscription": return "subscription";
+    case "subscription": return t("subscription");
     default: throw new TypeError("profile snapshot has an invalid source kind");
   }
 }
+
+/// The inspector's views by the word that titles them; any other mode shows
+/// the profile's details.
+const INSPECTOR_TITLES = Object.freeze({ edit: "edit", qrcode: "QR code" });
 
 function renderProfileInspector() {
   const inspector = state.profileInspector;
   if (!inspector) return "";
   const profile = inspector.profile ?? {};
-  const title = `${profile.name ?? inspector.id} · ${inspector.mode}`;
+  const title = `${profile.name ?? inspector.id} · ${t(INSPECTOR_TITLES[inspector.mode] ?? "details")}`;
   const sourceUrl = profile.source_url ?? profile.sourceUrl ?? null;
   let body = "";
   if (inspector.mode === "edit") {
@@ -101,7 +105,7 @@ function renderProfileInspector() {
       <dl class="detail-grid">
         <div><dt>${escapeHtml(t("Source URL"))}</dt><dd>${escapeHtml(sourceUrl ?? t("local file"))}</dd></div>
         <div><dt>${escapeHtml(t("Size"))}</dt><dd>${escapeHtml(formatBytes(profile.bytes ?? 0))}</dd></div>
-        <div><dt>${escapeHtml(t("Active"))}</dt><dd>${profile.active ? "yes" : "no"}</dd></div>
+        <div><dt>${escapeHtml(t("Active"))}</dt><dd>${escapeHtml(t(profile.active ? "yes" : "no"))}</dd></div>
       </dl>
       <textarea class="profile-editor" data-profile-editor spellcheck="false">${escapeHtml(profile.body ?? "")}</textarea>
       <div class="row-actions">
@@ -119,7 +123,7 @@ function renderProfileInspector() {
     body = `
       <dl class="detail-grid">
         <div><dt>${escapeHtml(t("ID"))}</dt><dd>${escapeHtml(profile.id ?? inspector.id)}</dd></div>
-        <div><dt>${escapeHtml(t("Active"))}</dt><dd>${profile.active ? "yes" : "no"}</dd></div>
+        <div><dt>${escapeHtml(t("Active"))}</dt><dd>${escapeHtml(t(profile.active ? "yes" : "no"))}</dd></div>
         <div><dt>${escapeHtml(t("Source URL"))}</dt><dd>${escapeHtml(sourceUrl ?? t("local file"))}</dd></div>
       </dl>
     `;

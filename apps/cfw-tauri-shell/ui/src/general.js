@@ -14,7 +14,7 @@ export function createGeneralView({ state, escapeHtml, engineStateLabel, engineT
   const engine = state.engine;
   const projection = state.projection;
   const settingsView = state.runtimeSettings;
-  const settingsReason = state.migrationHandoff ? "Finish migration before changing network settings" : state.runtimeSettingsError ?? (!settingsView ? "Network settings are loading" : null);
+  const settingsReason = state.migrationHandoff ? t("Finish migration before changing network settings") : state.runtimeSettingsError ?? (!settingsView ? t("Network settings are loading") : null);
   const statusDot = engine.active ? "cfw-status-dot on" : "cfw-status-dot";
   const localPort = projection.mixedPort ?? settingsView?.effective.mixed_port;
   const listenAddress = localPort ? `127.0.0.1:${localPort}` : null;

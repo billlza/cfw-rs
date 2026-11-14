@@ -57,6 +57,8 @@ export function platformPresentation(operatingSystem) {
   }
 }
 
+const STARTUP_DESIGN_LABELS = Object.freeze({ macos: "launchd", windows: "Start at Login" });
+
 // The native payload names the platform's startup mechanism differently.
 // Resolve it once at the UI boundary instead of rendering a missing Mac field.
 export function platformStartupDesign(operatingSystem, design) {
@@ -66,7 +68,7 @@ export function platformStartupDesign(operatingSystem, design) {
   if (typeof value !== "string" || !value.trim()) {
     throw new TypeError("host startup strategy is invalid");
   }
-  return { label: windows ? "Start at Login" : "launchd", value };
+  return { label: STARTUP_DESIGN_LABELS[operatingSystem], value };
 }
 
 export function proxyEnvironmentCommands(operatingSystem, port) {

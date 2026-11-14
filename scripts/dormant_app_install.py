@@ -304,6 +304,16 @@ INSTALLED_51005_PREDECESSOR: Final = PredecessorProfile(
     build_number="51005",
     tree_sha256="2fb5521d55b06c464044e0ebfe902bf244e8cdb9d3975f9c56bfb384deb22c00",
 )
+# Published 0.5.1 maintenance build, the last GA of 0.5.1. Its stapled tree
+# is bound by the signed-app manifest, the public DMG, updater and
+# distribution package seals and the `candidate` of the completed
+# 51005 -> 51006 install and service journals; the first 0.5.2 GA install
+# replaces it.
+INSTALLED_51006_PREDECESSOR: Final = PredecessorProfile(
+    product_version="0.5.1",
+    build_number="51006",
+    tree_sha256="72a3e8b5983ee318a4334315a01c5cfbd824be29321370a3e03873c2e6f14c4f",
+)
 SUPPORTED_PREDECESSORS: Final = MappingProxyType(
     {
         INSTALLED_50025_PREDECESSOR.build_number: INSTALLED_50025_PREDECESSOR,
@@ -314,6 +324,7 @@ SUPPORTED_PREDECESSORS: Final = MappingProxyType(
         INSTALLED_51002_PREDECESSOR.build_number: INSTALLED_51002_PREDECESSOR,
         INSTALLED_51004_PREDECESSOR.build_number: INSTALLED_51004_PREDECESSOR,
         INSTALLED_51005_PREDECESSOR.build_number: INSTALLED_51005_PREDECESSOR,
+        INSTALLED_51006_PREDECESSOR.build_number: INSTALLED_51006_PREDECESSOR,
     }
 )
 SERVICE_DECOMMISSION_PHASES: Final = (

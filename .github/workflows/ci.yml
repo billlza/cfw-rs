@@ -32,10 +32,10 @@ jobs:
           persist-credentials: false
       - name: Assert exact CI source and workflow identity ${{ github.workflow_sha }}
         run: /bin/test "$(/usr/bin/git rev-parse HEAD)" = "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         id: validation-python
         with:
-          python-version: "3.14.9"
+          python-version: "3.14.10"
           architecture: arm64
           update-environment: false
       - name: Select latest available Xcode
@@ -50,7 +50,7 @@ jobs:
             --output "$RUNNER_TEMP/cfw-ci-xcode.json"
       - name: Record Apple validation toolchain ${{ env.CFW_UNSIGNED_VALIDATION_XCODE_VERSION }} (${{ env.CFW_UNSIGNED_VALIDATION_XCODE_BUILD_VERSION }})
         run: /bin/cat "$RUNNER_TEMP/cfw-ci-xcode.json"
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: "1.99.1"
           components: clippy,rustfmt,llvm-tools-preview
@@ -118,10 +118,10 @@ jobs:
           persist-credentials: false
       - name: Assert exact CI source and workflow identity ${{ github.workflow_sha }}
         run: /bin/test "$(/usr/bin/git rev-parse HEAD)" = "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         id: validation-python
         with:
-          python-version: "3.14.9"
+          python-version: "3.14.10"
           architecture: arm64
           update-environment: false
       - name: Select latest available Xcode
@@ -136,7 +136,7 @@ jobs:
             --output "$RUNNER_TEMP/cfw-ci-xcode.json"
       - name: Record Apple validation toolchain ${{ env.CFW_UNSIGNED_VALIDATION_XCODE_VERSION }} (${{ env.CFW_UNSIGNED_VALIDATION_XCODE_BUILD_VERSION }})
         run: /bin/cat "$RUNNER_TEMP/cfw-ci-xcode.json"
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: "1.99.1"
           components: clippy,rustfmt,llvm-tools-preview
@@ -160,10 +160,10 @@ jobs:
           persist-credentials: false
       - name: Assert exact CI source and workflow identity ${{ github.workflow_sha }}
         run: /bin/test "$(/usr/bin/git rev-parse HEAD)" = "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         id: validation-python
         with:
-          python-version: "3.14.9"
+          python-version: "3.14.10"
           architecture: arm64
           update-environment: false
       - name: Select latest available Xcode
@@ -178,7 +178,7 @@ jobs:
             --output "$RUNNER_TEMP/cfw-ci-xcode.json"
       - name: Record Apple validation toolchain ${{ env.CFW_UNSIGNED_VALIDATION_XCODE_VERSION }} (${{ env.CFW_UNSIGNED_VALIDATION_XCODE_BUILD_VERSION }})
         run: /bin/cat "$RUNNER_TEMP/cfw-ci-xcode.json"
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: "1.99.1"
           components: clippy,rustfmt,llvm-tools-preview

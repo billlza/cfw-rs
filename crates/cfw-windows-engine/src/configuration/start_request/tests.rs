@@ -346,17 +346,18 @@ fn tunnel_data_plane_admits_only_the_exact_packet_fed_projection() {
     let fake_ip = serde_json::json!({"outbounds":[{"type":"socks5","tag":"proxy","server":"node.example.com","server_port":1080}],
         "dns":{"servers":[{"type":"udp","server":"1.1.1.1","server_port":53}],"fake_ip":{"exclude":["+.lan"]}}})
     .to_string();
-    for (case, mtu, ipv6, lan, mainland, leak, source) in [
-        (0, 1280, false, false, false, false, MAINLAND_SOURCE),
-        (1, 1500, true, true, false, true, MAINLAND_SOURCE),
-        (2, 9000, true, false, true, false, MAINLAND_SOURCE),
-        (3, 1500, true, true, true, true, fake_ip.as_str()),
+    for (case, mtu, ipv6, lan, mainland, leak, stun, source) in [
+        (0, 1280, false, false, false, false, false, MAINLAND_SOURCE),
+        (1, 1500, true, true, false, true, false, MAINLAND_SOURCE),
+        (2, 9000, true, false, true, false, true, MAINLAND_SOURCE),
+        (3, 1500, true, true, true, true, true, fake_ip.as_str()),
     ] {
         let settings = EngineSettings {
             tunnel_mtu: mtu,
             enable_ipv6: ipv6,
             mainland_china_direct: mainland,
             dns_leak_protection: leak,
+            webrtc_leak_protection: stun,
             lan_proxy: lan.then(|| LanProxySettings {
                 listen: Ipv4Addr::UNSPECIFIED,
                 port: 8081,
@@ -381,6 +382,16 @@ fn tunnel_data_plane_admits_only_the_exact_packet_fed_projection() {
             document["route"]["rules"][usize::from(lan) + 1]
                 == serde_json::json!({"port":853,"action":"reject"}),
             leak,
+            "case {case}"
+        );
+        // WebRTC leak protection adds its rules behind the Direct mode rule,
+        // so it never displaces the LAN access rule either.
+        assert_eq!(
+            document["route"]["rules"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!({"protocol":"stun","action":"reject"})),
+            stun,
             "case {case}"
         );
         let prepared = CheckedStartConfiguration::new(request)

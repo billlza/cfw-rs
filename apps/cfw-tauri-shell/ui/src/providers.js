@@ -124,8 +124,8 @@ function renderProviders() {
           <p class="muted">${providerUnavailable ? escapeHtml(providerUnavailableReason) : t("Resources in the selected profile. Updates retain the current configuration if validation fails.")}</p>
         </div>
         <div class="toolbar-actions">
-          <button class="button" data-action="update-all-providers" ${updatingAll || providerUnavailable || ![...state.providers, ...state.ruleProviders].some((provider) => provider.updatable) ? "disabled" : ""}>${updatingAll ? "Updating..." : t("Update All")}</button>
-          <button class="button ghost" data-action="health-check-all" ${healthAll || providerUnavailable || state.providers.length === 0 ? "disabled" : ""}>${healthAll ? "Checking..." : t("Health Check All")}</button>
+          <button class="button" data-action="update-all-providers" ${updatingAll || providerUnavailable || ![...state.providers, ...state.ruleProviders].some((provider) => provider.updatable) ? "disabled" : ""}>${t(updatingAll ? "Updating…" : "Update All")}</button>
+          <button class="button ghost" data-action="health-check-all" ${healthAll || providerUnavailable || state.providers.length === 0 ? "disabled" : ""}>${t(healthAll ? "Checking…" : "Health Check All")}</button>
           <button class="button ghost" data-action="open-rules">${escapeHtml(t("Rules"))}</button>
         </div>
       </section>
@@ -146,7 +146,7 @@ function renderProviders() {
                 ${provider.error ? `<p class="error">${escapeHtml(provider.error)}</p>` : ""}
               </div>
               <div class="row-actions">
-                <button class="button ghost" data-provider-update="${escapeHtml(provider.name)}" ${updating || providerUnavailable || !provider.updatable ? "disabled" : ""}>${updating ? "Updating" : t("Update")}</button>
+                <button class="button ghost" data-provider-update="${escapeHtml(provider.name)}" ${updating || providerUnavailable || !provider.updatable ? "disabled" : ""}>${t(updating ? "Updating" : "Update")}</button>
                 <button class="button" data-provider-health="${escapeHtml(provider.name)}" ${checking || providerUnavailable ? "disabled" : ""}>${checking ? t("Checking") : t("Health Check")}</button>
               </div>
             </article>
@@ -155,7 +155,7 @@ function renderProviders() {
           <article class="panel provider-row empty-state">
             <div>
               <p class="label">${escapeHtml(t("Selected profile"))}</p>
-              <h3>${providerUnavailable ? "Proxy provider management unavailable" : t("No proxy providers loaded")}</h3>
+              <h3>${t(providerUnavailable ? "Proxy provider management unavailable" : "No proxy providers loaded")}</h3>
               <p class="muted">${providerUnavailable ? escapeHtml(providerUnavailableReason) : t("Import a configuration containing proxy-providers to manage its nodes here.")}</p>
             </div>
           </article>
@@ -176,7 +176,7 @@ function renderProviders() {
                 ${provider.error ? `<p class="error">${escapeHtml(provider.error)}</p>` : ""}
               </div>
               <div class="row-actions">
-                <button class="button ghost" data-rule-provider-update="${escapeHtml(provider.name)}" ${updating || providerUnavailable || !provider.updatable ? "disabled" : ""}>${updating ? "Updating" : t("Update")}</button>
+                <button class="button ghost" data-rule-provider-update="${escapeHtml(provider.name)}" ${updating || providerUnavailable || !provider.updatable ? "disabled" : ""}>${t(updating ? "Updating" : "Update")}</button>
               </div>
             </article>
           `;
@@ -184,7 +184,7 @@ function renderProviders() {
           <article class="panel provider-row empty-state">
             <div>
               <p class="label">${escapeHtml(t("Selected profile"))}</p>
-              <h3>${providerUnavailable ? "Rule provider management unavailable" : t("No rule providers loaded")}</h3>
+              <h3>${t(providerUnavailable ? "Rule provider management unavailable" : "No rule providers loaded")}</h3>
               <p class="muted">${providerUnavailable ? escapeHtml(providerUnavailableReason) : t("Import a configuration containing rule-providers to manage its rules here.")}</p>
             </div>
           </article>

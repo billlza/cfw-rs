@@ -105,12 +105,13 @@ function renderSettings() {
 
       ${renderSettingsGroup(t("Engine"), [
         renderSettingAction(t("Local proxy port"), state.runtimeSettings?.effective.mixed_port ?? listenAddress, t("Configure local port, log level, TUN MTU and LAN access."), "open-runtime-settings", t("Configure"), state.runtimeSettingsError),
-        renderSettingValue(t("Controller"), projection.controller ?? "not running", t("App-owned loopback controller of the running engine. Its secret is never shown.")),
+        renderSettingValue(t("Controller"), projection.controller ?? t("not running"), t("App-owned loopback controller of the running engine. Its secret is never shown.")),
         renderSettingValue(t("Engine state"), t("{state} · desired {desiredMode}", { state: engineStateLabel(engine), desiredMode: engine.desiredMode }), engine.availabilityReason ?? t("Live state of the Authority-mediated engine.")),
         renderSettingValue(t("Log level"), projection.logLevel ?? "info", REASONS.logLevel),
         renderToggle("allowLan", t("Allow LAN"), REASONS.allowLan, { reason: state.runtimeSettingsError, disabled: state.engineMutationBusy }),
         renderToggle("mainlandChinaDirect", t("Mainland China direct"), REASONS.mainlandChinaDirect, { reason: state.runtimeSettingsError, disabled: state.engineMutationBusy }),
         renderToggle("dnsLeakProtection", t("DNS leak protection"), REASONS.dnsLeakProtection, { reason: state.runtimeSettingsError, disabled: state.engineMutationBusy }),
+        renderToggle("webrtcLeakProtection", t("WebRTC leak protection"), REASONS.webrtcLeakProtection, { reason: state.runtimeSettingsError, disabled: state.engineMutationBusy }),
         renderToggle("mixin", t("Mixin"), "", { reason: REASONS.mixin }),
       ])}
 

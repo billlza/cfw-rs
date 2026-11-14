@@ -1,5 +1,10 @@
 // Display only saved routing policy. No controller status, credential values,
 // server addresses or subscription URLs are part of this view.
+
+/// The group that lists the nodes of a profile without groups. The name is
+/// its identity; the Proxies page shows it translated.
+export const CONFIGURED_NODES_GROUP = "Configured nodes";
+
 export function savedProfilePolicy(profile) {
   if (!profile || typeof profile.id !== "string" || typeof profile.body !== "string") {
     throw new TypeError("saved profile response is invalid");
@@ -35,7 +40,7 @@ export function savedProfilePolicy(profile) {
     groups.unshift(appSelectorGroup(profile.app_selector, nodes, profile.proxy_selections));
   }
   if (groups.length === 0) {
-    groups.push({ name: "Configured nodes", type: "List", now: document.route?.final ?? document.outbounds[0].tag, options: [...nodes.values()] });
+    groups.push({ name: CONFIGURED_NODES_GROUP, type: "List", now: document.route?.final ?? document.outbounds[0].tag, options: [...nodes.values()] });
   }
   const rules = (document.route?.rules ?? []).map((rule, index) => ({
     index: String(index + 1),

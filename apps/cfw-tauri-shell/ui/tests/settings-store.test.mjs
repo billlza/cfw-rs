@@ -5,6 +5,7 @@ import { dom, element, host, spy } from "./support/fake-host.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { state, defaultSettingsSnapshot } from "../src/state.js";
+import { setLocale } from "../src/i18n.js";
 import { createSettingsController } from "../src/settings-controller.js";
 import { loadNetworkDiagnostics, loadPlatformDesign } from "../src/system-info.js";
 import {
@@ -142,6 +143,40 @@ test("the startup Login Item read applies only to the snapshot it was taken for"
   state.activePage = "settings";
   await settings.refreshStartupLoginItemStatus(snapshotOf());
   assert.notEqual(state.settingsSnapshot.settings.theme, "dark", "a newer snapshot is not overwritten");
+});
+
+test("a failed Login Item read is reported in the display language", async () => {
+  const { settings } = controller();
+  const expected = snapshotOf();
+  const system = state.payload.product.operating_system;
+  const sentences = {
+    macos: {
+      "zh-Hans": "无法读取 macOS 登录项状态。请重新加载后重试；失败已记录在本地诊断中。",
+      "zh-Hant": "無法讀取 macOS 登入項目狀態。請重新載入後重試；失敗已記錄於本機診斷中。",
+      ja: "macOS のログイン項目の状態を読み取れませんでした。再読み込みして再試行してください。エラーはローカル診断に記録されています。",
+    },
+    windows: {
+      "zh-Hans": "无法读取 Windows 启动注册。请重新加载后重试；失败已记录在本地诊断中。",
+      "zh-Hant": "無法讀取 Windows 啟動註冊。請重新載入後重試；失敗已記錄於本機診斷中。",
+      ja: "Windows の起動登録を読み取れませんでした。再読み込みして再試行してください。エラーはローカル診断に記録されています。",
+    },
+  };
+  try {
+    host.respond("read_settings_snapshot", new Error("sm unavailable"));
+    for (const [operatingSystem, translated] of Object.entries(sentences)) {
+      state.payload.product.operating_system = operatingSystem;
+      for (const [locale, sentence] of Object.entries(translated)) {
+        setLocale(locale);
+        state.settingsSnapshot = expected;
+        await settings.refreshStartupLoginItemStatus(expected);
+        assert.equal(state.launchAtLogin.observationError, sentence, `${operatingSystem} ${locale}`);
+        assert.equal(lastLog().message, sentence, `${operatingSystem} ${locale}: the log line is the same sentence`);
+      }
+    }
+  } finally {
+    setLocale("en");
+    state.payload.product.operating_system = system;
+  }
 });
 
 test("the settings snapshot and its Login Item state are validated field by field", () => {

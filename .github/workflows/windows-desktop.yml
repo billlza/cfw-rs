@@ -41,14 +41,14 @@ jobs:
           New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence') -ErrorAction Stop | Out-Null
           [ordered]@{ source=$source; phase='initialized'; release_accepted=$false } |
             ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/run-receipt.json') -Encoding utf8NoBOM
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
         with:
           toolchain: ${{ steps.pins.outputs.RUST_VERSION }}
           components: clippy,rustfmt
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ steps.pins.outputs.NODE_VERSION }}
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ steps.pins.outputs.PYTHON_VERSION }}
       - name: Verify bounded WebView2 startup observation
@@ -286,7 +286,7 @@ jobs:
             -Source (git rev-parse HEAD) -Output (Join-Path $evidence 'installed-gui')
       - name: Preserve desktop build output and diagnostics
         if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: cfw-desktop-development-windows-x64
           path: ${{ runner.temp }}/cfw-desktop-evidence/
@@ -316,7 +316,7 @@ jobs:
           $pinMatches = [regex]::Matches($pins, '(?m)^RUST_VERSION=([0-9.]+)\r?$')
           if ($pinMatches.Count -ne 1) { throw 'Missing or ambiguous Rust pin' }
           "RUST_VERSION=$($pinMatches[0].Groups[1].Value)" >> $env:GITHUB_OUTPUT
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
         with:
           toolchain: ${{ steps.pins.outputs.RUST_VERSION }}
           components: clippy,rustfmt
@@ -329,7 +329,7 @@ jobs:
           ./scripts/fixtures/windows_update_package.ps1 -Source $env:CFW_PACKAGE_SOURCE -Evidence (Join-Path $env:RUNNER_TEMP 'cfw-package-evidence')
       - name: Preserve package inspection output and diagnostics
         if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: cfw-update-package-inspection-windows-x64
           path: ${{ runner.temp }}/cfw-package-evidence/

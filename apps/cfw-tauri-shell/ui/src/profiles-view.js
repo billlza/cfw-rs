@@ -4,6 +4,7 @@ import { state } from "./state.js";
 import { escapeHtml, formatBytes } from "./text-format.js";
 import { t } from "./i18n.js";
 import { PROFILE_SOURCE_ACCEPT } from "./profile-import.js";
+import { renderSubscriptionUpdateNote } from "./subscription-updates.js";
 
 export function renderProfiles() {
   const repositoryReason = state.profilesUnavailableReason
@@ -39,6 +40,7 @@ export function renderProfiles() {
             <div class="profile-card-main">
               <h3>${escapeHtml(profile.name)}</h3>
               <p title="${escapeHtml(t("Time since this profile was saved in {product}", { product: state.payload.product.name }))}">${escapeHtml(profileSourceLabel(profile))} (${escapeHtml(profile.updated)})</p>
+              ${renderSubscriptionUpdateNote(profile)}
             </div>
             <div class="profile-card-primary">
               <button data-profile-action="edit" data-profile-id="${escapeHtml(profile.id)}" title="${escapeHtml(t("Open this profile"))}">‹›</button>

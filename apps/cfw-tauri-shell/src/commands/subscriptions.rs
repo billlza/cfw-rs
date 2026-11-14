@@ -30,6 +30,7 @@ use serde::Serialize;
 use tauri::State;
 use uuid::Uuid;
 
+mod auto_update;
 mod fetch;
 mod import_transaction;
 mod local_file;
@@ -38,6 +39,10 @@ mod provisioning;
 mod proxy_tests;
 mod update_transaction;
 mod validation;
+pub(crate) use auto_update::{
+    SubscriptionUpdates, set_subscription_update_interval, start_subscription_updates,
+    subscription_updates,
+};
 pub(super) use fetch::{SubscriptionRoute, fetch_provider_resources, validate_subscription_url};
 use fetch::{fetch_subscription_bounded, resolve_provider_documents};
 use import_transaction::{ProfileImportSource, prepare_profile_import};
@@ -47,11 +52,12 @@ use provisioning::{
     provision_subscription_credentials, provision_subscription_credentials_attempt,
 };
 pub(super) use update_transaction::prepare_subscription_update_attempt;
-use update_transaction::prepare_subscription_update_with_rotation;
+use update_transaction::{FetchedUpdate, prepare_update_by_hand};
 #[cfg(test)]
 use update_transaction::{
-    SubscriptionUpdateCommitError, commit_subscription_update, commit_subscription_update_attempt,
-    commit_subscription_update_with_rotation,
+    RunningProfile, SubscriptionUpdateCommitError, UpdatePreparationError,
+    commit_subscription_update, commit_subscription_update_attempt,
+    commit_subscription_update_with_rotation, prepare_update,
 };
 pub(super) use validation::validated_subscription_import_with_namespace;
 use validation::{
@@ -224,17 +230,13 @@ async fn import_online(
     .await
 }
 
-/// Fetch outside the engine queue. At admission, compare the current document,
-/// preserve manual selections, and stage credentials without collecting the
-/// old audience needed for runtime recovery.
-#[tauri::command]
-pub(crate) async fn update_profile(
-    engine: State<'_, ManagedEngine>,
-    retirement: State<'_, PlatformMaintenanceGate>,
-    profiles: State<'_, ManagedProfiles>,
-    id: String,
-) -> Result<UiSubscriptionUpdateResult, String> {
-    let read_id = id.clone();
+/// Downloads the subscription of profile `id`, outside the engine queue.
+async fn fetch_update(
+    engine: &ManagedEngine,
+    profiles: &ManagedProfiles,
+    id: &str,
+) -> Result<FetchedUpdate, String> {
+    let read_id = id.to_owned();
     let before_fetch = read_repository(profiles.repository(), move |repository| {
         load_profile(repository, &read_id)
     })
@@ -244,54 +246,35 @@ pub(crate) async fn update_profile(
         .as_deref()
         .ok_or_else(|| format!("profile has no subscription URL to update: {id}"))?;
     let target = validate_subscription_url(source_url)?;
-    let route = SubscriptionRoute::for_engine(&engine)?;
+    let route = SubscriptionRoute::for_engine(engine)?;
     let body = fetch_subscription_bounded(&target, MAX_SUBSCRIPTION_DOCUMENT_BYTES, route).await?;
     let body = resolve_provider_documents(body, route).await?;
+    Ok(FetchedUpdate {
+        before_fetch,
+        target,
+        body,
+    })
+}
+
+/// Fetch outside the engine queue, then prepare the download at admission; a
+/// running engine is restarted onto a changed document.
+#[tauri::command]
+pub(crate) async fn update_profile(
+    app: tauri::AppHandle,
+    engine: State<'_, ManagedEngine>,
+    retirement: State<'_, PlatformMaintenanceGate>,
+    profiles: State<'_, ManagedProfiles>,
+    id: String,
+) -> Result<UiSubscriptionUpdateResult, String> {
+    let fetched = fetch_update(&engine, &profiles, &id).await?;
     let repository = profiles.repository().clone();
     let vault = profiles.credential_vault().clone();
     let (profile, reset_proxy_groups) =
-        apply_profile_change(&engine, &retirement, move |settings| async move {
-            let stored = load_profile(&repository, &id)?;
-            if stored.profile.as_json() != before_fetch.profile.as_json()
-                || stored.profile.provider_sources() != before_fetch.profile.provider_sources()
-                || stored.source_url != before_fetch.source_url
-                || stored.record.name != before_fetch.record.name
-            {
-                return Err(
-                    "subscription profile changed while downloading; the response was not applied"
-                        .into(),
-                );
-            }
-            let imported = validated_subscription_import_with_reusable_references(
-                &body,
-                &settings,
-                stored.profile.credential_references_in_outbound_order(),
-            )?;
-            let (_, reset_groups) = imported
-                .profile
-                .inherit_proxy_selections(&stored.profile)
-                .map_err(|error| error.to_string())?;
-            let candidate = prepare_subscription_update_with_rotation(
-                &repository,
-                &vault,
-                &stored,
-                target.as_str(),
-                &body,
-                &settings,
-                &imported,
-            )
-            .await?;
-            Ok(cfw_application::ProfileChange {
-                profile_id: candidate.profile_id,
-                profile: candidate.profile,
-                activate: candidate.activate,
-                previous_profile: candidate.previous_profile,
-                commit: Box::new(move || {
-                    (candidate.commit)().map(|profile| (profile, reset_groups))
-                }),
-            })
+        apply_profile_change(&engine, &retirement, move |settings| {
+            prepare_update_by_hand(repository, vault, fetched, settings)
         })
         .await?;
+    auto_update::settled_by_user(&app, &id);
     Ok(UiSubscriptionUpdateResult {
         profile,
         credential_cleanup_removed: 0,
@@ -305,6 +288,7 @@ pub(crate) async fn update_profile(
 /// is untouched, so neither the digest nor the selection changes.
 #[tauri::command]
 pub(crate) async fn update_profile_info(
+    app: tauri::AppHandle,
     engine: State<'_, ManagedEngine>,
     profiles: State<'_, ManagedProfiles>,
     id: String,
@@ -321,17 +305,21 @@ pub(crate) async fn update_profile_info(
         .reserve_maintenance()
         .map_err(|error| error.to_string())?;
     let repository = profiles.repository().clone();
+    let profile_id = id.clone();
     crate::startup_state::prepare_off_main(move || {
         repository
             .update_metadata(
-                &id,
+                &profile_id,
                 Some(&name),
                 source_url.as_ref().map(|url| url.as_str()),
             )
             .map(|_record| ())
             .map_err(|error| error.to_string())
     })
-    .await
+    .await?;
+    // What a background attempt reported was about the previous address.
+    auto_update::settled_by_user(&app, &id);
+    Ok(())
 }
 
 #[tauri::command]

@@ -233,6 +233,34 @@
   white-space: normal;
 }
 
+/* What a background update left for the user: a change to the running
+   profile that waits to be applied, or the reason an update failed. */
+.profile-card-main .profile-card-update {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.profile-card-main .profile-card-update.failed {
+  color: var(--danger);
+}
+
+.profile-card-apply {
+  height: 24px;
+  margin-top: 6px;
+  border: 0;
+  border-radius: 3px;
+  background: #777272;
+  color: #fff;
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.profile-card-apply:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
 .profile-list,
 .provider-section {
   display: grid;

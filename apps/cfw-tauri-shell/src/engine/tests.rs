@@ -245,11 +245,19 @@ mod controller_binding;
 #[path = "tests/endpoint_retry.rs"]
 mod endpoint_retry;
 
+#[path = "tests/kept_engine.rs"]
+mod kept_engine;
+
 #[path = "tests/mode_profile.rs"]
 mod mode_profile;
 
 #[path = "tests/mode_queue.rs"]
 mod mode_queue;
 
+#[path = "tests/profile_change.rs"]
+mod profile_change;
+
 #[path = "tests/restoration.rs"]
 mod restoration;
+/// For tests of the commands that run in the engine queue.
+pub(crate) use restoration::{RestorationRightsBridge, engine_with_rights_bridge};

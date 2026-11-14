@@ -307,6 +307,7 @@ fn selected_direct_profile(repository: &ProfileRepository) -> StoredProfile {
 }
 
 mod import_audience;
+mod kept_engine_updates;
 mod local_sources;
 mod profile_documents;
 mod subscription_updates;

@@ -3,6 +3,7 @@ mod combined_failures;
 mod controller;
 mod cutover;
 mod generation_isolation_property;
+mod kept_runtime;
 mod lifecycle;
 mod local_proxy;
 mod mode_cycle_integration;

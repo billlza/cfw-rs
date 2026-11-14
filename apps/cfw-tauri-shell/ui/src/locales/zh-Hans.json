@@ -1020,5 +1020,20 @@
   "no": "否",
   "edit": "编辑",
   "QR code": "二维码",
-  "details": "详情"
+  "details": "详情",
+  "Automatic subscription updates": "订阅自动更新",
+  "Download subscriptions in the background. A profile the core is not running is replaced directly; a change to the running profile waits on the Profiles page until you apply it.": "在后台下载订阅。内核未在运行的配置文件会直接替换；运行中的配置文件如有变化，会在“配置文件”页面等待你应用。",
+  "Every 6 hours": "每 6 小时",
+  "Every 12 hours": "每 12 小时",
+  "Every day": "每天",
+  "Every week": "每周",
+  "New subscription content is available. Applying it restarts the core.": "订阅有新内容。应用后内核会重启。",
+  "New subscription content is available.": "订阅有新内容。",
+  "Automatic update failed: {error}": "自动更新失败：{error}",
+  "Apply update": "应用更新",
+  "{name} updated automatically": "{name} 已自动更新",
+  "Automatic subscription updates are unavailable: {error}": "订阅自动更新不可用：{error}",
+  "Automatic subscription updates: {interval}": "订阅自动更新：{interval}",
+  "Automatic subscription updates were not changed: {error}": "订阅自动更新未更改：{error}",
+  "Rejected an invalid subscription update report: {error}": "已拒绝无效的订阅更新报告：{error}"
 }

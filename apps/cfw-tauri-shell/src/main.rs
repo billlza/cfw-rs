@@ -70,12 +70,13 @@ use commands::{
     reset_settings_snapshot, restart_after_identity_recovery, reveal_home_directory,
     reveal_logs_directory, reveal_profile, rules_snapshot, save_profile_text, select_profile,
     select_proxy, set_allow_lan, set_bind_address, set_core_enabled, set_launch_at_login_enabled,
-    set_log_level, set_mixin_enabled, set_proxy_mode, set_system_proxy_enabled, set_tun_enabled,
-    start_connections_stream, start_log_stream, stop_connections_stream, stop_log_stream,
-    system_proxy_state, test_proxy_delays, toggle_devtools, tun_runtime_state,
-    update_all_providers, update_all_proxy_providers, update_all_rule_providers,
-    update_geoip_database, update_profile, update_profile_info, update_proxy_provider,
-    update_rule_provider, write_runtime_settings_snapshot, write_settings_snapshot,
+    set_log_level, set_mixin_enabled, set_proxy_mode, set_subscription_update_interval,
+    set_system_proxy_enabled, set_tun_enabled, start_connections_stream, start_log_stream,
+    stop_connections_stream, stop_log_stream, subscription_updates, system_proxy_state,
+    test_proxy_delays, toggle_devtools, tun_runtime_state, update_all_providers,
+    update_all_proxy_providers, update_all_rule_providers, update_geoip_database, update_profile,
+    update_profile_info, update_proxy_provider, update_rule_provider,
+    write_runtime_settings_snapshot, write_settings_snapshot,
 };
 use engine::engine_snapshot;
 #[cfg(target_os = "macos")]
@@ -203,6 +204,7 @@ fn main() {
         .manage(AppLifecycle::default())
         .manage(LiveStreams::default())
         .manage(commands::ManagedProviders::default())
+        .manage(commands::SubscriptionUpdates::default())
         .manage(commands::NetworkDiagnosticsGate::default())
         .manage(connection_diagnostics::DiagnosticsGate::default())
         .manage(TrayMenuState::default())
@@ -318,6 +320,8 @@ fn main() {
         import_profile_file,
         update_profile,
         update_profile_info,
+        subscription_updates,
+        set_subscription_update_interval,
         profile_qrcode_svg,
         reveal_profile,
         open_profile_externally,

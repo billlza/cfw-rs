@@ -74,6 +74,7 @@ import { createConnectionActions } from "./connection-actions.js";
 import { createLogActions } from "./log-actions.js";
 import { createRuleActions } from "./rule-actions.js";
 import { createProfileActions } from "./profile-actions.js";
+import { createSubscriptionUpdates } from "./subscription-updates.js";
 import { createPageShell } from "./page-shell.js";
 import { createGlobalEvents } from "./global-events.js";
 import { createHostEvents } from "./host-events.js";
@@ -247,6 +248,7 @@ const profileActions = createProfileActions({
   selectProfileById, openCredentialSetup, resolveProfileSource, openProfileContextMenu, showInvalidProfileSource,
 });
 const { importProfileFromPath } = profileActions;
+const subscriptionUpdates = createSubscriptionUpdates({ renderPage, loadProfilesSnapshot, loadRuntimeProjection, runProfileMenuAction });
 
 /// Run once per page load. What the previous installation attempt left behind
 /// is logged, a failure of that attempt or of its review is also shown, and
@@ -298,6 +300,7 @@ function bindPageEvents() {
   ruleActions.bindPage();
   proxyActions.bindPage();
   profileActions.bindPage();
+  subscriptionUpdates.bindPage();
   document.querySelectorAll("[data-page]").forEach((button) => {
     button.addEventListener("click", async (event) => {
       const page = event.currentTarget.dataset.page;
@@ -391,6 +394,7 @@ async function reloadPayload() {
   await loadRetirementStatus();
   await loadNetworkDiagnostics();
   await loadProfilesSnapshot();
+  await subscriptionUpdates.load();
   // The projection belongs to the active profile, so it must be re-read after
   // the profile snapshot.  Keeping the previous projection here can make the
   // General and Settings pages claim a stale port or controller endpoint.
@@ -451,6 +455,8 @@ async function bootstrap() {
 
   await listen("cfw://stream-error", onStreamError);
 
+  await listen("cfw://subscription-updates", subscriptionUpdates.onChanged);
+
   await listen("tauri://drag-drop", onDragDrop);
 
   markCriticalListenersBound();
@@ -461,6 +467,9 @@ async function bootstrap() {
   await loadEngineStatus();
   await loadRuntimeProjection();
   renderPage();
+  // The dashboard is ready without this read; the listener above hears what
+  // changes from here on.
+  void subscriptionUpdates.loadAndRender();
   void (async () => {
     if (await loadControllerSnapshotWithRetry()) {
       if (state.activePage === "rules") await loadRulesSnapshot();

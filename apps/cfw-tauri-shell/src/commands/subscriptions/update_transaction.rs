@@ -1,8 +1,155 @@
 //! A subscription update: credentials first, then a commit only if the stored
 //! profile is unchanged, and one reference rotation after an immutable
-//! conflict.
+//! conflict. An update that must keep the running engine declines a changed
+//! document of the running profile before the vault is written.
 
 use super::*;
+
+/// A subscription document downloaded for one stored profile.
+pub(super) struct FetchedUpdate {
+    /// The profile as it was stored when the download began.
+    pub(super) before_fetch: StoredProfile,
+    pub(super) target: reqwest::Url,
+    pub(super) body: String,
+}
+
+/// What an update may do to the profile a running engine uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RunningProfile {
+    /// An update by hand: the engine is restarted onto the download.
+    Replaceable,
+    /// A background update: the profile is saved again only when the download
+    /// is the document the engine already runs.
+    Kept,
+}
+
+/// Why a download was not prepared as the replacement of its profile.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum UpdatePreparationError {
+    /// The engine runs this profile and the download is not what it runs.
+    /// Nothing was written to the vault.
+    RunningProfileChanged,
+    Failed(String),
+}
+
+impl fmt::Display for UpdatePreparationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RunningProfileChanged => formatter.write_str(
+                "the subscription differs from the profile the engine is running; the profile was kept",
+            ),
+            Self::Failed(message) => formatter.write_str(message),
+        }
+    }
+}
+
+/// Prepares a download as the replacement of the profile it was fetched for:
+/// compare the stored profile with the one the download began from, preserve
+/// manual selections, and stage credentials without collecting the old
+/// audience needed for runtime recovery.
+///
+/// With [`RunningProfile::Kept`] the engine is on, so a selected profile is
+/// the one it runs. Its replacement is prepared only when the download is the
+/// same document under the same credentials, which needs no restart. Anything
+/// else is declined before the vault is written: an audience staged for a
+/// document that is never committed would be left behind by every attempt.
+pub(super) async fn prepare_update(
+    repository: &ProfileRepository,
+    vault: &impl CredentialVaultProvisioner,
+    fetched: &FetchedUpdate,
+    settings: &EngineSettings,
+    running_profile: RunningProfile,
+) -> Result<
+    cfw_application::ProfileChange<(ProfileImportResult, Vec<String>)>,
+    UpdatePreparationError,
+> {
+    let failed = UpdatePreparationError::Failed;
+    let before_fetch = &fetched.before_fetch;
+    let stored = load_profile(repository, &before_fetch.record.id).map_err(failed)?;
+    if stored.profile.as_json() != before_fetch.profile.as_json()
+        || stored.profile.provider_sources() != before_fetch.profile.provider_sources()
+        || stored.source_url != before_fetch.source_url
+        || stored.record.name != before_fetch.record.name
+    {
+        return Err(failed(
+            "subscription profile changed while downloading; the response was not applied".into(),
+        ));
+    }
+    let imported = validated_subscription_import_with_reusable_references(
+        &fetched.body,
+        settings,
+        stored.profile.credential_references_in_outbound_order(),
+    )
+    .map_err(failed)?;
+    let (_, reset_groups) = imported
+        .profile
+        .inherit_proxy_selections(&stored.profile)
+        .map_err(|error| failed(error.to_string()))?;
+    let running = running_profile == RunningProfile::Kept
+        && is_selected(repository, &stored.record.id).map_err(failed)?;
+    let candidate = if running {
+        if imported.profile.digest() != stored.profile.digest() {
+            return Err(UpdatePreparationError::RunningProfileChanged);
+        }
+        // The same document: the vault confirms the same credentials, or
+        // answers an immutable conflict for different ones.
+        match prepare_subscription_update_attempt(
+            repository,
+            vault,
+            &stored,
+            Some(fetched.target.as_str()),
+            &imported,
+            None,
+        )
+        .await
+        {
+            Ok(candidate) => candidate,
+            Err(error) if error.is_immutable_conflict() => {
+                return Err(UpdatePreparationError::RunningProfileChanged);
+            }
+            Err(error) => return Err(failed(error.to_string())),
+        }
+    } else {
+        prepare_subscription_update_with_rotation(
+            repository,
+            vault,
+            &stored,
+            fetched.target.as_str(),
+            &fetched.body,
+            settings,
+            &imported,
+        )
+        .await
+        .map_err(failed)?
+    };
+    Ok(cfw_application::ProfileChange {
+        profile_id: candidate.profile_id,
+        profile: candidate.profile,
+        activate: candidate.activate,
+        previous_profile: candidate.previous_profile,
+        commit: Box::new(move || (candidate.commit)().map(|profile| (profile, reset_groups))),
+    })
+}
+
+/// Prepares a download as an update by hand does: whatever the engine runs,
+/// the download replaces the stored profile, and a running engine is
+/// restarted onto a changed document of its profile.
+pub(super) async fn prepare_update_by_hand(
+    repository: ProfileRepository,
+    vault: impl CredentialVaultProvisioner,
+    fetched: FetchedUpdate,
+    settings: EngineSettings,
+) -> Result<cfw_application::ProfileChange<(ProfileImportResult, Vec<String>)>, String> {
+    prepare_update(
+        &repository,
+        &vault,
+        &fetched,
+        &settings,
+        RunningProfile::Replaceable,
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
 
 #[derive(Debug)]
 pub(in crate::commands) enum SubscriptionUpdateCommitError {
@@ -112,7 +259,7 @@ pub(in crate::commands) async fn prepare_subscription_update_attempt(
     })
 }
 
-pub(super) async fn prepare_subscription_update_with_rotation(
+async fn prepare_subscription_update_with_rotation(
     repository: &ProfileRepository,
     vault: &impl CredentialVaultProvisioner,
     expected: &StoredProfile,

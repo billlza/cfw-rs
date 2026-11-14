@@ -355,6 +355,7 @@ const responses = {
   open_page: null,
   begin_migration_handoff: null,
   check_for_updates: { available: false, current: "0.4.0" },
+  subscription_updates: { interval: "off", profiles: [] },
   resolve_update_install: { outcome: { state: "none" }, pending: null },
 };
 const BASE_CONTROLLER_SNAPSHOT = structuredClone(responses.controller_snapshot);

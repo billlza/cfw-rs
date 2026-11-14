@@ -377,6 +377,24 @@ impl EngineModeCoordinator {
             + Send
             + 'static,
     {
+        self.change_profile_with(settings, crate::RunningEngine::Replace, prepare)
+            .await
+    }
+
+    /// [`Self::change_profile`] with the caller's answer for an engine that is
+    /// running something other than the candidate.
+    pub async fn change_profile_with<T, F>(
+        &self,
+        settings: EngineSettings,
+        running: crate::RunningEngine,
+        prepare: F,
+    ) -> Result<T, EngineCoordinatorError>
+    where
+        T: Send + 'static,
+        F: Future<Output = Result<crate::ProfileChange<T>, EngineCoordinatorError>>
+            + Send
+            + 'static,
+    {
         let (value_tx, value_rx) = oneshot::channel();
         let preparation = Box::pin(async move {
             let candidate = prepare.await?;
@@ -397,6 +415,7 @@ impl EngineModeCoordinator {
             .try_send(Command::ChangeProfile(Box::new(
                 crate::coordinator_actor::ChangeProfileCommand {
                     settings,
+                    running,
                     prepare: preparation,
                     response: response_tx,
                 },

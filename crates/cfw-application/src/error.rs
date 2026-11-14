@@ -82,6 +82,10 @@ pub enum EngineCoordinatorError {
         "{source}; exact runtime cleanup is required before the previous configuration can be restored"
     )]
     ProfileChangeRecoveryRequired { source: Box<EngineCoordinatorError> },
+    #[error(
+        "the candidate differs from what the engine is running; the engine was kept and nothing was changed"
+    )]
+    RunningEngineKept,
     #[error("engine coordinator is no longer running")]
     CoordinatorClosed,
     #[error("engine coordinator command queue is full")]

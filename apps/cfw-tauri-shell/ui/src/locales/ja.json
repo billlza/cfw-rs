@@ -1020,5 +1020,20 @@
   "no": "いいえ",
   "edit": "編集",
   "QR code": "QR コード",
-  "details": "詳細"
+  "details": "詳細",
+  "Automatic subscription updates": "サブスクリプションの自動更新",
+  "Download subscriptions in the background. A profile the core is not running is replaced directly; a change to the running profile waits on the Profiles page until you apply it.": "サブスクリプションをバックグラウンドでダウンロードします。コアが使用していないプロファイルはそのまま置き換えます。稼働中のプロファイルの変更は、適用するまで「プロファイル」ページで待機します。",
+  "Every 6 hours": "6 時間ごと",
+  "Every 12 hours": "12 時間ごと",
+  "Every day": "毎日",
+  "Every week": "毎週",
+  "New subscription content is available. Applying it restarts the core.": "サブスクリプションに新しい内容があります。適用するとコアが再起動します。",
+  "New subscription content is available.": "サブスクリプションに新しい内容があります。",
+  "Automatic update failed: {error}": "自動更新に失敗しました：{error}",
+  "Apply update": "更新を適用",
+  "{name} updated automatically": "{name} を自動更新しました",
+  "Automatic subscription updates are unavailable: {error}": "サブスクリプションの自動更新を利用できません：{error}",
+  "Automatic subscription updates: {interval}": "サブスクリプションの自動更新：{interval}",
+  "Automatic subscription updates were not changed: {error}": "サブスクリプションの自動更新は変更されませんでした：{error}",
+  "Rejected an invalid subscription update report: {error}": "無効なサブスクリプション更新レポートを拒否しました：{error}"
 }

@@ -1020,5 +1020,20 @@
   "no": "否",
   "edit": "編輯",
   "QR code": "QR 碼",
-  "details": "詳細資訊"
+  "details": "詳細資訊",
+  "Automatic subscription updates": "訂閱自動更新",
+  "Download subscriptions in the background. A profile the core is not running is replaced directly; a change to the running profile waits on the Profiles page until you apply it.": "在背景下載訂閱。核心未在執行的設定檔會直接取代；執行中的設定檔如有變更，會在「設定檔」頁面等待你套用。",
+  "Every 6 hours": "每 6 小時",
+  "Every 12 hours": "每 12 小時",
+  "Every day": "每天",
+  "Every week": "每週",
+  "New subscription content is available. Applying it restarts the core.": "訂閱有新內容。套用後核心會重新啟動。",
+  "New subscription content is available.": "訂閱有新內容。",
+  "Automatic update failed: {error}": "自動更新失敗：{error}",
+  "Apply update": "套用更新",
+  "{name} updated automatically": "{name} 已自動更新",
+  "Automatic subscription updates are unavailable: {error}": "訂閱自動更新無法使用：{error}",
+  "Automatic subscription updates: {interval}": "訂閱自動更新：{interval}",
+  "Automatic subscription updates were not changed: {error}": "訂閱自動更新未變更：{error}",
+  "Rejected an invalid subscription update report: {error}": "已拒絕無效的訂閱更新報告：{error}"
 }

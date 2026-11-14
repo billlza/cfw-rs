@@ -194,3 +194,67 @@ What it does not cover:
 - release evidence projections, which never carry it;
 - an earlier build refuses a settings file saved with the switch on and does
   not start the core; turn the switch off before installing one.
+
+## Background controls › Automatic subscription updates
+
+Off by default. The interval (every 6 or 12 hours, every day, every week) is
+stored in `cfw-subscription-settings.json`, apart from the preferences and
+from the runtime and automation settings, so an earlier build never reads it.
+A stored value this build does not know leaves updates off and disables the
+setting, which then shows the reason.
+
+While the app runs, a subscription is due one interval after its profile was
+last saved. The app looks for due subscriptions one minute after launch, every
+five minutes after that, and at once when the interval changes. Each one is
+downloaded and validated exactly as Update on the Profiles page does it, one
+after another: through the running core's local proxy port when it has one,
+and otherwise directly.
+
+What happens to a download depends on what the core runs:
+
+- the core is off, or runs another profile: the download replaces the stored
+  profile and keeps the manual node choices that still exist, as an update by
+  hand does;
+- the core runs this profile and the download is the document it already
+  runs: the profile is saved again, which only renews its saved time;
+- the core runs this profile and the download differs in its nodes, rules or
+  credentials: nothing is changed. The stored profile, the Keychain and the
+  running core stay as they are, and the profile's card on the Profiles page
+  says that new content is available. Apply update downloads it again and
+  restarts the core onto it, as Update does. Once the core is off or runs
+  another profile, the next look replaces the profile by itself.
+
+A background update never starts, stops or restarts the core and never asks
+macOS for authorization. It is not a new mode request either, so network rules
+and a running connection diagnostic go on as before. It takes its turn with
+mode and profile changes; while maintenance holds the engine, it is left for
+the next look.
+
+A failed attempt leaves its reason on the profile's card and is repeated after
+half an hour, or after one interval when that is shorter. A waiting change is
+downloaded again after one interval for as long as the core keeps running the
+profile. What the cards show is kept in memory only: after a restart the
+schedule starts again from each profile's saved time. Updating a profile by
+hand, or changing its name or address, clears its note at once; saving it in
+the editor clears it at the next look. Turning updates off clears every note.
+
+Limits:
+
+- nothing is updated while the app is not running;
+- the saved time of a profile is the time of its last update, not of its last
+  change, so a subscription whose content never changes is still downloaded
+  once per interval;
+- a provider that writes changing information into node names, such as the
+  remaining traffic or an expiry date, changes its document with every
+  download. A profile the core does not run is then saved anew every
+  interval, and the card of the running profile says that new content is
+  available just as often;
+- while a start of the core has failed or waits for approval, the selected
+  profile counts as the running one: a changed download waits on its card,
+  and one that equals it is reported as failed, as an update by hand is,
+  until the core is switched off or recovers;
+- credentials an update no longer references stay in the Keychain until
+  Settings › Credentials › Unused credentials removes them, as after an update
+  by hand;
+- a profile opened in the editor before a background update replaces it is
+  refused on Save, because it is no longer the stored document.

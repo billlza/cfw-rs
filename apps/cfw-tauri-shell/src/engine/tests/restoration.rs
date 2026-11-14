@@ -84,12 +84,12 @@ async fn a_granted_settings_restoration_runs_the_recovery_and_reports_its_result
 /// Answers every rights request, records whether it asked for restoration
 /// rights alone, and has no other native operation.
 #[derive(Default)]
-struct RestorationRightsBridge {
+pub(crate) struct RestorationRightsBridge {
     requests: Mutex<Vec<bool>>,
 }
 
 impl RestorationRightsBridge {
-    fn requests(&self) -> Vec<bool> {
+    pub(crate) fn requests(&self) -> Vec<bool> {
         self.requests.lock().expect("rights requests").clone()
     }
 }
@@ -117,7 +117,9 @@ impl cfw_engine_api::ProfileDelayBackend for RestorationRightsBridge {
 }
 
 /// An engine whose rights requests reach `bridge`.
-fn engine_with_rights_bridge(bridge: Arc<RestorationRightsBridge>) -> crate::engine::ManagedEngine {
+pub(crate) fn engine_with_rights_bridge(
+    bridge: Arc<RestorationRightsBridge>,
+) -> crate::engine::ManagedEngine {
     crate::engine::ManagedEngine {
         coordinator: endpoint_retry_coordinator(Arc::new(EndpointRetryBackend::new(0))),
         capabilities: crate::engine::EngineCapabilities {

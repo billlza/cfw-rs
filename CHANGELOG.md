@@ -24,6 +24,21 @@
 
 ### Profiles
 
+- Add Settings › Background controls › Automatic subscription updates, off by
+  default: every 6 or 12 hours, every day or every week. While the app runs,
+  a subscription that is due is downloaded and validated like an update by
+  hand. A profile the core is not running is replaced directly. A change to
+  the running profile is never applied by itself: the profile, the Keychain
+  and the core stay as they are, the profile's card on the Profiles page says
+  that new content is available, and Apply update restarts the core onto it.
+  A background update never starts, stops or restarts the core and never asks
+  macOS for authorization. A failed attempt shows its reason on the card and
+  is repeated after half an hour. The interval lives in a settings file of
+  its own, which earlier builds do not read.
+- Report a profile change that leaves the core as it is as saved while the
+  core's last start has failed. Importing or updating a profile the core
+  does not run then ended with `profile committed, but controller identity
+  refresh failed`, although the profile had been saved.
 - Refuse a Clash subscription that contains a NUL character. The YAML parser
   read the NUL as the end of the document, so the import took what came
   before it and dropped the rest without a word.

@@ -1,6 +1,7 @@
 import { t, LANGUAGE_OPTIONS } from "./i18n.js";
 import { networkDiagnosticsView } from "./network-diagnostics.js";
 import { platformFontOptions } from "./font-preferences.js";
+import { UPDATE_INTERVAL_OPTIONS } from "./subscription-updates.js";
 // Settings and read-only network diagnostics rendering. Commands and
 // transactional settings dialogs own all mutations.
 export function createSettingsView({ state, defaultSettingsSnapshot, defaultSettings, engineIsOff, launchAtLoginPresentation, escapeHtml, renderToggle, THEME_OPTIONS, REASONS, engineStateLabel, serviceProxyLabel }) {
@@ -117,6 +118,7 @@ function renderSettings() {
 
       ${renderSettingsGroup(t("Background controls"), [
         renderSettingAction(t("Shortcuts & network rules"), t("Global shortcuts and automatic connection"), t("Choose global hotkeys and opt-in rules for Wi-Fi or wired networks."), "open-automation-settings", t("Configure")),
+        renderSettingSelect(t("Automatic subscription updates"), state.subscriptionUpdates.interval, UPDATE_INTERVAL_OPTIONS, t("Download subscriptions in the background. A profile the core is not running is replaced directly; a change to the running profile waits on the Profiles page until you apply it."), "data-subscription-update-interval", state.subscriptionUpdates.error),
         ...(windows ? [renderSettingAction(t("Startup apps"), t("Windows Settings"), t("Review Windows' startup control for this app. This app changes only its own sign-in registration."), "open-windows-startup-settings", t("Open"))] : []),
       ])}
 

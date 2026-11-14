@@ -1020,5 +1020,20 @@
   "no": "no",
   "edit": "edit",
   "QR code": "QR code",
-  "details": "details"
+  "details": "details",
+  "Automatic subscription updates": "Automatic subscription updates",
+  "Download subscriptions in the background. A profile the core is not running is replaced directly; a change to the running profile waits on the Profiles page until you apply it.": "Download subscriptions in the background. A profile the core is not running is replaced directly; a change to the running profile waits on the Profiles page until you apply it.",
+  "Every 6 hours": "Every 6 hours",
+  "Every 12 hours": "Every 12 hours",
+  "Every day": "Every day",
+  "Every week": "Every week",
+  "New subscription content is available. Applying it restarts the core.": "New subscription content is available. Applying it restarts the core.",
+  "New subscription content is available.": "New subscription content is available.",
+  "Automatic update failed: {error}": "Automatic update failed: {error}",
+  "Apply update": "Apply update",
+  "{name} updated automatically": "{name} updated automatically",
+  "Automatic subscription updates are unavailable: {error}": "Automatic subscription updates are unavailable: {error}",
+  "Automatic subscription updates: {interval}": "Automatic subscription updates: {interval}",
+  "Automatic subscription updates were not changed: {error}": "Automatic subscription updates were not changed: {error}",
+  "Rejected an invalid subscription update report: {error}": "Rejected an invalid subscription update report: {error}"
 }

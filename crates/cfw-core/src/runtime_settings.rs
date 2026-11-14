@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 const FILE_NAME: &str = "cfw-runtime-settings.json";
 const AUTOMATION_FILE_NAME: &str = "cfw-automation-settings.json";
+const SUBSCRIPTION_FILE_NAME: &str = "cfw-subscription-settings.json";
 const MAX_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,6 +35,15 @@ impl SettingsStore {
         &self,
     ) -> Result<RuntimeSettingsSnapshot<T>, SettingsStoreError> {
         self.structured_settings(AUTOMATION_FILE_NAME)
+    }
+
+    /// How subscriptions are refreshed in the background. A build that
+    /// predates the file never reads it, so it is absent from the preferences
+    /// whose schema those builds check.
+    pub fn subscription_settings<T: Serialize + DeserializeOwned + Default>(
+        &self,
+    ) -> Result<RuntimeSettingsSnapshot<T>, SettingsStoreError> {
+        self.structured_settings(SUBSCRIPTION_FILE_NAME)
     }
 
     fn structured_settings<T: Serialize + DeserializeOwned + Default>(
@@ -77,6 +87,18 @@ impl SettingsStore {
         settings: &T,
     ) -> Result<(), SettingsStoreError> {
         self.compare_and_swap_structured_settings(AUTOMATION_FILE_NAME, expected_revision, settings)
+    }
+
+    pub fn compare_and_swap_subscription_settings<T: Serialize>(
+        &self,
+        expected_revision: Option<&str>,
+        settings: &T,
+    ) -> Result<(), SettingsStoreError> {
+        self.compare_and_swap_structured_settings(
+            SUBSCRIPTION_FILE_NAME,
+            expected_revision,
+            settings,
+        )
     }
 
     fn compare_and_swap_structured_settings<T: Serialize>(

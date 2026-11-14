@@ -56,7 +56,7 @@ sha2.workspace = true
 # independently of target-specific additions. Keep it consistent with the
 # shared configuration; platform SDK dependencies remain target-selected.
 tauri = { version = "=2.12.3", features = ["macos-private-api", "tray-icon"] }
-tauri-plugin-single-instance = "=2.5.4"
+tauri-plugin-single-instance = "=2.5.5"
 tauri-plugin-global-shortcut = "=2.4.1"
 thiserror.workspace = true
 tempfile.workspace = true
@@ -67,7 +67,7 @@ uuid.workspace = true
 zeroize.workspace = true
 
 [build-dependencies]
-cc = "=1.10.0"
+cc = "=1.11.2"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sha2.workspace = true

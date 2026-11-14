@@ -1,5 +1,5 @@
-//! How an attempt is concluded, what the dashboard is told, and when a
-//! profile counts as changed while an attempt ran.
+//! How an attempt is concluded, what the dashboard is told, and how a look
+//! runs its attempts.
 
 use std::cell::{Cell, RefCell};
 
@@ -7,6 +7,8 @@ use cfw_profiles::ProfileSourceKind;
 
 use super::*;
 use crate::engine::EngineMaintenanceError;
+
+mod superseded;
 
 const SAVED: u64 = 1_800_000_000;
 const CLOCK: u64 = 1_800_090_000;
@@ -76,45 +78,6 @@ fn only_a_failure_is_set_aside_when_the_profile_changed_meanwhile() {
         ),
         Refresh::NotAdmitted
     );
-}
-
-#[tokio::test]
-async fn a_profile_changed_meanwhile_once_it_is_no_longer_the_stored_record() {
-    const ID: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-    const ADDRESS: &str = "https://subscription.example/current";
-    let temporary = tempfile::TempDir::new().expect("temporary directory");
-    let repository = ProfileRepository::new(temporary.path().join("profiles"));
-    repository
-        .import_with_id_and_source(
-            ID,
-            Some("Work"),
-            &ValidatedSingBoxProfile::direct(),
-            Some(ADDRESS),
-        )
-        .expect("stored subscription");
-    let record = repository
-        .load(ID)
-        .expect("load")
-        .expect("stored profile")
-        .record;
-    assert!(!changed_meanwhile(&repository, record.clone()).await);
-
-    repository
-        .update_metadata(ID, Some("Renamed"), Some(ADDRESS))
-        .expect("rename");
-    assert!(changed_meanwhile(&repository, record.clone()).await);
-    repository
-        .delete(ID, cfw_profiles::InvalidSelection::Keep)
-        .expect("delete");
-    assert!(changed_meanwhile(&repository, record.clone()).await);
-
-    // A repository that cannot be read shows no change: the attempt's own
-    // failure is what the user is told.
-    let not_a_directory = temporary.path().join("file");
-    std::fs::write(&not_a_directory, b"").expect("file");
-    let unreadable = ProfileRepository::new(&not_a_directory);
-    assert!(unreadable.load(ID).is_err());
-    assert!(!changed_meanwhile(&unreadable, record).await);
 }
 
 fn following(interval: UpdateInterval) -> SubscriptionUpdates {
@@ -187,8 +150,8 @@ fn document_of(id: &str) -> Result<String, String> {
 struct Run {
     /// The subscriptions whose download began.
     downloaded: Vec<String>,
-    /// What each save was handed: the subscription and its download.
-    saved: Vec<(String, Result<String, String>)>,
+    /// What each save was handed: what the download before it brought.
+    saved: Vec<Result<String, String>>,
     looked: Looked,
     result: Result<(), String>,
 }
@@ -220,8 +183,8 @@ async fn run(
             downloaded.borrow_mut().push(record.id);
             std::future::ready(document)
         },
-        |record, document| {
-            saved.borrow_mut().push((record.id, document));
+        |document| {
+            saved.borrow_mut().push(document);
             std::future::ready(script.next().expect("a save the script expects"))
         },
         || clock.clone(),
@@ -254,14 +217,14 @@ async fn each_due_subscription_is_attempted_in_turn_and_what_it_left_is_kept() {
     .await;
     assert_eq!(run.result, Ok(()));
     assert_eq!(run.downloaded, ["a", "b", "unreachable"]);
-    // Each save is handed the download of its own subscription, and a
+    // Each save is handed what the download before it brought, and a
     // download that failed is concluded like any other.
     assert_eq!(
         run.saved,
         [
-            ("a".to_owned(), Ok("document of a".to_owned())),
-            ("b".to_owned(), Ok("document of b".to_owned())),
-            ("unreachable".to_owned(), Err("timed out".to_owned())),
+            Ok("document of a".to_owned()),
+            Ok("document of b".to_owned()),
+            Err("timed out".to_owned()),
         ]
     );
     assert_eq!(
@@ -404,7 +367,7 @@ async fn a_look_ends_as_soon_as_it_may_not_proceed() {
 
 #[tokio::test]
 async fn updates_turned_off_while_an_attempt_runs_end_the_look_and_leave_no_note() {
-    fn left_waiting(_downloaded: Result<(), String>) -> std::future::Ready<Refresh> {
+    fn left_waiting() -> std::future::Ready<Refresh> {
         std::future::ready(Refresh::Left(Outcome::Waiting))
     }
     let due = || vec![subscription("a"), subscription("b")];
@@ -418,13 +381,13 @@ async fn updates_turned_off_while_an_attempt_runs_end_the_look_and_leave_no_note
         &updates,
         due(),
         || updates.followed() == UpdateInterval::Daily,
-        |_record| {
+        |_due| {
             updates.follow(UpdateInterval::Off).expect("off");
-            std::future::ready(Ok(()))
+            std::future::ready(())
         },
-        |_record, downloaded| {
+        |()| {
             saves.set(saves.get() + 1);
-            left_waiting(downloaded)
+            left_waiting()
         },
         || Ok(CLOCK),
         &mut looked,
@@ -448,12 +411,12 @@ async fn updates_turned_off_while_an_attempt_runs_end_the_look_and_leave_no_note
         &updates,
         due(),
         || true,
-        |_record| std::future::ready(Ok(())),
-        |record, downloaded| {
-            if record.id == "a" {
+        |due| std::future::ready(due.id),
+        |id: String| {
+            if id == "a" {
                 updates.follow(UpdateInterval::Off).expect("off");
             }
-            left_waiting(downloaded)
+            left_waiting()
         },
         || Ok(CLOCK),
         &mut looked,

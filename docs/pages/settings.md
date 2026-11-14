@@ -242,6 +242,14 @@ neither saved nor noted, while a save that has already begun is completed.
 Choosing another interval ends that look in the same way, and the look that
 follows at once downloads again what is still due.
 
+A failure is noted only while the profile is still stored exactly as it was
+when its download began. Once the profile was updated by hand, edited,
+renamed, given another address or deleted meanwhile, no failure is noted, and
+a document downloaded from the previous address is not saved. A profile that
+was updated, edited, renamed, made local or deleted after a look began and
+before its own turn is skipped in that look. The next look decides about the
+profile as it is then.
+
 Limits:
 
 - nothing is updated while the app is not running;

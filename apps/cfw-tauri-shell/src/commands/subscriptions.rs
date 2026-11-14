@@ -241,19 +241,31 @@ async fn fetch_update(
         load_profile(repository, &read_id)
     })
     .await?;
-    let source_url = before_fetch
-        .source_url
-        .as_deref()
-        .ok_or_else(|| format!("profile has no subscription URL to update: {id}"))?;
-    let target = validate_subscription_url(source_url)?;
-    let route = SubscriptionRoute::for_engine(engine)?;
-    let body = fetch_subscription_bounded(&target, MAX_SUBSCRIPTION_DOCUMENT_BYTES, route).await?;
-    let body = resolve_provider_documents(body, route).await?;
+    let (target, body) = fetch_subscription_of(engine, &before_fetch).await?;
     Ok(FetchedUpdate {
         before_fetch,
         target,
         body,
     })
+}
+
+/// Downloads the subscription a stored profile comes from, outside the engine
+/// queue: the address it was fetched from and the document found there.
+async fn fetch_subscription_of(
+    engine: &ManagedEngine,
+    stored: &StoredProfile,
+) -> Result<(reqwest::Url, String), String> {
+    let source_url = stored.source_url.as_deref().ok_or_else(|| {
+        format!(
+            "profile has no subscription URL to update: {}",
+            stored.record.id
+        )
+    })?;
+    let target = validate_subscription_url(source_url)?;
+    let route = SubscriptionRoute::for_engine(engine)?;
+    let body = fetch_subscription_bounded(&target, MAX_SUBSCRIPTION_DOCUMENT_BYTES, route).await?;
+    let body = resolve_provider_documents(body, route).await?;
+    Ok((target, body))
 }
 
 /// Fetch outside the engine queue, then prepare the download at admission; a

@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use cfw_application::EngineCoordinatorError;
 use cfw_engine_api::EngineMode;
-use cfw_profiles::ProfileRecord;
+use cfw_profiles::{ProfileRecord, StoredProfile};
 use tauri::{AppHandle, Emitter, Manager};
 
 use super::update_transaction::{RunningProfile, UpdatePreparationError, prepare_update};
@@ -51,11 +51,20 @@ enum Refresh {
     Updated(UiUpdatedProfile),
     /// The profile stays as it was, with something for the user to see.
     Left(Outcome),
-    /// The profile changed while the attempt ran, so the attempt says nothing
-    /// about it.
+    /// The profile is no longer the one the look read, or it changed while
+    /// the attempt ran: the attempt says nothing about it.
     Superseded,
     /// The engine queue refused the turn; the next look tries again.
     NotAdmitted,
+}
+
+/// What the first half of an attempt brings.
+struct Downloaded {
+    /// The profile as it was stored when the download began.
+    before_fetch: StoredProfile,
+    /// The address the document came from and the document, or why there is
+    /// none.
+    document: Result<(reqwest::Url, String), String>,
 }
 
 /// What a look did, for the dashboard to hear about.
@@ -208,8 +217,11 @@ async fn look(app: &AppHandle, interval: u64) -> Result<(), String> {
         due,
         // An exit in progress or a changed preference ends this look.
         || lifecycle.startup_work_allowed() && updates.followed().seconds() == Some(interval),
-        |record| download(&engine, &profiles, record),
-        |record, downloaded| save_download(&engine, &profiles, record, downloaded),
+        |due| download(&engine, profiles.repository(), due),
+        |downloaded| {
+            let vault = profiles.credential_vault().clone();
+            save_download(&engine, profiles.repository(), vault, downloaded)
+        },
         now,
         &mut looked,
     )
@@ -230,12 +242,12 @@ async fn attempt_each<T, D, S>(
     due: Vec<ProfileRecord>,
     proceed: impl Fn() -> bool,
     mut download: impl FnMut(ProfileRecord) -> D,
-    mut save: impl FnMut(ProfileRecord, Result<T, String>) -> S,
+    mut save: impl FnMut(T) -> S,
     clock: impl Fn() -> Result<u64, String>,
     looked: &mut Looked,
 ) -> Result<(), String>
 where
-    D: Future<Output = Result<T, String>>,
+    D: Future<Output = T>,
     S: Future<Output = Refresh>,
 {
     for record in due {
@@ -247,7 +259,7 @@ where
         if !proceed() {
             break;
         }
-        let different = match save(record.clone(), downloaded).await {
+        let different = match save(downloaded).await {
             Refresh::NotAdmitted => break,
             Refresh::Updated(profile) => {
                 looked.updated.push(profile);
@@ -261,37 +273,75 @@ where
     Ok(())
 }
 
-/// The first half of an attempt: the subscription's current document.
+/// The first half of an attempt: the due profile as it is stored now and,
+/// from its address, the subscription's current document. A profile that is
+/// no longer the one the look read ends the attempt before anything is
+/// downloaded.
 async fn download(
     engine: &ManagedEngine,
-    profiles: &ManagedProfiles,
-    record: ProfileRecord,
-) -> Result<FetchedUpdate, String> {
-    fetch_update(engine, profiles, &record.id).await
+    repository: &ProfileRepository,
+    due: ProfileRecord,
+) -> Result<Downloaded, Refresh> {
+    let before_fetch = stored_now(repository, due).await?;
+    let document = fetch_subscription_of(engine, &before_fetch).await;
+    Ok(Downloaded {
+        before_fetch,
+        document,
+    })
+}
+
+/// The profile the look found due, as it is stored now. One that was
+/// updated, edited, renamed, made local or deleted since the look read it is
+/// left for the next look, which reads it again. Another address alone keeps
+/// it due: no list record carries the address, and the download goes to the
+/// one stored now.
+async fn stored_now(
+    repository: &ProfileRepository,
+    due: ProfileRecord,
+) -> Result<StoredProfile, Refresh> {
+    let id = due.id.clone();
+    let stored = read_repository(repository, move |repository| {
+        repository.load(&id).map_err(|error| error.to_string())
+    })
+    .await;
+    match stored {
+        Ok(Some(stored)) if stored.record == due => Ok(stored),
+        Ok(_) => Err(Refresh::Superseded),
+        Err(error) => Err(Refresh::Left(Outcome::failed(&error))),
+    }
 }
 
 /// The second half: saves the download, if there is one, and says what the
-/// attempt came to.
+/// attempt came to. An attempt that ended before its download is concluded
+/// as it ended.
 async fn save_download(
     engine: &ManagedEngine,
-    profiles: &ManagedProfiles,
-    record: ProfileRecord,
-    downloaded: Result<FetchedUpdate, String>,
+    repository: &ProfileRepository,
+    vault: impl CredentialVaultProvisioner,
+    downloaded: Result<Downloaded, Refresh>,
 ) -> Refresh {
-    let result = match downloaded {
-        Ok(fetched) => {
-            save_keeping_engine(
-                engine,
-                profiles.repository().clone(),
-                profiles.credential_vault().clone(),
-                fetched,
-            )
-            .await
+    let Downloaded {
+        before_fetch,
+        document,
+    } = match downloaded {
+        Ok(downloaded) => downloaded,
+        Err(ended) => return ended,
+    };
+    let result = match document {
+        Ok((target, body)) => {
+            // The engine queue takes the download with it; the profile it
+            // began from is compared once more below.
+            let fetched = FetchedUpdate {
+                before_fetch: before_fetch.clone(),
+                target,
+                body,
+            };
+            save_keeping_engine(engine, repository.clone(), vault, fetched).await
         }
         Err(error) => Err(KeptEngineChangeError::Failed(error)),
     };
     let superseded = matches!(result, Err(KeptEngineChangeError::Failed(_)))
-        && changed_meanwhile(profiles.repository(), record).await;
+        && changed_meanwhile(repository, before_fetch).await;
     concluded(result, superseded)
 }
 
@@ -327,12 +377,16 @@ pub(super) async fn save_keeping_engine(
 }
 
 /// Whether the stored profile is no longer the one an attempt set out for:
-/// the user updated, edited, renamed or deleted it meanwhile.
-async fn changed_meanwhile(repository: &ProfileRepository, expected: ProfileRecord) -> bool {
+/// the user updated, edited or renamed it, gave it another address or deleted
+/// it meanwhile. Its whole stored identity counts, as it does for a
+/// replacement: the address is part of it, although no list record carries
+/// it. A download from the previous address says nothing about the profile
+/// as it is now.
+async fn changed_meanwhile(repository: &ProfileRepository, before_fetch: StoredProfile) -> bool {
     read_repository(repository, move |repository| {
         repository
-            .load(&expected.id)
-            .map(|stored| stored.map(|stored| stored.record) != Some(expected))
+            .load(&before_fetch.record.id)
+            .map(|stored| stored != Some(before_fetch))
             .map_err(|error| error.to_string())
     })
     .await

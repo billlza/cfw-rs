@@ -40,6 +40,11 @@ PRODUCT_PACKAGES = frozenset(
         "cfw-release-verifier",
         "cfw-singbox-config",
         "cfw-tauri-shell",
+        # The Windows runtime reads the product version from its own crate and
+        # refuses an installation manifest or a desktop image of another one.
+        "cfw-windows-credentials",
+        "cfw-windows-engine",
+        "cfw-windows-storage",
     }
 )
 

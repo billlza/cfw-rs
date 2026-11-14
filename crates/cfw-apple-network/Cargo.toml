@@ -3,6 +3,7 @@ name = "cfw-apple-network"
 version = "0.5.1"
 edition = "2024"
 license.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 cfw-engine-api = { path = "../cfw-engine-api" }

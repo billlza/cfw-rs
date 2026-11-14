@@ -111,7 +111,7 @@ REQUIRED_RELEASE_CI_GATE_SHA256 = (
     "42ec3e8c3a07bc3903ad869197dfbd3fb4480d2217303d3e4d3fcb304933b65e"
 )
 REQUIRED_WORKFLOW_SHA256 = (
-    "2a9815410000157c0f8a75c78e73342e4dbec6546079ba0e9f545f6009aa1bf8"
+    "9c94bf1099ab0fd54eb583f812f390da616cef7eddb39085315d7acdad020e71"
 )
 
 # Constructs that swallow a failure, suppress warnings, or conditionally skip a

@@ -3,6 +3,7 @@ name = "cfw-tauri-shell"
 version = "0.5.1"
 edition = "2024"
 license.workspace = true
+rust-version.workspace = true
 build = "build.rs"
 autobins = false
 

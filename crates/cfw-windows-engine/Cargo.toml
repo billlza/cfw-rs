@@ -3,6 +3,7 @@ name = "cfw-windows-engine"
 version = "0.5.1"
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 
 [features]
 native-engine-validation = []

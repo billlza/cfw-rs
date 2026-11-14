@@ -1,0 +1,36 @@
+name: Mobile egress observer
+
+on:
+  pull_request:
+    paths:
+      - "tools/mobile-egress-guard/**"
+      - ".github/workflows/mobile-egress-observer.yml"
+  push:
+    branches:
+      - "feat/mobile-egress-observer"
+    paths:
+      - "tools/mobile-egress-guard/**"
+      - ".github/workflows/mobile-egress-observer.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  observer-tests:
+    name: Offline observer tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.13"
+      - name: Compile observer
+        run: python -m py_compile tools/mobile-egress-guard/observer.py tools/mobile-egress-guard/firmware_intake.py
+      - name: Validate offline security and accounting contracts
+        run: python -m unittest discover -s tools/mobile-egress-guard/tests -v

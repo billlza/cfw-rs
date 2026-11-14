@@ -125,6 +125,43 @@ private func payload(_ fields: [String: Any]) throws -> Data {
   }
 }
 
+@Test func resourcesAreFoundByTheKindOfHostNotByItsDirectory() {
+  let bundle = "CFMNativeDashboard_CFMNativeDashboard.bundle"
+  let library = "/work/target/native-ui-development/products/libCFMNativeDashboard.dylib"
+  // A packaged app carries the bundle in Contents/Resources, whatever the
+  // library's own location.
+  #expect(
+    DashboardStrings.resourceLocation(
+      mainBundle: URL(fileURLWithPath: "/Applications/Clash for Mac.app"), image: library)
+      == .applicationResources)
+  // A development executable may be anywhere below Cargo's output: beside
+  // the final binary, in `deps`, or in a per-package directory. The bundle
+  // is beside the library in every case.
+  for executable in [
+    "/work/target/debug", "/work/target/debug/deps",
+    "/work/target/debug/build/cfw-tauri-shell/0123456789abcdef/out",
+  ] {
+    guard
+      case .besideLibrary(let url) = DashboardStrings.resourceLocation(
+        mainBundle: URL(fileURLWithPath: executable), image: library)
+    else {
+      Issue.record("\(executable): the bundle is not beside the library")
+      continue
+    }
+    #expect(url.path == "/work/target/native-ui-development/products/" + bundle)
+  }
+  // SwiftPM compiles this code into its own test and build products, which
+  // are not the dashboard library; they keep SwiftPM's lookup.
+  for image in [
+    "/work/.build/debug/CFMNativeDashboardPackageTests.xctest/Contents/MacOS/CFMNativeDashboardPackageTests",
+    "/work/.build/debug/libOther.dylib", nil,
+  ] {
+    #expect(
+      DashboardStrings.resourceLocation(
+        mainBundle: URL(fileURLWithPath: "/work/.build/debug"), image: image) == .package)
+  }
+}
+
 @Test func abiRejectsBackgroundCalls() async {
   let status = await Task.detached { dashboardPublish(nil, 0) }.value
   #expect(status == 3)

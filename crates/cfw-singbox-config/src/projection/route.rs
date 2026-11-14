@@ -60,13 +60,23 @@ impl ValidatedSingBoxProfile {
                 rule_sets.push(resource);
             }
         }
-        rules.splice(
-            0..0,
-            [
-                json!({"clash_mode": "Direct", "action": "route", "outbound": direct_outbound}),
-                json!({"clash_mode": "Global", "action": "route", "outbound": global_outbound}),
-            ],
-        );
+        // The leak protection switches apply to every ordinary Tunnel
+        // projection, whatever the selected route, and never to release
+        // evidence.
+        let protects_leaks = mode.has_tunnel()
+            && self.dns_projection == DnsProjection::Ordinary
+            && self.release_packet_evidence_case.is_none();
+        let mut mode_rules =
+            vec![json!({"clash_mode": "Direct", "action": "route", "outbound": direct_outbound})];
+        // WebRTC leak protection follows the Direct mode rule, which leaves
+        // Direct mode alone, and precedes the Global mode rule and the
+        // profile's rules.
+        if protects_leaks && settings.webrtc_leak_protection {
+            mode_rules.extend(crate::webrtc_leak::route_rules());
+        }
+        mode_rules
+            .push(json!({"clash_mode": "Global", "action": "route", "outbound": global_outbound}));
+        rules.splice(0..0, mode_rules);
         crate::dns_policy::add_connection_dns_rules(
             &self.document,
             &mut rules,
@@ -78,12 +88,9 @@ impl ValidatedSingBoxProfile {
         );
         if mode.has_tunnel() {
             rules.insert(0, json!({ "port": 53, "action": "hijack-dns" }));
-            // DNS leak protection applies to every ordinary Tunnel projection,
-            // whatever the selected route, and never to release evidence.
-            if settings.dns_leak_protection
-                && self.dns_projection == DnsProjection::Ordinary
-                && self.release_packet_evidence_case.is_none()
-            {
+            // DNS leak protection follows the hijack and precedes the mode
+            // rules, so it holds in every mode.
+            if protects_leaks && settings.dns_leak_protection {
                 rules.insert(1, crate::dns_leak::route_rule());
             }
         }

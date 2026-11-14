@@ -164,7 +164,9 @@ domain-named proxy endpoint. Every ordinary engine query and route-level
 destination lookup uses certificate-verified DoH detoured through the selected
 outbound; Tunnel additionally hijacks packet-flow port 53 into that same
 authenticated path, and refuses port 853 (DNS over TLS and DNS over QUIC)
-while DNS leak protection is on. While Mainland China direct applies, mainland
+while DNS leak protection is on. While WebRTC leak protection is on, Tunnel
+also refuses STUN outside Direct mode, so a page cannot ask a STUN server for
+an address of this Mac. While Mainland China direct applies, mainland
 names in Rule mode instead use DoH in mainland China dialled directly, as
 Settings › Engine describes. This is acyclic because authenticated DoH endpoints are
 numeric and the selected outbound's own domain endpoint has an explicit direct

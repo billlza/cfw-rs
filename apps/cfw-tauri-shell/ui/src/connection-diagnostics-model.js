@@ -46,6 +46,22 @@ export function normalizedIp(value) {
   return [...left, ...Array(missing).fill("0"), ...right].map((part) => part.padStart(4, "0")).join(":");
 }
 
+// Whether WebRTC leak protection refuses this window's STUN: the switch is on,
+// the tunnel is active and the routing mode is one the rules cover. An unknown
+// routing mode is never read as protection.
+export function stunRefused({ protection, tunnelActive, mode }) {
+  return protection === true && tunnelActive === true && (mode === "Rule" || mode === "Global");
+}
+
+// What a UDP result means under the protection that was in force while it ran:
+// no exit is the expected outcome of a refusal, and an exit means a packet
+// left outside the tunnel.
+export function udpProtectionNote(value) {
+  if (value?.refused !== true) return null;
+  if (value.status === "observed") return "escaped";
+  return value.status === "failed" && (value.reason === "timeout" || value.reason === "no_udp_candidate") ? "expected" : null;
+}
+
 export function udpComparison(addresses, report) {
   const references = [report?.ipv4, report?.ipv6].filter((item) => item?.status === "observed").map((item) => normalizedIp(item.value));
   const comparable = addresses.map(normalizedIp).filter((ip) => ip && references.some((ref) => ref && ref.includes(":") === ip.includes(":")));

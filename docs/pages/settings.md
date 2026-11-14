@@ -128,7 +128,69 @@ What it does not cover:
   DNS and the switch changes nothing;
 - release evidence projections, which never carry it.
 
-With Mainland China direct on, mainland names are still resolved by encrypted
-DNS in mainland China, dialled directly, as that switch describes: the two
-switches are independent. An earlier build refuses a settings file saved with
-the switch on and does not start the core; turn it off before installing one.
+## Engine › WebRTC leak protection
+
+Off by default. It is a runtime setting, saved and applied like DNS leak
+protection: through the network settings transaction, with the same rollback
+when a candidate core fails to start.
+
+A WebRTC client asks a STUN server which address its UDP packets arrive from,
+and a page reads the answer from the candidates it gathers. The page names the
+server, so the answer follows the server's route and not the page's. In Rule
+mode a page loaded through the proxy can name a server that is routed directly
+and read the real address, and a page loaded directly can name a proxied
+server and read the proxy's exit.
+
+In TUN Mode the switch adds three route rules. The first recognises STUN
+(RFC 8489) by its message format, on UDP only and with the STUN sniffer alone,
+so no TCP connection waits for it and no other protocol is inspected. The
+second refuses what the first recognised. The third refuses UDP to the seven
+ports the core never inspects (25, 110, 143, 465, 587, 993 and 995: it takes
+them for mail ports where the server speaks first), because the page names the
+server's port too and a STUN server there would go unrecognised. STUN is
+therefore given no route at all, and neither address is reported. The rules
+follow the Direct mode rule and precede the Global mode rule and the profile's
+rules: they hold in Rule and Global mode, whatever the selected route, and
+leave Direct mode alone, where every site already sees the real address.
+
+What it costs:
+
+- every app's STUN is refused, not only a browser's. WebRTC also tests each
+  peer-to-peer path with STUN, so a call, a game or a remote desktop that
+  connects two peers directly goes through its service's relay instead, which
+  can be slower, or does not connect when the service offers none;
+- TURN (RFC 8656) shares the STUN message format, so a relay allocation over
+  UDP is refused too, and a client falls back to a relay over TCP or TLS;
+- UDP to the seven mail ports is refused whatever it carries. No standard
+  service uses UDP there;
+- a page that waits for candidate gathering to finish may wait for the STUN
+  timeout first.
+
+What it does not cover:
+
+- System Proxy and Local Proxy mode: a browser sends WebRTC's UDP from the
+  network interface, never through an HTTP or SOCKS proxy, so the core does
+  not see it and the switch changes nothing. Use TUN Mode there, or the
+  browser's own setting (the Chromium policy `WebRtcIPHandlingPolicy` with
+  `disable_non_proxied_udp`, or Firefox's
+  `media.peerconnection.ice.proxy_only_if_behind_proxy`);
+- an address the browser reads from the Mac's own network interfaces rather
+  than from a server. Browsers hide these behind generated names until a page
+  has camera or microphone permission; after that the page sees them, a
+  public IPv6 address included. No route rule can change that;
+- a packet that leaves outside the tunnel's route coverage, such as one a
+  client sends from a socket bound to a physical interface, because the
+  projection does not change what the tunnel captures. Connections ›
+  Connection diagnostics › Check UDP reports an exit it observes while the
+  switch is in force;
+- STUN that is not the first datagram of its UDP session. The core inspects
+  the first datagram only. A WebRTC socket opens with STUN, so a browser is
+  always recognised; a program that sends something else first from the same
+  socket keeps its route for whatever follows;
+- split routing itself: in Rule mode a site with servers on both routes
+  still sees both exits, through WebRTC over TCP (a relay, or a TCP
+  candidate) or through any request that is routed directly. Only Global mode
+  sends everything one way;
+- release evidence projections, which never carry it;
+- an earlier build refuses a settings file saved with the switch on and does
+  not start the core; turn the switch off before installing one.

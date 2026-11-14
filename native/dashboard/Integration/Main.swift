@@ -474,6 +474,7 @@ private final class IntegrationHost: NSObject, NSApplicationDelegate, NSWindowDe
         "lan_proxy": settings["lan_proxy"] ?? NSNull(),
         "mainland_china_direct": settings["mainland_china_direct"] ?? false,
         "dns_leak_protection": settings["dns_leak_protection"] ?? false,
+        "webrtc_leak_protection": settings["webrtc_leak_protection"] ?? false,
       ]
       fixtures["read_runtime_settings_snapshot"] = snapshot
       return snapshot

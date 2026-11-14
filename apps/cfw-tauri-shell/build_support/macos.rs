@@ -239,17 +239,11 @@ fn verify_development_native_ui(repository_root: &Path) -> Result<(), String> {
         std::env::var_os(development_native_ui::OUTPUT_ENV)
             .ok_or("CFW_DEVELOPMENT_NATIVE_UI_PRODUCTS is unset")?,
     );
-    let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").ok_or("Cargo output is missing")?);
-    let profile = out_dir
-        .ancestors()
-        .nth(3)
-        .ok_or("Cargo profile output is missing")?;
-    let verified =
-        development_native_ui::verify(repository_root, &products, profile, |path, value| {
-            let manifest: ArtifactManifest = serde_json::from_value(value.clone())
-                .map_err(|error| format!("parse development artifact manifest: {error}"))?;
-            verify_manifest(path, &manifest)
-        })?;
+    let verified = development_native_ui::verify(repository_root, &products, |path, value| {
+        let manifest: ArtifactManifest = serde_json::from_value(value.clone())
+            .map_err(|error| format!("parse development artifact manifest: {error}"))?;
+        verify_manifest(path, &manifest)
+    })?;
     for path in verified.watched_paths {
         println!("cargo:rerun-if-changed={}", path.display());
     }

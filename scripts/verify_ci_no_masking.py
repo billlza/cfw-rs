@@ -57,7 +57,7 @@ DEFAULT_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 DEFAULT_PINS = REPO_ROOT / "scripts" / "dependency_pins.env"
 RELEASE_CI_GATE = REPO_ROOT / "scripts" / "run_release_ci_gate.sh"
 NATIVE_UI_DEVELOPMENT_CHECKS = REPO_ROOT / "scripts" / "native_ui_development_checks.sh"
-REQUIRED_NATIVE_UI_DEVELOPMENT_CHECKS_SHA256 = "472500cd394803a7a355e8f9137fee88041b8f6f0fea0828a35345c577a4d609"
+REQUIRED_NATIVE_UI_DEVELOPMENT_CHECKS_SHA256 = "5fae810752220993663344debb343f753ef45e1076bda7792d72181ccde1b576"
 REQUIRED_RUN_SHELL = "/bin/bash --noprofile --norc -p -e -o pipefail {0}"
 REQUIRED_MACOS_RUNNER = "xcode-27"
 REQUIRED_CHECKOUT_ACTION = (
@@ -987,7 +987,7 @@ def _check_release_ci_boundary(text: str, pins: dict[str, str]) -> list[str]:
             findings += _check_masking(helper_source)
             for fragment in (
                 'target="$(/usr/bin/mktemp -d "$repository/target/development/ci-${operation}_XXXXXXXX")"',
-                '"$repository/scripts/prepare_development_native_ui.py" --cargo-target-dir "$target"',
+                '"$repository/scripts/prepare_development_native_ui.py")"',
                 'export CARGO_TARGET_DIR="$target"',
                 'export CFW_DEVELOPMENT_NATIVE_UI_PRODUCTS="$products"',
             ):

@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Explicitly prepare Swift debug UI inputs before running Cargo with native-ui.
 
-Never signs, installs, changes networking, or writes into release candidates.
-Every build keeps a fresh attempt with its logs, products and receipt. A
-completed attempt removes its Swift build scratch, which is plain compiler
-output already copied into the products; a failed attempt keeps it for
-diagnosis. Cargo only validates the completed receipt and its current
-source/resource bytes.
+Never signs, installs, changes networking, or writes into release candidates
+or into Cargo's output directories. Every build keeps a fresh attempt with its
+logs, products and receipt. The products hold the library and, beside it, its
+resource bundle: that is where the library looks for its resources in an
+unbundled executable, wherever Cargo puts that executable. A completed attempt
+removes its Swift build scratch, which is plain compiler output already copied
+into the products; a failed attempt keeps it for diagnosis. Cargo only
+validates the completed receipt and its current source/product bytes.
 """
 from __future__ import annotations
 
@@ -59,17 +61,6 @@ def real_directory(path: Path, *, create: bool = False) -> None:
         raise ValueError(f"development directory is not canonical: {path}")
 
 
-def target_directory(repository: Path, target: Path) -> None:
-    if target != repository / "target":
-        try:
-            relative = target.relative_to(repository / "target/development")
-        except ValueError as error:
-            raise ValueError("Cargo target must be target or target/development/<name>") from error
-        if len(relative.parts) != 1 or re.fullmatch(r"[A-Za-z0-9_-]{1,80}", str(relative)) is None:
-            raise ValueError("development Cargo target name is invalid")
-    real_directory(target, create=True)
-
-
 def manifest(path: Path) -> dict:
     if path.resolve(strict=True) != path:
         raise ValueError(f"development input must not use a symlink alias: {path}")
@@ -94,19 +85,6 @@ def source_digest(sources: dict) -> str:
     return hashlib.sha256("".join(f"{path} {value['sha256']}\n" for path, value in sorted(sources.items())).encode()).hexdigest()
 
 
-def publish_resources(source: Path, destination: Path, expected: dict) -> None:
-    if destination.exists() or destination.is_symlink():
-        if manifest(destination) != expected:
-            raise ValueError(
-                f"existing development resources differ: {destination}; select a fresh "
-                "--cargo-target-dir target/development/<name> (absolute path); existing bytes were preserved"
-            )
-        return
-    shutil.copytree(source, destination)
-    if manifest(destination) != expected:
-        raise ValueError(f"copied development resources differ: {destination}")
-
-
 def run_tool(arguments: list[str], attempt: Path, label: str, *, timeout: int) -> subprocess.CompletedProcess:
     policy = {"command": arguments, "timeout_seconds": timeout, "output_limit": 16 * 1024 * 1024}
     try:
@@ -123,9 +101,8 @@ def run_tool(arguments: list[str], attempt: Path, label: str, *, timeout: int) -
     return result
 
 
-def prepare(repository: Path, target: Path, *, explicit_target: bool = False) -> Path:
+def prepare(repository: Path) -> Path:
     real_directory(repository)
-    target_directory(repository, target)
     sources = source_manifests(repository)
     digest = source_digest(sources)
     attempts = repository / "target/native-ui-development" / digest
@@ -161,17 +138,11 @@ def prepare(repository: Path, target: Path, *, explicit_target: bool = False) ->
     os.chmod(products / LIBRARY, 0o755)
     shutil.copytree(output / RESOURCES, products / RESOURCES)
     product_manifests = {name: manifest(products / name) for name in (LIBRARY, RESOURCES)}
-    profile_relative = "aarch64-apple-darwin/debug" if explicit_target else "debug"
-    profile = target / profile_relative
-    for directory in (profile, profile / "deps"):
-        real_directory(directory, create=True)
-        publish_resources(products / RESOURCES, directory / RESOURCES, product_manifests[RESOURCES])
     if source_manifests(repository) != sources:
         raise ValueError(f"UI inputs changed during the build; incomplete attempt retained at {attempt}")
     receipt = {
-        "schema_version": 1, "artifact_kind": "development-native-ui-v1", "configuration": "debug",
-        "target": "aarch64-apple-darwin", "repository": str(repository), "cargo_target_dir": str(target),
-        "profile_relative": profile_relative, "source_sha256": digest,
+        "schema_version": 2, "artifact_kind": "development-native-ui-v2", "configuration": "debug",
+        "target": "aarch64-apple-darwin", "repository": str(repository), "source_sha256": digest,
         "sources": sources, "products": product_manifests,
     }
     with (products / "receipt.json").open("x") as handle:
@@ -183,13 +154,10 @@ def prepare(repository: Path, target: Path, *, explicit_target: bool = False) ->
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cargo-target-dir", type=Path)
-    parser.add_argument("--target", choices=("aarch64-apple-darwin",))
-    arguments = parser.parse_args()
+    parser.parse_args()
     repository = Path(__file__).resolve().parent.parent
-    target = arguments.cargo_target_dir or repository / "target"
     try:
-        products = prepare(repository, target, explicit_target=arguments.target is not None)
+        products = prepare(repository)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         parser.exit(1, f"error: development native UI: {error}\n")
     print(products)

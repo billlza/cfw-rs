@@ -23,7 +23,7 @@ export RECORD="$2/record"
 cfw_run_release_python_script() {
   printf 'prepare:%s\\n' "$*" >> "$RECORD"
   if [[ "$PREPARE_EXIT" != 0 ]]; then return "$PREPARE_EXIT"; fi
-  printf '%s/products\\n' "$4"
+  printf '%s/target/native-ui-development/fixture/products\\n' "$1"
 }
 cfw_run_with_release_cargo_runtime() {
   printf 'cargo:%s\\ntarget:%s\\nproducts:%s\\n' "$*" "$CARGO_TARGET_DIR" "$CFW_DEVELOPMENT_NATIVE_UI_PRODUCTS" >> "$RECORD"
@@ -45,13 +45,21 @@ cfw_run_native_ui_development_check "$2" "$3"
                 self.assertEqual(result.returncode, 0, result.stderr)
             records = (repository / "record").read_text().splitlines()
             for start in (0, 4):
-                self.assertTrue(records[start].startswith("prepare:"))
+                # The producer takes no Cargo directory: where Cargo writes is
+                # this helper's business alone.
+                self.assertEqual(
+                    records[start],
+                    f"prepare:{repository} {repository}/scripts/prepare_development_native_ui.py",
+                )
                 self.assertTrue(records[start + 1].startswith("cargo:"))
                 self.assertIn("--locked --workspace --all-targets --all-features", records[start + 1])
                 path = Path(records[start + 2].removeprefix("target:"))
                 self.assertTrue(path.is_relative_to(repository / "target/development"))
                 self.assertFalse(path.exists())
-                self.assertEqual(records[start + 3], f"products:{path}/products")
+                self.assertEqual(
+                    records[start + 3],
+                    f"products:{repository}/target/native-ui-development/fixture/products",
+                )
                 paths.append(path)
             self.assertNotEqual(paths[0], paths[1])
             self.assertIn("-- -D warnings", records[5])

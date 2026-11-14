@@ -1,9 +1,13 @@
 //! Admission of explicitly prepared development products. This module performs
 //! filesystem validation only; Cargo never invokes Swift or copies resources.
+//!
+//! The products directory holds the library and, beside it, its resource
+//! bundle. The library finds the bundle there itself, so nothing here depends
+//! on where Cargo places an executable.
 use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -33,8 +37,6 @@ struct Receipt {
     configuration: String,
     target: String,
     repository: PathBuf,
-    cargo_target_dir: PathBuf,
-    profile_relative: String,
     source_sha256: String,
     sources: BTreeMap<String, Value>,
     products: BTreeMap<String, Value>,
@@ -69,45 +71,15 @@ fn lower_hex(value: &str, length: usize) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-/// Only the normal repository target directory or an explicitly named,
-/// isolated development target is writable by the external preparation step.
-fn require_target_directory(repository: &Path, target: &Path) -> Result<(), String> {
-    canonical_directory(target)?;
-    let base = repository.join("target");
-    if target == base {
-        return Ok(());
-    }
-    let relative = target
-        .strip_prefix(base.join("development"))
-        .map_err(|_| "development Cargo target must be target or target/development/<name>")?;
-    let parts: Vec<_> = relative.components().collect();
-    let name = relative
-        .to_str()
-        .ok_or("development target name must be UTF-8")?;
-    if parts.len() != 1
-        || !matches!(parts[0], Component::Normal(_))
-        || name.is_empty()
-        || name.len() > 80
-        || !name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
-        return Err("development Cargo target name is invalid".into());
-    }
-    Ok(())
-}
-
 /// The callback is the same tree-manifest verifier used by release build.rs.
 /// No development receipt can replace that verifier or override its hashes.
 pub fn verify(
     repository: &Path,
     products: &Path,
-    cargo_profile: &Path,
     mut verify_manifest: impl FnMut(&Path, &Value) -> Result<(), String>,
 ) -> Result<VerifiedProducts, String> {
     canonical_directory(repository)?;
     canonical_directory(products)?;
-    canonical_directory(cargo_profile)?;
     let base = repository.join("target/native-ui-development");
     let relative = products
         .strip_prefix(&base)
@@ -130,8 +102,8 @@ pub fn verify(
     let receipt: Receipt =
         serde_json::from_slice(&fs::read(&receipt_path).map_err(|error| error.to_string())?)
             .map_err(|error| format!("invalid development UI receipt: {error}"))?;
-    if receipt.schema_version != 1
-        || receipt.artifact_kind != "development-native-ui-v1"
+    if receipt.schema_version != 2
+        || receipt.artifact_kind != "development-native-ui-v2"
         || receipt.configuration != "debug"
         || receipt.target != "aarch64-apple-darwin"
         || receipt.repository != repository
@@ -140,16 +112,6 @@ pub fn verify(
         return Err(
             "development UI receipt has a different source, repository or development identity"
                 .into(),
-        );
-    }
-    require_target_directory(repository, &receipt.cargo_target_dir)?;
-    if !matches!(
-        receipt.profile_relative.as_str(),
-        "debug" | "aarch64-apple-darwin/debug"
-    ) || receipt.cargo_target_dir.join(&receipt.profile_relative) != cargo_profile
-    {
-        return Err(
-            "development UI resources were prepared for a different Cargo output directory".into(),
         );
     }
     if receipt.sources.len() != SOURCE_PATHS.len()
@@ -191,13 +153,6 @@ pub fn verify(
     }
     for (name, manifest) in &receipt.products {
         verify_manifest(&products.join(name), manifest)?;
-    }
-    let resources = &receipt.products[RESOURCES];
-    for directory in [cargo_profile.to_path_buf(), cargo_profile.join("deps")] {
-        canonical_directory(&directory)?;
-        let path = directory.join(RESOURCES);
-        verify_manifest(&path, resources)?;
-        watched_paths.push(path);
     }
     Ok(VerifiedProducts {
         library_root: products.to_path_buf(),

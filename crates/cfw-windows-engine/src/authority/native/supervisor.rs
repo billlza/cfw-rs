@@ -51,13 +51,11 @@ impl WindowsAuthority {
             )
         {
             let processes = self.observe_runtime_processes()?;
-            if matches!(
-                processes.state(),
-                super::super::RuntimeProcessState::Accounting {
-                    active: 0,
-                    total: 1..
-                }
-            ) {
+            let retired = self
+                .machine
+                .metadata()
+                .is_some_and(|record| processes.run_retirement(record.root()).is_some());
+            if retired {
                 match state.state {
                     AuthorityState::Recovering => {
                         self.reconcile_local_recovery()?;

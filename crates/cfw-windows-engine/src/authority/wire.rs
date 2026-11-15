@@ -26,7 +26,9 @@ const PROTOCOL: &str = "cfw.windows.authority";
 // reference. It remains distinct from the UserAgent's execution binding.
 // v7 lets the bound Tunnel UserAgent open SYSTEM's tunnel network, poll it
 // until SYSTEM offers a packet endpoint, and confirm that endpoint.
-const VERSION: u16 = 7;
+// v8 has a recovery receipt say how SYSTEM knew the run's processes were
+// gone: a counted Job, or the end of the logon the run ran under.
+const VERSION: u16 = 8;
 
 #[derive(Debug, thiserror::Error)]
 pub enum WireError {

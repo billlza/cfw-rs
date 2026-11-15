@@ -577,6 +577,7 @@ pub(super) fn process_report(
         RuntimeProcessState::NoRuntimeRoot => serde_json::json!({"kind":"no_runtime_root"}),
         RuntimeProcessState::DurablyRetired => serde_json::json!({"kind":"durably_retired"}),
         RuntimeProcessState::NeverAuthorized => serde_json::json!({"kind":"never_authorized"}),
+        RuntimeProcessState::OwnerLogonEnded => serde_json::json!({"kind":"owner_logon_ended"}),
         RuntimeProcessState::Accounting { active, total } => {
             serde_json::json!({"kind":"accounting","active":active,"total":total})
         }

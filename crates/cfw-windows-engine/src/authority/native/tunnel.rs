@@ -3,8 +3,9 @@
 //! process; SYSTEM routes the adapter only when it accepts Ready. Once the
 //! lease leaves Starting/Active the supervisor retires that network, and Off
 //! needs the retirement's observed adapter absence together with an empty
-//! runtime Job. No wire report from the UserAgent is a cleanup fact.
-use super::super::{RuntimeProcessState, wire::TunnelOpenRequest};
+//! runtime Job, or with the ended logon of a run whose Job is gone. No wire
+//! report from the UserAgent is a cleanup fact.
+use super::super::wire::TunnelOpenRequest;
 use super::*;
 use crate::tunnel::{EndpointHandoff, EndpointOffer, TunnelHost, TunnelNetworkPlan};
 use cfw_engine_api::authority_v1::AuthorityMode;
@@ -232,9 +233,9 @@ impl WindowsAuthority {
         })
     }
 
-    /// Reconcile a Tunnel record to Off once its Job is empty and its network
-    /// retired: after an acknowledged stop, or after the execution lease was
-    /// lost. Returns false while retirement is still pending.
+    /// Reconcile a Tunnel record to Off once every process of its run is
+    /// gone and its network retired: after an acknowledged stop, or after the
+    /// execution lease was lost. Returns false while retirement is pending.
     pub(super) fn reconcile_tunnel(&mut self) -> Result<bool> {
         require_service()?;
         let target = match self.machine.phase() {
@@ -259,14 +260,7 @@ impl WindowsAuthority {
             .ok_or(AuthorityError::CleanupUnproven)?
             .clone();
         let processes = self.observe_runtime_processes()?;
-        let retired = processes.root() == target.root()
-            && matches!(
-                processes.state(),
-                RuntimeProcessState::Accounting {
-                    active: 0,
-                    total: 1..
-                }
-            );
+        let retired = processes.run_retirement(target.root()).is_some();
         if !retired {
             return Ok(false);
         }
@@ -276,12 +270,13 @@ impl WindowsAuthority {
         };
         let handoff_retired = self.tunnel.as_ref().is_none_or(|run| run.handoff.is_none());
         // The Job held the UserAgent, its engine and every descendant, and
-        // admission disallows breakaway: an empty Job closed their sockets,
-        // endpoint client and memory. The host thread's exit closed the
-        // session, the endpoint's server end and the adapter handle, and the
-        // adapter was then observed absent with every route and resolver it
-        // carried. A plain Tunnel run never owns WinINet settings: the
-        // UserAgent admits a system proxy only for SystemProxy runs.
+        // admission disallows breakaway: an empty Job, or the end of the
+        // logon they all ran under, closed their sockets, endpoint client
+        // and memory. The host thread's exit closed the session, the
+        // endpoint's server end and the adapter handle, and the adapter was
+        // then observed absent with every route and resolver it carried. A
+        // plain Tunnel run never owns WinINet settings: the UserAgent admits
+        // a system proxy only for SystemProxy runs.
         let evidence = CleanupEvidence {
             binding: CleanupBinding::TunnelRuntime(target.clone()),
             revision: target.revision(),

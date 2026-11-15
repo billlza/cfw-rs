@@ -120,7 +120,7 @@ impl ProxyRecoveryReport {
 #[serde(deny_unknown_fields)]
 pub struct ProxyRecoveryReceipt {
     pub(in crate::authority) context: ProxyRecoveryContext,
-    pub(in crate::authority) retired_process_count: u32,
+    pub(in crate::authority) retirement: ProcessRetirement,
 }
 
 /// Publication of a fully observed SystemProxy stop or recovery. A later execution
@@ -143,8 +143,8 @@ impl ProxyRecoveryReceipt {
     pub fn context(&self) -> &ProxyRecoveryContext {
         &self.context
     }
-    pub fn retired_process_count(&self) -> u32 {
-        self.retired_process_count
+    pub fn retirement(&self) -> ProcessRetirement {
+        self.retirement
     }
 }
 
@@ -198,7 +198,7 @@ pub(super) fn decode_cleanup(
     if value.recovery.context != report.context
         || value.recovery.context.observer != *owner
         || report.context.purpose != ProxyRecoveryPurpose::ReconcileOff
-        || value.recovery.retired_process_count == 0
+        || !value.recovery.retirement.valid()
         || value.snapshot.state != AuthorityState::Off
         || target.revision.checked_add(1) != value.snapshot.revision
         || value.snapshot.root.as_ref() != Some(&target.root)
@@ -215,7 +215,7 @@ pub(super) fn decode_receipt(
     let value: ProxyRecoveryReceipt = decode(bytes)?;
     if value.context != report.context
         || value.context.observer != *owner
-        || value.retired_process_count == 0
+        || !value.retirement.valid()
     {
         return Err(WireError::Correlation);
     }

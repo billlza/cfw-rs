@@ -1,12 +1,12 @@
 use super::super::{
     ProxyRecoveryContext, ProxyRecoveryPurpose, ProxyRecoveryTarget, RuntimeProcessObservation,
-    RuntimeProcessState,
     recovery::ProxyRecoveryAdmission,
     wire::{ProxyRecoveryGrant, ProxyRecoveryReceipt, ProxyRecoveryReport, TicketMaterial},
 };
 use super::*;
 
-/// The service independently observed the entire exact runtime Job at zero and
+/// The service independently observed the entire exact runtime Job at zero,
+/// or the end of the logon the run ran under once that Job was gone, and
 /// admitted a fresh proxy observation by the authenticated current-user image.
 /// This scoped, time-bound fact does not attest other cleanup obligations. It
 /// cannot be deserialized or constructed from client-provided process counts.
@@ -36,12 +36,13 @@ impl ProxyRecoveryObservation {
         self.observed_at
     }
     pub(in crate::authority) fn receipt(&self) -> Result<ProxyRecoveryReceipt> {
-        let RuntimeProcessState::Accounting { active: 0, total } = self.processes.state() else {
-            return Err(AuthorityError::CleanupUnproven);
-        };
+        let retirement = self
+            .processes
+            .run_retirement(&self.context.target.root)
+            .ok_or(AuthorityError::CleanupUnproven)?;
         Ok(ProxyRecoveryReceipt {
             context: self.context.clone(),
-            retired_process_count: total,
+            retirement,
         })
     }
 }
@@ -139,15 +140,7 @@ impl WindowsAuthority {
         target: &ProxyRecoveryTarget,
     ) -> Result<RuntimeProcessObservation> {
         let observed = self.observe_runtime_processes()?;
-        if observed.root() != &target.root
-            || !matches!(
-                observed.state(),
-                RuntimeProcessState::Accounting {
-                    active: 0,
-                    total: 1..
-                }
-            )
-        {
+        if observed.run_retirement(&target.root).is_none() {
             return Err(AuthorityError::CleanupUnproven);
         }
         Ok(observed)

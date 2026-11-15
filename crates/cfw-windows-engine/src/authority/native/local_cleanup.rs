@@ -1,7 +1,7 @@
 //! LocalProxy normal-stop and recovery cleanup. The schema-6 contract admits only
 //! process-local sockets/pipes; no system proxy, managed interface or packet
 //! pump is created. This proof is not usable for SystemProxy or Tunnel.
-use super::super::{RuntimeProcessObservation, RuntimeProcessState};
+use super::super::RuntimeProcessObservation;
 use super::*;
 use cfw_engine_api::authority_v1::AuthorityMode;
 
@@ -33,7 +33,8 @@ impl WindowsAuthority {
     /// Reconcile a known LocalProxy record after losing the execution lease.
     /// The old acknowledgement is not reconstructed. Independent whole-Job
     /// retirement and the bounded resource contract replace it for recovery;
-    /// a missing Job, unknown journal, live member or another mode still fails.
+    /// a missing Job whose owner's logon still exists, an unknown journal, a
+    /// live member or another mode still fails.
     pub fn reconcile_local_recovery(&mut self) -> Result<VerifiedLocalCleanup> {
         require_service()?;
         let target = self.machine.local_recovery_target()?;
@@ -54,21 +55,15 @@ impl WindowsAuthority {
         let operation = target.operation().ok_or(AuthorityError::CleanupUnproven)?;
         let process_local = operation.mode() == AuthorityMode::LocalProxy;
         let processes = self.observe_runtime_processes()?;
-        let retired = processes.root() == target.root()
-            && matches!(
-                processes.state(),
-                RuntimeProcessState::Accounting {
-                    active: 0,
-                    total: 1..
-                }
-            );
+        let retired = processes.run_retirement(target.root()).is_some();
         if !retired || !process_local || self.proxy_recovery.is_some() {
             return Err(AuthorityError::CleanupUnproven);
         }
         // Windows closes a terminated process's handles. The exact SYSTEM Job
         // includes the Agent and all descendants; admission disallows breakaway
         // and the pinned runtime never exports sockets outside that tree. Job
-        // zero therefore retires its TCP/UDP sockets, private IPC and memory.
+        // zero therefore retires its TCP/UDP sockets, private IPC and memory,
+        // and so does the end of the logon that whole tree ran under.
         // Configuration validation excludes system interfaces/extra services.
         // These process-local facts cannot substitute for per-user WinINet or
         // TUN/route/DNS restoration in another mode.

@@ -534,8 +534,12 @@ fn sid_text(sid: PSID) -> Result<String, PeerIdentityError> {
 mod tests;
 
 mod authorization;
+mod logon;
 mod observation;
 pub use authorization::{
     LiveConsoleSession, ServiceAuthorizationError, ServicePeerAuthorization,
     UserAgentLeaseRequirement, authorize_service_request,
 };
+#[cfg(feature = "native-service-validation")]
+pub use logon::recorded_logon_ended_for_validation;
+pub(crate) use logon::{RecordedLogon, observe_recorded_logon};

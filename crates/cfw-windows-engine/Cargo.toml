@@ -32,6 +32,7 @@ windows-sys = { version = "=0.61.2", features = [
   "Win32_Foundation",
   "Win32_Devices_DeviceAndDriverInstallation",
   "Win32_Security",
+  "Win32_Security_Authentication_Identity",
   "Win32_Security_Authorization",
   "Win32_Security_Cryptography",
   "Win32_Security_Cryptography_Catalog",

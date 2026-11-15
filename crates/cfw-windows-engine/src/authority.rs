@@ -39,8 +39,8 @@ pub use runtime_job::{
 pub use runtime_job::{RuntimeJobError, RuntimeProcessObservation, RuntimeProcessState};
 pub use types::{
     AuthorityLineage, AuthoritySnapshot, CleanupEvidence, LeaseContext, OperationContext,
-    PrepareRequest, PreparedTicket, ReadyReport, RecordedRuntimeScope, RuntimeStartAuthorization,
-    StoppedReport,
+    PrepareRequest, PreparedTicket, ProcessRetirement, ReadyReport, RecordedRuntimeScope,
+    RuntimeStartAuthorization, StoppedReport,
 };
 
 #[derive(Debug, thiserror::Error)]

@@ -164,6 +164,9 @@ pub(super) fn main() -> Result<()> {
                 | "--installed-coordinator-client"
                 | "--installed-startup-client"
                 | "--installed-tunnel-client"
+                | "--installed-proxy-recovery-client"
+                | "--installed-proxy-abandon-client"
+                | "--installed-proxy-resume-client"
         )
     {
         if args[2] != cfw_windows_engine::runtime_host::SERVICE_NAME {
@@ -176,6 +179,9 @@ pub(super) fn main() -> Result<()> {
             "--installed-coordinator-client" => installed_host::exercise_coordinator(),
             "--installed-startup-client" => installed_host::exercise_startup(),
             "--installed-tunnel-client" => installed_host::exercise_tunnel(),
+            "--installed-proxy-recovery-client" => installed_host::exercise_proxy_recovery(),
+            "--installed-proxy-abandon-client" => installed_host::exercise_proxy_abandon(),
+            "--installed-proxy-resume-client" => installed_host::exercise_proxy_resume(),
             _ => installed_host::exercise_profile(),
         };
     }

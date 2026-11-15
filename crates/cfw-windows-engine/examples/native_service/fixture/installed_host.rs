@@ -18,6 +18,7 @@ mod checks;
 mod coordinator;
 mod profile;
 mod progress;
+mod proxy_recovery;
 mod reports;
 mod startup_registration;
 mod tunnel;
@@ -33,6 +34,9 @@ pub(super) enum InstalledSuite {
     Coordinator,
     Startup,
     Tunnel,
+    ProxyRecovery,
+    ProxyAbandon,
+    ProxyResume,
 }
 impl InstalledSuite {
     fn prefix(self) -> &'static str {
@@ -44,6 +48,9 @@ impl InstalledSuite {
             Self::Coordinator => "installed-host-coordinator",
             Self::Startup => "installed-host-startup",
             Self::Tunnel => "installed-host-tunnel",
+            Self::ProxyRecovery => "installed-host-proxy-recovery",
+            Self::ProxyAbandon => "installed-host-proxy-abandon",
+            Self::ProxyResume => "installed-host-proxy-resume",
         }
     }
 }
@@ -360,6 +367,36 @@ pub(super) fn exercise_tunnel() -> Result<()> {
     Ok(())
 }
 
+/// The three SystemProxy failure-path clients; see `proxy_recovery`.
+fn exercise_proxy(
+    key: &str,
+    product_agent: bool,
+    last_generation: u64,
+    exercise: impl FnOnce(&mut Progress) -> Result<serde_json::Value>,
+) -> Result<()> {
+    require_opt_in()?;
+    let mut progress = Progress::new()?;
+    progress.record("open_desktop", 0)?;
+    let outcome = exercise(&mut progress)?;
+    progress.record("complete", last_generation)?;
+    let mut report = serde_json::json!({
+        "source":std::env::var("CFW_NATIVE_SERVICE_SOURCE").map_err(|e|e.to_string())?,
+        "product_service":true,"product_agent":product_agent,"desktop_is_fixture":true,
+        "medium_integrity":true,"release_accepted":false});
+    report[key] = outcome;
+    println!("{report}");
+    Ok(())
+}
+pub(super) fn exercise_proxy_recovery() -> Result<()> {
+    exercise_proxy("proxy_recovery", true, 12, proxy_recovery::exercise)
+}
+pub(super) fn exercise_proxy_abandon() -> Result<()> {
+    exercise_proxy("proxy_abandoned", true, 13, proxy_recovery::abandon)
+}
+pub(super) fn exercise_proxy_resume() -> Result<()> {
+    exercise_proxy("proxy_resumed", false, 13, proxy_recovery::resume)
+}
+
 pub(super) fn exercise_startup() -> Result<()> {
     require_opt_in()?;
     let mut progress = Progress::new()?;
@@ -439,6 +476,11 @@ pub(super) fn check_output(
             && tunnel["fresh_queries"] == 3
             && tunnel["agent_crash_recovery"]["adapter_absent_after_off"] == true
             && tunnel["agent_crash_recovery"]["physical_route_restored"] == true
+    } else if matches!(
+        suite,
+        InstalledSuite::ProxyRecovery | InstalledSuite::ProxyAbandon | InstalledSuite::ProxyResume
+    ) {
+        proxy_recovery::accepts(suite, &report)
     } else if suite == InstalledSuite::Startup {
         let startup = &report["startup_registration"];
         startup["source"] == report["source"]
@@ -472,7 +514,10 @@ pub(super) fn check_output(
     if !valid_case
         || report["product_service"] != (suite != InstalledSuite::Startup)
         || report["product_agent"]
-            != !matches!(suite, InstalledSuite::Profile | InstalledSuite::Startup)
+            != !matches!(
+                suite,
+                InstalledSuite::Profile | InstalledSuite::Startup | InstalledSuite::ProxyResume
+            )
         || report["desktop_is_fixture"] != true
         || report["medium_integrity"] != true
         || report["release_accepted"] != false

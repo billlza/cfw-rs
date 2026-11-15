@@ -124,6 +124,21 @@ pub(in super::super) fn combine_reports(directory: &Path) -> Result<()> {
             "registration_removed",
         ),
         (InstalledSuite::Tunnel, "backend_tunnel", "tunnel_runtime"),
+        (
+            InstalledSuite::ProxyRecovery,
+            "proxy_recovery",
+            "recovers_without_restart",
+        ),
+        (
+            InstalledSuite::ProxyAbandon,
+            "proxy_abandoned",
+            "proxy_left_applied",
+        ),
+        (
+            InstalledSuite::ProxyResume,
+            "proxy_resumed",
+            "recovered_off",
+        ),
     ] {
         let report = read(&directory.join(format!("{}-lifecycle.json", suite.prefix())))?;
         if direct["source"] != report["source"]

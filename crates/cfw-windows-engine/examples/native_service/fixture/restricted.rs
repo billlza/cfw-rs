@@ -24,6 +24,9 @@ pub(super) enum ClientCase {
     InstalledCoordinatorDesktop,
     InstalledStartupDesktop,
     InstalledTunnelDesktop,
+    InstalledProxyRecoveryDesktop,
+    InstalledProxyAbandonDesktop,
+    InstalledProxyResumeDesktop,
     ProcessObservation,
     UpdateInspection,
     RejectedRuntime,
@@ -48,6 +51,9 @@ impl ClientCase {
             Self::InstalledCoordinatorDesktop => "--installed-coordinator-client",
             Self::InstalledStartupDesktop => "--installed-startup-client",
             Self::InstalledTunnelDesktop => "--installed-tunnel-client",
+            Self::InstalledProxyRecoveryDesktop => "--installed-proxy-recovery-client",
+            Self::InstalledProxyAbandonDesktop => "--installed-proxy-abandon-client",
+            Self::InstalledProxyResumeDesktop => "--installed-proxy-resume-client",
             Self::ProcessObservation => "--desktop-process-client",
             Self::UpdateInspection => "--update-package-client",
             Self::RejectedRuntime => "--rejected-agent-runtime",
@@ -72,6 +78,9 @@ impl ClientCase {
             Self::InstalledCoordinatorDesktop => "installed-host-coordinator".into(),
             Self::InstalledStartupDesktop => "installed-host-startup".into(),
             Self::InstalledTunnelDesktop => "installed-host-tunnel".into(),
+            Self::InstalledProxyRecoveryDesktop => "installed-host-proxy-recovery".into(),
+            Self::InstalledProxyAbandonDesktop => "installed-host-proxy-abandon".into(),
+            Self::InstalledProxyResumeDesktop => "installed-host-proxy-resume".into(),
             Self::ProcessObservation => format!("{name}-process"),
             Self::UpdateInspection => format!("{name}-update"),
             Self::RejectedRuntime => format!("{name}-runtime-rejected"),
@@ -118,10 +127,12 @@ impl ClientCase {
             | Self::InstalledBackendDesktop
             | Self::InstalledBackendExitDesktop
             | Self::InstalledCoordinatorDesktop
-            | Self::InstalledTunnelDesktop => {
+            | Self::InstalledTunnelDesktop
+            | Self::InstalledProxyRecoveryDesktop
+            | Self::InstalledProxyAbandonDesktop => {
                 serde_json::json!({"product_service":true,"product_agent":true,"desktop_is_fixture":true,"release_accepted":false})
             }
-            Self::InstalledProfileDesktop => {
+            Self::InstalledProfileDesktop | Self::InstalledProxyResumeDesktop => {
                 serde_json::json!({"product_service":true,"product_agent":false,"desktop_is_fixture":true,"release_accepted":false})
             }
             Self::InstalledStartupDesktop => {
@@ -139,6 +150,9 @@ impl ClientCase {
                 | Self::InstalledCoordinatorDesktop
                 | Self::InstalledStartupDesktop
                 | Self::InstalledTunnelDesktop
+                | Self::InstalledProxyRecoveryDesktop
+                | Self::InstalledProxyAbandonDesktop
+                | Self::InstalledProxyResumeDesktop
         )
     }
     fn installed_suite(self) -> Result<installed_host::InstalledSuite> {
@@ -150,6 +164,11 @@ impl ClientCase {
             Self::InstalledCoordinatorDesktop => Ok(installed_host::InstalledSuite::Coordinator),
             Self::InstalledStartupDesktop => Ok(installed_host::InstalledSuite::Startup),
             Self::InstalledTunnelDesktop => Ok(installed_host::InstalledSuite::Tunnel),
+            Self::InstalledProxyRecoveryDesktop => {
+                Ok(installed_host::InstalledSuite::ProxyRecovery)
+            }
+            Self::InstalledProxyAbandonDesktop => Ok(installed_host::InstalledSuite::ProxyAbandon),
+            Self::InstalledProxyResumeDesktop => Ok(installed_host::InstalledSuite::ProxyResume),
             _ => Err("client is not an installed suite".into()),
         }
     }
@@ -563,6 +582,9 @@ fn run_case(
     // SYSTEM to recover from its UserAgent's termination.
     let limit = if matches!(case, ClientCase::InstalledTunnelDesktop) {
         Duration::from_secs(240)
+    } else if matches!(case, ClientCase::InstalledProxyRecoveryDesktop) {
+        // Two runs, each with a bounded wait for the product's recovery.
+        Duration::from_secs(120)
     } else if matches!(
         case,
         ClientCase::RuntimeDesktop
@@ -574,6 +596,8 @@ fn run_case(
             | ClientCase::InstalledProfileDesktop
             | ClientCase::InstalledCoordinatorDesktop
             | ClientCase::InstalledStartupDesktop
+            | ClientCase::InstalledProxyAbandonDesktop
+            | ClientCase::InstalledProxyResumeDesktop
             | ClientCase::UpdateInspection
     ) {
         Duration::from_secs(60)
@@ -649,6 +673,9 @@ pub(super) fn run_installed_host(image: &Path, expected: [u8; 32]) -> Result<()>
         ClientCase::InstalledCoordinatorDesktop,
         ClientCase::InstalledStartupDesktop,
         ClientCase::InstalledTunnelDesktop,
+        ClientCase::InstalledProxyRecoveryDesktop,
+        ClientCase::InstalledProxyAbandonDesktop,
+        ClientCase::InstalledProxyResumeDesktop,
     ] {
         let exercise = || {
             run_case(
@@ -866,7 +893,10 @@ fn client_body(name: &str, hex: &str, case: ClientCase) -> Result<()> {
         | ClientCase::InstalledProfileDesktop
         | ClientCase::InstalledCoordinatorDesktop
         | ClientCase::InstalledStartupDesktop
-        | ClientCase::InstalledTunnelDesktop => {
+        | ClientCase::InstalledTunnelDesktop
+        | ClientCase::InstalledProxyRecoveryDesktop
+        | ClientCase::InstalledProxyAbandonDesktop
+        | ClientCase::InstalledProxyResumeDesktop => {
             return Err("installed host client must use its separate test entrypoint".into());
         }
         ClientCase::RuntimeRestartDesktop => {

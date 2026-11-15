@@ -242,11 +242,9 @@ mod tests {
         ));
         // With the settings it restored still in place, the restoration is
         // proven by its own record, which names the engine that was owned.
-        restoration::publish(
-            &mut proxy.directory.write().unwrap(),
-            &owned(&proxy, &context),
-        )
-        .unwrap();
+        // Read the settings before the directory is locked for the write.
+        let restored = owned(&proxy, &context);
+        restoration::publish(&mut proxy.directory.write().unwrap(), &restored).unwrap();
         let observed = proxy.observe_restoration(&context, &digest()).unwrap();
         assert_eq!(observed.recorded_process_id(), 123);
         assert_eq!(proxy.snapshot().unwrap(), before);

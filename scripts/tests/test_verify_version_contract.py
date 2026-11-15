@@ -144,6 +144,19 @@ class VersionContractTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "cfw-controller"):
                 verify(repository)
 
+    def test_the_windows_crates_share_the_product_version(self) -> None:
+        # The Windows runtime reads the product version from its own crate, so
+        # a version that opens without these three fails here, not in an MSI.
+        for name in ("cfw-windows-credentials", "cfw-windows-engine", "cfw-windows-storage"):
+            self.assertIn(name, PRODUCT_PACKAGES)
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                repository = Path(temporary)
+                self.make_repository(repository)
+                manifest = repository / f"crates/{name}/Cargo.toml"
+                manifest.write_text(manifest.read_text().replace(EXPECTED_VERSION, "0.4.0"))
+                with self.assertRaisesRegex(ValueError, name):
+                    verify(repository)
+
     def test_lockfile_version_and_local_origin_are_checked(self) -> None:
         mutations = (
             (lambda text: text.replace(f'version = "{EXPECTED_VERSION}"', 'version = "0.4.0"', 1),

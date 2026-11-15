@@ -1,7 +1,7 @@
 import { t, formatDate } from "./i18n.js";
 import { escapeHtml } from "./text-format.js";
 import { probeWebRtc } from "./connection-webrtc.js";
-import { diagnosticFailure, httpVerdict, udpComparison } from "./connection-diagnostics-model.js";
+import { diagnosticFailure, httpVerdict, stunRefused, udpComparison, udpProtectionNote } from "./connection-diagnostics-model.js";
 
 export function createConnectionDiagnostics({ state, runtime, invoke, renderPage, webRtc = probeWebRtc, requestId = () => crypto.randomUUID() }) {
   const model = { active: null, hidden: true, report: null, dns: null, udp: null, information: null, error: null, binding: null };
@@ -32,7 +32,11 @@ export function createConnectionDiagnostics({ state, runtime, invoke, renderPage
     renderPage();
     try {
       let value;
-      if (kind === "udp") value = await webRtc({ signal: abort.signal });
+      if (kind === "udp") {
+        // The result is read against the protection in force while it ran.
+        const refused = stunRefused({ protection: state.toggles?.webrtcLeakProtection, tunnelActive: state.engine?.tunnelActive, mode: state.mode });
+        value = { ...await webRtc({ signal: abort.signal }), refused };
+      }
       else if (kind === "connectivity") value = await invoke("connection_diagnostics", { requestId: id });
       else if (kind === "dns") value = await invoke("connection_dns_check", { requestId: id });
       else if (kind === "information") value = await invoke("connection_ip_information", { requestId: id, ip: address });
@@ -98,9 +102,12 @@ export function createConnectionDiagnostics({ state, runtime, invoke, renderPage
     const value = model.udp;
     const comparison = value?.status === "observed" ? udpComparison(value.addresses, stale() ? null : model.report) : null;
     const messages = { matched: t("Observed UDP and HTTPS exits match."), different: t("Different UDP and HTTPS exits observed. Review your routing and TUN settings."), unconfirmed: t("No comparable HTTPS result; run connectivity checks first.") };
+    const note = udpProtectionNote(value);
     return `<section class="diagnostic-section"><div class="diagnostic-section-head"><h2>WebRTC / UDP</h2><button data-action="diagnostic-udp" ${model.active ? "disabled" : ""}>${html(t("Check UDP"))}</button></div>
       <p>${html(t("Uses Cloudflare STUN to observe this window's UDP path. No camera or microphone. Other browsers may behave differently."))}</p>
-      ${value ? (value.status === "observed" ? `<strong>${html(value.addresses.map(ip).join(" · "))}</strong><p class="diagnostic-${comparison === "different" ? "attention" : "neutral"}">${html(messages[comparison])}</p>` : `<p class="diagnostic-attention">${html(value.status === "unsupported" ? t("WebRTC is unavailable in this window") : diagnosticFailure(value.reason))}</p>`) : ""}</section>`;
+      ${value ? (value.status === "observed" ? `<strong>${html(value.addresses.map(ip).join(" · "))}</strong>${note === "escaped" ? `<p class="diagnostic-attention">${html(t("WebRTC leak protection is on, but this window still observed a UDP exit. STUN may have left outside TUN."))}</p>` : ""}<p class="diagnostic-${comparison === "different" ? "attention" : "neutral"}">${html(messages[comparison])}</p>`
+        : note === "expected" ? `<p class="diagnostic-neutral">${html(t("No UDP exit was observed, as expected: WebRTC leak protection refuses STUN in TUN Mode."))}</p>`
+        : `<p class="diagnostic-attention">${html(value.status === "unsupported" ? t("WebRTC is unavailable in this window") : diagnosticFailure(value.reason))}</p>`) : ""}</section>`;
   }
 
   function render() {

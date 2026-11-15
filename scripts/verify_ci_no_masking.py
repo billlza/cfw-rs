@@ -111,7 +111,7 @@ REQUIRED_RELEASE_CI_GATE_SHA256 = (
     "42ec3e8c3a07bc3903ad869197dfbd3fb4480d2217303d3e4d3fcb304933b65e"
 )
 REQUIRED_WORKFLOW_SHA256 = (
-    "ef739c29a9bd8d1c54be411ebef8c77894febf15505de951aa0b4f6ffe2aa760"
+    "2a9815410000157c0f8a75c78e73342e4dbec6546079ba0e9f545f6009aa1bf8"
 )
 
 # Constructs that swallow a failure, suppress warnings, or conditionally skip a
@@ -774,7 +774,7 @@ def _check_closed_python_binding(
     return [
         f"job {name!r} does not bind closed CI Python through {fragment!r}"
         for fragment in (
-            "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
+            "actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0",
             "id: validation-python",
             f'python-version: "{pins["PYTHON_VERSION"]}"',
             "architecture: arm64",

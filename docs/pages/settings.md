@@ -128,7 +128,145 @@ What it does not cover:
   DNS and the switch changes nothing;
 - release evidence projections, which never carry it.
 
-With Mainland China direct on, mainland names are still resolved by encrypted
-DNS in mainland China, dialled directly, as that switch describes: the two
-switches are independent. An earlier build refuses a settings file saved with
-the switch on and does not start the core; turn it off before installing one.
+## Engine › WebRTC leak protection
+
+Off by default. It is a runtime setting, saved and applied like DNS leak
+protection: through the network settings transaction, with the same rollback
+when a candidate core fails to start.
+
+A WebRTC client asks a STUN server which address its UDP packets arrive from,
+and a page reads the answer from the candidates it gathers. The page names the
+server, so the answer follows the server's route and not the page's. In Rule
+mode a page loaded through the proxy can name a server that is routed directly
+and read the real address, and a page loaded directly can name a proxied
+server and read the proxy's exit.
+
+In TUN Mode the switch adds three route rules. The first recognises STUN
+(RFC 8489) by its message format, on UDP only and with the STUN sniffer alone,
+so no TCP connection waits for it and no other protocol is inspected. The
+second refuses what the first recognised. The third refuses UDP to the seven
+ports the core never inspects (25, 110, 143, 465, 587, 993 and 995: it takes
+them for mail ports where the server speaks first), because the page names the
+server's port too and a STUN server there would go unrecognised. STUN is
+therefore given no route at all, and neither address is reported. The rules
+follow the Direct mode rule and precede the Global mode rule and the profile's
+rules: they hold in Rule and Global mode, whatever the selected route, and
+leave Direct mode alone, where every site already sees the real address.
+
+What it costs:
+
+- every app's STUN is refused, not only a browser's. WebRTC also tests each
+  peer-to-peer path with STUN, so a call, a game or a remote desktop that
+  connects two peers directly goes through its service's relay instead, which
+  can be slower, or does not connect when the service offers none;
+- TURN (RFC 8656) shares the STUN message format, so a relay allocation over
+  UDP is refused too, and a client falls back to a relay over TCP or TLS;
+- UDP to the seven mail ports is refused whatever it carries. No standard
+  service uses UDP there;
+- a page that waits for candidate gathering to finish may wait for the STUN
+  timeout first.
+
+What it does not cover:
+
+- System Proxy and Local Proxy mode: a browser sends WebRTC's UDP from the
+  network interface, never through an HTTP or SOCKS proxy, so the core does
+  not see it and the switch changes nothing. Use TUN Mode there, or the
+  browser's own setting (the Chromium policy `WebRtcIPHandlingPolicy` with
+  `disable_non_proxied_udp`, or Firefox's
+  `media.peerconnection.ice.proxy_only_if_behind_proxy`);
+- an address the browser reads from the Mac's own network interfaces rather
+  than from a server. Browsers hide these behind generated names until a page
+  has camera or microphone permission; after that the page sees them, a
+  public IPv6 address included. No route rule can change that;
+- a packet that leaves outside the tunnel's route coverage, such as one a
+  client sends from a socket bound to a physical interface, because the
+  projection does not change what the tunnel captures. Connections ›
+  Connection diagnostics › Check UDP reports an exit it observes while the
+  switch is in force;
+- STUN that is not the first datagram of its UDP session. The core inspects
+  the first datagram only. A WebRTC socket opens with STUN, so a browser is
+  always recognised; a program that sends something else first from the same
+  socket keeps its route for whatever follows;
+- split routing itself: in Rule mode a site with servers on both routes
+  still sees both exits, through WebRTC over TCP (a relay, or a TCP
+  candidate) or through any request that is routed directly. Only Global mode
+  sends everything one way;
+- release evidence projections, which never carry it;
+- an earlier build refuses a settings file saved with the switch on and does
+  not start the core; turn the switch off before installing one.
+
+## Background controls › Automatic subscription updates
+
+Off by default. The interval (every 6 or 12 hours, every day, every week) is
+stored in `cfw-subscription-settings.json`, apart from the preferences and
+from the runtime and automation settings, so an earlier build never reads it.
+A stored value this build does not know leaves updates off and disables the
+setting, which then shows the reason.
+
+While the app runs, a subscription is due one interval after its profile was
+last saved. The app looks for due subscriptions one minute after launch, every
+five minutes after that, and at once when the interval changes. Each one is
+downloaded and validated exactly as Update on the Profiles page does it, one
+after another: through the running core's local proxy port when it has one,
+and otherwise directly.
+
+What happens to a download depends on what the core runs:
+
+- the core is off, or runs another profile: the download replaces the stored
+  profile and keeps the manual node choices that still exist, as an update by
+  hand does;
+- the core runs this profile and the download is the document it already
+  runs: the profile is saved again, which only renews its saved time;
+- the core runs this profile and the download differs in its nodes, rules or
+  credentials: nothing is changed. The stored profile, the Keychain and the
+  running core stay as they are, and the profile's card on the Profiles page
+  says that new content is available. Apply update downloads it again and
+  restarts the core onto it, as Update does. Once the core is off or runs
+  another profile, the next look replaces the profile by itself.
+
+A background update never starts, stops or restarts the core and never asks
+macOS for authorization. It is not a new mode request either, so network rules
+and a running connection diagnostic go on as before. It takes its turn with
+mode and profile changes; while maintenance holds the engine, it is left for
+the next look.
+
+A failed attempt leaves its reason on the profile's card and is repeated after
+half an hour, or after one interval when that is shorter. A waiting change is
+downloaded again after one interval for as long as the core keeps running the
+profile. What the cards show is kept in memory only: after a restart the
+schedule starts again from each profile's saved time. Updating a profile by
+hand, or changing its name or address, clears its note at once; saving it in
+the editor clears it at the next look. Turning updates off clears every note
+and ends the look that is under way: a download that ends after that is
+neither saved nor noted, while a save that has already begun is completed.
+Choosing another interval ends that look in the same way, and the look that
+follows at once downloads again what is still due.
+
+A failure is noted only while the profile is still stored exactly as it was
+when its download began. Once the profile was updated by hand, edited,
+renamed, given another address or deleted meanwhile, no failure is noted, and
+a document downloaded from the previous address is not saved. A profile that
+was updated, edited, renamed, made local or deleted after a look began and
+before its own turn is skipped in that look. The next look decides about the
+profile as it is then.
+
+Limits:
+
+- nothing is updated while the app is not running;
+- the saved time of a profile is the time of its last update, not of its last
+  change, so a subscription whose content never changes is still downloaded
+  once per interval;
+- a provider that writes changing information into node names, such as the
+  remaining traffic or an expiry date, changes its document with every
+  download. A profile the core does not run is then saved anew every
+  interval, and the card of the running profile says that new content is
+  available just as often;
+- while a start of the core has failed or waits for approval, the selected
+  profile counts as the running one: a changed download waits on its card,
+  and one that equals it is reported as failed, as an update by hand is,
+  until the core is switched off or recovers;
+- credentials an update no longer references stay in the Keychain until
+  Settings › Credentials › Unused credentials removes them, as after an update
+  by hand;
+- a profile opened in the editor before a background update replaces it is
+  refused on Save, because it is no longer the stored document.

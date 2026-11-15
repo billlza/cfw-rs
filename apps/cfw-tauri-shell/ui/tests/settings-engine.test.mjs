@@ -6,6 +6,7 @@ import { replaceEngineIdentity, runEngine } from "./support/engine.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { state, runtime } from "../src/state.js";
+import { setLocale } from "../src/i18n.js";
 import { createEngineStatus } from "../src/engine-status.js";
 import { engineToggleCapability, engineToggleChangeAllowed } from "../src/engine-capability.js";
 import {
@@ -91,6 +92,10 @@ test("startup recovery is explicit, refused while busy or unavailable, and must 
   const { status } = engineStatus();
   state.engineMutationBusy = true;
   await assert.rejects(() => status.reconcileStartupServices(), /already in progress/u);
+  setLocale("zh-Hans");
+  try {
+    await assert.rejects(() => status.reconcileStartupServices(), { message: "网络模式正在切换中" });
+  } finally { setLocale("en"); }
   state.engineMutationBusy = false;
   await assert.rejects(() => status.reconcileStartupServices(), /not available in the current state/u);
   host.respond("engine_snapshot", RECOVERABLE);

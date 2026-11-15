@@ -335,6 +335,8 @@ const RUNTIME_SWITCHES = [
     reason: "traffic that no profile rule matches goes direct when it is bound for mainland China" },
   { key: "dns_leak_protection", toggle: "dnsLeakProtection", label: "DNS leak protection",
     reason: "every connection to port 853 is refused" },
+  { key: "webrtc_leak_protection", toggle: "webrtcLeakProtection", label: "WebRTC leak protection",
+    reason: "STUN is refused, so a web page cannot ask a STUN server" },
 ];
 
 for (const sw of RUNTIME_SWITCHES) {
@@ -346,7 +348,7 @@ for (const sw of RUNTIME_SWITCHES) {
     const toggle = (html) => html.match(new RegExp(`<input type="checkbox" data-toggle="${sw.toggle}"([^>]*)\\/>`, "u"))?.[1];
     try {
       let html = await renderPage("settings");
-      const order = ["allowLan", "mainlandChinaDirect", "dnsLeakProtection", "mixin"].map((key) => html.indexOf(`data-toggle="${key}"`));
+      const order = ["allowLan", "mainlandChinaDirect", "dnsLeakProtection", "webrtcLeakProtection", "mixin"].map((key) => html.indexOf(`data-toggle="${key}"`));
       assert.ok(order.every((position, index) => position >= 0 && (index === 0 || order[index - 1] < position)), `row order ${order}`);
       assert.ok(html.includes(`<b>${sw.label}</b>`));
       assert.ok(html.includes(sw.reason));

@@ -21,6 +21,16 @@ fn proxy(lines: &str) -> String {
 }
 
 #[test]
+fn a_nul_character_refuses_the_document_instead_of_importing_what_precedes_it() {
+    // Read as the end of input, the NUL would drop the second proxy without
+    // a word and import the first.
+    let document = format!(
+        "proxies:\n{SOCKS}\0  - name: Second\n    type: socks5\n    server: b.example.com\n    port: 1080\n"
+    );
+    assert_refused(&document, "subscription YAML is invalid");
+}
+
+#[test]
 fn a_document_needs_a_mapping_root_and_a_bounded_list_of_uniquely_named_mappings() {
     assert_eq!(
         clash::import_clash_document("- not\n- a mapping\n", OutboundCollector::default())

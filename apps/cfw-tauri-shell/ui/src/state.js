@@ -183,6 +183,10 @@ export const state = {
   // repository. Migration and projection may only interpret the latter as
   // "no selected profile".
   profilesUnavailableReason: null,
+  // Subscriptions refreshed in the background: the stored interval, what the
+  // last attempt left beside a profile (by profile id), why the host's state
+  // could not be read, and the profiles whose waiting change is being applied.
+  subscriptionUpdates: { interval: "off", notes: new Map(), error: null, applying: new Set() },
   legacyProfileMigrationPreview: null,
   profileInspector: null,
   /** @type {{ id: string, x: number, y: number } | null} */

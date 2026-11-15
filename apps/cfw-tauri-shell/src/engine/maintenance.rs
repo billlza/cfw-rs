@@ -10,6 +10,11 @@ pub(super) const MAX_PENDING_MODE_CHANGES: usize = 32;
 pub(crate) enum EngineModeChangeIntent {
     Set(EngineMode),
     ReapplyCurrent,
+    /// Storage work that leaves the runtime and its mode as they are. It
+    /// takes its turn like the others, so maintenance and mode changes see
+    /// it, but it is no new intent: an automatic request or a diagnostic that
+    /// observed the current intent stays current.
+    KeepRuntime,
 }
 
 pub(super) struct EngineMaintenanceGate {
@@ -99,10 +104,12 @@ impl EngineMaintenanceGate {
             if expected.is_some_and(|revision| revision != inner.intent_revision) {
                 return Err(EngineMaintenanceError::StaleIntent);
             }
-            inner.intent_revision = inner
-                .intent_revision
-                .checked_add(1)
-                .ok_or(EngineMaintenanceError::StateLock)?;
+            if intent != EngineModeChangeIntent::KeepRuntime {
+                inner.intent_revision = inner
+                    .intent_revision
+                    .checked_add(1)
+                    .ok_or(EngineMaintenanceError::StateLock)?;
+            }
             inner.active_mode_changes += 1;
             (
                 EngineModeChangeRegistration {

@@ -175,6 +175,14 @@ traffic or subscription quota. CFW keeps its display names in a separate
 name, so its CFW display name must be supplied explicitly or changed in profile
 Settings. The time shown is not the age recorded by CFW.
 
+A subscription can be updated in the background, at an interval chosen under
+Settings › Background controls › Automatic subscription updates (see
+Settings). Such an update replaces a profile only while the core does not run
+it. A change to the running profile leaves the profile, the Keychain and the
+core untouched: its card says that new content is available, and Apply update
+downloads it again and restarts the core onto it, as Update does. A failed
+attempt shows its reason on the card until the next attempt.
+
 Application-managed storage is also bounded and fail closed: each complete
 profile envelope is at most 384 KiB, the repository contains at most 4,096
 entries and 512 unique credential references, and all envelopes together

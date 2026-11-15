@@ -88,7 +88,7 @@ export function createCredentialSetup({ renderPage, renderGlassOverlays, closeGl
     return (`
         <div class="glass-dialog-backdrop" data-glass-dismiss></div>
         <div class="glass-dialog" role="dialog" aria-label="${escapeHtml(t("Profile credentials"))}">
-          <h3>Credentials${setup?.profileName ? ` · ${escapeHtml(setup.profileName)}` : ""}</h3>
+          <h3>${escapeHtml(t("Credentials"))}${setup?.profileName ? ` · ${escapeHtml(setup.profileName)}` : ""}</h3>
           ${body}
           ${setup?.missing?.length && !engineIsOff() ? `<p class="glass-dialog-copy">${escapeHtml(REASONS.engineNotOff)}</p>` : ""}
           <div class="glass-dialog-actions">

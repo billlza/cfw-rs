@@ -330,7 +330,11 @@ RETIRED_GA_ALLOCATIONS_V051: Final = (
     ("51003", "ga", "retired_product_change_notarization_outcome_unknown"),
     ("51004", "ga", "retired_product_change_after_ga_runtime_acceptance_before_publication"),
 )
-PUBLISHED_GA_V051: Final = ("51005", "ga", "published")
+# 0.5.1 published two GA builds: 51005, and 51006 as a maintenance build of
+# the same product version. The history up to the first one is the fixed
+# prefix of the closed ledger.
+FIRST_PUBLISHED_GA_V051: Final = ("51005", "ga", "published")
+PUBLISHED_GA_V051: Final = ("51006", "ga", "published")
 
 
 @dataclass(frozen=True)
@@ -339,8 +343,10 @@ class LedgerPolicy:
 
     Every ledger starts at `first_build` and is gap-free from there. A closed
     product version has no active GA: its whole history, including every
-    retired GA allocation and the GA it published, is fixed here and the
-    ledger may only be read. The active product version fixes only the
+    retired GA allocation and every GA it published, is fixed here and the
+    ledger may only be read. `published` is the last GA a version published;
+    a version that published more than one keeps its history up to the
+    earlier ones in `immutable_prefix`. The active product version fixes only the
     history before its GA allocations; the release identity file names its
     one active GA, and each retired GA allocation is bound by its retirement
     note instead.
@@ -383,10 +389,21 @@ POLICIES: Final = {
         product_version="0.5.1",
         relative_path=Path("docs/release/build-allocations-v051.json"),
         first_build=51001,
+        immutable_prefix=(*RETIRED_GA_ALLOCATIONS_V051, FIRST_PUBLISHED_GA_V051),
+        superseded=None,
+        retired_ga=(),
+        published=PUBLISHED_GA_V051,
+        closed=True,
+    ),
+    # Opened after 0.5.1 was published, at its first GA allocation.
+    "0.5.2": LedgerPolicy(
+        product_version="0.5.2",
+        relative_path=Path("docs/release/build-allocations-v052.json"),
+        first_build=52001,
         immutable_prefix=(),
         superseded=None,
-        retired_ga=RETIRED_GA_ALLOCATIONS_V051,
-        published=PUBLISHED_GA_V051,
+        retired_ga=(),
+        published=None,
         closed=False,
     ),
 }

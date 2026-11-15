@@ -158,9 +158,9 @@ public struct ReleaseObservationJournalDecision: Codable, Equatable, Sendable {
 }
 
 public struct ReleaseObservationCandidate: Codable, Equatable, Sendable {
-  static let releaseProductVersion = "0.5.1"
+  static let releaseProductVersion = "0.5.2"
   /// Product versions whose observations stay admitted after their release.
-  static let historicalProductVersions: Set<String> = ["0.4.0", "0.5.0"]
+  static let historicalProductVersions: Set<String> = ["0.4.0", "0.5.0", "0.5.1"]
 
   public let version: String
   public let buildNumber: String

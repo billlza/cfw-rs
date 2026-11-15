@@ -97,7 +97,9 @@ async fn initialize(app: AppHandle) -> Result<(), String> {
             app.state::<Diagnostics>()
                 .startup_step("tray", || crate::shell::build_tray(&app))
                 .map_err(|error| error.to_string())?;
-            crate::commands::start_provider_refresh(app.clone())
+            crate::commands::start_provider_refresh(app.clone())?;
+            crate::commands::start_subscription_updates(app.clone());
+            Ok(())
         })
         .await?;
         // Optional startup controls may complete after the dashboard is ready.

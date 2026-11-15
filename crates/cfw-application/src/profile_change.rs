@@ -19,6 +19,19 @@ pub struct ProfileChange<T> {
     pub commit: Box<dyn FnOnce() -> Result<T, String> + Send>,
 }
 
+/// What a profile change does when the engine is running and the candidate is
+/// not what it runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunningEngine {
+    /// Check the candidate, start it in place of what is running, and restore
+    /// the previous runtime if that fails.
+    Replace,
+    /// Decline the change with [`Error::RunningEngineKept`]: nothing is
+    /// checked, stopped, started or committed. A change that needs no
+    /// replacement is committed as usual.
+    Keep,
+}
+
 pub(crate) type Preparation =
     Pin<Box<dyn Future<Output = Result<ProfileChange<()>, Error>> + Send>>;
 
@@ -26,6 +39,7 @@ pub(crate) async fn apply(
     context: TransitionContext<'_>,
     state: &mut CoordinatorState,
     settings: EngineSettings,
+    running: RunningEngine,
     prepare: Preparation,
 ) -> Result<EngineSnapshot, Error> {
     // The whole operation runs inside the coordinator actor, so observation
@@ -72,6 +86,9 @@ pub(crate) async fn apply(
             &state.snapshot,
         ));
         return Ok(state.snapshot.clone());
+    }
+    if running == RunningEngine::Keep {
+        return Err(Error::RunningEngineKept);
     }
     let projected_mode = match mode {
         EngineMode::LocalProxy => ProjectionMode::LocalProxy,

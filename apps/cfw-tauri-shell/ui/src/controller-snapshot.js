@@ -1,5 +1,6 @@
 // Projects controller snapshots into dashboard state, and clears that state
 // when the controller cannot be trusted.
+import { t } from "./i18n.js";
 import { state } from "./state.js";
 import { formatBytes } from "./text-format.js";
 import { latestDelay } from "./proxy-delay.js";
@@ -79,7 +80,7 @@ export function applyConnectionsSnapshot(snapshot) {
   const connections = snapshot.connections ?? [];
   state.connections = connections.map((connection) => {
     const metadata = connection.metadata ?? {};
-    const host = metadata.host || metadata.destinationIP || metadata.destination_ip || "unknown";
+    const host = metadata.host || metadata.destinationIP || metadata.destination_ip || t("unknown");
     const rulePayload = connection.rulePayload ?? connection.rule_payload;
     const rule = [connection.rule, rulePayload].filter(Boolean).join(",");
     const previous = previousRows.get(connection.id);
@@ -98,7 +99,7 @@ export function applyConnectionsSnapshot(snapshot) {
       downloadBytes,
       uploadSpeedBytes: uploadSpeed,
       downloadSpeedBytes: downloadSpeed,
-      speed: `${formatBytes(uploadSpeed)}/s up · ${formatBytes(downloadSpeed)}/s down`,
+      speed: t("{upload}/s up · {download}/s down", { upload: formatBytes(uploadSpeed), download: formatBytes(downloadSpeed) }),
       age: connection.start ? connection.start.slice(11, 19) : "live",
       start: connection.start,
       metadata,

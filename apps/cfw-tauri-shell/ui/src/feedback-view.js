@@ -22,7 +22,7 @@ export function renderFeedback() {
         <div>
           <p class="label">${escapeHtml(t("About"))}</p>
           <h3>${escapeHtml(product.name)} v${escapeHtml(String(version))}${update?.available && update?.version ? ` → v${escapeHtml(String(update.version))}` : ""}</h3>
-          <p class="muted">${escapeHtml(product.license)} · ${escapeHtml(product.architecture)} · ${presentation.name}${product.minimum_os_version === null ? "" : ` ${escapeHtml(product.minimum_os_version)} or later`}</p>
+          <p class="muted">${escapeHtml(product.license)} · ${escapeHtml(product.architecture)} · ${presentation.name}${product.minimum_os_version === null ? "" : ` ${escapeHtml(t("{version} or later", { version: product.minimum_os_version }))}`}</p>
         </div>
         <span class="badge">${escapeHtml(product.operating_system === "macos" ? t("ARM64 macOS only") : `${presentation.name} ${product.architecture}`)}</span>
       </section>
@@ -42,8 +42,8 @@ export function renderFeedback() {
         ${platform ? `
           <dl class="ports-list feedback-list">
             <div><dt>${escapeHtml(t("system proxy"))}</dt><dd>${escapeHtml(t(platform.system_proxy_strategy ?? ""))}</dd></div>
-            <div><dt>tunnel</dt><dd>${escapeHtml(t(platform.tun_strategy ?? ""))}</dd></div>
-            <div><dt>helper</dt><dd>${escapeHtml(t(platform.helper_strategy ?? ""))}</dd></div>
+            <div><dt>${escapeHtml(t("tunnel"))}</dt><dd>${escapeHtml(t(platform.tun_strategy ?? ""))}</dd></div>
+            <div><dt>${escapeHtml(t("helper"))}</dt><dd>${escapeHtml(t(platform.helper_strategy ?? ""))}</dd></div>
             <div><dt>${escapeHtml(t(startupDesign.label))}</dt><dd>${escapeHtml(t(startupDesign.value))}</dd></div>
           </dl>
         ` : `<p class="muted">${escapeHtml(t("Platform design is unavailable."))}</p>`}
@@ -53,8 +53,8 @@ export function renderFeedback() {
         <p class="label">${escapeHtml(t("Dashboard"))}</p>
         <h3>${escapeHtml(t("Layout reference"))}</h3>
         <dl class="ports-list feedback-list">
-          <div><dt>window</dt><dd>${escapeHtml(t("850 x 603 minimum baseline"))}</dd></div>
-          <div><dt>pages</dt><dd>${escapeHtml(PAGES.map((page) => page.id).join(" / "))}</dd></div>
+          <div><dt>${escapeHtml(t("window"))}</dt><dd>${escapeHtml(t("850 x 603 minimum baseline"))}</dd></div>
+          <div><dt>${escapeHtml(t("pages"))}</dt><dd>${escapeHtml(PAGES.map((page) => page.id).join(" / "))}</dd></div>
         </dl>
       </section>
     </div>

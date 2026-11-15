@@ -3,6 +3,7 @@ import { replaceEngineIdentity, runEngine, stopEngine, streamBinding } from "./s
 import assert from "node:assert/strict";
 import { beforeEach, test } from "node:test";
 import { state, runtime } from "../src/state.js";
+import { setLocale } from "../src/i18n.js";
 import { createConnectionActions } from "../src/connection-actions.js";
 import { createLogActions } from "../src/log-actions.js";
 import { createRuleActions } from "../src/rule-actions.js";
@@ -184,6 +185,40 @@ test("the request log stream follows the same engine and refusal rules", async (
   const before = renderPage.count();
   await actions["toggle-log-stream"]();
   assert.equal(renderPage.count(), before, "a start overtaken by the engine renders nothing");
+});
+
+test("stream changes and an empty log copy are reported in the display language", async () => {
+  const sentences = {
+    "zh-Hans": ["连接数据流已启动", "连接数据流已停止", "请求日志已启动", "请求日志已停止", "（无日志）"],
+    "zh-Hant": ["連線資料串流已啟動", "連線資料串流已停止", "請求日誌已啟動", "請求日誌已停止", "（無日誌）"],
+    ja: ["接続ストリームを開始しました", "接続ストリームを停止しました", "リクエストログを開始しました", "リクエストログを停止しました", "（ログなし）"],
+  };
+  const connections = connectionActions().actions;
+  const logs = createLogActions({ renderPage: spy(), patchLogStream: spy() }).actions;
+  runEngine();
+  state.connectionPaused = true;
+  state.logsPaused = true;
+  try {
+    for (const [locale, [streamStarted, streamStopped, logsStarted, logsStopped, noLogs]] of Object.entries(sentences)) {
+      setLocale(locale);
+      host.respond("start_connections_stream", streamBinding("connections"));
+      await connections["toggle-connection-stream"]();
+      assert.equal(lastLog().message, streamStarted, locale);
+      host.respond("stop_connections_stream", null);
+      await connections["toggle-connection-stream"]();
+      assert.equal(lastLog().message, streamStopped, locale);
+      host.respond("start_log_stream", streamBinding("request-logs"));
+      await logs["toggle-log-stream"]();
+      assert.equal(lastLog().message, logsStarted, locale);
+      host.respond("stop_log_stream", null);
+      await logs["toggle-log-stream"]();
+      assert.equal(lastLog().message, logsStopped, locale);
+      state.logs = [];
+      clipboard.written.length = 0;
+      await logs["copy-logs"]();
+      assert.deepEqual(clipboard.written, [noLogs], locale);
+    }
+  } finally { setLocale("en"); }
 });
 
 test("logs are cleared, copied in order and their folder opened per platform", async () => {

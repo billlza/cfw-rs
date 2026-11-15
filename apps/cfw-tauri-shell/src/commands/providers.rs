@@ -48,7 +48,8 @@ struct ResourceStatus {
     health: Option<String>,
 }
 
-fn now() -> Result<u64, String> {
+/// Seconds since the Unix epoch, as the profile repository records them.
+pub(in crate::commands) fn now() -> Result<u64, String> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|value| value.as_secs())

@@ -69,7 +69,7 @@ export function createEngineStatus({ renderPage, updateStatusBar, cancelDelayTes
   }
 
   async function reconcileStartupServices() {
-    if (state.engineMutationBusy) throw new Error("A network mode change is already in progress");
+    if (state.engineMutationBusy) throw new Error(t("A network mode change is already in progress"));
     if (state.migrationHandoff || !state.engine.startupRecoveryAvailable) {
       throw new Error(t("Background service recovery is not available in the current state."));
     }

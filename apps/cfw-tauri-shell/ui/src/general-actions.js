@@ -46,7 +46,7 @@ export function createGeneralActions({ renderPage, renderGlassOverlays, automati
     "copy-proxy-exports": async () => {
       const port = state.projection.mixedPort;
       if (!port) {
-        appendLog("warning", "shell", t("The projected inbound port is unavailable: {value1}", { value1: state.projection.error ?? "no active profile is selected" }));
+        appendLog("warning", "shell", t("The projected inbound port is unavailable: {value1}", { value1: state.projection.error ?? t("no active profile is selected") }));
         renderPage();
         return;
       }

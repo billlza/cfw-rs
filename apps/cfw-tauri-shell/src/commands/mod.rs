@@ -49,9 +49,10 @@ pub(crate) use shell_ops::{
     refresh_tray_menu, reveal_home_directory, reveal_logs_directory, toggle_devtools,
 };
 pub(crate) use subscriptions::{
-    import_profile_file, import_profile_text, import_profile_url, open_profile_externally,
-    profile_qrcode_svg, read_profile_text, reveal_profile, save_profile_text, update_profile,
-    update_profile_info,
+    SubscriptionUpdates, import_profile_file, import_profile_text, import_profile_url,
+    open_profile_externally, profile_qrcode_svg, read_profile_text, reveal_profile,
+    save_profile_text, set_subscription_update_interval, start_subscription_updates,
+    subscription_updates, update_profile, update_profile_info,
 };
 pub(crate) use toggles::{
     apply_restore_dns_servers, current_platform_design, reconcile_startup_services,

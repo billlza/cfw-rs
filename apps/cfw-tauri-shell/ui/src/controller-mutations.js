@@ -68,8 +68,8 @@ export function createControllerMutations({ renderPage }) {
 
         if (mutationError) {
           const readback = controllerReadable
-            ? t("controller readback reports {value1}", { value1: observed ?? "unavailable" })
-            : "controller readback was unavailable";
+            ? t("controller readback reports {value1}", { value1: observed ?? t("unavailable") })
+            : t("controller readback was unavailable");
           appendLog("error", entry.source, `${entry.failureLabel}: ${errorText(mutationError)}; ${readback}`);
           finishControllerMutationEntry(entry, false);
           continue;
@@ -80,7 +80,7 @@ export function createControllerMutations({ renderPage }) {
           continue;
         }
         if (!confirmed) {
-          appendLog("error", entry.source, t("{failureLabel}: controller readback reported {value2}", { failureLabel: entry.failureLabel, value2: observed ?? "unavailable" }));
+          appendLog("error", entry.source, t("{failureLabel}: controller readback reported {value2}", { failureLabel: entry.failureLabel, value2: observed ?? t("unavailable") }));
           finishControllerMutationEntry(entry, false);
           continue;
         }

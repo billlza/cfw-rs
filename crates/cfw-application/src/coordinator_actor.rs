@@ -57,6 +57,7 @@ pub(crate) struct PrepareCutoverCommand {
 
 pub(crate) struct ChangeProfileCommand {
     pub(crate) settings: EngineSettings,
+    pub(crate) running: crate::RunningEngine,
     pub(crate) prepare: crate::profile_change::Preparation,
     pub(crate) response: oneshot::Sender<Result<EngineSnapshot, EngineCoordinatorError>>,
 }
@@ -311,7 +312,7 @@ pub(crate) async fn run_coordinator(
                         let _response_dropped = response.send(result);
                     }
                     Command::ChangeProfile(command) => {
-                        let ChangeProfileCommand { settings, prepare, response } = *command;
+                        let ChangeProfileCommand { settings, running, prepare, response } = *command;
                         let context = crate::runtime::TransitionContext {
                             backend: backend.as_ref(),
                             snapshots: &snapshots,
@@ -321,7 +322,7 @@ pub(crate) async fn run_coordinator(
                             authorization_timeout: options.authorization_timeout,
                             status_query_timeout: options.status_query_timeout,
                         };
-                        let result = crate::profile_change::apply(context, &mut state, settings, prepare).await;
+                        let result = crate::profile_change::apply(context, &mut state, settings, running, prepare).await;
                         let _response_dropped = response.send(result);
                     }
                     Command::PrepareCutover(command) => {

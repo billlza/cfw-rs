@@ -130,7 +130,7 @@ export function createProfileData({ cancelDelayTest, loadProvidersSnapshot, prov
         name: profile.name,
         updated: profile.updated_epoch_secs
           ? formatRelativeUpdated(profile.updated_epoch_secs)
-          : "unknown",
+          : t("unknown"),
         updatedEpochSecs: profile.updated_epoch_secs ?? null,
         sourceKind: profile.source_kind,
         active: Boolean(profile.active),
@@ -145,7 +145,7 @@ export function createProfileData({ cancelDelayTest, loadProvidersSnapshot, prov
         name: profile.name,
         updated: profile.updated_epoch_secs
           ? formatRelativeUpdated(profile.updated_epoch_secs)
-          : "unknown",
+          : t("unknown"),
         sourceKind: profile.source_kind,
         selected: profile.selected,
         error: profile.error,

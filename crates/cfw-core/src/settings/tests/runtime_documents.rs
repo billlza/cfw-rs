@@ -1,6 +1,6 @@
 //! The documents beside the preferences: the runtime settings and their
-//! compare-and-swap, the automation settings kept apart from them, and the
-//! legacy retirement marker's exact bytes.
+//! compare-and-swap, the automation and subscription settings kept apart from
+//! them, and the legacy retirement marker's exact bytes.
 
 use super::*;
 
@@ -117,6 +117,55 @@ fn automation_settings_live_apart_from_runtime_settings() {
             .revision
             .is_none()
     );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn subscription_settings_live_apart_from_runtime_and_automation_settings() {
+    let (root, store) = test_store("subscription");
+    let empty = store
+        .subscription_settings::<std::collections::BTreeMap<String, u16>>()
+        .unwrap();
+    assert!(empty.settings.is_empty());
+    assert!(empty.revision.is_none());
+    let interval = std::collections::BTreeMap::from([("hours".to_owned(), 6)]);
+    store
+        .compare_and_swap_subscription_settings(None, &interval)
+        .unwrap();
+    let stored = store
+        .subscription_settings::<std::collections::BTreeMap<String, u16>>()
+        .unwrap();
+    assert_eq!(stored.settings, interval);
+    assert!(stored.revision.is_some());
+    assert!(matches!(
+        store.compare_and_swap_subscription_settings(None, &interval),
+        Err(SettingsStoreError::RuntimeSettingsChanged)
+    ));
+    let longer = std::collections::BTreeMap::from([("hours".to_owned(), 12)]);
+    store
+        .compare_and_swap_subscription_settings(stored.revision.as_deref(), &longer)
+        .unwrap();
+    assert_eq!(
+        store
+            .subscription_settings::<std::collections::BTreeMap<String, u16>>()
+            .unwrap()
+            .settings,
+        longer
+    );
+    for untouched in [
+        store
+            .runtime_settings::<std::collections::BTreeMap<String, u16>>()
+            .unwrap(),
+        store
+            .automation_settings::<std::collections::BTreeMap<String, u16>>()
+            .unwrap(),
+    ] {
+        assert!(untouched.revision.is_none());
+    }
+    let home = &store.paths().app_home;
+    assert!(home.join("cfw-subscription-settings.json").is_file());
+    assert!(!home.join("cfw-runtime-settings.json").exists());
+    assert!(!home.join("cfw-automation-settings.json").exists());
     fs::remove_dir_all(root).unwrap();
 }
 

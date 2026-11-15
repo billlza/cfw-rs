@@ -6,7 +6,12 @@ mod mode_switch;
 mod preparation;
 mod runtime_access;
 mod runtime_settings;
-pub(crate) use mode_switch::{apply_admitted_engine_mode, apply_profile_change};
+#[cfg(test)]
+pub(crate) use mode_switch::apply_profile_change_admitted_by;
+pub(crate) use mode_switch::{
+    KeptEngineChangeError, apply_admitted_engine_mode, apply_profile_change,
+    apply_profile_change_keeping_engine,
+};
 pub(crate) use preparation::{
     EngineCapabilities, EngineShutdownOutcome, EngineStatusPayload, StagedEndpointRebind,
     prepare_managed_engine,
@@ -27,7 +32,7 @@ pub(crate) const ENDPOINT_CONFLICT_RETRY_DELAY: std::time::Duration =
     std::time::Duration::from_millis(500);
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use std::sync::{Arc, RwLock};
 #[cfg(target_os = "macos")]
@@ -254,6 +259,19 @@ impl ManagedEngine {
         let lease = self
             .maintenance
             .begin_mode_change(EngineModeChangeIntent::ReapplyCurrent)
+            .await?;
+        Ok((self.coordinator.snapshot().desired_mode, lease))
+    }
+
+    /// Queues storage work that leaves the runtime as it is, and reads the
+    /// desired mode once its turn has come. Unlike
+    /// [`Self::begin_current_mode_change`] this is no new mode intent.
+    pub(crate) async fn begin_runtime_preserving_change(
+        &self,
+    ) -> Result<(EngineMode, EngineModeChangeLease), EngineMaintenanceError> {
+        let lease = self
+            .maintenance
+            .begin_mode_change(EngineModeChangeIntent::KeepRuntime)
             .await?;
         Ok((self.coordinator.snapshot().desired_mode, lease))
     }

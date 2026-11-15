@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createConnectionDiagnostics } from "../src/connection-diagnostics.js";
-import { httpVerdict, normalizedIp, udpComparison } from "../src/connection-diagnostics-model.js";
+import { httpVerdict, normalizedIp, stunRefused, udpComparison, udpProtectionNote } from "../src/connection-diagnostics-model.js";
 import { probeWebRtc } from "../src/connection-webrtc.js";
 
 const report = () => ({ observed_at_ms: 1793836800000, route: { kind: "engine_proxy", port: 7890 },
@@ -193,4 +193,67 @@ test("successful WebRTC reports only server-reflexive UDP candidates and closes 
   peer.onicecandidate({ candidate: null });
   assert.deepEqual(await running, { status: "observed", addresses: ["198.51.100.1"] });
   assert.equal(peer.closed, true);
+});
+
+test("STUN counts as refused only with the switch on, an active tunnel and a covered routing mode", () => {
+  const on = { protection: true, tunnelActive: true, mode: "Rule" };
+  assert.equal(stunRefused(on), true);
+  assert.equal(stunRefused({ ...on, mode: "Global" }), true);
+  for (const change of [{ protection: false }, { protection: undefined }, { protection: "true" }, { tunnelActive: false },
+    { tunnelActive: undefined }, { mode: "Direct" }, { mode: null }, { mode: "rule" }]) {
+    assert.equal(stunRefused({ ...on, ...change }), false, JSON.stringify(change));
+  }
+  assert.equal(udpProtectionNote(null), null);
+  assert.equal(udpProtectionNote({ status: "failed", reason: "timeout", refused: false }), null);
+  assert.equal(udpProtectionNote({ status: "failed", reason: "timeout" }), null);
+  assert.equal(udpProtectionNote({ status: "failed", reason: "timeout", refused: true }), "expected");
+  assert.equal(udpProtectionNote({ status: "failed", reason: "no_udp_candidate", refused: true }), "expected");
+  assert.equal(udpProtectionNote({ status: "failed", reason: "webrtc_failed", refused: true }), null);
+  assert.equal(udpProtectionNote({ status: "unsupported", refused: true }), null);
+  assert.equal(udpProtectionNote({ status: "observed", addresses: ["198.51.100.1"], refused: true }), "escaped");
+});
+
+const protectedSetup = (webRtc) => {
+  const made = setup(async () => report(), webRtc);
+  made.state.engine = { ...made.state.engine, tunnelActive: true };
+  made.state.toggles = { webrtcLeakProtection: true };
+  return made;
+};
+
+test("a UDP check that finds no exit under WebRTC leak protection reports the expected refusal", async () => {
+  for (const reason of ["timeout", "no_udp_candidate"]) {
+    const { view } = protectedSetup(async () => ({ status: "failed", reason, addresses: [] }));
+    await view.actions["diagnostic-udp"]();
+    const html = view.render();
+    assert.match(html, /<p class="diagnostic-neutral">No UDP exit was observed, as expected: WebRTC leak protection refuses STUN in TUN Mode\.<\/p>/u, reason);
+    assert.doesNotMatch(html, /Timed out|does not prove protection/u, reason);
+  }
+  // Without the protection the same result stays an unexplained failure.
+  for (const change of [{ toggles: { webrtcLeakProtection: false } }, { mode: "Direct" }, { engine: { active: true, generation: 1, tunnelActive: false } }]) {
+    const { state, view } = protectedSetup(async () => ({ status: "failed", reason: "timeout", addresses: [] }));
+    Object.assign(state, change);
+    await view.actions["diagnostic-udp"]();
+    const html = view.render();
+    assert.match(html, /<p class="diagnostic-attention">Timed out<\/p>/u, JSON.stringify(change));
+    assert.doesNotMatch(html, /as expected/u, JSON.stringify(change));
+  }
+  // Another failure is never explained by the protection.
+  const { view } = protectedSetup(async () => ({ status: "failed", reason: "webrtc_failed", addresses: [] }));
+  await view.actions["diagnostic-udp"]();
+  assert.match(view.render(), /WebRTC could not complete the probe/u);
+  assert.doesNotMatch(view.render(), /as expected/u);
+});
+
+test("a UDP exit observed under WebRTC leak protection is reported as a packet outside the tunnel", async () => {
+  const { state, view } = protectedSetup(async () => ({ status: "observed", addresses: ["198.51.100.1"] }));
+  await view.actions["diagnostic-udp"]();
+  const html = view.render();
+  assert.match(html, /<p class="diagnostic-attention">WebRTC leak protection is on, but this window still observed a UDP exit\. STUN may have left outside TUN\.<\/p>/u);
+  // The note belongs to the measurement: a later change of state does not rewrite it.
+  state.toggles.webrtcLeakProtection = false;
+  assert.match(view.render(), /still observed a UDP exit/u);
+  // Without the protection an observed exit carries no such note.
+  const plain = setup(async () => report(), async () => ({ status: "observed", addresses: ["198.51.100.1"] }));
+  await plain.view.actions["diagnostic-udp"]();
+  assert.doesNotMatch(plain.view.render(), /still observed a UDP exit/u);
 });

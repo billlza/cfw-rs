@@ -1,3 +1,4 @@
+import { t } from "./i18n.js";
 import { platformPresentation } from "./platform-presentation.js";
 
 const CUTOVER_TARGETS = new Set(["system_proxy", "tunnel"]);
@@ -403,10 +404,10 @@ export function cutoverReceiptIsCurrent(cutover, nowMillis = Date.now()) {
 
 export function cutoverConfirmArguments(cutover, nowMillis = Date.now()) {
   if (!cutoverReceiptIsCurrent(cutover, nowMillis)) {
-    throw new TypeError("Cutover receipt is missing or expired; run Prepare again.");
+    throw new TypeError(t("Cutover receipt is missing or expired; run Prepare again."));
   }
   if (cutover.confirmedReceiptId !== cutover.receiptId) {
-    throw new TypeError("Tick the one-way cutover confirmation for this preparation.");
+    throw new TypeError(t("Tick the one-way cutover confirmation for this preparation."));
   }
   return {
     receiptId: cutover.receiptId,

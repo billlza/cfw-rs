@@ -155,14 +155,14 @@ export function launchAtLoginPresentation() {
   }
   if (value.liveStatus === "requires_approval") {
     return {
-      hint: "macOS requires approval in System Settings › General › Login Items. Approve it there, or switch Off to cancel registration.",
+      hint: t("macOS requires approval in System Settings › General › Login Items. Approve it there, or switch Off to cancel registration."),
       reason: null,
     };
   }
   if (!value.matchesPersistedIntent) {
     if (value.liveStatus === "enabled") {
       return {
-        hint: "macOS currently enables this Login Item, while the saved preference says Off. Switching Off reconciles both states.",
+        hint: t("macOS currently enables this Login Item, while the saved preference says Off. Switching Off reconciles both states."),
         reason: null,
       };
     }

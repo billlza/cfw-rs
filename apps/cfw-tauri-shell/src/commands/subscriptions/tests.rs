@@ -27,7 +27,7 @@ const TRANSACTION_SOURCE_URL: &str = "https://subscription.example/current";
 const IMPORT_SECRET: &str = "subscription-secret-must-not-leak";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ProvisionRequestSnapshot {
+pub(super) struct ProvisionRequestSnapshot {
     profile_id: String,
     profile_digest: String,
     required_references: Vec<CredentialRef>,
@@ -63,7 +63,7 @@ fn provision_request_snapshot(
 }
 
 #[derive(Debug)]
-struct ScriptedCredentialVault {
+pub(super) struct ScriptedCredentialVault {
     profiles_dir: PathBuf,
     responses: Mutex<VecDeque<Result<CredentialVaultReceipt, CredentialVaultError>>>,
     requests: Mutex<Vec<ProvisionRequestSnapshot>>,
@@ -73,7 +73,7 @@ struct ScriptedCredentialVault {
 }
 
 impl ScriptedCredentialVault {
-    fn new(
+    pub(super) fn new(
         profiles_dir: PathBuf,
         responses: Vec<Result<CredentialVaultReceipt, CredentialVaultError>>,
     ) -> Self {
@@ -111,7 +111,7 @@ impl ScriptedCredentialVault {
         )
     }
 
-    fn requests(&self) -> Vec<ProvisionRequestSnapshot> {
+    pub(super) fn requests(&self) -> Vec<ProvisionRequestSnapshot> {
         self.requests.lock().expect("request lock").clone()
     }
 
@@ -307,6 +307,7 @@ fn selected_direct_profile(repository: &ProfileRepository) -> StoredProfile {
 }
 
 mod import_audience;
+mod kept_engine_updates;
 mod local_sources;
 mod profile_documents;
 mod subscription_updates;

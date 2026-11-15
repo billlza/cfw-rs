@@ -77,7 +77,7 @@ export function createProxyActions({
     "reload-proxies": async () => {
       if (!controllerActionAllowed(t("Reloading proxies"), "proxy")) return;
       const live = await loadControllerSnapshot();
-      appendLog(live ? "info" : "error", "proxy", live ? "Controller snapshot reloaded" : t("Controller unavailable; keeping local data"));
+      appendLog(live ? "info" : "error", "proxy", t(live ? "Controller snapshot reloaded" : "Controller unavailable; keeping local data"));
       renderPage();
     },
   };

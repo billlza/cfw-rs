@@ -3,6 +3,7 @@ import { replaceEngineIdentity, runEngine, stopEngine, streamBinding } from "./s
 import assert from "node:assert/strict";
 import { beforeEach, test } from "node:test";
 import { state, runtime } from "../src/state.js";
+import { setLocale } from "../src/i18n.js";
 import {
   closeConnectionsAfterProxyChange,
   loadControllerSnapshot,
@@ -325,6 +326,27 @@ test("a mutation the controller did not apply, could not confirm or refused is r
   host.respond("controller_snapshot", null);
   assert.equal(await enqueueControllerMutation(mutation({ invokeMutation: () => Promise.reject(new Error("bad mode")) })), false);
   assert.equal(lastLog().message, "Proxy mode Global was not applied: bad mode; controller readback was unavailable");
+  setLocale("zh-Hans");
+  try {
+    assert.equal(await enqueueControllerMutation(mutation({ invokeMutation: () => Promise.reject(new Error("bad mode")) })), false);
+    assert.equal(lastLog().message, "Proxy mode Global was not applied: bad mode; 控制接口回读不可用", "the readback is described in the display language");
+  } finally { setLocale("en"); }
+
+  // A snapshot that can be read but holds no value for the mutation.
+  const unobserved = (overrides = {}) => mutation({ readObserved: () => null, publishObserved: () => {}, ...overrides });
+  const refused = { invokeMutation: () => Promise.reject(new Error("bad mode")) };
+  host.respond("controller_snapshot", snapshot({ mode: "rule" }));
+  assert.equal(await enqueueControllerMutation(unobserved()), false);
+  assert.equal(lastLog().message, "Proxy mode Global was not applied: controller readback reported unavailable");
+  assert.equal(await enqueueControllerMutation(unobserved(refused)), false);
+  assert.equal(lastLog().message, "Proxy mode Global was not applied: bad mode; controller readback reports unavailable");
+  setLocale("zh-Hans");
+  try {
+    assert.equal(await enqueueControllerMutation(unobserved()), false);
+    assert.equal(lastLog().message, "Proxy mode Global was not applied：控制接口回读结果为 不可用");
+    assert.equal(await enqueueControllerMutation(unobserved(refused)), false);
+    assert.equal(lastLog().message, "Proxy mode Global was not applied: bad mode; 控制接口回读结果为 不可用");
+  } finally { setLocale("en"); }
 });
 
 test("a confirmed mutation closes existing connections when that preference is on", async () => {

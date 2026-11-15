@@ -8,7 +8,7 @@ struct ReleaseObservationTests {
   @Test("release observation admits the current or a historical version with any canonical build")
   func releaseObservationVersions() throws {
     let version = ReleaseObservationCandidate.releaseProductVersion
-    for admitted in [version, "0.4.0", "0.5.0"] {
+    for admitted in [version, "0.4.0", "0.5.0", "0.5.1"] {
       for build in ["1", "70001", "999999999999999999"] {
         let candidate = try ReleaseObservationCandidate(version: admitted, buildNumber: build)
         #expect(candidate.version == admitted)
@@ -16,7 +16,7 @@ struct ReleaseObservationTests {
       }
     }
     for (version, build) in [
-      ("0.5.2", "70001"), ("0.4.1", "70001"), ("0.5.0-preview", "70001"), ("", "70001"),
+      ("0.5.3", "70001"), ("0.4.1", "70001"), ("0.5.0-preview", "70001"), ("", "70001"),
       (version, ""), (version, "070001"), (version, "0"), (version, "+70001"),
       (version, "70001 "), (version, "1000000000000000000"), (version, "７０００１"),
       (version, "7٠٠٠1"),

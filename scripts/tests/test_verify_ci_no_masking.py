@@ -49,7 +49,7 @@ jobs:
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-""" + REQUIRED_SOURCE_ASSERTION_STEP + "\n" + """      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+""" + REQUIRED_SOURCE_ASSERTION_STEP + "\n" + """      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         id: validation-python
         with:
           python-version: "3.14.7"
@@ -1393,7 +1393,7 @@ HOSTED_JOB_WORKFLOW = (
     + "    steps:\n"
     + CHECKOUT_STEP
     + SOURCE_ASSERTION_STEP
-    + "      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97\n"
+    + "      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0\n"
     "        id: validation-python\n"
     "        with:\n"
     '          python-version: "3.14.7"\n'

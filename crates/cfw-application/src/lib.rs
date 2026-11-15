@@ -17,7 +17,7 @@ mod transition;
 pub use controller::EngineControllerAccess;
 pub use coordinator::{CoordinatorOptions, CoordinatorTask, EngineModeCoordinator};
 pub use error::{EngineCoordinatorError, EngineOperation, RecoveredRuntimeMismatch};
-pub use profile_change::ProfileChange;
+pub use profile_change::{ProfileChange, RunningEngine};
 pub use restart::EngineRestartSpec;
 
 #[cfg(test)]

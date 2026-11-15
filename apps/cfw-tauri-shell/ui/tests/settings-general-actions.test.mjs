@@ -6,6 +6,7 @@ import { replaceEngineIdentity, runEngine } from "./support/engine.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { state } from "../src/state.js";
+import { setLocale } from "../src/i18n.js";
 import { createGeneralActions } from "../src/general-actions.js";
 import { createEngineActions } from "../src/engine-actions.js";
 import {
@@ -28,6 +29,11 @@ test("General copies terminal proxy commands for the projected port, or says why
   await actions["copy-proxy-exports"]();
   assert.equal(lastLog().message, "The projected inbound port is unavailable: no active profile is selected");
   assert.equal(renderPage.count(), 4);
+  setLocale("zh-Hans");
+  try {
+    await actions["copy-proxy-exports"]();
+    assert.equal(lastLog().message, "实际入站端口不可用：未选中任何配置文件", "the reason is in the display language too");
+  } finally { setLocale("en"); }
 });
 
 test("General explains LAN sharing, TUN, Mixin and system DNS in an info dialog", async () => {

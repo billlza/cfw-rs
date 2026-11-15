@@ -70,6 +70,16 @@ pub struct EngineSettings {
     /// switch existed keep their bytes.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dns_leak_protection: bool,
+    /// WebRTC leak protection. In Tunnel mode the core refuses STUN, so a
+    /// page cannot learn an address of this Mac from a STUN server, whichever
+    /// route that server takes (see [`crate::webrtc_leak`]).
+    /// It holds in Rule and Global mode and leaves Direct mode alone. It
+    /// changes nothing in the proxy modes, where a browser's UDP never passes
+    /// through the application, and never changes a release evidence
+    /// projection; absent means off, so files written before the switch
+    /// existed keep their bytes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub webrtc_leak_protection: bool,
 }
 
 impl Default for EngineSettings {
@@ -102,6 +112,7 @@ impl Default for EngineSettings {
             ],
             mainland_china_direct: false,
             dns_leak_protection: false,
+            webrtc_leak_protection: false,
         }
     }
 }
@@ -218,6 +229,9 @@ pub struct RuntimePreferences {
     /// See [`EngineSettings::dns_leak_protection`]. Absent means off.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dns_leak_protection: bool,
+    /// See [`EngineSettings::webrtc_leak_protection`]. Absent means off.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub webrtc_leak_protection: bool,
 }
 
 impl Default for RuntimePreferences {
@@ -231,6 +245,7 @@ impl Default for RuntimePreferences {
             lan_proxy: None,
             mainland_china_direct: false,
             dns_leak_protection: false,
+            webrtc_leak_protection: false,
         }
     }
 }
@@ -267,6 +282,7 @@ impl RuntimePreferences {
         settings.lan_proxy = self.lan_proxy.clone().filter(|_| self.allow_lan);
         settings.mainland_china_direct = self.mainland_china_direct;
         settings.dns_leak_protection = self.dns_leak_protection;
+        settings.webrtc_leak_protection = self.webrtc_leak_protection;
         settings.validate_listener_settings()?;
         // The endpoint allocator chooses a distinct controller after applying
         // a user-selected mixed port; projection validates the final tuple.

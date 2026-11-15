@@ -5,7 +5,7 @@ import { acceptNativeRuntimeDraft, createRuntimeSettingsUI, preferencesFromRunti
 
 const preferences = { preferred_mixed_port:null, log_level:"info", tunnel_mtu:1500, allow_lan:false, lan_proxy:null };
 const mtuLimits = { minimum: 1280, maximum: 1500 };
-const response = () => ({ tunnel_mtu_limits: { ...mtuLimits }, settings:structuredClone(preferences), revision:null, effective:{mixed_port:7890,log_level:"info",tunnel_mtu:1500,ipv6_dns_enabled:true,lan_proxy:null,mainland_china_direct:false,dns_leak_protection:false} });
+const response = () => ({ tunnel_mtu_limits: { ...mtuLimits }, settings:structuredClone(preferences), revision:null, effective:{mixed_port:7890,log_level:"info",tunnel_mtu:1500,ipv6_dns_enabled:true,lan_proxy:null,mainland_china_direct:false,dns_leak_protection:false,webrtc_leak_protection:false} });
 
 test("runtime MTU validation follows the backend bounds and preserves legacy values for editing", () => {
   const draft = runtimeDraft({ ...preferences, tunnel_mtu: 9000 });
@@ -72,7 +72,7 @@ test("native MTU correction rejects unsupported values without writing and keeps
 
 // The native form receives exactly the fields runtimeDialogFrame sends.
 function nativeDraft(draft, edits = {}) {
-  const { initialIPv6DNS, ipv6DNSInherited, mainlandChinaDirect, dnsLeakProtection, ...fields } = draft;
+  const { initialIPv6DNS, ipv6DNSInherited, mainlandChinaDirect, dnsLeakProtection, webrtcLeakProtection, ...fields } = draft;
   return { ...fields, ipv6DNSEdited: !ipv6DNSInherited, ...edits };
 }
 
@@ -274,11 +274,12 @@ test("a rejected settings transaction retains the saved values and refreshes act
   assert.ok(messages.some(([level]) => level === "error"));
 });
 
-// The two runtime switches share one transaction path; each is checked on
+// The runtime switches share one transaction path; each is checked on
 // its own stored key, state field and toggle method.
 const SWITCHES = [
   { key: "mainland_china_direct", toggle: "mainlandChinaDirect", method: "toggleMainlandChinaDirect", label: "mainland China direct" },
   { key: "dns_leak_protection", toggle: "dnsLeakProtection", method: "toggleDnsLeakProtection", label: "DNS leak protection" },
+  { key: "webrtc_leak_protection", toggle: "webrtcLeakProtection", method: "toggleWebRtcLeakProtection", label: "WebRTC leak protection" },
 ];
 
 for (const sw of SWITCHES) {
@@ -404,22 +405,24 @@ for (const sw of SWITCHES) {
 test("the native settings draft stays closed to the runtime switches", async () => {
   const { runtimeDialogFrame } = await import("../src/native-runtime-settings.js");
   globalThis.document = { documentElement: { dataset: { theme: "light" } } };
-  const draft = runtimeDraft({ ...preferences, mainland_china_direct: true, dns_leak_protection: true });
+  const draft = runtimeDraft({ ...preferences, mainland_china_direct: true, dns_leak_protection: true, webrtc_leak_protection: true });
   assert.equal(draft.mainlandChinaDirect, true);
   assert.equal(draft.dnsLeakProtection, true);
+  assert.equal(draft.webrtcLeakProtection, true);
   assert.deepEqual(Object.keys(runtimeDialogFrame({ draft, mtuLimits, saving:false, error:null }).draft).sort(),
     ["allow", "ipv6DNS", "ipv6DNSEdited", "lanAddress", "lanPort", "lanSources", "level", "mtu", "port"]);
-  for (const extra of [{ mainlandChinaDirect: false }, { dnsLeakProtection: false }]) {
+  for (const extra of [{ mainlandChinaDirect: false }, { dnsLeakProtection: false }, { webrtcLeakProtection: false }]) {
     assert.throws(() => acceptNativeRuntimeDraft(draft, { ...nativeDraft(draft), ...extra }), /draft is invalid/u);
   }
   const kept = preferencesFromRuntimeDraft(acceptNativeRuntimeDraft(draft, nativeDraft(draft)), mtuLimits);
   assert.equal(kept.mainland_china_direct, true);
   assert.equal(kept.dns_leak_protection, true);
+  assert.equal(kept.webrtc_leak_protection, true);
   const off = runtimeDraft(preferences);
-  for (const key of ["mainland_china_direct", "dns_leak_protection"]) {
+  for (const key of ["mainland_china_direct", "dns_leak_protection", "webrtc_leak_protection"]) {
     assert.equal(Object.hasOwn(preferencesFromRuntimeDraft(off, mtuLimits), key), false, `${key}: off keeps the legacy shape`);
   }
-  for (const field of ["mainlandChinaDirect", "dnsLeakProtection"]) {
+  for (const field of ["mainlandChinaDirect", "dnsLeakProtection", "webrtcLeakProtection"]) {
     const invalid = runtimeDraft(preferences);
     invalid[field] = "true";
     assert.throws(() => preferencesFromRuntimeDraft(invalid, mtuLimits), TypeError, field);
@@ -434,6 +437,7 @@ test("the component integration harness serves runtime snapshots the renderer ac
   assert.equal(await ui.load(), true, state.runtimeSettingsError);
   assert.equal(state.toggles.mainlandChinaDirect, false);
   assert.equal(state.toggles.dnsLeakProtection, false);
+  assert.equal(state.toggles.webrtcLeakProtection, false);
   // Its write handler rebuilds the effective view, which must keep every field.
   const host = await readFile(new URL("Main.swift", integration), "utf8");
   const rebuilt = host.match(/case "write_runtime_settings_snapshot":[\s\S]*?snapshot\["effective"\] = \[([\s\S]*?)\n\s*\]/u)?.[1];

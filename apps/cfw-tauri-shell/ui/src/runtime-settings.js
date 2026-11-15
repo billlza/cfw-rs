@@ -28,6 +28,7 @@ export function runtimeDraft(settings, effective = null) {
     // Not editable fields: carried so saving the form keeps the switches.
     mainlandChinaDirect: settings.mainland_china_direct === true,
     dnsLeakProtection: settings.dns_leak_protection === true,
+    webrtcLeakProtection: settings.webrtc_leak_protection === true,
   };
 }
 
@@ -44,7 +45,8 @@ export function preferencesFromRuntimeDraft(draft, mtuLimits) {
   validateMtuLimits(mtuLimits);
   if (!RUNTIME_LOG_LEVELS.includes(draft.level)) throw new Error(t("Choose a supported log level"));
   if (typeof draft.ipv6DNS !== "boolean") throw new Error(t("Choose whether to enable IPv6 DNS"));
-  if (typeof draft.mainlandChinaDirect !== "boolean" || typeof draft.dnsLeakProtection !== "boolean") {
+  if (typeof draft.mainlandChinaDirect !== "boolean" || typeof draft.dnsLeakProtection !== "boolean"
+    || typeof draft.webrtcLeakProtection !== "boolean") {
     throw new TypeError("Runtime settings draft is invalid");
   }
   const sources = draft.lanSources.split(/[\n,]/u).map((value) => value.trim()).filter(Boolean);
@@ -69,6 +71,7 @@ export function preferencesFromRuntimeDraft(draft, mtuLimits) {
     // Absent means off, which keeps the bytes of settings saved before each switch.
     ...(draft.mainlandChinaDirect ? { mainland_china_direct: true } : {}),
     ...(draft.dnsLeakProtection ? { dns_leak_protection: true } : {}),
+    ...(draft.webrtcLeakProtection ? { webrtc_leak_protection: true } : {}),
   };
 }
 
@@ -96,6 +99,8 @@ export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, 
       || typeof snapshot.effective.mainland_china_direct !== "boolean"
       || (snapshot.settings.dns_leak_protection !== undefined && typeof snapshot.settings.dns_leak_protection !== "boolean")
       || typeof snapshot.effective.dns_leak_protection !== "boolean"
+      || (snapshot.settings.webrtc_leak_protection !== undefined && typeof snapshot.settings.webrtc_leak_protection !== "boolean")
+      || typeof snapshot.effective.webrtc_leak_protection !== "boolean"
       || !(snapshot.revision === null || typeof snapshot.revision === "string")) {
       throw new TypeError("Runtime settings response is invalid");
     }
@@ -109,6 +114,7 @@ export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, 
     state.toggles.ipv6DNS = snapshot.effective.ipv6_dns_enabled;
     state.toggles.mainlandChinaDirect = snapshot.effective.mainland_china_direct;
     state.toggles.dnsLeakProtection = snapshot.effective.dns_leak_protection;
+    state.toggles.webrtcLeakProtection = snapshot.effective.webrtc_leak_protection;
     state.logLevel = snapshot.effective.log_level;
   }
   async function load() {
@@ -173,16 +179,17 @@ export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, 
   // One switch of the stored preferences. A background refresh cannot cancel
   // a user's choice: the write is bound to the exact snapshot read for this
   // action, and the backend enforces its revision.
-  async function toggleSwitch(field, label, enabled) {
-    if (typeof enabled !== "boolean") throw new TypeError(`${label} must be enabled or disabled`);
+  async function toggleSwitch(field, enabled) {
+    if (typeof enabled !== "boolean") throw new TypeError(`${field} must be enabled or disabled`);
     if (state.engineMutationBusy || state.migrationHandoff) throw new Error(t("Another network operation is in progress"));
     const snapshot = await invoke("read_runtime_settings_snapshot");
     validateSnapshot(snapshot);
     return save({ ...snapshot.settings, [field]: enabled }, snapshot.revision);
   }
-  const toggleIPv6DNS = (enabled) => toggleSwitch("ipv6_dns_enabled", "IPv6 DNS", enabled);
-  const toggleMainlandChinaDirect = (enabled) => toggleSwitch("mainland_china_direct", "Mainland China direct", enabled);
-  const toggleDnsLeakProtection = (enabled) => toggleSwitch("dns_leak_protection", "DNS leak protection", enabled);
+  const toggleIPv6DNS = (enabled) => toggleSwitch("ipv6_dns_enabled", enabled);
+  const toggleMainlandChinaDirect = (enabled) => toggleSwitch("mainland_china_direct", enabled);
+  const toggleDnsLeakProtection = (enabled) => toggleSwitch("dns_leak_protection", enabled);
+  const toggleWebRtcLeakProtection = (enabled) => toggleSwitch("webrtc_leak_protection", enabled);
   function renderDialog() {
     const dialog = state.runtimeSettingsDialog;
     if (!dialog) { nativeDialog?.sync(null); return ""; }
@@ -252,5 +259,5 @@ export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, 
       } catch (error) { appendLog("error", "settings", errorText(error)); renderPage(); }
     }));
   }
-  return { load, open, close, save, toggleLAN, toggleIPv6DNS, toggleMainlandChinaDirect, toggleDnsLeakProtection, renderDialog, bindDialog, bindPage };
+  return { load, open, close, save, toggleLAN, toggleIPv6DNS, toggleMainlandChinaDirect, toggleDnsLeakProtection, toggleWebRtcLeakProtection, renderDialog, bindDialog, bindPage };
 }

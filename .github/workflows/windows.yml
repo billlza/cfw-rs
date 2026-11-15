@@ -231,6 +231,10 @@ jobs:
             if (-not $stdout.Wait(10000) -or -not $stderr.Wait(10000)) { throw 'Forwarding probe output did not drain' }
             [IO.File]::WriteAllText((Join-Path $artifactRoot 'tunnel-forwarding-stdout.log'), $stdout.GetAwaiter().GetResult())
             [IO.File]::WriteAllText((Join-Path $artifactRoot 'tunnel-forwarding-stderr.log'), $stderr.GetAwaiter().GetResult())
+            # What Windows Filtering Platform dropped meanwhile, read only: it
+            # shows whether the filter discarded the engine's ICMP reports.
+            $events = netsh wfp show netevents "file=$(Join-Path $artifactRoot 'tunnel-forwarding-wfp-events.xml')"
+            if ($LASTEXITCODE -ne 0) { throw "Windows Filtering Platform events were not read: $events" }
             if (-not $exited) { throw 'Wintun forwarding probe exceeded its deadline' }
             if ($process.ExitCode -ne 0) { throw "Wintun forwarding probe failed ($($process.ExitCode)); inspect retained observations" }
           } finally { $process.Dispose() }
@@ -263,41 +267,59 @@ jobs:
               throw "Wintun forwarding case $($case.mtu) is incomplete"
             }
             # The adapter received exactly what the pump delivered under the
-            # policy for its own addresses; refused packets never reached it.
+            # policy for its own addresses, less the engine's port unreachable
+            # reports Windows returned unaccepted, which Wintun counts as
+            # receive errors; refused packets never reached it. Besides echoes
+            # only gVisor's advertisements of the remote fixture address,
+            # whose reachability Windows checks, may be refused.
             $counters = $case.interface_counters
+            $discarded = $counters.windows_discarded
             $refused = $case.pump.refused
             if ($case.adapter_dhcpv4_enabled_at_creation -isnot [bool] -or $case.adapter_dhcpv4_enabled_with_fixture_addresses -isnot [bool] -or
                 $case.delivery_policy.ipv4 -cne '192.0.2.10' -or $case.delivery_policy.ipv6 -cne '2001:db8:1::10' -or
-                $counters.received_equals_delivered -ne $true -or
-                ($counters.after.in_unicast_packets - $counters.before.in_unicast_packets) -ne $case.pump.to_system.packets -or
-                ($counters.after.in_octets - $counters.before.in_octets) -ne $case.pump.to_system.bytes -or
+                $counters.received_equals_delivered -ne $true -or $null -eq $discarded.packets -or $null -eq $discarded.bytes -or
+                ($counters.after.in_unicast_packets - $counters.before.in_unicast_packets) -ne ($case.pump.to_system.packets - $discarded.packets) -or
+                ($counters.after.in_octets - $counters.before.in_octets) -ne ($case.pump.to_system.bytes - $discarded.bytes) -or
+                ($counters.after.in_errors - $counters.before.in_errors) -ne $discarded.packets -or
                 $counters.after.in_non_unicast_packets -ne $counters.before.in_non_unicast_packets -or
-                $counters.after.in_discards -ne $counters.before.in_discards -or $counters.after.in_errors -ne $counters.before.in_errors -or
-                (@($refused.PSObject.Properties.Name | Sort-Object) -join ',') -cne 'destination,protocol,source' -or
+                $counters.after.in_discards -ne $counters.before.in_discards -or
+                (@($refused.PSObject.Properties.Name | Sort-Object) -join ',') -cne 'destination,neighbor,protocol,source' -or
                 $refused.source.packets -ne 0 -or $refused.protocol.packets -ne 0 -or $null -eq $refused.destination.packets -or
-                @(@($refused.destination, $refused.source, $refused.protocol) | Where-Object { ($_.packets -eq 0) -ne ($null -eq $_.first) }).Count -ne 0) {
+                ($refused.neighbor.packets -ne 0 -and
+                  ($refused.neighbor.first.source -cne '2001:db8:1::123' -or $refused.neighbor.first.destination -cne '2001:db8:1::10')) -or
+                @(@($refused.destination, $refused.source, $refused.protocol, $refused.neighbor) | Where-Object { ($_.packets -eq 0) -ne ($null -eq $_.first) }).Count -ne 0) {
               throw "Wintun forwarding case $($case.mtu) did not bind deliveries to its policy"
             }
             # With the switches off the node served every probe. With both on
-            # the engine refused each flow they name, and the refusal reached
-            # its Windows socket; a datagram that is not STUN still passed.
+            # the engine refused each flow they name: the connection at its
+            # socket, and each datagram went unanswered while the engine's
+            # report reached Windows, which may discard it. A datagram that is
+            # not STUN still passed.
             $protection = $case.leak_protection
-            $named = if ($protection.enabled) { 'refused' } else { 'served' }
+            $tcp = if ($protection.enabled) { 'refused' } else { 'served' }
+            $udp = if ($protection.enabled) { 'unanswered' } else { 'served' }
+            $udpOutcomes = if ($protection.enabled) { @('refused', 'silent') } else { @('served') }
             if ((@($protection.PSObject.Properties.Name | Sort-Object) -join ',') -cne "enabled,$families") {
               throw "Wintun forwarding case $($case.mtu) has no complete leak protection observation"
             }
+            $returned = 0
             foreach ($family in @($result.ip_families)) {
               $probes = $protection.$family
+              $datagrams = @($probes.encrypted_dns_udp, $probes.stun, $probes.stun_unsniffed_port)
               if ((@($probes.PSObject.Properties.Name | Sort-Object) -join ',') -cne 'encrypted_dns_tcp,encrypted_dns_udp,other_udp_on_stun_port,stun,stun_unsniffed_port' -or
-                  $probes.encrypted_dns_tcp.outcome -cne $named -or $probes.encrypted_dns_udp.outcome -cne $named -or
-                  $probes.stun.outcome -cne $named -or $probes.stun_unsniffed_port.outcome -cne $named -or
-                  $probes.other_udp_on_stun_port.outcome -cne 'served') {
-                throw "Wintun forwarding case $($case.mtu) leak protection ($($protection.enabled)) differs in ${family}: $($probes | ConvertTo-Json -Compress -Depth 5)"
+                  $probes.encrypted_dns_tcp.expected -cne $tcp -or $probes.encrypted_dns_tcp.outcome -cne $tcp -or
+                  @($datagrams | Where-Object { $_.expected -cne $udp -or $_.outcome -cnotin $udpOutcomes }).Count -ne 0 -or
+                  $probes.other_udp_on_stun_port.expected -cne 'served' -or $probes.other_udp_on_stun_port.outcome -cne 'served') {
+                throw "Wintun forwarding case $($case.mtu) leak protection ($($protection.enabled)) differs in ${family}: $($probes | ConvertTo-Json -Compress -Depth 6)"
               }
+              foreach ($datagram in @($datagrams | Where-Object outcome -ceq 'silent')) { $returned += $datagram.counted.adapter.in_errors }
+            }
+            if ($discarded.packets -ne $returned) {
+              throw "Wintun forwarding case $($case.mtu) accounts for $($discarded.packets) reports Windows discarded; its silent probes saw $returned"
             }
           }
           "Verified Windows IPv4/IPv6 TCP and UDP through Wintun, the packet pump and the native engine at MTU $(@($result.cases).mtu -join '/')" | Out-Host
-          "Verified that the running engine passes encrypted DNS and STUN with both leak protection switches off and refuses them, with a reset at the Windows socket, with both on" | Out-Host
+          "Verified that the running engine passes encrypted DNS and STUN with both leak protection switches off and refuses them with both on: each connection at its Windows socket, each datagram unanswered while the engine's report reached Windows" | Out-Host
       - name: Upload the verified unsigned engine component
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

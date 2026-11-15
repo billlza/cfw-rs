@@ -33,6 +33,7 @@ use windows_sys::Win32::NetworkManagement::IpHelper::IP_ADAPTER_DHCP_ENABLED;
 mod exchange;
 mod leak_protection;
 mod socks;
+use leak_protection::Discarded;
 use socks::{Fixture, HTTP_TARGETS, UDP_TARGETS, family, udp_overhead};
 
 const PROFILE: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -475,21 +476,22 @@ fn exercise(
         ));
     }
     // Genuine engine output is always addressed to the adapter from a
-    // remote peer; only sing-tun's echoes of Windows' own multicast,
-    // broadcast and link-local packets may be refused, by destination.
+    // remote peer. Only sing-tun's echoes of Windows' own multicast,
+    // broadcast and link-local packets may be refused, by destination, and
+    // gVisor's advertisements of the remote address Windows checks.
     if report.refused.source.packets != 0 || report.refused.protocol.packets != 0 {
         return Err(format!(
-            "the delivery policy refused engine packets other than echoes: {:?}",
+            "the delivery policy refused engine packets other than echoes and neighbour advertisements: {:?}",
             report.refused
         ));
     }
-    let after = received_equals_delivered(adapter, &before, &report)?;
+    let discarded = probes.verdict()?;
+    let after = received_equals_delivered(adapter, &before, &report, discarded)?;
     let control = exchange::causal_control(&fixture)?;
     let accepted = fixture.accepted();
     let observations = fixture.finish()?;
     require_fixture_flows(&observations, mtu)?;
     leak_protection::require_flows(&observations, &nonce, case.leak_protection)?;
-    probes.verdict()?;
     drop(process);
     std::fs::remove_dir_all(&runtime.0)
         .map_err(|error| format!("remove the engine runtime directory: {error}"))?;
@@ -503,10 +505,12 @@ fn exercise(
             "server_endpoint_closed":true,"refused":{
                 "destination":refused(&report.refused.destination),
                 "source":refused(&report.refused.source),
-                "protocol":refused(&report.refused.protocol)}},
+                "protocol":refused(&report.refused.protocol),
+                "neighbor":refused(&report.refused.neighbor)}},
         "delivery_policy":{"ipv4":policy.ipv4().to_string(),
             "ipv6":policy.ipv6().map(|address| address.to_string())},
-        "interface_counters":{"before":before,"after":after,"received_equals_delivered":true},
+        "interface_counters":{"before":before,"after":after,"received_equals_delivered":true,
+            "windows_discarded":{"packets":discarded.packets,"bytes":discarded.bytes}},
         "causal_control":control,"fixture_accepted_connections":accepted,"fixture":observations,
         "windows_to_engine_forwarding_verified":true,"engine_to_windows_forwarding_verified":true
     }))
@@ -521,7 +525,9 @@ fn refused(class: &RefusedClass) -> Value {
 }
 
 /// The adapter's receive counters grew by exactly the packets and bytes the
-/// pump delivered, with no non-unicast, discarded or erroneous receive. That
+/// pump delivered, with no non-unicast or discarded receive. The only
+/// erroneous receives are the engine reports the leak protection probes saw
+/// Windows return unaccepted, which Wintun does not count as received. That
 /// refused packets were withheld from the session is the pump tests' proof.
 /// Wintun indicates packets asynchronously, so the counters may trail the
 /// pump's retirement briefly.
@@ -529,6 +535,7 @@ fn received_equals_delivered(
     adapter: &Owned<'_>,
     before: &InterfaceCounters,
     report: &PumpReport,
+    discarded: Discarded,
 ) -> Result<InterfaceCounters> {
     let delivered = report.to_system;
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -537,17 +544,19 @@ fn received_equals_delivered(
             library::counters(adapter.luid, adapter.name).map_err(|error| error.to_string())?;
         let grew = |now: u64, then: u64| now.checked_sub(then);
         let matches = grew(after.in_unicast_packets, before.in_unicast_packets)
-            == Some(delivered.packets)
-            && grew(after.in_octets, before.in_octets) == Some(delivered.bytes)
+            == delivered.packets.checked_sub(discarded.packets)
+            && grew(after.in_octets, before.in_octets)
+                == delivered.bytes.checked_sub(discarded.bytes)
             && after.in_non_unicast_packets == before.in_non_unicast_packets
             && after.in_discards == before.in_discards
-            && after.in_errors == before.in_errors;
+            && grew(after.in_errors, before.in_errors) == Some(discarded.packets);
         if matches {
             return Ok(after);
         }
         if Instant::now() >= deadline {
             return Err(format!(
-                "adapter receive counters differ from the pump's deliveries: before {before:?}, after {after:?}, pump {report:?}"
+                "adapter receive counters differ from the pump's deliveries less {} reports Windows returned unaccepted: before {before:?}, after {after:?}, pump {report:?}",
+                discarded.packets
             ));
         }
         thread::sleep(Duration::from_millis(20));

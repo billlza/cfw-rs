@@ -6,13 +6,16 @@
 //! to the encrypted DNS port, a STUN binding request to the STUN port and to
 //! a port the engine never sniffs, and a datagram to the STUN port that is
 //! not STUN. With the switches off the node serves every one of them. With
-//! both on the engine refuses all but the last. A refusal must reach the
-//! socket at once, as a refused connection or a reset datagram socket, which
-//! needs the engine's reset or ICMP error to pass the pump's delivery policy;
-//! and the node must see nothing of a refused flow. Each probe also records
-//! what happened meanwhile: what the pump carried and refused each way, the
-//! adapter's counters, and what the Windows IP, UDP and ICMP layers counted
-//! for the family.
+//! both on the engine refuses all but the last, and the node sees nothing of
+//! a refused flow. A refused connection must be refused at its socket, which
+//! needs the engine's reset to pass the pump's delivery policy. A refused
+//! datagram must go unanswered while the engine's port unreachable report
+//! reaches Windows: the pump delivers exactly that report and the ICMP layer
+//! counts it. Whether Windows then resets the socket is recorded, not
+//! required; hosted Windows discards the report instead. Each probe also
+//! records what happened meanwhile: what the pump carried and refused each
+//! way, the adapter's counters, and what the Windows IP, UDP and ICMP layers
+//! counted for the family.
 use super::{
     super::{Result, network},
     socks::{Fixture, family, hex, transform},
@@ -25,13 +28,9 @@ use std::{
     net::{IpAddr, SocketAddr, TcpStream, UdpSocket},
     time::{Duration, Instant},
 };
-use windows_sys::Win32::{
-    NetworkManagement::IpHelper::{
-        GetIcmpStatisticsEx, GetIpStatisticsEx, GetUdpStatisticsEx, MIB_ICMP_EX_XPSP1,
-        MIB_IPSTATS_LH, MIB_UDPSTATS, MIBICMPSTATS_EX_XPSP1,
-    },
-    Networking::WinSock::{AF_INET, AF_INET6},
-};
+
+mod counted;
+use counted::{Counted, Reported};
 
 /// DNS over TLS and DNS over QUIC. DNS leak protection refuses the port.
 const ENCRYPTED_DNS_PORT: u16 = 853;
@@ -49,6 +48,13 @@ const CONNECT: Duration = Duration::from_secs(15);
 /// The node and the engine are on this host: an answer or a refusal is
 /// immediate, and nothing within this bound is neither.
 const ANSWER: Duration = Duration::from_secs(5);
+
+/// The engine's port unreachable report about one probe datagram: an IP
+/// header, the ICMP header, and the whole datagram it refused.
+fn report_bytes(ipv6: bool) -> u64 {
+    let header: u64 = if ipv6 { 40 } else { 20 };
+    2 * (header + 8) + DATAGRAM_BYTES as u64
+}
 
 /// Whether the node serves a connection to `target` for these probes.
 pub(super) fn tcp_target(target: SocketAddr) -> bool {
@@ -102,109 +108,11 @@ pub(super) struct Sources<'a> {
     pub(super) pump: &'a dyn Fn() -> PumpReport,
 }
 
-/// One family's counters of the Windows IP, UDP and ICMP layers.
-#[derive(Clone, Copy)]
-struct Stack {
-    ip: MIB_IPSTATS_LH,
-    udp: MIB_UDPSTATS,
-    icmp: MIB_ICMP_EX_XPSP1,
-}
-impl Stack {
-    fn read(ipv6: bool) -> Result<Self> {
-        let family = u32::from(if ipv6 { AF_INET6 } else { AF_INET });
-        let mut stack = Self {
-            ip: MIB_IPSTATS_LH::default(),
-            udp: MIB_UDPSTATS::default(),
-            icmp: MIB_ICMP_EX_XPSP1::default(),
-        };
-        // SAFETY: each structure is owned and writable for its call.
-        let statuses = unsafe {
-            [
-                GetIpStatisticsEx(&mut stack.ip, family),
-                GetUdpStatisticsEx(&mut stack.udp, family),
-                GetIcmpStatisticsEx(&mut stack.icmp, family),
-            ]
-        };
-        if statuses != [0; 3] {
-            return Err(format!("read the Windows stack counters: {statuses:?}"));
-        }
-        Ok(stack)
-    }
-}
-
-/// What the pump, the adapter and the stack had counted at one moment.
-struct Counted {
-    pump: PumpReport,
-    adapter: InterfaceCounters,
-    stack: Stack,
-}
-impl Counted {
-    fn now(sources: &Sources<'_>, target: SocketAddr) -> Result<Self> {
-        Ok(Self {
-            pump: (sources.pump)(),
-            adapter: (sources.adapter)()?,
-            stack: Stack::read(target.is_ipv6())?,
-        })
-    }
-    /// What changed since `before`. The pump's and the adapter's counters
-    /// never go back; the stack's are 32-bit counters that wrap.
-    fn since(&self, before: &Self) -> Result<Value> {
-        let grew = |now: u64, then: u64| {
-            now.checked_sub(then)
-                .ok_or_else(|| "a pump or adapter counter went back".to_owned())
-        };
-        let wrap = |now: u32, then: u32| now.wrapping_sub(then);
-        let (pump, then) = (&self.pump, &before.pump);
-        let (adapter, earlier) = (&self.adapter, &before.adapter);
-        let (ip, ip_then) = (&self.stack.ip, &before.stack.ip);
-        let (udp, udp_then) = (&self.stack.udp, &before.stack.udp);
-        Ok(json!({
-            "pump":{
-                "to_engine":grew(pump.to_engine.packets, then.to_engine.packets)?,
-                "to_system":grew(pump.to_system.packets, then.to_system.packets)?,
-                "to_system_bytes":grew(pump.to_system.bytes, then.to_system.bytes)?,
-                "refused_destination":grew(pump.refused.destination.packets, then.refused.destination.packets)?,
-                "refused_source":grew(pump.refused.source.packets, then.refused.source.packets)?,
-                "refused_protocol":grew(pump.refused.protocol.packets, then.refused.protocol.packets)?,
-                "refused_protocol_bytes":grew(pump.refused.protocol.bytes, then.refused.protocol.bytes)?},
-            "adapter":{
-                "in_unicast":grew(adapter.in_unicast_packets, earlier.in_unicast_packets)?,
-                "in_non_unicast":grew(adapter.in_non_unicast_packets, earlier.in_non_unicast_packets)?,
-                "in_discards":grew(adapter.in_discards, earlier.in_discards)?,
-                "in_errors":grew(adapter.in_errors, earlier.in_errors)?,
-                "out_unicast":grew(adapter.out_unicast_packets, earlier.out_unicast_packets)?},
-            "ip":{
-                "in_receives":wrap(ip.dwInReceives, ip_then.dwInReceives),
-                "in_header_errors":wrap(ip.dwInHdrErrors, ip_then.dwInHdrErrors),
-                "in_address_errors":wrap(ip.dwInAddrErrors, ip_then.dwInAddrErrors),
-                "in_discards":wrap(ip.dwInDiscards, ip_then.dwInDiscards),
-                "in_delivers":wrap(ip.dwInDelivers, ip_then.dwInDelivers),
-                "out_requests":wrap(ip.dwOutRequests, ip_then.dwOutRequests),
-                "out_discards":wrap(ip.dwOutDiscards, ip_then.dwOutDiscards),
-                "out_no_routes":wrap(ip.dwOutNoRoutes, ip_then.dwOutNoRoutes)},
-            "udp":{
-                "in_datagrams":wrap(udp.dwInDatagrams, udp_then.dwInDatagrams),
-                "no_ports":wrap(udp.dwNoPorts, udp_then.dwNoPorts),
-                "in_errors":wrap(udp.dwInErrors, udp_then.dwInErrors),
-                "out_datagrams":wrap(udp.dwOutDatagrams, udp_then.dwOutDatagrams)},
-            "icmp_in":icmp(&self.stack.icmp.icmpInStats, &before.stack.icmp.icmpInStats),
-            "icmp_out":icmp(&self.stack.icmp.icmpOutStats, &before.stack.icmp.icmpOutStats)
-        }))
-    }
-}
-
-/// One direction of ICMP: messages, errors, and every type whose count changed.
-fn icmp(now: &MIBICMPSTATS_EX_XPSP1, then: &MIBICMPSTATS_EX_XPSP1) -> Value {
-    let types: serde_json::Map<_, _> = now
-        .rgdwTypeCount
-        .iter()
-        .zip(then.rgdwTypeCount.iter())
-        .enumerate()
-        .filter(|(_, (now, then))| now != then)
-        .map(|(kind, (now, then))| (kind.to_string(), json!(now.wrapping_sub(*then))))
-        .collect();
-    json!({"messages":now.dwMsgs.wrapping_sub(then.dwMsgs),
-        "errors":now.dwErrors.wrapping_sub(then.dwErrors),"types":types})
+/// Engine reports Windows returned unaccepted while the probes ran.
+#[derive(Clone, Copy, Default)]
+pub(super) struct Discarded {
+    pub(super) packets: u64,
+    pub(super) bytes: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -226,15 +134,71 @@ impl Outcome {
     }
 }
 
+/// What the switches require of one probe.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Expected {
+    /// The node answers.
+    Served,
+    /// The connection is refused at its socket.
+    Refused,
+    /// No answer, and the engine's port unreachable report reaches Windows.
+    Unanswered,
+}
+impl Expected {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Served => "served",
+            Self::Refused => "refused",
+            Self::Unanswered => "unanswered",
+        }
+    }
+}
+
 struct Observation {
     outcome: Outcome,
     elapsed: Duration,
     counted: Value,
+    reported: Reported,
 }
 impl Observation {
-    fn receipt(&self, target: SocketAddr) -> Value {
-        json!({"target":target.to_string(),"outcome":self.outcome.label(),
-        "elapsed_ms":self.elapsed.as_millis(),"counted":self.counted})
+    fn receipt(&self, target: SocketAddr, expected: Expected) -> Value {
+        json!({"target":target.to_string(),"expected":expected.label(),
+        "outcome":self.outcome.label(),"elapsed_ms":self.elapsed.as_millis(),
+        "counted":self.counted})
+    }
+
+    /// Whether the probe did what `expected` requires, and what Windows
+    /// returned unaccepted of the engine's report meanwhile.
+    fn judge(&self, expected: Expected, ipv6: bool) -> Result<Discarded> {
+        let report = self.reported;
+        match (expected, self.outcome) {
+            (Expected::Served, Outcome::Served) | (Expected::Refused, Outcome::Refused) => {
+                Ok(Discarded::default())
+            }
+            // A reset socket is Windows' own word that the report arrived.
+            (Expected::Unanswered, Outcome::Refused) => Ok(Discarded::default()),
+            // Five quiet seconds let every counter settle: the pump delivered
+            // exactly the report, the adapter passed it to the stack, and the
+            // ICMP layer counted it, whatever the stack did with it then.
+            (Expected::Unanswered, Outcome::Silent)
+                if report.delivered == 1
+                    && report.delivered_bytes == report_bytes(ipv6)
+                    && report.received + report.returned == 1
+                    && report.unreachable >= 1 =>
+            {
+                Ok(Discarded {
+                    packets: report.returned,
+                    bytes: report.returned * report_bytes(ipv6),
+                })
+            }
+            (Expected::Unanswered, Outcome::Silent) => Err(
+                "went unanswered without the engine's port unreachable report reaching Windows"
+                    .to_owned(),
+            ),
+            (expected, outcome) => {
+                Err(format!("was {}, not {}", outcome.label(), expected.label()))
+            }
+        }
     }
 }
 
@@ -248,10 +212,12 @@ fn observe(
     let started = Instant::now();
     let outcome = probe()?;
     let elapsed = started.elapsed();
+    let (counted, reported) = Counted::now(sources, target)?.since(&before)?;
     Ok(Observation {
         outcome,
         elapsed,
-        counted: Counted::now(sources, target)?.since(&before)?,
+        counted,
+        reported,
     })
 }
 
@@ -362,13 +328,14 @@ fn remotes() -> [(IpAddr, IpAddr); 2] {
 pub(super) struct Probes {
     pub(super) observed: Value,
     differences: Vec<String>,
+    discarded: Discarded,
 }
 impl Probes {
-    /// The case's verdict on its probes, given once the rest of the case
-    /// has been checked.
-    pub(super) fn verdict(&self) -> Result<()> {
+    /// The case's verdict on its probes and, when they did what the
+    /// switches require, the engine reports Windows returned unaccepted.
+    pub(super) fn verdict(&self) -> Result<Discarded> {
         if self.differences.is_empty() {
-            return Ok(());
+            return Ok(self.discarded);
         }
         Err(format!(
             "leak protection {}: {}; observed {}",
@@ -387,45 +354,49 @@ impl Probes {
 /// failure reports the whole observation.
 pub(super) fn probe(fixture: &Fixture, sources: &Sources<'_>, enabled: bool) -> Probes {
     let nonce = fixture.nonce();
-    let expected = |refusable: bool| {
-        if enabled && refusable {
-            Outcome::Refused
-        } else {
-            Outcome::Served
-        }
-    };
+    let named = |refusal: Expected| if enabled { refusal } else { Expected::Served };
     let mut observed = serde_json::Map::new();
     let mut differences = Vec::new();
+    let mut discarded = Discarded::default();
     for (local, remote) in remotes() {
         let family = family(SocketAddr::new(remote, 0));
         let mut probes = serde_json::Map::new();
-        let mut judge =
-            |name: &str, target: SocketAddr, seen: Result<Observation>, refusable: bool| {
-                let receipt = match seen {
-                    Ok(seen) => {
-                        if seen.outcome != expected(refusable) {
-                            differences.push(format!(
-                                "{family} {name} was {}, not {}",
-                                seen.outcome.label(),
-                                expected(refusable).label()
-                            ));
+        let mut judge = |name: &str,
+                         target: SocketAddr,
+                         seen: Result<Observation>,
+                         expected: Expected| {
+            let receipt = match seen {
+                Ok(seen) => {
+                    match seen.judge(expected, target.is_ipv6()) {
+                        Ok(returned) => {
+                            discarded.packets += returned.packets;
+                            discarded.bytes += returned.bytes;
                         }
-                        seen.receipt(target)
+                        Err(difference) => {
+                            differences.push(format!("{family} {name} {difference}"));
+                        }
                     }
-                    Err(error) => {
-                        differences.push(format!("{family} {name}: {error}"));
-                        json!({"target":target.to_string(),"failure":error})
-                    }
-                };
-                probes.insert(name.to_owned(), receipt);
+                    seen.receipt(target, expected)
+                }
+                Err(error) => {
+                    differences.push(format!("{family} {name}: {error}"));
+                    json!({"target":target.to_string(),"expected":expected.label(),"failure":error})
+                }
             };
+            probes.insert(name.to_owned(), receipt);
+        };
         let target = SocketAddr::new(remote, ENCRYPTED_DNS_PORT);
         let seen = observe(sources, target, || connect(nonce, local, target));
-        judge("encrypted_dns_tcp", target, seen, true);
+        judge("encrypted_dns_tcp", target, seen, named(Expected::Refused));
         for probe in datagrams(nonce, family) {
             let target = SocketAddr::new(remote, probe.port);
             let seen = observe(sources, target, || datagram(local, target, &probe.payload));
-            judge(probe.name, target, seen, probe.refusable);
+            let expected = if probe.refusable {
+                named(Expected::Unanswered)
+            } else {
+                Expected::Served
+            };
+            judge(probe.name, target, seen, expected);
         }
         observed.insert(family.to_owned(), Value::Object(probes));
     }
@@ -433,6 +404,7 @@ pub(super) fn probe(fixture: &Fixture, sources: &Sources<'_>, enabled: bool) -> 
     Probes {
         observed: Value::Object(observed),
         differences,
+        discarded,
     }
 }
 

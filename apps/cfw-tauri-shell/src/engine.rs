@@ -334,6 +334,14 @@ impl ManagedEngine {
         })
     }
 
+    /// The authorization this engine's mode transitions ask for.
+    pub(crate) fn mode_authorization(&self) -> ModeAuthorization {
+        ModeAuthorization {
+            authorization: self.system_proxy_authorization.clone(),
+            platform: self.coordinator.runtime_platform(),
+        }
+    }
+
     /// Runs background service `recovery` once macOS granted the rights to
     /// restore the System Proxy settings an ended session left; see
     /// `recover_after_settings_restoration`.
@@ -482,6 +490,27 @@ async fn authorize_proxy_transition(
         .authorize_system_proxy(restoration_only)
         .await
         .map_err(|error| authorization_failure_message(error.kind, &error.message))
+}
+
+/// What a mode transition of one engine asks its platform for before it
+/// starts. It carries the platform that engine's coordinator runs on, so no
+/// caller chooses it.
+pub(crate) struct ModeAuthorization {
+    authorization: Arc<dyn SystemProxyAuthorization>,
+    platform: EngineRuntimePlatform,
+}
+
+impl ModeAuthorization {
+    /// Authorization before a transition into `mode`. A mode that takes over
+    /// this user's proxy settings on this platform asks for that; every other
+    /// mode, Off included, asks only to restore what an earlier run left.
+    pub(crate) async fn authorize(&self, mode: EngineMode) -> Result<(), String> {
+        authorize_proxy_transition(
+            self.authorization.as_ref(),
+            !self.platform.takes_over_proxy_settings(mode),
+        )
+        .await
+    }
 }
 
 /// Recovers background services once macOS granted the rights to restore the

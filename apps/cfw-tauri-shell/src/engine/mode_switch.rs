@@ -27,13 +27,13 @@ pub(crate) async fn apply_admitted_engine_mode(
         .map_err(|error| error.to_string())?;
     let coordinator = engine.coordinator.clone();
     let endpoints = engine.endpoints.clone();
-    let authorization = engine.system_proxy_authorization.clone();
+    let authorization = engine.mode_authorization();
     let retry_guard = mode_lease.retry_guard();
     let completion = mode_lease.run_to_completion(async move {
         // Authorization precedes the runtime transition, including restoration
         // after a long session. The existing runtime stays active while macOS
         // waits; no cleanup deadline or new engine generation has begun.
-        authorize_proxy_transition(authorization.as_ref(), mode != EngineMode::SystemProxy).await?;
+        authorization.authorize(mode).await?;
         set_mode_with_endpoint_rebind(
             &coordinator,
             &endpoints,
@@ -109,7 +109,7 @@ where
         Ok(())
     };
     let settings = engine.engine_settings()?;
-    let authorization = engine.system_proxy_authorization.clone();
+    let authorization = engine.mode_authorization();
     let preparation_settings = settings.clone();
     let preparation = async move {
         let candidate = prepare(preparation_settings)
@@ -117,7 +117,8 @@ where
             .map_err(EngineCoordinatorError::ProfilePreparation)?;
         if candidate.activate && mode != EngineMode::Off {
             start_admission.map_err(EngineCoordinatorError::ProfilePreparation)?;
-            authorize_proxy_transition(authorization.as_ref(), mode != EngineMode::SystemProxy)
+            authorization
+                .authorize(mode)
                 .await
                 .map_err(EngineCoordinatorError::ProfilePreparation)?;
         }

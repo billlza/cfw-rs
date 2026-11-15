@@ -122,7 +122,7 @@ test("Windows settings use native platform descriptions and reject a macOS desig
     state.payload.product = { ...product, name: "Clash for Windows", operating_system: "windows", architecture: "x64" };
     state.platform = WINDOWS_PLATFORM_DESIGN;
     const html = await renderPage("settings");
-    for (const text of ["Windows protected storage", "File Explorer", "system tray", "Not available in this development build"]) {
+    for (const text of ["Windows protected storage", "File Explorer", "system tray", "Wintun adapter created and routed by the Windows authority service"]) {
       assert.ok(html.includes(text), text);
     }
     assert.doesNotMatch(html, /Minimum macOS|ARM64-only|Keychain vault|in Finder|Dock icon|launchd|NetworkExtension|System Settings › Network|legacy restore|Avenir Next|SF Mono/u);

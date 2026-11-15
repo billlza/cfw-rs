@@ -837,7 +837,7 @@
   "Current-user Windows proxy with owned restoration": "現在のユーザーの Windows プロキシを所有元が復元",
   "Windows authority service and ordinary-user Agent": "Windows 権限サービスと一般ユーザーのエージェント",
   "Current-user sign-in registration; Windows controls startup approval": "現在のユーザーのサインイン起動登録。起動の許可は Windows が管理",
-  "Not available in this development build": "この開発ビルドでは利用できません",
+  "Wintun adapter created and routed by the Windows authority service": "Windows 権限サービスが作成してルーティングする Wintun アダプター",
   "Start hidden in the system tray.": "起動時にウィンドウを表示せず、システムトレイに常駐します。",
   "Applied immediately and saved. Follow system uses your Windows language preferences.": "すぐに適用して保存します。「システムに従う」は Windows の言語設定を使用します。",
   "Windows protected storage": "Windows の保護されたストレージ",

@@ -89,6 +89,11 @@
           !content.includes('Manage DNS for each active adapter in Windows Settings')) {
         throw new Error('Fresh Windows preferences contain foreign font or DNS instructions');
       }
+      if (backend.engine.capabilities.tunnel !== true ||
+          backend.platform.tun_strategy !== 'Wintun adapter created and routed by the Windows authority service' ||
+          !content.includes(backend.platform.tun_strategy)) {
+        throw new Error('Windows preferences do not describe the tunnel the backend offers');
+      }
     }
     await page.screenshot({ path: `${id}.png` });
     pages.push({ id, heading, content, checks, snapshot: await page.locator('body').ariaSnapshot() });

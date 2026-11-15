@@ -837,7 +837,7 @@
   "Current-user Windows proxy with owned restoration": "Current-user Windows proxy with owned restoration",
   "Windows authority service and ordinary-user Agent": "Windows authority service and ordinary-user Agent",
   "Current-user sign-in registration; Windows controls startup approval": "Current-user sign-in registration; Windows controls startup approval",
-  "Not available in this development build": "Not available in this development build",
+  "Wintun adapter created and routed by the Windows authority service": "Wintun adapter created and routed by the Windows authority service",
   "Start hidden in the system tray.": "Start hidden in the system tray.",
   "Applied immediately and saved. Follow system uses your Windows language preferences.": "Applied immediately and saved. Follow system uses your Windows language preferences.",
   "Windows protected storage": "Windows protected storage",

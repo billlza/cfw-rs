@@ -332,13 +332,13 @@ fn platform_design_describes_the_authority_mediated_architecture() {
 
 #[cfg(windows)]
 #[test]
-fn windows_platform_design_does_not_claim_apple_services_or_tunnel_support() {
+fn windows_platform_design_names_its_own_services_and_tunnel() {
     let design = serde_json::to_value(current_platform_design()).unwrap();
     assert_eq!(design["target"], "windows-x64");
     assert_eq!(design.as_object().unwrap().len(), 5);
     assert_eq!(
         design["tun_strategy"],
-        "Not available in this development build"
+        "Wintun adapter created and routed by the Windows authority service"
     );
     assert!(
         design["startup_strategy"]

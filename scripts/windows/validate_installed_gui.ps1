@@ -32,7 +32,7 @@ $receipt = [ordered]@{
     engine_notices_installed=$false; wintun_payload_installed=$false
     fresh_off_session=$null; local_proxy_session=$null; tunnel_session=$null; system_proxy_quit_session=$null
     native_gui_exercised=$false; ordinary_user=$false; page_count=0; graceful_exit_observed=$false
-    startup_registration_exercised=$false; actual_sign_in_exercised=$false
+    startup_registration_exercised=$false; settings_controls_exercised=$false; actual_sign_in_exercised=$false
     physical_display_exercised=$false; network_mode_exercised=$false; release_accepted=$false
 }
 $fresh = $null
@@ -99,7 +99,8 @@ try {
     $sessionScript = Join-Path $PSScriptRoot 'run_installed_gui_session.ps1'
     & $sessionScript -Launcher $Launcher -Source $Source -Output $outputRoot -Scenario 'fresh-off' -SessionResult ([ref]$fresh)
     if (-not $fresh.graceful_exit_observed -or $fresh.page_count -ne 9 -or $fresh.network_mode_exercised -or
-        -not $fresh.startup_registration_exercised -or $fresh.actual_sign_in_exercised) {
+        -not $fresh.startup_registration_exercised -or -not $fresh.settings_controls_exercised -or
+        $fresh.actual_sign_in_exercised) {
         throw 'The independent fresh-Off GUI case did not pass'
     }
     $networkRoot = Join-Path $outputRoot 'local-proxy'
@@ -168,6 +169,7 @@ try {
         $receipt.native_gui_exercised = $fresh.native_gui_exercised
         $receipt.page_count = $fresh.page_count
         $receipt.startup_registration_exercised = $fresh.startup_registration_exercised
+        $receipt.settings_controls_exercised = $fresh.settings_controls_exercised
     }
     if ($null -ne $fresh -and $null -ne $network -and $null -ne $tunnel -and $null -ne $systemProxy) {
         $receipt.ordinary_user = $fresh.ordinary_user -and $network.ordinary_user -and $tunnel.ordinary_user -and $systemProxy.ordinary_user

@@ -33,7 +33,7 @@ $receipt = [ordered]@{
     wininet_proxy_verified=$false; active_quit_exercised=$false; original_user_proxy_restored=$false
     tunnel_runtime=$null; http_through_tunnel_verified=$false; combined_mode_refused=$false
     tunnel_adapter_retired=$false; core_preserved_after_tunnel=$false
-    startup_registration_exercised=$false; actual_sign_in_exercised=$false
+    startup_registration_exercised=$false; settings_controls_exercised=$false; actual_sign_in_exercised=$false
     physical_display_exercised=$false; network_mode_exercised=$false; release_accepted=$false
 }
 $SessionResult.Value = $receipt
@@ -71,7 +71,7 @@ function Invoke-Playwright([string]$Name, [string[]]$Arguments) {
         return ($result -join "`n")
     } finally { Pop-Location }
 }
-function Invoke-GuiScenario([ValidateSet('startup-off', 'startup-registration', 'network-start', 'network-stop', 'tunnel-start', 'tunnel-stop', 'system-proxy-start', 'quit')][string]$Name) {
+function Invoke-GuiScenario([ValidateSet('startup-off', 'startup-registration', 'settings-controls', 'network-start', 'network-stop', 'tunnel-start', 'tunnel-stop', 'system-proxy-start', 'quit')][string]$Name) {
     $observer = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'gui/observe.js'))
     $scenarioFile = if ($Name -ceq 'quit') { 'quit-with-state' } else { $Name }
     $scenarioCode = [IO.File]::ReadAllText((Join-Path $PSScriptRoot "gui/$scenarioFile.js"))
@@ -223,6 +223,13 @@ try {
             throw 'The installed GUI did not verify its startup registration transaction'
         }
         $receipt.startup_registration_exercised = $true
+        $controls = (Invoke-GuiScenario 'settings-controls') | ConvertFrom-Json
+        $controls | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'settings-controls.json') -Encoding utf8NoBOM
+        if (-not $controls.settings_controls_exercised -or $controls.languages.Count -ne 3 -or
+            $controls.engine.Count -ne 2 -or $controls.scroll.Count -ne 10 -or $controls.release_accepted) {
+            throw 'The installed GUI did not keep its display language, update interval, leak protection switches and scroll position'
+        }
+        $receipt.settings_controls_exercised = $true
     } elseif ($Scenario -ceq 'local-proxy') {
         $started = (Invoke-GuiScenario 'network-start') | ConvertFrom-Json
         $started | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'network-start.json') -Encoding utf8NoBOM

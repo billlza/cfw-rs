@@ -460,6 +460,9 @@ fn packet_pump_refuses_engine_packets_outside_the_policy_and_keeps_running() {
     redirect[20] = 5;
     let mut router = ipv6_between(88, 13, PEER6, OWN6, 58);
     router[40] = 134;
+    // gVisor advertises an address whose reachability Windows checks.
+    let mut neighbor = ipv6_between(64, 14, PEER6, OWN6, 58);
+    neighbor[40] = 136;
     let written = [
         &admitted_v4,
         &echo,
@@ -472,6 +475,7 @@ fn packet_pump_refuses_engine_packets_outside_the_policy_and_keeps_running() {
         &redirect,
         &icmpv6,
         &router,
+        &neighbor,
         &fragment,
     ];
     let retirement = thread::scope(|scope| {
@@ -486,7 +490,8 @@ fn packet_pump_refuses_engine_packets_outside_the_policy_and_keeps_running() {
                 && report.refused.destination.packets
                     + report.refused.source.packets
                     + report.refused.protocol.packets
-                    == 7
+                    + report.refused.neighbor.packets
+                    == 8
         }));
         assert!(!pump.control().terminated());
         pump.control().expect_peer_close();
@@ -540,6 +545,11 @@ fn packet_pump_refuses_engine_packets_outside_the_policy_and_keeps_running() {
                 bytes: 120 + 64 + 88,
                 first: refusal(RefusalReason::Protocol, PEER4.into(), OWN4.into()),
             },
+            neighbor: RefusedClass {
+                packets: 1,
+                bytes: 64,
+                first: refusal(RefusalReason::Neighbor, PEER6.into(), OWN6.into()),
+            },
         }
     );
     assert_eq!(report.ring_full_waits, 0);
@@ -574,7 +584,9 @@ fn packet_pump_refusals_never_wait_for_or_fill_the_system_ring() {
     assert_eq!(report.to_system, DirectionCounters::default());
     assert_eq!(report.refused.destination.bytes, 200 * 1500);
     assert_eq!(
-        report.refused.source.packets + report.refused.protocol.packets,
+        report.refused.source.packets
+            + report.refused.protocol.packets
+            + report.refused.neighbor.packets,
         0
     );
     assert!(fake.outbound().is_empty());

@@ -62,6 +62,7 @@ pub struct RefusedPackets {
     pub destination: RefusedClass,
     pub source: RefusedClass,
     pub protocol: RefusedClass,
+    pub neighbor: RefusedClass,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,6 +153,7 @@ struct Shared {
     refused_destination: RefusalTally,
     refused_source: RefusalTally,
     refused_protocol: RefusalTally,
+    refused_neighbor: RefusalTally,
 }
 impl Shared {
     fn new(abort: Arc<AtomicBool>) -> Self {
@@ -167,6 +169,7 @@ impl Shared {
             refused_destination: RefusalTally::default(),
             refused_source: RefusalTally::default(),
             refused_protocol: RefusalTally::default(),
+            refused_neighbor: RefusalTally::default(),
         }
     }
     fn refuse(&self, refusal: Refusal, length: usize) {
@@ -174,6 +177,7 @@ impl Shared {
             RefusalReason::Destination => &self.refused_destination,
             RefusalReason::Source => &self.refused_source,
             RefusalReason::Protocol => &self.refused_protocol,
+            RefusalReason::Neighbor => &self.refused_neighbor,
         }
         .add(refusal, length);
     }
@@ -210,6 +214,7 @@ impl Shared {
                 destination: self.refused_destination.snapshot(),
                 source: self.refused_source.snapshot(),
                 protocol: self.refused_protocol.snapshot(),
+                neighbor: self.refused_neighbor.snapshot(),
             },
         }
     }

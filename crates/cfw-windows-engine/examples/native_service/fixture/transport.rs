@@ -872,6 +872,7 @@ fn command_name(command: &cfw_windows_engine::authority::wire::Command) -> &'sta
         Command::ConfirmRuntimeKeeper(_) => "confirm_runtime_keeper",
         Command::OpenTunnel(_) => "open_tunnel",
         Command::ConfirmTunnelEndpoint(_) => "confirm_tunnel_endpoint",
+        Command::RouteTunnel(_) => "route_tunnel",
         Command::Ready(_) => "ready",
         Command::Heartbeat(_) => "heartbeat",
         Command::BeginStop(_) => "begin_stop",

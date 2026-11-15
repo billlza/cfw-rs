@@ -3,12 +3,17 @@ use super::*;
 const MTU: u16 = 1500;
 
 fn tunnel_lease(now: Instant) -> (Machine, Peer, Peer, LeaseContext) {
+    lease(RunMode::Tunnel, now)
+}
+
+/// A lease of `mode` bound to its UserAgent, before Ready.
+pub(super) fn lease(mode: RunMode, now: Instant) -> (Machine, Peer, Peer, LeaseContext) {
     let mut machine = off();
     let host = peer(Role::Desktop);
     let runtime = peer(Role::UserAgent);
     let revision = allocate(&mut machine, &host);
     let mut request = input(revision, 1);
-    request.mode = RunMode::Tunnel;
+    request.mode = mode;
     let ticket = Ticket::for_test([7; 32]);
     let context = machine
         .prepare(&request, &host, Uuid::from_u128(8), ticket.digest(), now)
@@ -19,15 +24,20 @@ fn tunnel_lease(now: Instant) -> (Machine, Peer, Peer, LeaseContext) {
     (machine, host, runtime, context)
 }
 
-fn tunnel_ready(context: &LeaseContext) -> ReadyReport {
+pub(super) fn tunnel_ready(context: &LeaseContext) -> ReadyReport {
     let mut ready = report(context);
     ready.packet_pump_limits = Some(crate::tunnel::packet_pump_limits(MTU));
     ready
 }
 
 pub(super) fn tunnel(acknowledged: bool) -> (Machine, LeaseContext) {
+    stopping(RunMode::Tunnel, acknowledged)
+}
+
+/// A run of `mode` whose stop began, and whose owner then acknowledged it.
+pub(super) fn stopping(mode: RunMode, acknowledged: bool) -> (Machine, LeaseContext) {
     let now = Instant::now();
-    let (mut machine, host, runtime, context) = tunnel_lease(now);
+    let (mut machine, host, runtime, context) = lease(mode, now);
     machine
         .ready(&runtime, &tunnel_ready(&context), now)
         .unwrap();

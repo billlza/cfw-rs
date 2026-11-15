@@ -168,12 +168,15 @@ impl CheckedStartConfiguration {
     /// Admit exactly the Tunnel data plane of an engine that owns an inherited
     /// packet endpoint. Its configuration requests no adapter, route, DNS,
     /// firewall or proxy change: the privileged packet owner keeps those, and
-    /// this admission grants no Authority lease. TunnelSystemProxy stays closed.
+    /// this admission grants no Authority lease. A combined run also has the
+    /// loopback listener this user's proxy settings will name; applying those
+    /// settings stays with `WindowsSystemProxy`.
     pub fn prepare_tunnel_data_plane<'a>(
         self,
         material: impl IntoIterator<Item = (&'a CredentialRef, &'a str)>,
     ) -> Result<PreparedConfig, Error> {
-        if self.mode() != ProjectionMode::Tunnel {
+        let mode = self.mode();
+        if !mode.has_tunnel() {
             return Err(Error::Configuration("platform mode is not yet admitted"));
         }
         let options = self.request.tunnel_options.ok_or(Error::Configuration(
@@ -189,7 +192,7 @@ impl CheckedStartConfiguration {
             resolved,
             &self.request.config_json,
             &self.request.config_content_digest,
-            ProjectionMode::Tunnel,
+            mode,
             controller,
             Some(options.mtu),
         )
@@ -345,10 +348,15 @@ fn tunnel_controller(
         return Err(invalid());
     }
     let inbounds = root["inbounds"].as_array().ok_or_else(invalid)?;
-    if !(1..=2).contains(&inbounds.len()) {
+    // A combined run adds the loopback listener this user's proxy settings
+    // will name, on the port bound into the identity digest.
+    let proxy_port = options.system_proxy_port;
+    let required = 1 + usize::from(proxy_port.is_some());
+    if !(required..=required + 1).contains(&inbounds.len()) {
         return Err(invalid());
     }
     let mut tunnel = false;
+    let mut proxy = false;
     let mut lan = false;
     let mut ports = BTreeSet::from([controller.port()]);
     for inbound in inbounds {
@@ -356,6 +364,13 @@ fn tunnel_controller(
             Some(TUNNEL_INBOUND_TAG) if !tunnel => {
                 packet_interface(inbound, options)?;
                 tunnel = true;
+            }
+            Some(SYSTEM_PROXY_INBOUND_TAG) if !proxy => {
+                let (address, port) = mixed_listener(inbound, &mut ports)?;
+                if address != Ipv4Addr::LOCALHOST || Some(port) != proxy_port {
+                    return Err(invalid());
+                }
+                proxy = true;
             }
             Some(LAN_INBOUND_TAG) if !lan => {
                 let (address, port) = mixed_listener(inbound, &mut ports)?;
@@ -365,7 +380,7 @@ fn tunnel_controller(
             _ => return Err(invalid()),
         }
     }
-    if !tunnel {
+    if !tunnel || proxy != proxy_port.is_some() {
         return Err(invalid());
     }
     Ok(controller)

@@ -1,10 +1,11 @@
-//! The SYSTEM side of a Tunnel lease. The bound UserAgent opens SYSTEM's own
-//! tunnel network and confirms the packet endpoint SYSTEM placed in its
-//! process; SYSTEM routes the adapter only when it accepts Ready. Once the
-//! lease leaves Starting/Active the supervisor retires that network, and Off
-//! needs the retirement's observed adapter absence together with an empty
-//! runtime Job, or with the ended logon of a run whose Job is gone. No wire
-//! report from the UserAgent is a cleanup fact.
+//! The SYSTEM side of a lease that owns a tunnel. The bound UserAgent opens
+//! SYSTEM's own tunnel network and confirms the packet endpoint SYSTEM placed
+//! in its process. SYSTEM routes the adapter when it accepts Ready; a combined
+//! run has it routed earlier, before it applies this user's proxy settings.
+//! Once the lease leaves Starting/Active the supervisor retires that network,
+//! and Off needs the retirement's observed adapter absence together with an
+//! empty runtime Job, or with the ended logon of a run whose Job is gone. No
+//! wire report from the UserAgent is a cleanup fact.
 use super::super::wire::TunnelOpenRequest;
 use super::*;
 use crate::RunMode;
@@ -53,7 +54,7 @@ impl WindowsAuthority {
         self.advance_timers(now)?;
         self.machine
             .require_starting_runtime(&peer, &request.context)?;
-        if request.context.operation.mode != RunMode::Tunnel || !self.keeper_confirmed {
+        if !request.context.operation.mode.owns_tunnel() || !self.keeper_confirmed {
             return Err(AuthorityError::Identity);
         }
         let plan = TunnelNetworkPlan::new(&request.network_options())?;
@@ -122,6 +123,37 @@ impl WindowsAuthority {
         let policy = run.host.plan()?.delivery_policy()?;
         run.host.start_pump(server, policy, deadline)?;
         run.pump_running = true;
+        self.machine.heartbeat(&peer, context, Instant::now())?;
+        self.after_publication(authorization, deadline)?;
+        Ok(self.snapshot())
+    }
+
+    /// A combined run has its adapter routed before it applies this user's
+    /// proxy settings, so that those never point at a run without its tunnel.
+    /// The pump must be running; Ready still attests its bounds.
+    pub(in crate::authority) fn route_tunnel(
+        &mut self,
+        authorization: &ServicePeerAuthorization,
+        context: &LeaseContext,
+    ) -> Result<AuthoritySnapshot> {
+        let deadline = Instant::now() + ADMISSION;
+        let peer = self.admit(authorization, deadline)?;
+        self.advance_timers(Instant::now())?;
+        self.machine.require_starting_runtime(&peer, context)?;
+        if context.operation.mode != RunMode::TunnelSystemProxy || !self.keeper_confirmed {
+            return Err(AuthorityError::Identity);
+        }
+        let run = self.tunnel.as_mut().ok_or(AuthorityError::Stale)?;
+        if run.context != *context || !run.pump_running {
+            return Err(AuthorityError::Stale);
+        }
+        if run.host.pump_ended() {
+            return Err(crate::tunnel::Error::from("tunnel packet pump has ended").into());
+        }
+        if !run.routed {
+            run.host.route(deadline)?;
+            run.routed = true;
+        }
         self.machine.heartbeat(&peer, context, Instant::now())?;
         self.after_publication(authorization, deadline)?;
         Ok(self.snapshot())
@@ -233,6 +265,43 @@ impl WindowsAuthority {
         })
     }
 
+    /// Whether SYSTEM's own network of a combined run is gone: its adapter
+    /// observed absent and its endpoint handoff retired. The caller has seen
+    /// every process of the run retired. Off for such a run is committed by
+    /// the proof of its proxy settings, never from here.
+    pub(super) fn combined_tunnel_retired(&mut self, installation: uuid::Uuid) -> Result<bool> {
+        let network = matches!(self.tunnel_network(installation)?, TunnelNetwork::Retired);
+        Ok(network && self.tunnel.as_ref().is_none_or(|run| run.handoff.is_none()))
+    }
+
+    /// A supervision tick for a combined record that is stopping or in
+    /// recovery: SYSTEM retires its network without waiting for a Desktop,
+    /// including an adapter an earlier SYSTEM process left. Returns false
+    /// while that is pending.
+    pub(super) fn retire_combined_tunnel(&mut self) -> Result<bool> {
+        require_service()?;
+        let target = match self.machine.phase() {
+            AuthorityState::Stopping => self
+                .machine
+                .stopped_cleanup_target(RunMode::TunnelSystemProxy)?,
+            AuthorityState::Recovering => {
+                self.machine.recovery_target(RunMode::TunnelSystemProxy)?
+            }
+            _ => return Err(AuthorityError::CleanupUnproven),
+        };
+        let processes = self.observe_runtime_processes()?;
+        if processes.run_retirement(target.root()).is_none()
+            || !self.combined_tunnel_retired(target.root().installation_id)?
+        {
+            return Ok(false);
+        }
+        // The hosts have ended. The proxy proof observes the adapter afresh
+        // rather than reading what they recorded.
+        self.tunnel = None;
+        self.tunnel_recovery = None;
+        Ok(true)
+    }
+
     /// Reconcile a Tunnel record to Off once every process of its run is
     /// gone and its network retired: after an acknowledged stop, or after the
     /// execution lease was lost. Returns false while retirement is pending.
@@ -273,8 +342,8 @@ impl WindowsAuthority {
         // and memory. The host thread's exit closed the session, the
         // endpoint's server end and the adapter handle, and the adapter was
         // then observed absent with every route and resolver it carried. A
-        // plain Tunnel run never owns WinINet settings: the UserAgent admits
-        // a system proxy only for SystemProxy runs.
+        // plain Tunnel run never owns WinINet settings: the UserAgent applies
+        // them only for a run whose mode owns them.
         let evidence = CleanupEvidence {
             binding: CleanupBinding::TunnelRuntime(target.clone()),
             revision: target.revision(),

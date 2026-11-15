@@ -27,6 +27,11 @@ enum Work {
         Instant,
         SyncSender<ControlResult<PacketClient>>,
     ),
+    RouteTunnel(
+        crate::authority::LeaseContext,
+        Instant,
+        SyncSender<ControlResult<AuthoritySnapshot>>,
+    ),
     Ready(
         ReadyReport,
         Instant,
@@ -142,6 +147,17 @@ impl ControlSession {
         let (sender, receiver) = mpsc::sync_channel(1);
         let deadline = Instant::now() + crate::tunnel::OPEN_LIMIT;
         self.enqueue(Work::OpenTunnel(request, deadline, sender))?;
+        self.receive(receiver, deadline)
+    }
+    /// Have SYSTEM route the adapter of a combined run, before this user's
+    /// proxy settings are applied.
+    pub(super) fn route_tunnel(
+        &self,
+        context: crate::authority::LeaseContext,
+    ) -> Result<AuthoritySnapshot> {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let deadline = Instant::now() + COMMAND;
+        self.enqueue(Work::RouteTunnel(context, deadline, sender))?;
         self.receive(receiver, deadline)
     }
     pub(super) fn ready(&self, report: ReadyReport) -> Result<AuthoritySnapshot> {
@@ -281,6 +297,10 @@ fn run(
                 channel
                     .open_tunnel(request, deadline)
                     .map_err(|error| Arc::new(ControlError::Wire(error))),
+            )?,
+            Ok(Work::RouteTunnel(context, deadline, reply)) => send_result(
+                reply,
+                exchange(&mut channel, Command::RouteTunnel(context), deadline),
             )?,
             Ok(Work::Ready(report, deadline, reply)) => send_result(
                 reply,

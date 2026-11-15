@@ -36,12 +36,9 @@ impl UserRuntimeStorage {
         executable: VerifiedExecutable,
         mode: RunMode,
     ) -> Result<UserAgentRuntime> {
-        let proxy = match mode {
-            // A Tunnel engine owns no WinINet settings: SYSTEM routes its
-            // adapter instead.
-            RunMode::LocalProxy | RunMode::Tunnel => None,
-            RunMode::SystemProxy => Some(self.proxy.clone()),
-        };
+        // Only a run that owns this user's proxy settings is handed them. A
+        // plain Tunnel engine owns none: SYSTEM routes its adapter instead.
+        let proxy = mode.owns_system_proxy().then(|| self.proxy.clone());
         let mut runtime = UserAgentRuntime::new(executable, self.root.join("engine-v1"), proxy);
         runtime.storage = Some(Arc::clone(&self.directory));
         Ok(runtime)

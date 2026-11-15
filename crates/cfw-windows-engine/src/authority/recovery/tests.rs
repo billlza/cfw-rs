@@ -1,5 +1,6 @@
 use super::*;
 use crate::{
+    RunMode,
     authority::{
         secret::Ticket,
         tests::{active, recovered},

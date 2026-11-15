@@ -2,6 +2,8 @@ use super::*;
 use cfw_engine_api::TunnelNetworkOptions;
 use cfw_singbox_config::{EngineSettings, ValidatedSingBoxProfile};
 
+mod combined;
+
 const PROFILE: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 fn input(mode: ProjectionMode, lan: bool, credentials: bool) -> EngineStartRequest {
     let source = if credentials {
@@ -454,11 +456,11 @@ fn tunnel_data_plane_rejects_other_modes_and_the_system_stack() {
             cfw_singbox_config::TunnelStack::Gvisor,
         ),
         (
-            ProjectionMode::TunnelSystemProxy,
-            cfw_singbox_config::TunnelStack::Gvisor,
+            ProjectionMode::Tunnel,
+            cfw_singbox_config::TunnelStack::System,
         ),
         (
-            ProjectionMode::Tunnel,
+            ProjectionMode::TunnelSystemProxy,
             cfw_singbox_config::TunnelStack::System,
         ),
     ] {

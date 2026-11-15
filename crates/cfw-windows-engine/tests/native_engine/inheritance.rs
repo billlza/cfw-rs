@@ -65,17 +65,39 @@ fn tunnel_config(mtu: u16, controller: u16) -> PreparedConfig {
 
 /// The product Tunnel data plane, admitted through the checked shared request.
 fn tunnel_config_for(source: &str, mtu: u16, controller: u16) -> PreparedConfig {
-    let settings = EngineSettings {
-        tunnel_mtu: mtu,
-        controller_port: controller,
-        ..EngineSettings::default()
-    };
+    data_plane(
+        source,
+        ProjectionMode::Tunnel,
+        &EngineSettings {
+            tunnel_mtu: mtu,
+            controller_port: controller,
+            ..EngineSettings::default()
+        },
+    )
+}
+
+/// The combined data plane: the same packet interface, with the loopback
+/// listener that a user's proxy settings would name on `mixed`.
+fn combined_config(mtu: u16, mixed: u16, controller: u16) -> PreparedConfig {
+    data_plane(
+        DIRECT,
+        ProjectionMode::TunnelSystemProxy,
+        &EngineSettings {
+            tunnel_mtu: mtu,
+            mixed_port: mixed,
+            controller_port: controller,
+            ..EngineSettings::default()
+        },
+    )
+}
+
+fn data_plane(source: &str, mode: ProjectionMode, settings: &EngineSettings) -> PreparedConfig {
     let projection = ValidatedSingBoxProfile::parse(source)
         .unwrap()
         .project_with_tunnel_stack(
             "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-            ProjectionMode::Tunnel,
-            &settings,
+            mode,
+            settings,
             cfw_singbox_config::TunnelStack::Gvisor,
         )
         .unwrap();
@@ -85,7 +107,7 @@ fn tunnel_config_for(source: &str, mtu: u16, controller: u16) -> PreparedConfig 
             config_epoch: 1,
             generation: 1,
         },
-        mode: ProjectionMode::Tunnel,
+        mode,
         credential_audience: projection.credential_audience().clone(),
         config_json: projection.as_json().to_owned(),
         config_content_digest: projection.configuration_digest().to_owned(),
@@ -95,8 +117,9 @@ fn tunnel_config_for(source: &str, mtu: u16, controller: u16) -> PreparedConfig 
             ipv6_enabled: settings.enable_ipv6,
             bypass_private_networks: settings.bypass_private_networks,
             direct_ipv4_hosts: projection.direct_ipv4_hosts(),
-            mtu,
-            system_proxy_port: None,
+            mtu: settings.tunnel_mtu,
+            system_proxy_port: (mode == ProjectionMode::TunnelSystemProxy)
+                .then_some(settings.mixed_port),
         }),
     };
     cfw_windows_engine::CheckedStartConfiguration::new(request)
@@ -132,6 +155,20 @@ fn listener_only_engine_refuses_a_tunnel_data_plane_before_any_effect() {
         worker.start(&tunnel, TIMEOUT),
         "Tunnel data plane requires its exact inherited packet endpoint",
     );
+    // Neither does the combined data plane: its listener never stands alone.
+    let proxy = reserve();
+    refused(
+        worker.start(
+            &combined_config(
+                1500,
+                proxy.local_addr().unwrap().port(),
+                controller.local_addr().unwrap().port(),
+            ),
+            TIMEOUT,
+        ),
+        "Tunnel data plane requires its exact inherited packet endpoint",
+    );
+    drop(proxy);
     assert!(
         alive(&process),
         "refused admission tore down the idle child"
@@ -192,6 +229,41 @@ fn packet_fed_engine_admits_only_its_exact_tunnel_and_closes_its_endpoint_on_sto
     assert_eq!(stopped.process_id, running.process_id);
     exited(&process);
     assert_endpoint_closed(&mut server);
+}
+
+#[test]
+fn packet_fed_engine_serves_the_proxy_listener_of_a_combined_data_plane() {
+    let temporary = tempfile::tempdir().unwrap();
+    let (mut server, client) =
+        cfw_windows_engine::tunnel::PacketServer::create(uuid::Uuid::new_v4(), 1500).unwrap();
+    let mut worker = EngineProcess::spawn_with_packet_endpoint(
+        executable(),
+        &temporary.path().join("combined"),
+        TIMEOUT,
+        None,
+        client,
+    )
+    .unwrap();
+    let process = process_handle(worker.process_id());
+    let mixed = reserve();
+    let controller = reserve();
+    let proxy = mixed.local_addr().unwrap();
+    let combined = combined_config(1500, proxy.port(), controller.local_addr().unwrap().port());
+    assert_eq!(combined.mode(), ProjectionMode::TunnelSystemProxy);
+    assert_eq!(combined.tunnel_mtu(), Some(1500));
+    assert_eq!(combined.system_proxy_endpoint(), Some(proxy));
+    drop((mixed, controller));
+    let running = worker.start(&combined, TIMEOUT).unwrap();
+    assert_eq!(running.configuration_digest, combined.digest());
+    assert_eq!(worker.observe(TIMEOUT).unwrap(), running);
+    // What a user's proxy settings would send to this listener is served by
+    // the engine that holds the packet endpoint.
+    proxied_get(proxy);
+    let stopped = worker.stop(TIMEOUT).unwrap();
+    assert_eq!(stopped.process_id, running.process_id);
+    exited(&process);
+    assert_endpoint_closed(&mut server);
+    let _released = TcpListener::bind(proxy).unwrap();
 }
 
 /// After the stopped receipt and process exit the endpoint reports its peer

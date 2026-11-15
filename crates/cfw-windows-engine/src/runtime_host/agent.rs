@@ -49,7 +49,7 @@ pub fn run_agent(
     let (sender, receiver) = mpsc::sync_channel(1);
     thread::scope(|scope| -> Result<()> {
         let worker = scope.spawn(|| session.run_observed(&stop, sender, observation));
-        let ready_limit = if context.operation.mode == crate::RunMode::Tunnel {
+        let ready_limit = if context.operation.mode.owns_tunnel() {
             Duration::from_secs(20) + crate::tunnel::OPEN_LIMIT
         } else {
             Duration::from_secs(20)

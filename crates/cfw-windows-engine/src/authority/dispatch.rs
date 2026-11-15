@@ -97,6 +97,7 @@ impl WindowsAuthority {
                     | Command::ConfirmRuntimeKeeper(_)
                     | Command::OpenTunnel(_)
                     | Command::ConfirmTunnelEndpoint(_)
+                    | Command::RouteTunnel(_)
                     | Command::Ready(_)
                     | Command::Heartbeat(_)
                     | Command::Stopped(_)
@@ -218,6 +219,9 @@ impl WindowsAuthority {
                 Command::ConfirmTunnelEndpoint(input) => Response::Status(
                     self.confirm_tunnel_endpoint(authorization, &input.context, input.handle)?,
                 ),
+                Command::RouteTunnel(context) => {
+                    Response::Status(self.route_tunnel(authorization, &context)?)
+                }
                 Command::Heartbeat(context) => {
                     Response::Status(self.heartbeat(authorization, &context)?)
                 }

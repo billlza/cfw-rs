@@ -67,6 +67,8 @@ pub struct WindowsAuthority {
     tunnel: Option<tunnel::TunnelRun>,
     /// Removes an adapter an earlier SYSTEM process left, for recovery.
     tunnel_recovery: Option<crate::tunnel::TunnelHost>,
+    /// The record revision at which a combined run's network was retired.
+    tunnel_retired_at: Option<u64>,
     /// Why the last live lease ended, until the service records it.
     lease_ending: Option<LeaseEnding>,
     pub(super) draining: bool,
@@ -134,6 +136,7 @@ impl WindowsAuthority {
             proxy_recovery: None,
             tunnel: None,
             tunnel_recovery: None,
+            tunnel_retired_at: None,
             lease_ending: None,
             draining: false,
             #[cfg(feature = "native-service-validation")]
@@ -454,8 +457,9 @@ impl WindowsAuthority {
         let mut candidate = self.machine.clone();
         candidate.ready(&peer, &report, now)?;
         // The machine accepted this exact report for the bound runtime; a
-        // Tunnel run is routed only now, before Active is published.
-        if report.context.operation.mode == crate::RunMode::Tunnel
+        // Tunnel run is routed only now, before Active is published. A
+        // combined run asked for its routes earlier, and they are kept.
+        if report.context.operation.mode.owns_tunnel()
             && self.machine.phase() == AuthorityState::Starting
         {
             self.route_tunnel_for_ready(&report, deadline)?;

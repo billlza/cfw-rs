@@ -67,11 +67,7 @@ impl Record {
         self.operation_id
     }
     pub(super) fn mode(&self) -> RunMode {
-        match self.mode {
-            ProjectionMode::LocalProxy => RunMode::LocalProxy,
-            ProjectionMode::SystemProxy => RunMode::SystemProxy,
-            ProjectionMode::Tunnel | ProjectionMode::TunnelSystemProxy => RunMode::Tunnel,
-        }
+        RunMode::from(self.mode)
     }
     pub(super) fn content_digest(&self) -> Result<[u8; 32]> {
         digest(&self.configuration_sha256)

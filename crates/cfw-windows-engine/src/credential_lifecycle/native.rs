@@ -220,11 +220,8 @@ impl WindowsCredentialLifecycle {
         request: CheckedStartConfiguration,
         deadline: Instant,
     ) -> Result<(AuthorityChannel, PreparedGrant, CheckedStartConfiguration)> {
-        // A Tunnel run binds its credentials like a proxy run; the combined
-        // mode's user proxy settings are not owned on Windows.
-        if request.mode() == cfw_singbox_config::ProjectionMode::TunnelSystemProxy {
-            return Err(Error::Unavailable);
-        }
+        // Every mode binds its credentials the same way; what a run owns
+        // beyond them is recorded by its mode.
         self.locked(deadline, || {
             let mut authority = self.connect()?;
             let Response::Observed(before) = send(&mut authority, Command::Observe, deadline)?

@@ -344,7 +344,7 @@ impl DesktopUserAgent {
             .take()
             .ok_or(DesktopError::State("missing admitted Agent"))?;
         let deadline = Instant::now()
-            + if self.context.operation.mode == crate::RunMode::Tunnel {
+            + if self.context.operation.mode.owns_tunnel() {
                 TUNNEL_START_LIMIT
             } else {
                 START_LIMIT
@@ -480,9 +480,10 @@ impl DesktopUserAgent {
         let platform = cfw_engine_api::EngineRuntimePlatform::Windows;
         Ok(DesktopLive {
             runtime: RuntimeIdentity {
-                // SYSTEM owns a Tunnel run's adapter and pump; its UserAgent
-                // hosts the engine. Proxy runs belong to the UserAgent alone.
-                owner: if self.context.operation.mode == crate::RunMode::Tunnel {
+                // SYSTEM owns the adapter and pump of a run with a tunnel;
+                // its UserAgent hosts the engine. Proxy runs belong to the
+                // UserAgent alone.
+                owner: if self.context.operation.mode.owns_tunnel() {
                     platform.tunnel_owner()
                 } else {
                     platform.proxy_owner()
@@ -636,7 +637,7 @@ impl DesktopUserAgent {
         if snapshot.state == AuthorityState::Off {
             return Ok(snapshot);
         }
-        if self.context.operation.mode == crate::RunMode::SystemProxy {
+        if self.context.operation.mode.owns_system_proxy() {
             self.reconcile_system_proxy_stop(proxy, deadline)?;
         }
         self.wait_global_off(deadline)
@@ -651,7 +652,7 @@ impl DesktopUserAgent {
         deadline: Instant,
     ) -> Result<crate::authority::wire::ProxyCleanupReceipt> {
         check_deadline(deadline)?;
-        if self.context.operation.mode != crate::RunMode::SystemProxy
+        if !self.context.operation.mode.owns_system_proxy()
             || self.agent_exit_observation().is_none()
         {
             return Err(DesktopError::State("SystemProxy owner has not exited"));

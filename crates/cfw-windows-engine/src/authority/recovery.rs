@@ -1,7 +1,6 @@
 //! Recovery observations have their own bounded connection authorization. They
 //! neither resurrect a runtime lease nor constitute global cleanup evidence.
 use super::{AuthorityError, Result, machine::Machine, secret::TicketDigest, types::*};
-use crate::RunMode;
 use crate::authority_journal::{JournalOperation, RecordedOwner};
 use cfw_engine_api::authority_v1::{AuthorityState, RootContext, WireValidate};
 use serde::{Deserialize, Serialize};
@@ -81,7 +80,7 @@ impl ProxyRecoveryTarget {
         if self.root.installation_id.is_nil()
             || self.root.validate().is_err()
             || self.revision < 2
-            || self.operation.mode() != RunMode::SystemProxy
+            || !self.operation.mode().owns_system_proxy()
         {
             return Err(AuthorityError::Invalid);
         }

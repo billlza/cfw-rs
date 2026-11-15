@@ -133,7 +133,7 @@ impl ReadyReport {
                 } else {
                     0b111
                 }
-            || (mode == RunMode::Tunnel) != self.packet_pump_limits.is_some()
+            || mode.owns_tunnel() != self.packet_pump_limits.is_some()
             || self
                 .packet_pump_limits
                 .as_ref()

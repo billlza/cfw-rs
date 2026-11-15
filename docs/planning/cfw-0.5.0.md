@@ -3043,6 +3043,69 @@ Ready 3939/4958/3829/4028；第二轮准入 1880/1927/1953/1993、收到启动�
 2–3 秒（镜像打开时的实时扫描或 runner 的哈希吞吐）仍未归因，它现已不影响正确性，列为后续优化项。
 
 
+### 2026-11-15：SystemProxy 运行在失败启动与中断后回到 Off
+
+为组合模式通读系统代理的恢复路径时发现：SystemProxy 运行只有在 Desktop 证明“本用户的代理设置已
+恢复”之后才记为 Off，而这份证明在该模式的失败路径上从未被给出。运行于是停在 Stopping 或
+Recovering，应用拒绝之后的每一次启动。LocalProxy 与 Tunnel 没有这个缺口，它们的清理由服务独自证明。
+
+根因（源码与下述托管复现一致）：
+
+- **UserAgent 绑定之后失败的启动**（例如代理端口被占用，或启动途中被取消）。证明要求恢复记录
+  `system-proxy-restored-v1.json` 指向本次运行；从未接管代理的运行没有这份记录，
+  `observe_restoration` 返回 `RestorationMissing`，存在上一次运行的记录时返回 `OwnershipConflict`。
+- **UserAgent 或 Desktop 丢失的运行**（UserAgent 被终止、应用崩溃、用户注销）。只有健康运行的停止
+  路径会请求证明；`ProxyRecoveryTarget::from_recorded` 与整条恢复流程此前只有夹具调用。SYSTEM
+  不能读写另一账户的 WinINet 选项，产品里也没有任何一方去完成处于 Recovering 的运行；UserAgent
+  来不及恢复时，WinINet 继续指向无人监听的端口。
+
+复现（提交 `7b7b5f38`，先于修正提交）：安装版宿主验证新增三个客户端，各自要求经验证的 Off 与原样的
+代理设置——代理端口被占用的启动、代理已生效时终止 UserAgent（应用存活）、代理已生效后整个 Desktop
+进程退出再由新进程接手。失败的用例会由夹具自行恢复代理设置，避免产品缺陷同时切断 runner 的网络。
+[CI 43678303411](https://github.com/billlza/cfw-rs/actions/runs/43678303411) 的引擎作业在第一例失败，
+原文为 “a SystemProxy start that failed after its UserAgent was bound did not return to Off: no verified
+Off within 30 s”，清理错误为 “Windows proxy ownership requires reconciliation before another
+activation”，与第一条根因逐项吻合；后两例在它失败后未运行。
+
+修正（服务端、线协议与日志 schema 均不变）：
+
+- 新增占位记录 `system-proxy-pending-v1.json`。UserAgent 在 Bind 之前写入本次运行的上下文、配置摘要
+  与自身进程身份；此时若存在未了结的所有权记录或已有手动代理/PAC，运行在绑定前就被拒绝，经既有的
+  未绑定中止回到 Off，什么都没有改动。`activate` 在所有权记录持久化之后、第一次改动之前撤销占位
+  记录，因此两份记录中始终有一份说明运行走到了哪一步。
+- `observe_restoration`：存在所有权记录仍是 `OwnershipConflict`；指向本次运行的恢复记录单独决定结果
+  （照旧比较当前设置）；两者都没有时，只有本次运行自己的占位记录能证明它从未接管代理，这种情况下
+  不比较设置，因为它什么都没有改。其他运行或其他配置的占位记录不构成证明。
+- `ProxyRecoveryGrant::restore_and_observe`：仅清理用途的凭据可用。SYSTEM 签发凭据前已观察到整个
+  运行 Job 归零，不再有这些设置的属主，Desktop 先恢复运行遗留的设置（没有所有权记录时跳过），再观察。
+- `user_agent::proxy_recovery::complete` 统一三种情形：属主 Desktop 在原连接上完成已确认的停止
+  （`from_stopped`）、属主 Desktop 完成被 SYSTEM 转入恢复的运行（新增 `from_lost`，只接受自己租约
+  对应的记录）、以及同一账户的任何 Desktop 完成它发现的恢复中运行（`from_recorded`）。只有不留存
+  任何状态的类型化拒绝（`CleanupUnproven`、`Stale`）会被再次询问，间隔 50 毫秒；投递不确定的命令
+  从不重发。属主已亲见 UserAgent 退出，等到自己的期限；只是发现该运行的 Desktop 最多等 3 秒，
+  超时返回该拒绝，由下一次状态查询再问。
+- backend 的状态查询在 Authority 处于 Recovering 且没有仍在收尾的属主时调用
+  `InstalledDesktop::recover_proxy_run`，因此启动时的协调与“恢复后台服务”操作都会完成遗留的运行。
+  记录属于其他账户或不属于 SystemProxy 时返回原有的 Recovering 结果。
+
+本机验证：以 CI 的 lint 命令与特性集（另加默认特性）对 Windows 目标做 Clippy，均无告警，未链接也未
+运行；平台无关的 166 项引擎测试通过，新增的 `from_lost` 选择器测试经两处变异检验均失败。占位记录的
+五项单元测试与三个安装版用例只能在 Windows 上运行，本节写入时修正尚未有托管结果，结果记录在
+[PR #96](https://github.com/billlza/cfw-rs/pull/96)。
+
+仍未覆盖：
+
+- **整机重启或断电后的恢复（三种模式）**。服务重启后若没有任何进程保留运行 Job 的名称，观察结果是
+  `Unavailable`，按既有规则不能当作零计数；记录非 Off 的整机重启必然如此，LocalProxy、Tunnel 与
+  SystemProxy 都停在 Recovering，没有产品路径解除。应用在关机前来不及停止运行时（断电，或会话结束时
+  被系统终止）就会如此，SystemProxy 运行还会让 WinINet 继续指向已关闭的端口。需要服务端能证明
+  “记录的运行属于上一次开机”，另行修正。
+- 已确认的停止若属主的证明失败，运行保持 Stopping 直到应用退出；之后转入 Recovering，由下一个
+  Desktop 完成。
+- 恢复要求当前设置与记录完全一致。运行中断后用户或其他软件改过代理设置时返回 `SettingsChanged`，
+  不会自动覆盖；是否提供“放弃原设置”的操作需要产品决定。
+- 其他账户遗留的运行只能由该账户登录后完成；服务仍只接受控制台会话的用户。
+
 ### 2026-10-23：开放事项（需要用户决定或外部条件）
 
 以下事项不能由托管 CI 单独完成，或会改变发布身份、持久化契约与产品方向，保持开放：
@@ -3058,8 +3121,13 @@ Ready 3939/4958/3829/4028；第二轮准入 1880/1927/1953/1993、收到启动�
   持久恢复目标；Tunnel 租约没有对应记录，UserAgent 崩溃后 WinINet 会指向已关闭的端口。
   开放组合模式需要扩展持久化的租约／恢复契约（`AuthorityMode` 是与 macOS 共享的
   wire 枚举），属于需要单独决定的契约变更；在此之前 UI 与后端都明确拒绝组合模式。
+  2026-11-15 用户批准了方案：新增仅属于 Windows 的记录模式（macOS 契约不变，旧记录照常可读）；
+  启动时先建隧道再设系统代理，停止时先恢复系统代理；Off 需要隧道与系统代理两份证明；已有手动
+  代理或 PAC 时拒绝启动。实现以 2026-11-15 一节的恢复修正为前提，尚未完成，UI 与后端仍拒绝该模式。
 - **物理机验收**：睡眠／唤醒、整机重启与断电式恢复、真实登录启动、多用户、Wi-Fi／有线
   切换与长期运行需要用户确定的 Windows 测试机，云 VM 不能替代。
+  其中整机重启与断电不只是验收项：记录非 Off 时重启后的恢复目前没有产品路径（见 2026-11-15 一节），
+  需要先补服务端证明。
 - **签名与发布**：Authenticode 代码签名身份、更新签名密钥、正式发布与公共字节核对需要
   用户提供签名材料并授权发布。
 - **Windows 目标的供应链门禁**：macOS 供应链作业只审计 aarch64-apple-darwin 目标图；

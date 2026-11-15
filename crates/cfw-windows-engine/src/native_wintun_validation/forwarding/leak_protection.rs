@@ -9,7 +9,9 @@
 //! both on the engine refuses all but the last. A refusal must reach the
 //! socket at once, as a refused connection or a reset datagram socket, which
 //! needs the engine's reset or ICMP error to pass the pump's delivery policy;
-//! and the node must see nothing of a refused flow.
+//! and the node must see nothing of a refused flow. Each probe also records
+//! what Windows received meanwhile: the packets its adapter took from the
+//! pump, and the ICMP messages its stack counted for the family.
 use super::{
     super::{Result, network},
     socks::{Fixture, family, hex, transform},
@@ -20,6 +22,10 @@ use std::{
     io::{ErrorKind, Read, Write},
     net::{IpAddr, SocketAddr, TcpStream, UdpSocket},
     time::{Duration, Instant},
+};
+use windows_sys::Win32::{
+    NetworkManagement::IpHelper::{GetIcmpStatisticsEx, MIB_ICMP_EX_XPSP1},
+    Networking::WinSock::{AF_INET, AF_INET6},
 };
 
 /// DNS over TLS and DNS over QUIC. DNS leak protection refuses the port.
@@ -38,6 +44,9 @@ const CONNECT: Duration = Duration::from_secs(15);
 /// The node and the engine are on this host: an answer or a refusal is
 /// immediate, and nothing within this bound is neither.
 const ANSWER: Duration = Duration::from_secs(5);
+/// The destination unreachable type of ICMP and of ICMPv6.
+const DESTINATION_UNREACHABLE: usize = 3;
+const DESTINATION_UNREACHABLE_V6: usize = 1;
 
 /// Whether the node serves a connection to `target` for these probes.
 pub(super) fn tcp_target(target: SocketAddr) -> bool {
@@ -83,6 +92,55 @@ fn other_datagram(nonce: &str, purpose: &str, family: &str) -> [u8; DATAGRAM_BYT
     datagram
 }
 
+/// The adapter's count of packets taken from the pump.
+pub(super) type Inbound<'a> = &'a dyn Fn() -> Result<u64>;
+
+/// What Windows had received at one moment, for one family.
+#[derive(Clone, Copy)]
+struct Received {
+    adapter_packets: u64,
+    icmp_messages: u32,
+    icmp_errors: u32,
+    destination_unreachable: u32,
+}
+impl Received {
+    fn now(inbound: Inbound<'_>, target: SocketAddr) -> Result<Self> {
+        let (family, unreachable) = if target.is_ipv6() {
+            (AF_INET6, DESTINATION_UNREACHABLE_V6)
+        } else {
+            (AF_INET, DESTINATION_UNREACHABLE)
+        };
+        let mut statistics = MIB_ICMP_EX_XPSP1::default();
+        // SAFETY: the statistics structure is owned and writable for the call.
+        let status = unsafe { GetIcmpStatisticsEx(&mut statistics, u32::from(family)) };
+        if status != 0 {
+            return Err(format!("read the ICMP statistics: status {status}"));
+        }
+        let incoming = statistics.icmpInStats;
+        Ok(Self {
+            adapter_packets: inbound()?,
+            icmp_messages: incoming.dwMsgs,
+            icmp_errors: incoming.dwErrors,
+            destination_unreachable: incoming.rgdwTypeCount[unreachable],
+        })
+    }
+    /// What arrived since `before`. The ICMP counters are 32-bit counters
+    /// that wrap; the adapter's never goes back.
+    fn since(self, before: Self) -> Result<Value> {
+        let adapter_packets = self
+            .adapter_packets
+            .checked_sub(before.adapter_packets)
+            .ok_or("the adapter's receive counter went back")?;
+        Ok(json!({
+            "adapter_packets":adapter_packets,
+            "icmp_messages":self.icmp_messages.wrapping_sub(before.icmp_messages),
+            "icmp_errors":self.icmp_errors.wrapping_sub(before.icmp_errors),
+            "icmp_destination_unreachable":
+                self.destination_unreachable.wrapping_sub(before.destination_unreachable)
+        }))
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Outcome {
     /// The node answered: the engine forwarded the flow.
@@ -105,29 +163,38 @@ impl Outcome {
 struct Observation {
     outcome: Outcome,
     elapsed: Duration,
+    received: Value,
 }
 impl Observation {
-    fn since(started: Instant, outcome: Outcome) -> Self {
-        Self {
-            outcome,
-            elapsed: started.elapsed(),
-        }
-    }
     fn receipt(&self, target: SocketAddr) -> Value {
         json!({"target":target.to_string(),"outcome":self.outcome.label(),
-        "elapsed_ms":self.elapsed.as_millis()})
+        "elapsed_ms":self.elapsed.as_millis(),"windows_received":self.received})
     }
+}
+
+/// Run one probe and note what Windows received while it ran.
+fn observe(
+    inbound: Inbound<'_>,
+    target: SocketAddr,
+    probe: impl FnOnce() -> Result<Outcome>,
+) -> Result<Observation> {
+    let before = Received::now(inbound, target)?;
+    let started = Instant::now();
+    let outcome = probe()?;
+    let elapsed = started.elapsed();
+    Ok(Observation {
+        outcome,
+        elapsed,
+        received: Received::now(inbound, target)?.since(before)?,
+    })
 }
 
 /// One TCP connection from the adapter's own address. A served one carries
 /// this run's token and reads the node's answer to its end.
-fn connect(nonce: &str, local: IpAddr, target: SocketAddr) -> Result<Observation> {
-    let started = Instant::now();
+fn connect(nonce: &str, local: IpAddr, target: SocketAddr) -> Result<Outcome> {
     let mut stream = match TcpStream::connect_timeout(&target, CONNECT) {
         Ok(stream) => stream,
-        Err(error) if error.kind() == ErrorKind::ConnectionRefused => {
-            return Ok(Observation::since(started, Outcome::Refused));
-        }
+        Err(error) if error.kind() == ErrorKind::ConnectionRefused => return Ok(Outcome::Refused),
         Err(error) => return Err(format!("TCP to {target}: {error}")),
     };
     stream
@@ -151,33 +218,31 @@ fn connect(nonce: &str, local: IpAddr, target: SocketAddr) -> Result<Observation
     if answer != transform(&token) {
         return Err(format!("TCP answer from {target} is not the node's"));
     }
-    Ok(Observation::since(started, Outcome::Served))
+    Ok(Outcome::Served)
 }
 
 /// One datagram from a new socket on the adapter's own address, so the
 /// engine sees it as the first of a session, and what came back.
-fn datagram(local: IpAddr, target: SocketAddr, payload: &[u8]) -> Result<Observation> {
+fn datagram(local: IpAddr, target: SocketAddr, payload: &[u8]) -> Result<Outcome> {
     let socket = UdpSocket::bind(SocketAddr::new(local, 0)).map_err(|error| error.to_string())?;
     socket
         .connect(target)
         .and_then(|()| socket.set_read_timeout(Some(ANSWER)))
         .map_err(|error| error.to_string())?;
-    let started = Instant::now();
     if socket.send(payload).map_err(|error| error.to_string())? != payload.len() {
         return Err(format!("UDP to {target} did not accept the datagram"));
     }
     let mut buffer = [0u8; 2 * DATAGRAM_BYTES];
-    let outcome = match socket.recv(&mut buffer) {
-        Ok(received) if buffer[..received] == transform(payload) => Outcome::Served,
-        Ok(_) => return Err(format!("UDP answer from {target} is not the node's")),
+    match socket.recv(&mut buffer) {
+        Ok(received) if buffer[..received] == transform(payload) => Ok(Outcome::Served),
+        Ok(_) => Err(format!("UDP answer from {target} is not the node's")),
         // Windows reports an ICMP port unreachable for a connected socket so.
-        Err(error) if error.kind() == ErrorKind::ConnectionReset => Outcome::Refused,
+        Err(error) if error.kind() == ErrorKind::ConnectionReset => Ok(Outcome::Refused),
         Err(error) if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {
-            Outcome::Silent
+            Ok(Outcome::Silent)
         }
-        Err(error) => return Err(format!("UDP answer from {target}: {error}")),
-    };
-    Ok(Observation::since(started, outcome))
+        Err(error) => Err(format!("UDP answer from {target}: {error}")),
+    }
 }
 
 /// One datagram probe: where it goes, what it carries and whether the
@@ -226,9 +291,35 @@ fn remotes() -> [(IpAddr, IpAddr); 2] {
     ]
 }
 
+/// What the probes of one case observed, and where that differs from what
+/// the switches must do.
+pub(super) struct Probes {
+    pub(super) observed: Value,
+    differences: Vec<String>,
+}
+impl Probes {
+    /// The case's verdict on its probes, given once the rest of the case
+    /// has been checked.
+    pub(super) fn verdict(&self) -> Result<()> {
+        if self.differences.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "leak protection {}: {}; observed {}",
+            if self.observed["enabled"] == true {
+                "on"
+            } else {
+                "off"
+            },
+            self.differences.join(", "),
+            self.observed
+        ))
+    }
+}
+
 /// Every probe in both families. Each runs whatever the others showed, so a
 /// failure reports the whole observation.
-pub(super) fn probe(fixture: &Fixture, enabled: bool) -> Result<Value> {
+pub(super) fn probe(fixture: &Fixture, inbound: Inbound<'_>, enabled: bool) -> Probes {
     let nonce = fixture.nonce();
     let expected = |refusable: bool| {
         if enabled && refusable {
@@ -263,29 +354,19 @@ pub(super) fn probe(fixture: &Fixture, enabled: bool) -> Result<Value> {
                 probes.insert(name.to_owned(), receipt);
             };
         let target = SocketAddr::new(remote, ENCRYPTED_DNS_PORT);
-        judge(
-            "encrypted_dns_tcp",
-            target,
-            connect(nonce, local, target),
-            true,
-        );
+        let seen = observe(inbound, target, || connect(nonce, local, target));
+        judge("encrypted_dns_tcp", target, seen, true);
         for probe in datagrams(nonce, family) {
             let target = SocketAddr::new(remote, probe.port);
-            let seen = datagram(local, target, &probe.payload);
+            let seen = observe(inbound, target, || datagram(local, target, &probe.payload));
             judge(probe.name, target, seen, probe.refusable);
         }
         observed.insert(family.to_owned(), Value::Object(probes));
     }
     observed.insert("enabled".into(), json!(enabled));
-    let observed = Value::Object(observed);
-    if differences.is_empty() {
-        Ok(observed)
-    } else {
-        Err(format!(
-            "leak protection {}: {}; observed {observed}",
-            if enabled { "on" } else { "off" },
-            differences.join(", ")
-        ))
+    Probes {
+        observed: Value::Object(observed),
+        differences,
     }
 }
 

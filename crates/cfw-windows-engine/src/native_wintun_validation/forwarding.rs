@@ -367,6 +367,13 @@ fn exercise(
         .map_err(|error| error.to_string())?;
     let before =
         library::counters(adapter.luid, adapter.name).map_err(|error| error.to_string())?;
+    // The adapter's count of packets taken from the pump, for the leak
+    // protection probes' record of what came back to each of them.
+    let inbound = || {
+        library::counters(adapter.luid, adapter.name)
+            .map(|counters| counters.in_unicast_packets)
+            .map_err(|error| error.to_string())
+    };
     let (traffic, observed, stopped, retired) = thread::scope(|scope| {
         let pump = match PacketPump::start(scope, &mut *session, server, policy) {
             Ok(pump) => pump,
@@ -383,8 +390,11 @@ fn exercise(
         let control = pump.control();
         // The leak protection probes follow the bulk exchange on the same
         // engine and pump.
-        let traffic = exchange::exchange(&fixture, mtu).and_then(|bulk| {
-            leak_protection::probe(&fixture, case.leak_protection).map(|probes| (bulk, probes))
+        let traffic = exchange::exchange(&fixture, mtu).map(|bulk| {
+            (
+                bulk,
+                leak_protection::probe(&fixture, &inbound, case.leak_protection),
+            )
         });
         let observed = traffic
             .as_ref()
@@ -401,6 +411,15 @@ fn exercise(
             pump.stop().map(|_| None).map_err(|error| error.to_string())
         };
         (traffic, observed, stopped, Some(retired))
+    });
+    // The leak protection observation is kept before any verdict on the case.
+    let traffic = traffic.and_then(|(bulk, probes)| {
+        record(
+            run.output,
+            &format!("{}-leak-protection.json", case.label()),
+            &probes.observed,
+        )
+        .map(|()| (bulk, probes))
     });
     let mut failures = Vec::new();
     let traffic = traffic
@@ -469,13 +488,14 @@ fn exercise(
     let observations = fixture.finish()?;
     require_fixture_flows(&observations, mtu)?;
     leak_protection::require_flows(&observations, &nonce, case.leak_protection)?;
+    probes.verdict()?;
     drop(process);
     std::fs::remove_dir_all(&runtime.0)
         .map_err(|error| format!("remove the engine runtime directory: {error}"))?;
     Ok(json!({
         "nonce":nonce,"engine_process_id":running.process_id,"configuration_digest":configuration_digest,
         "engine_observed_running_after_traffic":true,"engine_stopped_cleanly":true,
-        "traffic":traffic,"leak_protection":probes,"pump":{
+        "traffic":traffic,"leak_protection":probes.observed,"pump":{
             "to_engine":{"packets":report.to_engine.packets,"bytes":report.to_engine.bytes,"largest_packet":report.to_engine.largest_packet},
             "to_system":{"packets":report.to_system.packets,"bytes":report.to_system.bytes,"largest_packet":report.to_system.largest_packet},
             "ring_full_waits":report.ring_full_waits,"peer_close_code":retirement.peer_close_code(),

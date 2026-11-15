@@ -200,6 +200,13 @@ jobs:
           cargo build --locked -p cfw-windows-engine --features native-service-validation --example native-wintun-probe 2>&1 |
             Tee-Object -FilePath (Join-Path $artifactRoot 'tunnel-forwarding-build.log')
           if ($LASTEXITCODE -ne 0) { throw 'Wintun forwarding probe build failed' }
+          # Whether an ICMP error reaches a Windows socket also depends on the
+          # firewall. Its state is kept beside the receipts, read only.
+          & {
+            Get-NetFirewallProfile | Format-List Name, Enabled, DefaultInboundAction, DefaultOutboundAction
+            Get-NetFirewallRule -Direction Inbound -Enabled True | Where-Object DisplayName -Like '*Unreachable*' |
+              Format-List DisplayName, Profile, Action
+          } | Out-String -Width 200 | Set-Content -LiteralPath (Join-Path $artifactRoot 'tunnel-forwarding-firewall.txt') -Encoding utf8NoBOM
           $output = Join-Path $artifactRoot 'tunnel-forwarding'
           $start = [Diagnostics.ProcessStartInfo]::new((Join-Path $PWD 'target/debug/examples/native-wintun-probe.exe'))
           $start.UseShellExecute = $false

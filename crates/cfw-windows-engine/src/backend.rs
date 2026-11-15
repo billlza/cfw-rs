@@ -161,6 +161,16 @@ impl Active {
             .ok_or_else(|| fail(Kind::Internal, "missing runtime result"))?
             .clone()
     }
+    /// Whether the owner has delivered its cleanup result, without waiting.
+    fn has_ended(&mut self) -> bool {
+        if self.finished.is_none()
+            && let Ok((prepared, result)) = self.completion.try_recv()
+        {
+            self.owner_prepared = Some(prepared);
+            self.finished = Some(result);
+        }
+        self.finished.is_some()
+    }
     fn matches(&self, runtime: &RuntimeIdentity) -> bool {
         runtime.owner == owner(self.mode)
             && runtime.ready
@@ -527,10 +537,22 @@ fn run_owned(
     (Some(owner), result)
 }
 fn query(shared: &Shared, state: &mut State, deadline: Instant) -> Result<NativeEngineStatus> {
-    let snapshot = shared
+    let mut snapshot = shared
         .desktop
         .observe_authority(deadline)
         .map_err(host_error)?;
+    // A SystemProxy run whose UserAgent or Desktop was lost waits in recovery
+    // for a Desktop of its account. An owner still at work completes its own
+    // run; when it has ended, or none exists, this Desktop completes it here.
+    if snapshot.state == AuthorityState::Recovering
+        && state.active.as_mut().is_none_or(Active::has_ended)
+        && let Some(off) = shared
+            .desktop
+            .recover_proxy_run(deadline.min(Instant::now() + NATIVE_LIMIT))
+            .map_err(host_error)?
+    {
+        snapshot = off;
+    }
     if snapshot.state == AuthorityState::Off {
         if snapshot.revision.is_none() || snapshot.root.is_none() {
             return Err(fail(

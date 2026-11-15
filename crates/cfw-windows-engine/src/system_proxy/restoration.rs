@@ -4,8 +4,10 @@ use sha2::{Digest, Sha256};
 const NAME: &str = "system-proxy-restored-v1.json";
 const MAX_BYTES: usize = 4096;
 
-/// A fresh WinINet comparison with a private, durable restoration record. The
-/// process fields identify the former owner; they do not prove its retirement.
+/// A fresh WinINet comparison with a private, durable restoration record, or
+/// the pending record of a run that never took the proxy. The process fields
+/// identify the former owner, or the UserAgent that wrote the pending record;
+/// they do not prove its retirement.
 /// No serde/default/raw constructor may turn a caller's claim into this proof.
 pub struct ProxyRestorationObservation {
     context: EngineCommandContext,
@@ -14,6 +16,20 @@ pub struct ProxyRestorationObservation {
     process_created_at: u64,
 }
 impl ProxyRestorationObservation {
+    /// A run that never took the proxy, by its own pending record.
+    pub(super) fn never_applied(
+        context: EngineCommandContext,
+        configuration_digest: String,
+        process_id: u32,
+        process_created_at: u64,
+    ) -> Self {
+        Self {
+            context,
+            configuration_digest,
+            process_id,
+            process_created_at,
+        }
+    }
     pub fn context(&self) -> &EngineCommandContext {
         &self.context
     }
@@ -73,11 +89,7 @@ impl RestorationRecord {
         if self.version != 1
             || self.user_sid != sid
             || !valid_context(&self.context)
-            || self.configuration_digest.len() != 64
-            || !self
-                .configuration_digest
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || !valid_digest(&self.configuration_digest)
             || self.process_id == 0
             || self.process_created_at == 0
         {
@@ -114,6 +126,8 @@ impl WindowsSystemProxy {
     /// Reopen after the restoring process exits, using the installation-owned
     /// persistent directory and exact expected runtime identity. Missing records,
     /// active ownership, mismatched generations and changed OS values are errors.
+    /// A run that never took the proxy is observed by its pending record: it
+    /// changed nothing, so no settings are compared for it.
     pub fn observe_restoration(
         &self,
         context: &EngineCommandContext,
@@ -123,13 +137,23 @@ impl WindowsSystemProxy {
             return Err(ProxyError::RuntimeMismatch);
         }
         self.locked(|transaction| {
-            if Record::read(transaction, self.identity.user_sid())?.is_some() {
+            let sid = self.identity.user_sid();
+            if Record::read(transaction, sid)?.is_some() {
                 return Err(ProxyError::OwnershipConflict);
             }
-            let record = RestorationRecord::read(transaction, self.identity.user_sid())?;
-            if record.context != *context || record.configuration_digest != configuration_digest {
-                return Err(ProxyError::OwnershipConflict);
-            }
+            let (record, unproven) = match RestorationRecord::read(transaction, sid) {
+                Ok(record) => (Some(record), ProxyError::OwnershipConflict),
+                Err(ProxyError::RestorationMissing) => (None, ProxyError::RestorationMissing),
+                Err(error) => return Err(error),
+            };
+            let Some(record) = record.filter(|record| {
+                record.context == *context && record.configuration_digest == configuration_digest
+            }) else {
+                // This run restored nothing. Only its own record of never
+                // having taken the proxy accounts for that.
+                return pending::observe(transaction, sid, context, configuration_digest)?
+                    .ok_or(unproven);
+            };
             if settings_digest(&native::observe()?)? != record.original_settings_sha256 {
                 return Err(ProxyError::SettingsChanged);
             }

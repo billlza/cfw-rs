@@ -63,9 +63,9 @@ fn proxy_kind(error: &crate::ProxyError) -> Kind {
         crate::ProxyError::PolicyDenied
         | crate::ProxyError::UnsafeUser
         | crate::ProxyError::Identity(_) => Kind::PermissionDenied,
-        crate::ProxyError::InvalidJournal | crate::ProxyError::InvalidRestorationRecord => {
-            Kind::SystemProxyJournalFailed
-        }
+        crate::ProxyError::InvalidJournal
+        | crate::ProxyError::InvalidRestorationRecord
+        | crate::ProxyError::InvalidPendingRecord => Kind::SystemProxyJournalFailed,
         crate::ProxyError::SettingsChanged | crate::ProxyError::OwnershipConflict => {
             Kind::CompensationConflict
         }

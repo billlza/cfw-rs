@@ -39,10 +39,22 @@ impl ProxyRecoveryTarget {
             return Err(AuthorityError::CleanupUnproven);
         }
         let value = Self::from_scope(scope)?;
-        if value.root != context.operation.root || value.operation != context.recorded()? {
+        value.names(context)?;
+        Ok(value)
+    }
+    /// Select the run of `context` after SYSTEM took it into recovery, for the
+    /// Desktop that started it. Like any recovery selector it inherits nothing
+    /// from the lost lease.
+    pub fn from_lost(scope: &RecordedRuntimeScope, context: &LeaseContext) -> Result<Self> {
+        let value = Self::from_recorded(scope)?;
+        value.names(context)?;
+        Ok(value)
+    }
+    fn names(&self, context: &LeaseContext) -> Result<()> {
+        if self.root != context.operation.root || self.operation != context.recorded()? {
             return Err(AuthorityError::Stale);
         }
-        Ok(value)
+        Ok(())
     }
     fn from_scope(scope: &RecordedRuntimeScope) -> Result<Self> {
         let value = Self {

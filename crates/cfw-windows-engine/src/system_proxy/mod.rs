@@ -2,6 +2,7 @@
 //! service/engine authority: a settings receipt is never a global-Off proof.
 mod lan;
 mod native;
+mod pending;
 mod restoration;
 pub use lan::{LanProxyObservation, observe_lan_proxy_ports, observe_lan_proxy_state};
 pub use restoration::ProxyRestorationObservation;
@@ -55,6 +56,8 @@ pub enum ProxyError {
     RestorationMissing,
     #[error("Windows proxy restoration record is invalid")]
     InvalidRestorationRecord,
+    #[error("Windows proxy pending-ownership record is invalid")]
+    InvalidPendingRecord,
     #[error("Windows proxy request does not match the running engine")]
     RuntimeMismatch,
     #[error("Windows proxy publication may have changed settings; recovery is required: {0}")]
@@ -162,17 +165,20 @@ fn valid_context(context: &EngineCommandContext) -> bool {
         && context.config_epoch > 0
         && context.generation > 0
 }
+/// A configuration identity as every record states it: lowercase SHA-256.
+fn valid_digest(digest: &str) -> bool {
+    digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
 
 impl Record {
     fn encode(&self, sid: &str) -> Result<Vec<u8>, ProxyError> {
         if self.version != 1
             || self.user_sid != sid
             || !valid_context(&self.context)
-            || self.config_digest.len() != 64
-            || !self
-                .config_digest
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            || !valid_digest(&self.config_digest)
             || self.process_id == 0
             || self.process_created_at == 0
             || self.endpoint.port() == 0
@@ -444,6 +450,8 @@ impl WindowsSystemProxy {
                     &record.encode(self.identity.user_sid())?,
                     MAX_JOURNAL_BYTES,
                 )?;
+                // From here the ownership record says how far this run got.
+                pending::retire(transaction)?;
                 if native::observe()? != record.before {
                     return Err(ProxyError::SettingsChanged);
                 }

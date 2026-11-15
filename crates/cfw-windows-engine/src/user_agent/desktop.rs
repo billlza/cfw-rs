@@ -644,9 +644,10 @@ impl DesktopUserAgent {
         }
         self.wait_global_off(deadline)
     }
-    /// Finish a normally acknowledged SystemProxy stop on its original
-    /// connection. Keep this owner/runtime reference through the final reply;
-    /// failed or uncertain commands are never replayed here.
+    /// Complete this owner's SystemProxy run on its original connection once
+    /// its UserAgent has exited: a stop the UserAgent acknowledged, or a run
+    /// SYSTEM took into recovery because the UserAgent was lost. Keep this
+    /// owner/runtime reference through the final reply; see `proxy_recovery`.
     pub fn reconcile_system_proxy_stop(
         &mut self,
         proxy: &crate::WindowsSystemProxy,
@@ -659,22 +660,15 @@ impl DesktopUserAgent {
             return Err(DesktopError::State("SystemProxy owner has not exited"));
         }
         self.last_authority = None;
-        let Response::RuntimeScope(scope) = self.command(Command::ReadRuntimeScope, deadline)?
-        else {
-            return Err(DesktopError::Response);
-        };
-        let target = crate::authority::ProxyRecoveryTarget::from_stopped(&scope, &self.context)?;
-        let Response::ProxyRecoveryGranted(grant) =
-            self.command(Command::BeginProxyCleanup(target), deadline)?
-        else {
-            return Err(DesktopError::Response);
-        };
-        let report = grant.observe_restoration(proxy)?;
-        let Response::ProxyCleanupReconciled(receipt) =
-            self.command(Command::ReconcileProxyCleanup(report), deadline)?
-        else {
-            return Err(DesktopError::Response);
-        };
+        let authority = self
+            .authority
+            .as_mut()
+            .ok_or(DesktopError::State("authority connection unavailable"))?;
+        let receipt =
+            super::proxy_recovery::complete(authority, proxy, Some(&self.context), deadline)?
+                .ok_or(DesktopError::State(
+                    "the recorded run does not own the proxy settings",
+                ))?;
         self.last_authority = Some(receipt.snapshot().clone());
         Ok(receipt)
     }
@@ -736,7 +730,11 @@ fn retry_stale_revocation(mut attempt: impl FnMut() -> Result<Revocation>) -> Re
         "authority revision kept changing during stop",
     ))
 }
-fn send(authority: &mut AuthorityChannel, command: Command, deadline: Instant) -> Result<Response> {
+pub(super) fn send(
+    authority: &mut AuthorityChannel,
+    command: Command,
+    deadline: Instant,
+) -> Result<Response> {
     check_deadline(deadline)?;
     Ok(authority.request(
         Request::new(command)?,

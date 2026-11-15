@@ -14,6 +14,8 @@ pub mod launch_channel;
 #[cfg(windows)]
 pub mod launcher;
 #[cfg(windows)]
+pub(crate) mod proxy_recovery;
+#[cfg(windows)]
 mod runtime;
 #[cfg(windows)]
 mod storage;

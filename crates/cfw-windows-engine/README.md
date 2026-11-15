@@ -231,9 +231,11 @@ macOS, and the pump carries their refusals back. With the switches on, a
 connection to port 853 is reset at its socket at once. A refused datagram, STUN
 or UDP to a mail port, draws an ICMP port unreachable report from the engine;
 the delivery policy admits it, since it quotes a packet Windows sent from the
-adapter, and Windows' ICMP layer counts it. The hosted Windows Server 2025
-runner then discards it instead of telling the socket, so the application waits
-for its own timeout. Windows also checks that the adapter's on-link neighbours
+adapter, and Windows' ICMP layer counts it. On the hosted Windows Server 2025
+runner, Windows Defender Firewall then drops it at the filtering platform's
+inbound ICMP error layer (filter origin `Query User Default`: the probe program
+has no inbound rule), so the socket is never told and the program waits for its
+own timeout. Windows also checks that the adapter's on-link neighbours
 are reachable, and gVisor advertises every address the engine routes; the
 policy refuses those advertisements with the rest of neighbour discovery and
 counts them apart (`RefusalReason::Neighbor`). `native-wintun-probe

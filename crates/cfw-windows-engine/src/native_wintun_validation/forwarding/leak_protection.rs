@@ -12,10 +12,11 @@
 //! datagram must go unanswered while the engine's port unreachable report
 //! reaches Windows: the pump delivers exactly that report and the ICMP layer
 //! counts it. Whether Windows then resets the socket is recorded, not
-//! required; hosted Windows discards the report instead. Each probe also
-//! records what happened meanwhile: what the pump carried and refused each
-//! way, the adapter's counters, and what the Windows IP, UDP and ICMP layers
-//! counted for the family.
+//! required: on the hosted runner the firewall drops the report, since this
+//! program has no inbound rule. Each probe also records what happened
+//! meanwhile: what the pump carried and refused each way, the adapter's
+//! counters, and what the Windows IP, UDP and ICMP layers counted for the
+//! family.
 use super::{
     super::{Result, network},
     socks::{Fixture, family, hex, transform},

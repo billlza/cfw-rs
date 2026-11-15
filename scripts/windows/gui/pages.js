@@ -37,6 +37,18 @@
     const heading = await page.locator('#page-title').innerText();
     const content = await page.locator('#page').innerText();
     if (!heading.trim() || !content.trim()) throw new Error(`Empty shared page: ${id}`);
+    // The sidebar shows the connection state as a light beside its name.
+    const sidebar = await page.evaluate(() => {
+      const light = document.getElementById('sidebar-status-dot').getBoundingClientRect();
+      const label = document.getElementById('sidebar-status');
+      const name = label.getBoundingClientRect();
+      const bounds = document.querySelector('.sidebar').getBoundingClientRect();
+      return { state: label.textContent.trim(), width: light.width, height: light.height,
+        inside: light.left >= bounds.left && light.right <= name.left && name.right <= bounds.right };
+    });
+    if (sidebar.state !== 'Disconnected' || sidebar.width < 12 || sidebar.height < 12 || !sidebar.inside) {
+      throw new Error(`The sidebar does not show its connection light on ${id}: ${JSON.stringify(sidebar)}`);
+    }
     if (id === 'general') {
       const tunHelp = page.locator('[data-action="tun-info"]');
       if ((await tunHelp.getAttribute('title')) !== 'TUN Mode routes device traffic through a Windows virtual network adapter.') {
@@ -88,6 +100,11 @@
           content.includes('System Settings › Network') ||
           !content.includes('Manage DNS for each active adapter in Windows Settings')) {
         throw new Error('Fresh Windows preferences contain foreign font or DNS instructions');
+      }
+      if (backend.engine.capabilities.tunnel !== true ||
+          backend.platform.tun_strategy !== 'Wintun adapter created and routed by the Windows authority service' ||
+          !content.includes(backend.platform.tun_strategy)) {
+        throw new Error('Windows preferences do not describe the tunnel the backend offers');
       }
     }
     await page.screenshot({ path: `${id}.png` });

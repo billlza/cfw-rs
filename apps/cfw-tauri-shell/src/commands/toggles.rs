@@ -85,7 +85,7 @@ pub(crate) fn current_platform_design() -> PlatformDesign {
             system_proxy_strategy: "Current-user Windows proxy with owned restoration",
             helper_strategy: "Windows authority service and ordinary-user Agent",
             startup_strategy: "Current-user sign-in registration; Windows controls startup approval",
-            tun_strategy: "Not available in this development build",
+            tun_strategy: "Wintun adapter created and routed by the Windows authority service",
         }
     }
 }

@@ -251,7 +251,18 @@ pub(super) fn run(name: &str, hex: &str) -> Result<()> {
                     }))?;
                     Some(receipt)
                 } else { None };
-                Ok((finished, cleanup))
+                // The Job can still hold an exiting member when the Agent's exit is
+                // seen, so the acknowledgement may precede Off. The application
+                // waits for Off with this same call.
+                let settled = if mode == ProjectionMode::SystemProxy {
+                    None
+                } else {
+                    let off = operation
+                        .wait_global_off(Instant::now() + LIMIT)
+                        .map_err(|e| e.to_string())?;
+                    Some(off)
+                };
+                Ok((finished, cleanup, settled))
             });
             let exercised = (|| {
                 let ready = ready_receiver
@@ -341,22 +352,53 @@ pub(super) fn run(name: &str, hex: &str) -> Result<()> {
                     return Err(format!("{test}; Desktop lifecycle: {cleanup}"));
                 }
             };
-            let (finished, cleanup) = finished;
+            let (finished, cleanup, settled) = finished;
             let stopped = finished.stopped();
             let exit = stopped
                 .agent_exit()
                 .ok_or("Desktop stop omitted its agent exit")?;
+            let acknowledged = stopped.authority().state;
+            // A SystemProxy stop stays Stopping until this Desktop proves the
+            // restoration. Any other stop is Stopping until its Job is empty.
+            let admissible = acknowledged == AuthorityState::Stopping
+                || (mode != ProjectionMode::SystemProxy && acknowledged == AuthorityState::Off);
             if finished.reason() != StopReason::Requested
                 || stopped.context() != &context
-                || stopped.authority().state
-                    != if mode == ProjectionMode::SystemProxy {
-                        AuthorityState::Stopping
-                    } else {
-                        AuthorityState::Off
-                    }
+                || !admissible
                 || exit.exit_code() != 0
             {
-                return Err("Desktop stop acknowledgement differs from its mode contract".into());
+                // Each of these facts is a different defect; say which one differed.
+                return Err(format!(
+                    "Desktop stop acknowledgement differs from its mode contract: mode {mode:?}, \
+                     reason {:?}, authority {acknowledged:?}, agent exit code {}, lease context {}",
+                    finished.reason(),
+                    exit.exit_code(),
+                    if stopped.context() == &context {
+                        "unchanged"
+                    } else {
+                        "changed"
+                    },
+                ));
+            }
+            if mode != ProjectionMode::SystemProxy {
+                // Off follows a Stopping acknowledgement by exactly one record.
+                let published = if acknowledged == AuthorityState::Off {
+                    stopped.authority().revision
+                } else {
+                    stopped.authority().revision.and_then(|v| v.checked_add(1))
+                };
+                let off = settled.as_ref().is_some_and(|snapshot| {
+                    snapshot.state == AuthorityState::Off
+                        && snapshot.root.as_ref() == Some(&context.operation.root)
+                        && snapshot.revision == published
+                });
+                if !off {
+                    return Err(format!(
+                        "Desktop stop did not settle at the Off record that follows its \
+                         acknowledgement: acknowledged {:?}, settled {settled:?}",
+                        stopped.authority(),
+                    ));
+                }
             }
             if mode == ProjectionMode::SystemProxy
                 && cleanup.as_ref().is_none_or(|receipt| {

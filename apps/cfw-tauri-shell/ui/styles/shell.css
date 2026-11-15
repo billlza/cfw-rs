@@ -184,6 +184,8 @@
 
 .connected-line i {
   display: block;
+  /* A label wider than the line must not squeeze the light away. */
+  flex: none;
   width: 12px;
   height: 12px;
   border-radius: 50%;

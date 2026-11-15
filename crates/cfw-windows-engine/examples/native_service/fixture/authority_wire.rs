@@ -8,12 +8,11 @@ use cfw_windows_engine::authority::{
     AuthorityChannel, AuthorityError, AuthorizedReply, CleanupEvidence, PrepareRequest,
     ReadyReport, RuntimeProcessObservation, RuntimeProcessState, StoppedReport, WindowsAuthority,
     wire::{
-        BindRequest, Command, MAX_MESSAGE_BYTES, Rejection, Request, Response, StopRequest,
-        TicketMaterial, WireError,
+        BindRequest, Command, Rejection, Request, Response, StopRequest, TicketMaterial, WireError,
     },
 };
 use cfw_windows_engine::{AuthenticatedServiceRequest, LocalServiceConnection};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::sync::Arc;
 use zeroize::Zeroizing;
 
@@ -400,19 +399,7 @@ pub(super) fn run(name: &str, image: &Path, digest: [u8; 32]) -> Result<()> {
     Ok(())
 }
 pub(super) fn agent(name: &str, image: &Path, digest: [u8; 32]) -> Result<()> {
-    let mut bytes = Zeroizing::new(vec![0; MAX_MESSAGE_BYTES + 1]);
-    let mut length = 0;
-    let mut input = std::io::stdin().lock();
-    while length < bytes.len() {
-        let count = input
-            .read(&mut bytes[length..])
-            .map_err(|e| e.to_string())?;
-        if count == 0 {
-            break;
-        }
-        length += count;
-    }
-    let bind = Request::decode(&bytes[..length]).map_err(|e| e.to_string())?;
+    let bind = agent_handoff::read()?;
     let Command::BindUserAgent(material) = bind.command() else {
         return Err("agent handoff was not a bind request".into());
     };
@@ -472,7 +459,7 @@ pub(super) fn agent(name: &str, image: &Path, digest: [u8; 32]) -> Result<()> {
     let bound = channel
         .confirm_binding_for_validation(bound, Instant::now() + LIMIT)
         .map_err(|e| e.to_string())?;
-    drop((bound, bytes));
+    drop(bound);
     match channel.request(
         Request::new(Command::LoadLineage).map_err(|e| e.to_string())?,
         Instant::now() + LIMIT,

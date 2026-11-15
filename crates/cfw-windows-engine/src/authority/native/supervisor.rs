@@ -87,4 +87,10 @@ impl WindowsAuthority {
         }
         Ok(self.snapshot())
     }
+    /// The supervision tick itself, for a validation service that hosts this
+    /// Authority in place of the product's service loop.
+    #[cfg(feature = "native-service-validation")]
+    pub fn supervise_for_validation(&mut self) -> Result<AuthoritySnapshot> {
+        self.supervise()
+    }
 }

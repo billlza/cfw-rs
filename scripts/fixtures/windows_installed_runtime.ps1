@@ -317,6 +317,19 @@ try {
             }
             $probes += $probe
             if ($iteration -eq 0) {
+                # A disposable SYSTEM service hosts the real Authority with the
+                # installed Wintun. Its UserAgent takes the endpoint offer and
+                # ends its lease; SYSTEM alone must bring each record to Off.
+                & $DesktopFixture --installed-unconfirmed-endpoint-validation
+                if ($LASTEXITCODE -ne 0) { throw 'A lease that ended with an unconfirmed tunnel endpoint did not reach Off' }
+                foreach ($ending in @('lost', 'stopped')) {
+                    $settled = Get-Content -LiteralPath (Join-Path $Receipts "unconfirmed-endpoint-$ending.wire-validation.json") -Raw | ConvertFrom-Json
+                    if ($settled.source -cne $Source -or $settled.ending -cne $ending -or $settled.state -cne 'off' -or
+                        $settled.adapter_present -or $settled.endpoint_confirmations -ne 0 -or $settled.open_tunnel_requests -lt 2) {
+                        throw "Unconfirmed endpoint receipt is incomplete: $ending"
+                    }
+                }
+                $cases.Add('system_brings_a_lease_with_an_unconfirmed_tunnel_endpoint_to_off')
                 & $DesktopFixture --installed-maintenance-validation
                 if ($LASTEXITCODE -ne 0) { throw 'Installed SYSTEM service maintenance validation failed' }
                 $maintenance = Get-Content -LiteralPath (Join-Path $Receipts 'installed-service-maintenance.json') -Raw | ConvertFrom-Json

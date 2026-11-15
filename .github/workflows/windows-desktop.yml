@@ -2,7 +2,8 @@ name: Windows desktop development build
 
 on:
   push:
-    branches: [lza/cfw-0.5.0-windows-shell]
+    branches: [main, master]
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -23,12 +24,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - name: Verify source and read toolchain pins
         id: pins
         env:
-          EXPECTED_SOURCE: ${{ github.sha }}
+          EXPECTED_SOURCE: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
         run: |
           $source = git rev-parse HEAD
           if ($LASTEXITCODE -ne 0 -or $source -cne $env:EXPECTED_SOURCE) { throw 'Source identity mismatch' }
@@ -127,7 +128,7 @@ jobs:
       - name: Verify native desktop process observations
         env:
           CFW_NATIVE_PROCESS_OBSERVATION_TESTS: '1'
-          CFW_NATIVE_SERVICE_SOURCE: ${{ github.sha }}
+          CFW_NATIVE_SERVICE_SOURCE: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
         run: |
           cargo clippy --locked -p cfw-windows-engine --all-targets --features native-engine-validation,native-service-validation -- -D warnings 2>&1 |
             Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-process-clippy.log')
@@ -144,7 +145,7 @@ jobs:
       - name: Verify native shell dispatch
         env:
           CFW_NATIVE_SHELL_TESTS: '1'
-          CFW_NATIVE_SHELL_SOURCE: ${{ github.sha }}
+          CFW_NATIVE_SHELL_SOURCE: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
         run: |
           cargo clippy --locked -p cfw-platform --all-targets --features native-shell-validation -- -D warnings 2>&1 |
             Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/native-shell-clippy.log')
@@ -303,12 +304,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - name: Verify package source and Rust pin
         id: pins
         env:
-          EXPECTED_SOURCE: ${{ github.sha }}
+          EXPECTED_SOURCE: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
         run: |
           $source = git rev-parse HEAD
           if ($LASTEXITCODE -ne 0 -or $source -cne $env:EXPECTED_SOURCE) { throw 'Source identity mismatch' }
@@ -324,7 +325,7 @@ jobs:
         timeout-minutes: 8
         env:
           CFW_NATIVE_PACKAGE_TESTS: '1'
-          CFW_PACKAGE_SOURCE: ${{ github.sha }}
+          CFW_PACKAGE_SOURCE: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
         run: |
           ./scripts/fixtures/windows_update_package.ps1 -Source $env:CFW_PACKAGE_SOURCE -Evidence (Join-Path $env:RUNNER_TEMP 'cfw-package-evidence')
       - name: Preserve package inspection output and diagnostics

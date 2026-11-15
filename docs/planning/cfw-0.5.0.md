@@ -3089,9 +3089,18 @@ activation”，与第一条根因逐项吻合；后两例在它失败后未运�
   记录属于其他账户或不属于 SystemProxy 时返回原有的 Recovering 结果。
 
 本机验证：以 CI 的 lint 命令与特性集（另加默认特性）对 Windows 目标做 Clippy，均无告警，未链接也未
-运行；平台无关的 166 项引擎测试通过，新增的 `from_lost` 选择器测试经两处变异检验均失败。占位记录的
-五项单元测试与三个安装版用例只能在 Windows 上运行，本节写入时修正尚未有托管结果，结果记录在
-[PR #96](https://github.com/billlza/cfw-rs/pull/96)。
+运行；平台无关的 166 项引擎测试通过，新增的 `from_lost` 选择器测试经两处变异检验均失败；十二项本机
+门禁在 `68f2862b` 上通过（发布工具测试 3856 项，跳过 2 项）。
+
+托管验证（代码头 `68f2862b`）：[共享契约 43680404622](https://github.com/billlza/cfw-rs/actions/runs/43680404622)
+的引擎作业通过，三个客户端的回执如下。失败启动（第 11 代）在 Bind 之后失败，经 4 条记录回到 Off，
+代理设置未变。终止 UserAgent（第 12 代）在观察到 Recovering 后约 1.4 秒回到 Off，代理设置已恢复、
+监听端口已释放。第 13 代被弃置时为 Recovering（revision 79）且代理仍然生效；新进程的第一次状态查询
+即完成恢复（revision 80，Off），所有权记录已撤销。安装版桌面
+[43680404645](https://github.com/billlza/cfw-rs/actions/runs/43680404645) 两项作业通过。同一轮的共享
+契约作业失败在一项新增单元测试自身：`a_restoration_record_of_the_run_decides_alone` 在持有目录写锁时
+读取代理设置（`Storage(Busy)`），占位记录的其余四项测试通过。测试已改为先读后锁，这一修正的托管结果
+见 [PR #96](https://github.com/billlza/cfw-rs/pull/96)。
 
 仍未覆盖：
 

@@ -27,6 +27,9 @@ pub(super) enum ClientCase {
     InstalledProxyRecoveryDesktop,
     InstalledProxyAbandonDesktop,
     InstalledProxyResumeDesktop,
+    InstalledCombinedDesktop,
+    InstalledCombinedAbandonDesktop,
+    InstalledCombinedResumeDesktop,
     ProcessObservation,
     UpdateInspection,
     RejectedRuntime,
@@ -54,6 +57,9 @@ impl ClientCase {
             Self::InstalledProxyRecoveryDesktop => "--installed-proxy-recovery-client",
             Self::InstalledProxyAbandonDesktop => "--installed-proxy-abandon-client",
             Self::InstalledProxyResumeDesktop => "--installed-proxy-resume-client",
+            Self::InstalledCombinedDesktop => "--installed-combined-client",
+            Self::InstalledCombinedAbandonDesktop => "--installed-combined-abandon-client",
+            Self::InstalledCombinedResumeDesktop => "--installed-combined-resume-client",
             Self::ProcessObservation => "--desktop-process-client",
             Self::UpdateInspection => "--update-package-client",
             Self::RejectedRuntime => "--rejected-agent-runtime",
@@ -81,6 +87,9 @@ impl ClientCase {
             Self::InstalledProxyRecoveryDesktop => "installed-host-proxy-recovery".into(),
             Self::InstalledProxyAbandonDesktop => "installed-host-proxy-abandon".into(),
             Self::InstalledProxyResumeDesktop => "installed-host-proxy-resume".into(),
+            Self::InstalledCombinedDesktop => "installed-host-combined".into(),
+            Self::InstalledCombinedAbandonDesktop => "installed-host-combined-abandon".into(),
+            Self::InstalledCombinedResumeDesktop => "installed-host-combined-resume".into(),
             Self::ProcessObservation => format!("{name}-process"),
             Self::UpdateInspection => format!("{name}-update"),
             Self::RejectedRuntime => format!("{name}-runtime-rejected"),
@@ -129,10 +138,14 @@ impl ClientCase {
             | Self::InstalledCoordinatorDesktop
             | Self::InstalledTunnelDesktop
             | Self::InstalledProxyRecoveryDesktop
-            | Self::InstalledProxyAbandonDesktop => {
+            | Self::InstalledProxyAbandonDesktop
+            | Self::InstalledCombinedDesktop
+            | Self::InstalledCombinedAbandonDesktop => {
                 serde_json::json!({"product_service":true,"product_agent":true,"desktop_is_fixture":true,"release_accepted":false})
             }
-            Self::InstalledProfileDesktop | Self::InstalledProxyResumeDesktop => {
+            Self::InstalledProfileDesktop
+            | Self::InstalledProxyResumeDesktop
+            | Self::InstalledCombinedResumeDesktop => {
                 serde_json::json!({"product_service":true,"product_agent":false,"desktop_is_fixture":true,"release_accepted":false})
             }
             Self::InstalledStartupDesktop => {
@@ -153,6 +166,9 @@ impl ClientCase {
                 | Self::InstalledProxyRecoveryDesktop
                 | Self::InstalledProxyAbandonDesktop
                 | Self::InstalledProxyResumeDesktop
+                | Self::InstalledCombinedDesktop
+                | Self::InstalledCombinedAbandonDesktop
+                | Self::InstalledCombinedResumeDesktop
         )
     }
     fn installed_suite(self) -> Result<installed_host::InstalledSuite> {
@@ -169,6 +185,13 @@ impl ClientCase {
             }
             Self::InstalledProxyAbandonDesktop => Ok(installed_host::InstalledSuite::ProxyAbandon),
             Self::InstalledProxyResumeDesktop => Ok(installed_host::InstalledSuite::ProxyResume),
+            Self::InstalledCombinedDesktop => Ok(installed_host::InstalledSuite::Combined),
+            Self::InstalledCombinedAbandonDesktop => {
+                Ok(installed_host::InstalledSuite::CombinedAbandon)
+            }
+            Self::InstalledCombinedResumeDesktop => {
+                Ok(installed_host::InstalledSuite::CombinedResume)
+            }
             _ => Err("client is not an installed suite".into()),
         }
     }
@@ -580,10 +603,18 @@ fn run_case(
     // A Tunnel run may first install the pinned Wintun driver before Ready,
     // its stop proves the adapter's removal, and a second run waits for
     // SYSTEM to recover from its UserAgent's termination.
-    let limit = if matches!(case, ClientCase::InstalledTunnelDesktop) {
+    let limit = if matches!(
+        case,
+        // The combined suite has three runs, each of which creates an adapter.
+        ClientCase::InstalledTunnelDesktop | ClientCase::InstalledCombinedDesktop
+    ) {
         Duration::from_secs(240)
-    } else if matches!(case, ClientCase::InstalledProxyRecoveryDesktop) {
-        // Two runs, each with a bounded wait for the product's recovery.
+    } else if matches!(
+        case,
+        // Two runs, each with a bounded wait for the product's recovery; or
+        // one run with an adapter and a bounded wait for SYSTEM's retirement.
+        ClientCase::InstalledProxyRecoveryDesktop | ClientCase::InstalledCombinedAbandonDesktop
+    ) {
         Duration::from_secs(120)
     } else if matches!(
         case,
@@ -598,6 +629,7 @@ fn run_case(
             | ClientCase::InstalledStartupDesktop
             | ClientCase::InstalledProxyAbandonDesktop
             | ClientCase::InstalledProxyResumeDesktop
+            | ClientCase::InstalledCombinedResumeDesktop
             | ClientCase::UpdateInspection
     ) {
         Duration::from_secs(60)
@@ -676,6 +708,9 @@ pub(super) fn run_installed_host(image: &Path, expected: [u8; 32]) -> Result<()>
         ClientCase::InstalledProxyRecoveryDesktop,
         ClientCase::InstalledProxyAbandonDesktop,
         ClientCase::InstalledProxyResumeDesktop,
+        ClientCase::InstalledCombinedDesktop,
+        ClientCase::InstalledCombinedAbandonDesktop,
+        ClientCase::InstalledCombinedResumeDesktop,
     ] {
         let exercise = || {
             run_case(
@@ -896,7 +931,10 @@ fn client_body(name: &str, hex: &str, case: ClientCase) -> Result<()> {
         | ClientCase::InstalledTunnelDesktop
         | ClientCase::InstalledProxyRecoveryDesktop
         | ClientCase::InstalledProxyAbandonDesktop
-        | ClientCase::InstalledProxyResumeDesktop => {
+        | ClientCase::InstalledProxyResumeDesktop
+        | ClientCase::InstalledCombinedDesktop
+        | ClientCase::InstalledCombinedAbandonDesktop
+        | ClientCase::InstalledCombinedResumeDesktop => {
             return Err("installed host client must use its separate test entrypoint".into());
         }
         ClientCase::RuntimeRestartDesktop => {

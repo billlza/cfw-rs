@@ -1,6 +1,6 @@
 // Reopen the previously imported profile and turn TUN Mode on through its
 // visible switch. SYSTEM creates and routes the tunnel adapter for the
-// UserAgent's engine; the combined mode stays refused with its own reason.
+// UserAgent's engine; System Proxy stays offered beside it.
 (async (page, observeNative, _scenario, _quitInput, observeController) => {
   await page.locator('#nav button[data-page="general"][aria-current="page"]').waitFor();
   const before = await page.evaluate(async () => {
@@ -10,10 +10,10 @@
   const capabilities = before.engine.capabilities;
   if (before.boot.product.operating_system !== 'windows' || before.engine.unavailable_reason !== null ||
       before.engine.snapshot.state.state !== 'off' || before.engine.snapshot.desired_mode !== 'off' ||
-      capabilities.tunnel !== true || capabilities.system_proxy !== true || capabilities.tunnel_system_proxy !== false ||
+      capabilities.tunnel !== true || capabilities.system_proxy !== true || capabilities.tunnel_system_proxy !== true ||
       before.profiles.invalid_profiles.length !== 0 || before.profiles.profiles.length !== 1 ||
       before.profiles.profiles[0].active !== true) {
-    throw new Error(`TUN GUI case did not reopen the stopped, imported profile with TUN alone: ${JSON.stringify(before)}`);
+    throw new Error(`TUN GUI case did not reopen the stopped, imported profile with every network mode offered: ${JSON.stringify(before)}`);
   }
   await observeNative(page, () => {
     const input = document.querySelector('[data-toggle="tunMode"]');
@@ -37,16 +37,13 @@
     if (!['off', 'tunnel_installing', 'tunnel_starting'].includes(state)) throw new Error(`Unexpected TUN start result: ${JSON.stringify(value)}`);
     return false;
   }, undefined, { name: 'TUN start', timeoutMs: 75000 });
-  const reason = 'TUN Mode and System Proxy cannot run together in this Windows build. Turn one off first.';
-  const combined = await observeNative(page, (expected) => {
+  const combined = await observeNative(page, () => {
     const input = document.querySelector('[data-toggle="systemProxy"]');
-    const note = input?.closest('.cfw-row-right')?.querySelector('.cfw-row-note');
-    return input && input.disabled && !input.checked && note?.getAttribute('title') === expected
-      ? { system_proxy_disabled: true, reason: expected } : false;
-  }, reason, { name: 'combined-mode refusal', timeoutMs: 15000 });
+    return input && !input.disabled && !input.checked ? { system_proxy_offered: true } : false;
+  }, undefined, { name: 'combined-mode offer', timeoutMs: 15000 });
   const controllerProof = await observeController(page, active, 'tunnel');
   await page.screenshot({ path: 'tunnel-active.png' });
   const snapshot = await page.locator('body').ariaSnapshot();
-  return { before, active, combined, snapshot, ...controllerProof, combined_mode_refused: true,
+  return { before, active, combined, snapshot, ...controllerProof, combined_mode_offered: true,
     mutations: ['tunMode:on'], release_accepted: false };
 })

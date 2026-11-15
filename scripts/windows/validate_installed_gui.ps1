@@ -115,9 +115,11 @@ try {
     New-Item -ItemType Directory -Path $tunnelRoot -ErrorAction Stop | Out-Null
     & $sessionScript -Launcher $Launcher -Source $Source -Output $tunnelRoot -Scenario 'tunnel' -SessionResult ([ref]$tunnel)
     if (-not $tunnel.graceful_exit_observed -or -not $tunnel.network_mode_exercised -or
-        -not $tunnel.http_through_tunnel_verified -or -not $tunnel.combined_mode_refused -or
+        -not $tunnel.http_through_tunnel_verified -or -not $tunnel.combined_mode_exercised -or
+        -not $tunnel.http_forwarding_verified -or -not $tunnel.listener_released -or
         -not $tunnel.tunnel_adapter_retired -or -not $tunnel.core_preserved_after_tunnel -or
-        -not $tunnel.engine_stopped -or -not $tunnel.user_proxy_unchanged -or
+        -not $tunnel.engine_stopped -or -not $tunnel.original_user_proxy_restored -or
+        $tunnel.combined_runtime.context.installation_id -cne $network.active_runtime.context.installation_id -or
         $tunnel.imported_profile_id -cne $network.imported_profile_id -or
         $tunnel.tunnel_runtime.context.installation_id -cne $network.active_runtime.context.installation_id -or
         ($tunnel.process_id -eq $network.process_id -and $tunnel.process_creation_time -eq $network.process_creation_time)) {

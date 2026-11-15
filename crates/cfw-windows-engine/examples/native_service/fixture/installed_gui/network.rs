@@ -217,7 +217,7 @@ pub(super) fn probe(operation: &str, port: &str) -> Result<()> {
         )
     } else {
         if original_digest != digest {
-            return Err("LocalProxy changed the original user proxy options before traffic".into());
+            return Err("the user proxy options differ from the original before the probe".into());
         }
         None
     };
@@ -313,6 +313,73 @@ pub(super) fn tunnel_probe(operation: &str, installation: &str) -> Result<()> {
             "target": target, "route_luid": route, "route_entered_tunnel": on,
             "local_address": local, "http_through_tunnel_verified": on,
             "user_proxy_sha256": digest, "user_proxy_unchanged": true,
+            "release_accepted": false
+        }),
+    )
+}
+
+/// The GUI's TUN Mode and System Proxy together, observed from the same user
+/// session: the installation's adapter exists, Windows routes the probe host
+/// into it and a plain HTTP fetch leaves from the adapter's own address,
+/// while this user's proxy options name exactly the run's own loopback
+/// listener and that listener forwards a request.
+pub(super) fn combined_probe(installation: &str, port: &str) -> Result<()> {
+    use super::super::tunnel_probe::{adapter_luid, best_route, fetch_through_tunnel, resolve};
+    let (source, receipts) = validation_context()?;
+    let installation =
+        uuid::Uuid::parse_str(installation).map_err(|_| "invalid GUI installation identity")?;
+    let port: u16 = port.parse().map_err(|_| "invalid GUI proxy port")?;
+    if port == 0 {
+        return Err("GUI proxy port must be nonzero".into());
+    }
+    let observed = ObservedGui::open(&source, &receipts)?;
+    let before = proxy_snapshot()?;
+    let digest = proxy_digest(&before)?;
+    let original_digest = observed.original_proxy_digest()?;
+    let state = cfw_windows_engine::observe_lan_proxy_state().map_err(|e| e.to_string())?;
+    let ports = cfw_windows_engine::observe_lan_proxy_ports().map_err(|e| e.to_string())?;
+    if !state.manual_proxy_enabled
+        || state.auto_config_enabled
+        || state.auto_detect_enabled
+        || ports != BTreeSet::from([port])
+        || digest == original_digest
+    {
+        return Err("the GUI's combined mode did not install its manual proxy endpoint".into());
+    }
+    let adapter = cfw_windows_engine::tunnel::adapter_guid(installation);
+    let luid =
+        adapter_luid(adapter)?.ok_or("the GUI's tunnel adapter is absent in the combined mode")?;
+    let target = resolve()?;
+    let route = best_route(target)?;
+    if route != luid {
+        return Err(format!(
+            "the system route to {target} does not enter the GUI's tunnel adapter"
+        ));
+    }
+    let local = fetch_through_tunnel(target)?.local.to_string();
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    super::super::user_agent::traffic(address)?;
+    observed.recheck("combined probe GUI image changed during observation")?;
+    if proxy_snapshot()? != before {
+        return Err("user proxy options changed during the combined probe".into());
+    }
+    write(
+        &receipts,
+        "combined-http-probe.json",
+        &serde_json::json!({
+            "document": "cfw-installed-gui-combined-probe-v1", "source": source,
+            "gui_process_id": observed.pid,
+            "gui_process_creation_time": observed.process.identity().process_creation_time(),
+            "gui_same_user_session": true, "installation_id": installation,
+            "adapter": adapter, "adapter_luid": luid, "target": target, "route_luid": route,
+            "route_entered_tunnel": true, "local_address": local,
+            "http_through_tunnel_verified": true,
+            "proxy_address": address.to_string(), "http_forwarding_verified": true,
+            "system_proxy_applied": true,
+            "native_user_proxy": {"manual_proxy_enabled": state.manual_proxy_enabled,
+                "auto_config_enabled": state.auto_config_enabled,
+                "auto_detect_enabled": state.auto_detect_enabled, "ports": ports},
+            "user_proxy_sha256": digest, "original_user_proxy_sha256": original_digest,
             "release_accepted": false
         }),
     )

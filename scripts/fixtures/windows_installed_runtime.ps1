@@ -307,10 +307,13 @@ try {
                 $raw = & $desktopPath --installed-host-probe
                 if ($LASTEXITCODE -ne 0) { throw 'Installed post-runtime probe failed' }
                 $probe = $raw | ConvertFrom-Json
-                if ($probe.lineage.generation -ne 13) { throw 'Installed runtime did not retain the five backend, three application, two tunnel and three proxy recovery generations' }
+                if ($probe.lineage.generation -ne 17) { throw 'Installed runtime did not retain the five backend, three application, two tunnel, three proxy recovery and four combined-mode generations' }
                 $cases.Add('product_service_and_agent_run_both_proxy_modes')
                 $cases.Add('product_tunnel_routes_dns_and_traffic_then_retires_its_adapter')
                 $cases.Add('product_tunnel_recovers_off_after_its_user_agent_is_terminated')
+                $cases.Add('product_combined_mode_carries_proxy_and_tunnel_traffic_then_restores_both')
+                $cases.Add('product_combined_mode_recovers_off_after_a_failed_start_and_a_terminated_user_agent')
+                $cases.Add('product_combined_mode_retires_its_network_alone_and_the_next_desktop_restores_the_proxy')
             }
             $probes += $probe
             if ($iteration -eq 0) {

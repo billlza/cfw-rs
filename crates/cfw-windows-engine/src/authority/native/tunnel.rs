@@ -15,6 +15,8 @@ use crate::tunnel::{EndpointHandoff, EndpointOffer, TunnelHost, TunnelNetworkPla
 pub(in crate::authority) struct TunnelRun {
     context: LeaseContext,
     host: TunnelHost,
+    /// Present from the offer until its confirmation, or until the lease is
+    /// no longer live.
     handoff: Option<EndpointHandoff>,
     /// An endpoint was offered; a lost offer is never offered again.
     offered: bool,
@@ -188,10 +190,11 @@ impl WindowsAuthority {
     /// Every supervision tick. A live run whose pump ended is revoked; a run
     /// whose lease left Starting/Active is retired as soon as no runtime
     /// process can still use its endpoint, or at once when the stop can no
-    /// longer complete normally.
+    /// longer complete normally. An endpoint that was offered and not yet
+    /// confirmed is retired on the first such tick.
     pub(super) fn drive_tunnel(&mut self) -> Result<()> {
         let phase = self.machine.phase();
-        let Some(run) = self.tunnel.as_ref() else {
+        let Some(run) = self.tunnel.as_mut() else {
             return Ok(());
         };
         let live = matches!(phase, AuthorityState::Starting | AuthorityState::Active)
@@ -206,6 +209,13 @@ impl WindowsAuthority {
             }
             return Ok(());
         }
+        // Only the bound runtime of a Starting lease can confirm an endpoint,
+        // and this lease is no longer that. Dropping the handoff closes
+        // SYSTEM's server end and its own client reference, which leaves the
+        // copy in the UserAgent dead. Kept, it would stay with SYSTEM until
+        // the service restarts, and the run's endpoint could never be proven
+        // closed. It goes first: nothing below may keep it.
+        run.handoff = None;
         let retire = !run.host.retiring()
             && (matches!(
                 phase,

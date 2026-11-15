@@ -206,18 +206,35 @@ packet pump between that adapter's session and the engine's endpoint.
   when the stop is quarantined or recovering: the pump finishes or stops, the
   session ends, the adapter closes, and its absence, by interface and by device,
   is observed within 15 seconds.
-- Off for a Tunnel record needs an empty Job, the host thread's exit and the
-  observed absence of the adapter. After a SYSTEM restart a recovery host
-  removes the installation's Wintun device by GUID (`DIF_REMOVE`) and proves its
-  absence first. Every address, route and resolver names the adapter, and
-  nothing is written to another interface, proxy settings or firewall policy,
-  so removing the adapter restores the network. Only the NetBIOS setting is
-  kept, under the adapter's own interface GUID.
+- An endpoint that was offered and never confirmed is retired on the first
+  supervision tick after the lease left Starting. Only the bound runtime of a
+  Starting lease can confirm it, so SYSTEM drops the handoff: its server end
+  and its own client reference close, and the copy in the UserAgent is dead.
+  This covers a UserAgent that dies or fails to adopt the endpoint, and a stop
+  that arrives between the offer and its confirmation.
+- Off for a Tunnel record needs an empty Job, the host thread's exit, the
+  observed absence of the adapter and no handoff left with SYSTEM. After a
+  SYSTEM restart a recovery host removes the installation's Wintun device by
+  GUID (`DIF_REMOVE`) and proves its absence first. Every address, route and
+  resolver names the adapter, and nothing is written to another interface,
+  proxy settings or firewall policy, so removing the adapter restores the
+  network. Only the NetBIOS setting is kept, under the adapter's own interface
+  GUID.
 
 Windows may still send name queries to other interfaces' resolvers; the
 adapter's resolvers are preferred, not exclusive. A family the profile does not
 enable is not captured, as on macOS. The installed-host `Tunnel` suite runs the
 product through the shared backend with real system DNS and HTTP traffic.
+
+The installed product cannot be made to lose its lease between the offer and
+the confirmation: they are two consecutive calls of its UserAgent.
+`native-service-fixture --installed-unconfirmed-endpoint-validation` covers that
+window. A disposable SYSTEM service hosts the real Authority and loads the
+installed Wintun. A fixture UserAgent binds, repeats `OpenTunnel` until the
+endpoint is offered and ends its lease without confirming, once by exiting and
+once after acknowledging a stop. The service then runs the Authority's own
+supervision at the product's interval, and each record must reach Off with its
+adapter gone. Each case has its own Authority and leaves a receipt.
 
 ## Combined mode
 

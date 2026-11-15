@@ -4,7 +4,9 @@
 //! the adapter, the fixture address/host route, the pump and the engine. No
 //! Authority lease, SYSTEM endpoint handoff, default route, DNS, firewall or
 //! product backend is involved; the installed-host Tunnel suite covers the
-//! product path.
+//! product path. The same path carries the probes of the two leak protection
+//! switches: passed on with the switches off in every case, refused in a last
+//! case that runs the engine with both on.
 use super::{
     Result,
     library::{self, Library},
@@ -29,12 +31,50 @@ use std::{
 use windows_sys::Win32::NetworkManagement::IpHelper::IP_ADAPTER_DHCP_ENABLED;
 
 mod exchange;
+mod leak_protection;
 mod socks;
 use socks::{Fixture, HTTP_TARGETS, UDP_TARGETS, family, udp_overhead};
 
 const PROFILE: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const TIMEOUT: Duration = Duration::from_secs(15);
-const MTUS: [u16; 3] = [1280, 1500, 9000];
+
+/// One adapter lifetime: its MTU, and whether the engine runs with both leak
+/// protection switches on.
+#[derive(Clone, Copy)]
+struct Case {
+    mtu: u16,
+    leak_protection: bool,
+}
+impl Case {
+    /// The prefix of this case's receipts.
+    fn label(self) -> String {
+        if self.leak_protection {
+            format!("mtu-{}-leak-protection", self.mtu)
+        } else {
+            format!("mtu-{}", self.mtu)
+        }
+    }
+}
+
+/// Every MTU with the switches off, then one case with both on.
+const CASES: [Case; 4] = [
+    Case {
+        mtu: 1280,
+        leak_protection: false,
+    },
+    Case {
+        mtu: 1500,
+        leak_protection: false,
+    },
+    Case {
+        mtu: 9000,
+        leak_protection: false,
+    },
+    Case {
+        mtu: 1500,
+        leak_protection: true,
+    },
+];
 
 /// The pinned engine image every run admits afresh.
 struct EngineImage<'a> {
@@ -116,8 +156,8 @@ pub(super) fn run(
             source,
         };
         let operation = (|| {
-            for mtu in MTUS {
-                cases.push(forward(&run, mtu)?);
+            for case in CASES {
+                cases.push(forward(&run, case)?);
             }
             Ok(())
         })();
@@ -134,6 +174,7 @@ pub(super) fn run(
         "owned_addresses":["192.0.2.10/32","2001:db8:1::10/128"],
         "owned_host_routes":["192.0.2.123/32","2001:db8:1::123/128"],
         "wintun_engine_forwarding_verified":result.is_ok(),
+        "leak_protection_verified":result.is_ok(),
         "authority_lease_exercised":false,"system_to_user_handoff_exercised":false,
         "default_routes_modified":false,"dns_modified":false,"firewall_modified":false,
         "product_tunnel_backend_exercised":false,"release_accepted":false}),
@@ -189,7 +230,8 @@ fn reserve_loopback_port() -> Result<u16> {
 }
 
 /// The product Tunnel projection, admitted through the checked shared request.
-fn tunnel_request(node: SocketAddr, mtu: u16) -> Result<EngineStartRequest> {
+fn tunnel_request(node: SocketAddr, case: Case) -> Result<EngineStartRequest> {
+    let mtu = case.mtu;
     let profile = ValidatedSingBoxProfile::parse(
         &json!({"outbounds":[{"type":"socks5","tag":"proxy",
             "server":node.ip().to_string(),"server_port":node.port()}]})
@@ -199,6 +241,8 @@ fn tunnel_request(node: SocketAddr, mtu: u16) -> Result<EngineStartRequest> {
     let settings = EngineSettings {
         tunnel_mtu: mtu,
         controller_port: reserve_loopback_port()?,
+        dns_leak_protection: case.leak_protection,
+        webrtc_leak_protection: case.leak_protection,
         ..EngineSettings::default()
     };
     let projection = profile
@@ -231,8 +275,8 @@ fn tunnel_request(node: SocketAddr, mtu: u16) -> Result<EngineStartRequest> {
     })
 }
 
-fn forward(run: &Run<'_>, mtu: u16) -> Result<Value> {
-    let (output, source) = (run.output, run.source);
+fn forward(run: &Run<'_>, case: Case) -> Result<Value> {
+    let (output, source, mtu) = (run.output, run.source, case.mtu);
     let id = uuid::Uuid::new_v4();
     let adapter = run.library.create(id).map_err(|error| error.to_string())?;
     let luid = adapter.luid();
@@ -241,7 +285,7 @@ fn forward(run: &Run<'_>, mtu: u16) -> Result<Value> {
     let flags_at_creation = network::adapter_flags(luid);
     record(
         output,
-        &format!("mtu-{mtu}-created.json"),
+        &format!("{}-created.json", case.label()),
         &json!({"source":source,"mtu":mtu,"interface_guid":id,"luid":luid,"name":name,"adapter_created":true,
         "adapter_flags_at_creation":flags_at_creation.as_ref().ok()}),
     )?;
@@ -257,7 +301,7 @@ fn forward(run: &Run<'_>, mtu: u16) -> Result<Value> {
         };
         let exercised = owned
             .delivery_policy()
-            .and_then(|policy| exercise(run, &mut session, &identity, mtu, policy));
+            .and_then(|policy| exercise(run, &mut session, &identity, case, policy));
         let restored = owned.restore();
         drop(session);
         let mut receipt = combine(exercised, restored)?;
@@ -288,7 +332,7 @@ fn forward(run: &Run<'_>, mtu: u16) -> Result<Value> {
     receipt["adapter_absence_observed"] = json!(true);
     receipt["fixture_addresses_and_host_route_absent"] = json!(true);
     receipt["release_accepted"] = json!(false);
-    record(output, &format!("mtu-{mtu}-complete.json"), &receipt)?;
+    record(output, &format!("{}-complete.json", case.label()), &receipt)?;
     Ok(receipt)
 }
 
@@ -296,13 +340,14 @@ fn exercise(
     run: &Run<'_>,
     session: &mut crate::tunnel::Session<'_>,
     adapter: &Owned<'_>,
-    mtu: u16,
+    case: Case,
     policy: DeliveryPolicy,
 ) -> Result<Value> {
+    let mtu = case.mtu;
     let nonce = uuid::Uuid::new_v4().simple().to_string();
     // Fixture threads start before the inheritable packet endpoint exists.
     let fixture = Fixture::start(run.host, &nonce)?;
-    let request = tunnel_request(fixture.address(), mtu)?;
+    let request = tunnel_request(fixture.address(), case)?;
     let configuration_digest = request.config_digest.clone();
     let config = CheckedStartConfiguration::new(request)
         .and_then(|checked| checked.prepare_tunnel_data_plane([]))
@@ -336,7 +381,11 @@ fn exercise(
             }
         };
         let control = pump.control();
-        let traffic = exchange::exchange(&fixture, mtu);
+        // The leak protection probes follow the bulk exchange on the same
+        // engine and pump.
+        let traffic = exchange::exchange(&fixture, mtu).and_then(|bulk| {
+            leak_protection::probe(&fixture, case.leak_protection).map(|probes| (bulk, probes))
+        });
         let observed = traffic
             .as_ref()
             .ok()
@@ -377,7 +426,7 @@ fn exercise(
         }
         None => None,
     };
-    let (Some(traffic), Some(observed), Some(stopped), Some(retirement)) =
+    let (Some((traffic, probes)), Some(observed), Some(stopped), Some(retirement)) =
         (traffic, observed, stopped, retirement)
     else {
         drop(process);
@@ -419,13 +468,14 @@ fn exercise(
     let accepted = fixture.accepted();
     let observations = fixture.finish()?;
     require_fixture_flows(&observations, mtu)?;
+    leak_protection::require_flows(&observations, &nonce, case.leak_protection)?;
     drop(process);
     std::fs::remove_dir_all(&runtime.0)
         .map_err(|error| format!("remove the engine runtime directory: {error}"))?;
     Ok(json!({
         "nonce":nonce,"engine_process_id":running.process_id,"configuration_digest":configuration_digest,
         "engine_observed_running_after_traffic":true,"engine_stopped_cleanly":true,
-        "traffic":traffic,"pump":{
+        "traffic":traffic,"leak_protection":probes,"pump":{
             "to_engine":{"packets":report.to_engine.packets,"bytes":report.to_engine.bytes,"largest_packet":report.to_engine.largest_packet},
             "to_system":{"packets":report.to_system.packets,"bytes":report.to_system.bytes,"largest_packet":report.to_system.largest_packet},
             "ring_full_waits":report.ring_full_waits,"peer_close_code":retirement.peer_close_code(),

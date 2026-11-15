@@ -232,9 +232,11 @@ jobs:
           $families = @($result.ip_families) -join ','
           if ($initial.source -cne $source -or $initial.engine_sha256 -cne $receipt.host_artifact.sha256 -or
               $initial.process_id -ne $probeId -or $initial.process_creation_time -ne $probeStarted -or
-              ((@($result.cases) | ForEach-Object { $_.mtu }) -join ',') -cne '1280,1500,9000' -or
+              ((@($result.cases) | ForEach-Object { $_.mtu }) -join ',') -cne '1280,1500,9000,1500' -or
+              ((@($result.cases) | ForEach-Object { [string]$_.leak_protection.enabled }) -join ',') -cne 'False,False,False,True' -or
               $result.source -cne $source -or -not $result.success -or $null -ne $result.failure -or
-              -not $result.wintun_engine_forwarding_verified -or @($result.cases).Count -ne 3 -or
+              -not $result.wintun_engine_forwarding_verified -or -not $result.leak_protection_verified -or
+              @($result.cases).Count -ne 4 -or
               $families -cne 'ipv4,ipv6' -or
               $result.authority_lease_exercised -or $result.system_to_user_handoff_exercised -or
               $result.default_routes_modified -or $result.dns_modified -or $result.firewall_modified -or
@@ -269,8 +271,26 @@ jobs:
                 @(@($refused.destination, $refused.source, $refused.protocol) | Where-Object { ($_.packets -eq 0) -ne ($null -eq $_.first) }).Count -ne 0) {
               throw "Wintun forwarding case $($case.mtu) did not bind deliveries to its policy"
             }
+            # With the switches off the node served every probe. With both on
+            # the engine refused each flow they name, and the refusal reached
+            # its Windows socket; a datagram that is not STUN still passed.
+            $protection = $case.leak_protection
+            $named = if ($protection.enabled) { 'refused' } else { 'served' }
+            if ((@($protection.PSObject.Properties.Name | Sort-Object) -join ',') -cne "enabled,$families") {
+              throw "Wintun forwarding case $($case.mtu) has no complete leak protection observation"
+            }
+            foreach ($family in @($result.ip_families)) {
+              $probes = $protection.$family
+              if ((@($probes.PSObject.Properties.Name | Sort-Object) -join ',') -cne 'encrypted_dns_tcp,encrypted_dns_udp,other_udp_on_stun_port,stun,stun_unsniffed_port' -or
+                  $probes.encrypted_dns_tcp.outcome -cne $named -or $probes.encrypted_dns_udp.outcome -cne $named -or
+                  $probes.stun.outcome -cne $named -or $probes.stun_unsniffed_port.outcome -cne $named -or
+                  $probes.other_udp_on_stun_port.outcome -cne 'served') {
+                throw "Wintun forwarding case $($case.mtu) leak protection ($($protection.enabled)) differs in ${family}: $($probes | ConvertTo-Json -Compress -Depth 5)"
+              }
+            }
           }
           "Verified Windows IPv4/IPv6 TCP and UDP through Wintun, the packet pump and the native engine at MTU $(@($result.cases).mtu -join '/')" | Out-Host
+          "Verified that the running engine passes encrypted DNS and STUN with both leak protection switches off and refuses them, with a reset at the Windows socket, with both on" | Out-Host
       - name: Upload the verified unsigned engine component
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

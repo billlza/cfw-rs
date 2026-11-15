@@ -2,15 +2,13 @@ use super::{
     CredentialLifecycleError as Error,
     record::{self, Record},
 };
+use crate::RunMode;
 use crate::{
     CheckedStartConfiguration,
     authority::AuthoritySnapshot,
     authority_journal::{JournalOperation, RecordedOwner},
 };
-use cfw_engine_api::{
-    EngineCommandContext, EngineStartRequest,
-    authority_v1::{AuthorityMode, AuthorityState},
-};
+use cfw_engine_api::{EngineCommandContext, EngineStartRequest, authority_v1::AuthorityState};
 use cfw_singbox_config::{EngineSettings, ProjectionMode, ValidatedSingBoxProfile};
 use uuid::Uuid;
 
@@ -187,7 +185,7 @@ fn a_replaced_record_cannot_protect_a_different_operation_or_digest() {
                 original.operation_id()
             },
             if change == 1 {
-                AuthorityMode::LocalProxy
+                RunMode::LocalProxy
             } else {
                 original.mode()
             },

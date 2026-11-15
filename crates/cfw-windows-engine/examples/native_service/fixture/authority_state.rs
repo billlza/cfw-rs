@@ -1,7 +1,8 @@
 //! Native peer + actual journal publication checks. Cleanup observations are
 //! explicitly injected for policy testing; no engine or TUN runtime is started.
 use super::*;
-use cfw_engine_api::authority_v1::{AuthorityMode, AuthorityState, RootContext};
+use cfw_engine_api::authority_v1::{AuthorityState, RootContext};
+use cfw_windows_engine::RunMode;
 use cfw_windows_engine::ServicePeerAuthorization;
 use cfw_windows_engine::authority::{
     AuthorityError, CleanupEvidence, PrepareRequest, WindowsAuthority,
@@ -39,7 +40,7 @@ fn input(installation: uuid::Uuid, revision: u64, generation: u64) -> PrepareReq
             generation,
         },
         operation_id: uuid::Uuid::new_v4(),
-        mode: AuthorityMode::SystemProxy,
+        mode: RunMode::SystemProxy,
         config_sha256: [3; 32],
         identity_sha256: [4; 32],
         expected_revision: revision,

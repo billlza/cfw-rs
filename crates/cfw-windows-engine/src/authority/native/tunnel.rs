@@ -7,8 +7,8 @@
 //! report from the UserAgent is a cleanup fact.
 use super::super::wire::TunnelOpenRequest;
 use super::*;
+use crate::RunMode;
 use crate::tunnel::{EndpointHandoff, EndpointOffer, TunnelHost, TunnelNetworkPlan};
-use cfw_engine_api::authority_v1::AuthorityMode;
 
 /// One Tunnel run's network host and its pending endpoint handoff.
 pub(in crate::authority) struct TunnelRun {
@@ -53,7 +53,7 @@ impl WindowsAuthority {
         self.advance_timers(now)?;
         self.machine
             .require_starting_runtime(&peer, &request.context)?;
-        if request.context.operation.mode != AuthorityMode::Tunnel || !self.keeper_confirmed {
+        if request.context.operation.mode != RunMode::Tunnel || !self.keeper_confirmed {
             return Err(AuthorityError::Identity);
         }
         let plan = TunnelNetworkPlan::new(&request.network_options())?;
@@ -239,9 +239,7 @@ impl WindowsAuthority {
     pub(super) fn reconcile_tunnel(&mut self) -> Result<bool> {
         require_service()?;
         let target = match self.machine.phase() {
-            AuthorityState::Stopping => {
-                self.machine.stopped_cleanup_target(AuthorityMode::Tunnel)?
-            }
+            AuthorityState::Stopping => self.machine.stopped_cleanup_target(RunMode::Tunnel)?,
             AuthorityState::Recovering => {
                 if self.machine.context().is_some()
                     || self.keeper_confirmed
@@ -251,7 +249,7 @@ impl WindowsAuthority {
                 {
                     return Err(AuthorityError::CleanupUnproven);
                 }
-                self.machine.recovery_target(AuthorityMode::Tunnel)?
+                self.machine.recovery_target(RunMode::Tunnel)?
             }
             _ => return Err(AuthorityError::CleanupUnproven),
         };
@@ -282,7 +280,7 @@ impl WindowsAuthority {
             revision: target.revision(),
             lease_id: Some(operation.lease_id()),
             proxy_listener_closed: retired,
-            system_proxy_restored: operation.mode() == AuthorityMode::Tunnel,
+            system_proxy_restored: operation.mode() == RunMode::Tunnel,
             tunnel_engine_stopped: retired,
             packet_pump_closed: network,
             managed_tunnel_off: network,

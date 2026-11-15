@@ -72,7 +72,7 @@ fn local_recovery_cannot_relabel_other_modes_unknown_journals_or_prior_off() {
     ));
     let (system, _, _, _) = active(Instant::now());
     let record = serde_json::to_value(system.metadata().unwrap()).unwrap();
-    for mode in [AuthorityMode::SystemProxy, AuthorityMode::Tunnel] {
+    for mode in [RunMode::SystemProxy, RunMode::Tunnel] {
         let mut record = record.clone();
         record["operation"]["mode"] = serde_json::to_value(mode).unwrap();
         let machine = recovered(Some(serde_json::from_value(record).unwrap()));

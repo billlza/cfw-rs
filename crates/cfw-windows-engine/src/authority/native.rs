@@ -455,7 +455,7 @@ impl WindowsAuthority {
         candidate.ready(&peer, &report, now)?;
         // The machine accepted this exact report for the bound runtime; a
         // Tunnel run is routed only now, before Active is published.
-        if report.context.operation.mode == cfw_engine_api::authority_v1::AuthorityMode::Tunnel
+        if report.context.operation.mode == crate::RunMode::Tunnel
             && self.machine.phase() == AuthorityState::Starting
         {
             self.route_tunnel_for_ready(&report, deadline)?;

@@ -1,4 +1,5 @@
 use super::*;
+use crate::RunMode;
 use crate::{
     PreparedConfig,
     authority::{
@@ -7,10 +8,7 @@ use crate::{
     },
     authority_journal::RecordedOwner,
 };
-use cfw_engine_api::{
-    EngineCommandContext, EngineStartRequest,
-    authority_v1::{AuthorityMode, RootContext},
-};
+use cfw_engine_api::{EngineCommandContext, EngineStartRequest, authority_v1::RootContext};
 use cfw_singbox_config::{EngineSettings, ProjectionMode, ValidatedSingBoxProfile};
 use uuid::Uuid;
 
@@ -55,9 +53,9 @@ pub(super) fn inputs(mode: ProjectionMode) -> (BindRequest, PreparedConfig) {
             },
             operation_id: Uuid::from_u128(2),
             mode: if mode == ProjectionMode::LocalProxy {
-                AuthorityMode::LocalProxy
+                RunMode::LocalProxy
             } else {
-                AuthorityMode::SystemProxy
+                RunMode::SystemProxy
             },
             config_sha256: bytes(config.configuration_digest()),
             identity_sha256: bytes(config.digest()),
@@ -131,14 +129,14 @@ fn runtime_plan_binds_both_configuration_and_product_identity_digests() {
 fn runtime_plan_never_promotes_local_or_system_proxy_to_tunnel_ownership() {
     for mode in [ProjectionMode::LocalProxy, ProjectionMode::SystemProxy] {
         let (mut binding, config) = inputs(mode);
-        binding.context.operation.mode = AuthorityMode::Tunnel;
+        binding.context.operation.mode = RunMode::Tunnel;
         assert!(matches!(
             UserAgentPlan::new(binding, config),
             Err(UserAgentError::Mode)
         ));
     }
     let (mut binding, config) = inputs(ProjectionMode::LocalProxy);
-    binding.context.operation.mode = AuthorityMode::SystemProxy;
+    binding.context.operation.mode = RunMode::SystemProxy;
     assert!(matches!(
         UserAgentPlan::new(binding, config),
         Err(UserAgentError::Mode)

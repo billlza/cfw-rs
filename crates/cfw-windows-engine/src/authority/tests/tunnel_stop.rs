@@ -8,7 +8,7 @@ fn tunnel_lease(now: Instant) -> (Machine, Peer, Peer, LeaseContext) {
     let runtime = peer(Role::UserAgent);
     let revision = allocate(&mut machine, &host);
     let mut request = input(revision, 1);
-    request.mode = AuthorityMode::Tunnel;
+    request.mode = RunMode::Tunnel;
     let ticket = Ticket::for_test([7; 32]);
     let context = machine
         .prepare(&request, &host, Uuid::from_u128(8), ticket.digest(), now)
@@ -102,7 +102,7 @@ fn tunnel_ready_attests_the_windows_pump_bounds_within_the_wire_limits() {
 fn tunnel_stop_reconciles_only_with_retired_network_and_its_own_scope() {
     let (unacknowledged, _) = tunnel(false);
     assert!(matches!(
-        unacknowledged.stopped_cleanup_target(AuthorityMode::Tunnel),
+        unacknowledged.stopped_cleanup_target(RunMode::Tunnel),
         Err(AuthorityError::CleanupUnproven)
     ));
     let (mut machine, context) = tunnel(true);
@@ -110,9 +110,7 @@ fn tunnel_stop_reconciles_only_with_retired_network_and_its_own_scope() {
         machine.local_stopped_cleanup_target(),
         Err(AuthorityError::CleanupUnproven)
     ));
-    let target = machine
-        .stopped_cleanup_target(AuthorityMode::Tunnel)
-        .unwrap();
+    let target = machine.stopped_cleanup_target(RunMode::Tunnel).unwrap();
     // A LocalProxy proof cannot release a Tunnel record.
     let mut local = evidence(&target, context.lease_id, true);
     local.binding = CleanupBinding::LocalRuntime(target.clone());
@@ -143,16 +141,11 @@ fn tunnel_stop_reconciles_only_with_retired_network_and_its_own_scope() {
 #[test]
 fn tunnel_recovery_uses_the_recorded_run_and_never_another_mode() {
     let (machine, _) = tunnel(true);
-    let target = machine
-        .stopped_cleanup_target(AuthorityMode::Tunnel)
-        .unwrap();
+    let target = machine.stopped_cleanup_target(RunMode::Tunnel).unwrap();
     let restarted = recovered(Some(target.clone()));
-    assert_eq!(
-        restarted.recovery_target(AuthorityMode::Tunnel).unwrap(),
-        target
-    );
+    assert_eq!(restarted.recovery_target(RunMode::Tunnel).unwrap(), target);
     assert!(matches!(
-        restarted.recovery_target(AuthorityMode::LocalProxy),
+        restarted.recovery_target(RunMode::LocalProxy),
         Err(AuthorityError::CleanupUnproven)
     ));
     assert!(matches!(

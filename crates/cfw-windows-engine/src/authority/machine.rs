@@ -682,13 +682,13 @@ impl Machine {
         Ok(&lease.context)
     }
     pub(super) fn local_stopped_cleanup_target(&self) -> Result<AuthorityCommittedState> {
-        self.stopped_cleanup_target(cfw_engine_api::authority_v1::AuthorityMode::LocalProxy)
+        self.stopped_cleanup_target(crate::RunMode::LocalProxy)
     }
     /// The committed record of an acknowledged stop of a `mode` lease that
     /// still holds its original binding until cleanup commits.
     pub(super) fn stopped_cleanup_target(
         &self,
-        mode: cfw_engine_api::authority_v1::AuthorityMode,
+        mode: crate::RunMode,
     ) -> Result<AuthorityCommittedState> {
         if !self.durable_known {
             return Err(AuthorityError::Recovering);
@@ -712,13 +712,10 @@ impl Machine {
         Ok(metadata.clone())
     }
     pub(super) fn local_recovery_target(&self) -> Result<AuthorityCommittedState> {
-        self.recovery_target(cfw_engine_api::authority_v1::AuthorityMode::LocalProxy)
+        self.recovery_target(crate::RunMode::LocalProxy)
     }
     /// The committed record of a `mode` run whose execution lease was lost.
-    pub(super) fn recovery_target(
-        &self,
-        mode: cfw_engine_api::authority_v1::AuthorityMode,
-    ) -> Result<AuthorityCommittedState> {
+    pub(super) fn recovery_target(&self, mode: crate::RunMode) -> Result<AuthorityCommittedState> {
         if !self.durable_known || self.phase != AuthorityState::Recovering {
             return Err(AuthorityError::Recovering);
         }

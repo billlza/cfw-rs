@@ -1,4 +1,5 @@
 use super::{Result, UserAgentError};
+use crate::RunMode;
 use crate::{
     PreparedConfig,
     authority::{
@@ -6,7 +7,6 @@ use crate::{
         wire::{BindRequest, validate_context},
     },
 };
-use cfw_engine_api::authority_v1::AuthorityMode;
 use cfw_singbox_config::ProjectionMode;
 
 /// A checked input, not a start capability. Only the native Authority channel
@@ -121,9 +121,9 @@ impl UserAgentPlan {
     ) -> Result<()> {
         validate_context(&binding.context)?;
         let mode = match mode {
-            ProjectionMode::LocalProxy => AuthorityMode::LocalProxy,
-            ProjectionMode::SystemProxy => AuthorityMode::SystemProxy,
-            ProjectionMode::Tunnel => AuthorityMode::Tunnel,
+            ProjectionMode::LocalProxy => RunMode::LocalProxy,
+            ProjectionMode::SystemProxy => RunMode::SystemProxy,
+            ProjectionMode::Tunnel => RunMode::Tunnel,
             // The combined mode's system proxy is not yet owned on Windows.
             ProjectionMode::TunnelSystemProxy => return Err(UserAgentError::Mode),
         };

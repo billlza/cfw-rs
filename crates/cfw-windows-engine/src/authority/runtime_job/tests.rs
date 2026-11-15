@@ -1,4 +1,5 @@
 use super::*;
+use crate::RunMode;
 
 fn root() -> RootContext {
     RootContext {
@@ -78,7 +79,7 @@ fn a_missing_job_retires_an_admitted_run_only_when_its_logon_has_ended() {
         AuthorityCommittedState, JournalOperation, JournalTransition, RecordedOwner,
     };
     use crate::peer::RecordedLogon;
-    use cfw_engine_api::authority_v1::{AuthorityMode, AuthorityState};
+    use cfw_engine_api::authority_v1::AuthorityState;
     type Logon = std::result::Result<RecordedLogon, PeerIdentityError>;
     fn never_asked(_: &RecordedOwner) -> Logon {
         panic!("a record that admitted no run has no logon to ask about")
@@ -89,7 +90,7 @@ fn a_missing_job_retires_an_admitted_run_only_when_its_logon_has_ended() {
     .unwrap();
     let operation = JournalOperation::new(
         uuid::Uuid::new_v4(),
-        AuthorityMode::SystemProxy,
+        RunMode::SystemProxy,
         [1; 32],
         [2; 32],
         uuid::Uuid::new_v4(),

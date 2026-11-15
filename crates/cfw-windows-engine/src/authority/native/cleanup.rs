@@ -3,7 +3,7 @@
 //! enter this constructor. No wire Boolean becomes a cleanup fact here.
 use super::super::{ProcessRetirement, ProxyRecoveryObservation, ProxyRecoveryPurpose};
 use super::*;
-use cfw_engine_api::authority_v1::AuthorityMode;
+use crate::RunMode;
 
 impl WindowsAuthority {
     pub(in crate::authority) fn reconcile_proxy_cleanup(
@@ -50,7 +50,7 @@ impl WindowsAuthority {
         // exclusive Authority sequence required the preceding root to be Off;
         // a SystemProxy root cannot own a managed TUN adapter or packet pump.
         // These facts must not be reused for Tunnel or combined-mode cleanup.
-        let no_tunnel_resources = target.operation.mode() == AuthorityMode::SystemProxy;
+        let no_tunnel_resources = target.operation.mode() == RunMode::SystemProxy;
         let execution_material_retired = match self.machine.phase() {
             AuthorityState::Recovering => {
                 self.machine.context().is_none()

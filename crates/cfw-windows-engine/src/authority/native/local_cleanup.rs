@@ -3,7 +3,7 @@
 //! pump is created. This proof is not usable for SystemProxy or Tunnel.
 use super::super::RuntimeProcessObservation;
 use super::*;
-use cfw_engine_api::authority_v1::AuthorityMode;
+use crate::RunMode;
 
 pub struct VerifiedLocalCleanup {
     prior: AuthorityCommittedState,
@@ -53,7 +53,7 @@ impl WindowsAuthority {
         target: AuthorityCommittedState,
     ) -> Result<VerifiedLocalCleanup> {
         let operation = target.operation().ok_or(AuthorityError::CleanupUnproven)?;
-        let process_local = operation.mode() == AuthorityMode::LocalProxy;
+        let process_local = operation.mode() == RunMode::LocalProxy;
         let processes = self.observe_runtime_processes()?;
         let retired = processes.run_retirement(target.root()).is_some();
         if !retired || !process_local || self.proxy_recovery.is_some() {

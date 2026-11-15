@@ -374,15 +374,9 @@ impl WindowsEngineBackend {
                 || crate::user_agent::hex(&scope.identity_sha256) != active.digest
                 || scope.mode
                     != match mode {
-                        ProjectionMode::LocalProxy => {
-                            cfw_engine_api::authority_v1::AuthorityMode::LocalProxy
-                        }
-                        ProjectionMode::SystemProxy => {
-                            cfw_engine_api::authority_v1::AuthorityMode::SystemProxy
-                        }
-                        ProjectionMode::Tunnel => {
-                            cfw_engine_api::authority_v1::AuthorityMode::Tunnel
-                        }
+                        ProjectionMode::LocalProxy => crate::RunMode::LocalProxy,
+                        ProjectionMode::SystemProxy => crate::RunMode::SystemProxy,
+                        ProjectionMode::Tunnel => crate::RunMode::Tunnel,
                         ProjectionMode::TunnelSystemProxy => {
                             return Err(fail(Kind::Internal, "invalid runtime owner mode"));
                         }

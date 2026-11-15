@@ -8,6 +8,7 @@
 //! because its UserAgent or its Desktop was lost, has no owner any more: any
 //! Desktop of the same account completes it.
 use super::desktop::{DesktopError, Result, send};
+use crate::RunMode;
 use crate::{
     WindowsSystemProxy,
     authority::{
@@ -16,7 +17,7 @@ use crate::{
     },
     service_transport::check_deadline,
 };
-use cfw_engine_api::authority_v1::{AuthorityMode, AuthorityState};
+use cfw_engine_api::authority_v1::AuthorityState;
 use std::{
     thread,
     time::{Duration, Instant},
@@ -60,7 +61,7 @@ pub(crate) fn complete(
         };
         if scope
             .operation()
-            .is_none_or(|operation| operation.mode() != AuthorityMode::SystemProxy)
+            .is_none_or(|operation| operation.mode() != RunMode::SystemProxy)
         {
             return Ok(None);
         }

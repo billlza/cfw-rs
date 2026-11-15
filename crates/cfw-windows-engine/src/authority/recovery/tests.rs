@@ -348,7 +348,7 @@ fn recovery_rejects_other_accounts_roles_and_every_changed_durable_identity() {
             "{pointer}"
         );
     }
-    for mode in [AuthorityMode::LocalProxy, AuthorityMode::Tunnel] {
+    for mode in [RunMode::LocalProxy, RunMode::Tunnel] {
         let mut changed = original.clone();
         changed["operation"]["mode"] = serde_json::to_value(mode).unwrap();
         let target: ProxyRecoveryTarget = serde_json::from_value(changed).unwrap();

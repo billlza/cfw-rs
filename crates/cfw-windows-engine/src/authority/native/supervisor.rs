@@ -1,5 +1,5 @@
 use super::*;
-use cfw_engine_api::authority_v1::AuthorityMode;
+use crate::RunMode;
 
 impl WindowsAuthority {
     pub(crate) fn start_service_drain(&mut self) -> Result<()> {
@@ -27,23 +27,22 @@ impl WindowsAuthority {
             .metadata()
             .and_then(|m| m.operation())
             .map(|o| o.mode());
-        if mode == Some(AuthorityMode::Tunnel) || self.tunnel.is_some() {
+        if mode == Some(RunMode::Tunnel) || self.tunnel.is_some() {
             self.drive_tunnel()?;
             let reconcilable = match state.state {
                 AuthorityState::Recovering => true,
                 // Only an acknowledged stop keeps its binding until Off.
-                AuthorityState::Stopping => self
-                    .machine
-                    .stopped_cleanup_target(AuthorityMode::Tunnel)
-                    .is_ok(),
+                AuthorityState::Stopping => {
+                    self.machine.stopped_cleanup_target(RunMode::Tunnel).is_ok()
+                }
                 _ => false,
             };
-            if mode == Some(AuthorityMode::Tunnel) && reconcilable {
+            if mode == Some(RunMode::Tunnel) && reconcilable {
                 self.reconcile_tunnel()?;
             }
             return Ok(self.snapshot());
         }
-        let local = mode == Some(AuthorityMode::LocalProxy);
+        let local = mode == Some(RunMode::LocalProxy);
         if local
             && matches!(
                 state.state,

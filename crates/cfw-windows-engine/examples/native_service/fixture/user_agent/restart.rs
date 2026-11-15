@@ -88,10 +88,8 @@ impl Service {
                 || target.operation().is_none_or(|op| {
                     op.mode()
                         != match mode {
-                            Mode::Local => cfw_engine_api::authority_v1::AuthorityMode::LocalProxy,
-                            Mode::System => {
-                                cfw_engine_api::authority_v1::AuthorityMode::SystemProxy
-                            }
+                            Mode::Local => cfw_windows_engine::RunMode::LocalProxy,
+                            Mode::System => cfw_windows_engine::RunMode::SystemProxy,
                         }
                 })
             {

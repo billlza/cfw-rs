@@ -1,5 +1,6 @@
 use super::*;
-use cfw_engine_api::authority_v1::{AuthorityMode, AuthorityState, RootContext};
+use crate::RunMode;
+use cfw_engine_api::authority_v1::{AuthorityState, RootContext};
 use uuid::Uuid;
 
 fn installation() -> Uuid {
@@ -48,7 +49,7 @@ fn owner() -> RecordedOwner {
 fn operation() -> JournalOperation {
     JournalOperation::new(
         Uuid::from_u128(2),
-        AuthorityMode::SystemProxy,
+        RunMode::SystemProxy,
         [9; 32],
         [8; 32],
         Uuid::from_u128(3),
@@ -294,7 +295,7 @@ fn invalid_sid_and_logon_claims_fail_before_a_commit_is_usable() {
         assert!(
             JournalOperation::new(
                 Uuid::from_u128(2),
-                AuthorityMode::SystemProxy,
+                RunMode::SystemProxy,
                 [9; 32],
                 [8; 32],
                 Uuid::from_u128(3),
@@ -315,7 +316,7 @@ fn invalid_sid_and_logon_claims_fail_before_a_commit_is_usable() {
         assert!(
             JournalOperation::new(
                 Uuid::from_u128(2),
-                AuthorityMode::SystemProxy,
+                RunMode::SystemProxy,
                 [9; 32],
                 [8; 32],
                 Uuid::from_u128(3),
@@ -514,7 +515,7 @@ fn an_operation_cannot_change_identity_between_preparation_and_cleanup() {
         assert!(
             JournalOperation::new(
                 operation_id,
-                AuthorityMode::SystemProxy,
+                RunMode::SystemProxy,
                 [9; 32],
                 [8; 32],
                 lease_id,

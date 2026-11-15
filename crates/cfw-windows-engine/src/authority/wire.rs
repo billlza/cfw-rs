@@ -310,8 +310,7 @@ impl Command {
             }
             Self::OpenTunnel(input) => {
                 validate_context(&input.context)?;
-                if input.context.operation.mode
-                    != cfw_engine_api::authority_v1::AuthorityMode::Tunnel
+                if input.context.operation.mode != crate::RunMode::Tunnel
                     || !crate::tunnel::HANDOFF_MTU.contains(&input.mtu)
                 {
                     return Err(WireError::Malformed);
@@ -320,9 +319,7 @@ impl Command {
             }
             Self::ConfirmTunnelEndpoint(input) => {
                 validate_context(&input.context)?;
-                if input.context.operation.mode
-                    != cfw_engine_api::authority_v1::AuthorityMode::Tunnel
-                {
+                if input.context.operation.mode != crate::RunMode::Tunnel {
                     return Err(WireError::Malformed);
                 }
                 validate_handle(input.handle)

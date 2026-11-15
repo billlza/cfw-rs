@@ -1,6 +1,7 @@
 use super::*;
+use crate::RunMode;
 use crate::authority_journal::RecordedOwner;
-use cfw_engine_api::authority_v1::{AuthorityMode, RootContext};
+use cfw_engine_api::authority_v1::RootContext;
 
 fn owner() -> RecordedOwner {
     serde_json::from_value(
@@ -17,7 +18,7 @@ fn context() -> LeaseContext {
                 generation: 1,
             },
             operation_id: Uuid::from_u128(2),
-            mode: AuthorityMode::SystemProxy,
+            mode: RunMode::SystemProxy,
             config_sha256: [3; 32],
             identity_sha256: [4; 32],
             owner: owner(),
@@ -1031,7 +1032,7 @@ fn unknown_publication_is_an_error_and_recorded_scope_cannot_answer_an_owned_lea
 
 fn tunnel_context() -> LeaseContext {
     let mut value = context();
-    value.operation.mode = AuthorityMode::Tunnel;
+    value.operation.mode = RunMode::Tunnel;
     value
 }
 fn tunnel_open(mtu: u16) -> TunnelOpenRequest {

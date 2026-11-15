@@ -2,7 +2,8 @@
 //! Runtime readiness/stop reports and cleanup observations are synthetic here;
 //! this validates native ownership, not an engine or OS-cleanup implementation.
 use super::*;
-use cfw_engine_api::authority_v1::{AuthorityMode, AuthorityState, RootContext};
+use cfw_engine_api::authority_v1::{AuthorityState, RootContext};
+use cfw_windows_engine::RunMode;
 use cfw_windows_engine::authority::{
     AuthorityChannel, AuthorityError, AuthorizedReply, CleanupEvidence, PrepareRequest,
     ReadyReport, RuntimeProcessObservation, RuntimeProcessState, StoppedReport, WindowsAuthority,
@@ -70,7 +71,7 @@ impl Scoped {
         if recovered
             .recovery_target()
             .and_then(|m| m.operation())
-            .is_some_and(|op| op.mode() == AuthorityMode::LocalProxy)
+            .is_some_and(|op| op.mode() == RunMode::LocalProxy)
         {
             let before = recovered.snapshot();
             assert!(matches!(
@@ -308,7 +309,7 @@ pub(super) fn run(name: &str, image: &Path, digest: [u8; 32]) -> Result<()> {
                 generation: allocated.generation,
             },
             operation_id: uuid::Uuid::new_v4(),
-            mode: AuthorityMode::SystemProxy,
+            mode: RunMode::SystemProxy,
             config_sha256: [3; 32],
             identity_sha256: [4; 32],
             expected_revision: 2,

@@ -126,7 +126,7 @@ impl Validation {
                     .ok_or("missing stop context")?
                     .operation
                     .mode
-                    == cfw_engine_api::authority_v1::AuthorityMode::LocalProxy
+                    == cfw_windows_engine::RunMode::LocalProxy
                 {
                     let completed = controller
                         .reconcile_local_stop()
@@ -227,7 +227,7 @@ impl Validation {
                 .ok_or("missing acknowledged stop")?
                 .operation
                 .mode
-                == cfw_engine_api::authority_v1::AuthorityMode::LocalProxy
+                == cfw_windows_engine::RunMode::LocalProxy
             {
                 let before = controller.snapshot();
                 if !matches!(

@@ -10,12 +10,14 @@
 //! socket at once, as a refused connection or a reset datagram socket, which
 //! needs the engine's reset or ICMP error to pass the pump's delivery policy;
 //! and the node must see nothing of a refused flow. Each probe also records
-//! what Windows received meanwhile: the packets its adapter took from the
-//! pump, and the ICMP messages its stack counted for the family.
+//! what happened meanwhile: what the pump carried and refused each way, the
+//! adapter's counters, and what the Windows IP, UDP and ICMP layers counted
+//! for the family.
 use super::{
     super::{Result, network},
     socks::{Fixture, family, hex, transform},
 };
+use crate::tunnel::{InterfaceCounters, PumpReport};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -24,7 +26,10 @@ use std::{
     time::{Duration, Instant},
 };
 use windows_sys::Win32::{
-    NetworkManagement::IpHelper::{GetIcmpStatisticsEx, MIB_ICMP_EX_XPSP1},
+    NetworkManagement::IpHelper::{
+        GetIcmpStatisticsEx, GetIpStatisticsEx, GetUdpStatisticsEx, MIB_ICMP_EX_XPSP1,
+        MIB_IPSTATS_LH, MIB_UDPSTATS, MIBICMPSTATS_EX_XPSP1,
+    },
     Networking::WinSock::{AF_INET, AF_INET6},
 };
 
@@ -44,9 +49,6 @@ const CONNECT: Duration = Duration::from_secs(15);
 /// The node and the engine are on this host: an answer or a refusal is
 /// immediate, and nothing within this bound is neither.
 const ANSWER: Duration = Duration::from_secs(5);
-/// The destination unreachable type of ICMP and of ICMPv6.
-const DESTINATION_UNREACHABLE: usize = 3;
-const DESTINATION_UNREACHABLE_V6: usize = 1;
 
 /// Whether the node serves a connection to `target` for these probes.
 pub(super) fn tcp_target(target: SocketAddr) -> bool {
@@ -92,53 +94,117 @@ fn other_datagram(nonce: &str, purpose: &str, family: &str) -> [u8; DATAGRAM_BYT
     datagram
 }
 
-/// The adapter's count of packets taken from the pump.
-pub(super) type Inbound<'a> = &'a dyn Fn() -> Result<u64>;
-
-/// What Windows had received at one moment, for one family.
-#[derive(Clone, Copy)]
-struct Received {
-    adapter_packets: u64,
-    icmp_messages: u32,
-    icmp_errors: u32,
-    destination_unreachable: u32,
+/// Where a probe reads what happened while it ran.
+pub(super) struct Sources<'a> {
+    /// The owned adapter's counters.
+    pub(super) adapter: &'a dyn Fn() -> Result<InterfaceCounters>,
+    /// The running pump's report, which may trail by one packet.
+    pub(super) pump: &'a dyn Fn() -> PumpReport,
 }
-impl Received {
-    fn now(inbound: Inbound<'_>, target: SocketAddr) -> Result<Self> {
-        let (family, unreachable) = if target.is_ipv6() {
-            (AF_INET6, DESTINATION_UNREACHABLE_V6)
-        } else {
-            (AF_INET, DESTINATION_UNREACHABLE)
+
+/// One family's counters of the Windows IP, UDP and ICMP layers.
+#[derive(Clone, Copy)]
+struct Stack {
+    ip: MIB_IPSTATS_LH,
+    udp: MIB_UDPSTATS,
+    icmp: MIB_ICMP_EX_XPSP1,
+}
+impl Stack {
+    fn read(ipv6: bool) -> Result<Self> {
+        let family = u32::from(if ipv6 { AF_INET6 } else { AF_INET });
+        let mut stack = Self {
+            ip: MIB_IPSTATS_LH::default(),
+            udp: MIB_UDPSTATS::default(),
+            icmp: MIB_ICMP_EX_XPSP1::default(),
         };
-        let mut statistics = MIB_ICMP_EX_XPSP1::default();
-        // SAFETY: the statistics structure is owned and writable for the call.
-        let status = unsafe { GetIcmpStatisticsEx(&mut statistics, u32::from(family)) };
-        if status != 0 {
-            return Err(format!("read the ICMP statistics: status {status}"));
+        // SAFETY: each structure is owned and writable for its call.
+        let statuses = unsafe {
+            [
+                GetIpStatisticsEx(&mut stack.ip, family),
+                GetUdpStatisticsEx(&mut stack.udp, family),
+                GetIcmpStatisticsEx(&mut stack.icmp, family),
+            ]
+        };
+        if statuses != [0; 3] {
+            return Err(format!("read the Windows stack counters: {statuses:?}"));
         }
-        let incoming = statistics.icmpInStats;
+        Ok(stack)
+    }
+}
+
+/// What the pump, the adapter and the stack had counted at one moment.
+struct Counted {
+    pump: PumpReport,
+    adapter: InterfaceCounters,
+    stack: Stack,
+}
+impl Counted {
+    fn now(sources: &Sources<'_>, target: SocketAddr) -> Result<Self> {
         Ok(Self {
-            adapter_packets: inbound()?,
-            icmp_messages: incoming.dwMsgs,
-            icmp_errors: incoming.dwErrors,
-            destination_unreachable: incoming.rgdwTypeCount[unreachable],
+            pump: (sources.pump)(),
+            adapter: (sources.adapter)()?,
+            stack: Stack::read(target.is_ipv6())?,
         })
     }
-    /// What arrived since `before`. The ICMP counters are 32-bit counters
-    /// that wrap; the adapter's never goes back.
-    fn since(self, before: Self) -> Result<Value> {
-        let adapter_packets = self
-            .adapter_packets
-            .checked_sub(before.adapter_packets)
-            .ok_or("the adapter's receive counter went back")?;
+    /// What changed since `before`. The pump's and the adapter's counters
+    /// never go back; the stack's are 32-bit counters that wrap.
+    fn since(&self, before: &Self) -> Result<Value> {
+        let grew = |now: u64, then: u64| {
+            now.checked_sub(then)
+                .ok_or_else(|| "a pump or adapter counter went back".to_owned())
+        };
+        let wrap = |now: u32, then: u32| now.wrapping_sub(then);
+        let (pump, then) = (&self.pump, &before.pump);
+        let (adapter, earlier) = (&self.adapter, &before.adapter);
+        let (ip, ip_then) = (&self.stack.ip, &before.stack.ip);
+        let (udp, udp_then) = (&self.stack.udp, &before.stack.udp);
         Ok(json!({
-            "adapter_packets":adapter_packets,
-            "icmp_messages":self.icmp_messages.wrapping_sub(before.icmp_messages),
-            "icmp_errors":self.icmp_errors.wrapping_sub(before.icmp_errors),
-            "icmp_destination_unreachable":
-                self.destination_unreachable.wrapping_sub(before.destination_unreachable)
+            "pump":{
+                "to_engine":grew(pump.to_engine.packets, then.to_engine.packets)?,
+                "to_system":grew(pump.to_system.packets, then.to_system.packets)?,
+                "to_system_bytes":grew(pump.to_system.bytes, then.to_system.bytes)?,
+                "refused_destination":grew(pump.refused.destination.packets, then.refused.destination.packets)?,
+                "refused_source":grew(pump.refused.source.packets, then.refused.source.packets)?,
+                "refused_protocol":grew(pump.refused.protocol.packets, then.refused.protocol.packets)?,
+                "refused_protocol_bytes":grew(pump.refused.protocol.bytes, then.refused.protocol.bytes)?},
+            "adapter":{
+                "in_unicast":grew(adapter.in_unicast_packets, earlier.in_unicast_packets)?,
+                "in_non_unicast":grew(adapter.in_non_unicast_packets, earlier.in_non_unicast_packets)?,
+                "in_discards":grew(adapter.in_discards, earlier.in_discards)?,
+                "in_errors":grew(adapter.in_errors, earlier.in_errors)?,
+                "out_unicast":grew(adapter.out_unicast_packets, earlier.out_unicast_packets)?},
+            "ip":{
+                "in_receives":wrap(ip.dwInReceives, ip_then.dwInReceives),
+                "in_header_errors":wrap(ip.dwInHdrErrors, ip_then.dwInHdrErrors),
+                "in_address_errors":wrap(ip.dwInAddrErrors, ip_then.dwInAddrErrors),
+                "in_discards":wrap(ip.dwInDiscards, ip_then.dwInDiscards),
+                "in_delivers":wrap(ip.dwInDelivers, ip_then.dwInDelivers),
+                "out_requests":wrap(ip.dwOutRequests, ip_then.dwOutRequests),
+                "out_discards":wrap(ip.dwOutDiscards, ip_then.dwOutDiscards),
+                "out_no_routes":wrap(ip.dwOutNoRoutes, ip_then.dwOutNoRoutes)},
+            "udp":{
+                "in_datagrams":wrap(udp.dwInDatagrams, udp_then.dwInDatagrams),
+                "no_ports":wrap(udp.dwNoPorts, udp_then.dwNoPorts),
+                "in_errors":wrap(udp.dwInErrors, udp_then.dwInErrors),
+                "out_datagrams":wrap(udp.dwOutDatagrams, udp_then.dwOutDatagrams)},
+            "icmp_in":icmp(&self.stack.icmp.icmpInStats, &before.stack.icmp.icmpInStats),
+            "icmp_out":icmp(&self.stack.icmp.icmpOutStats, &before.stack.icmp.icmpOutStats)
         }))
     }
+}
+
+/// One direction of ICMP: messages, errors, and every type whose count changed.
+fn icmp(now: &MIBICMPSTATS_EX_XPSP1, then: &MIBICMPSTATS_EX_XPSP1) -> Value {
+    let types: serde_json::Map<_, _> = now
+        .rgdwTypeCount
+        .iter()
+        .zip(then.rgdwTypeCount.iter())
+        .enumerate()
+        .filter(|(_, (now, then))| now != then)
+        .map(|(kind, (now, then))| (kind.to_string(), json!(now.wrapping_sub(*then))))
+        .collect();
+    json!({"messages":now.dwMsgs.wrapping_sub(then.dwMsgs),
+        "errors":now.dwErrors.wrapping_sub(then.dwErrors),"types":types})
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -163,29 +229,29 @@ impl Outcome {
 struct Observation {
     outcome: Outcome,
     elapsed: Duration,
-    received: Value,
+    counted: Value,
 }
 impl Observation {
     fn receipt(&self, target: SocketAddr) -> Value {
         json!({"target":target.to_string(),"outcome":self.outcome.label(),
-        "elapsed_ms":self.elapsed.as_millis(),"windows_received":self.received})
+        "elapsed_ms":self.elapsed.as_millis(),"counted":self.counted})
     }
 }
 
-/// Run one probe and note what Windows received while it ran.
+/// Run one probe and note what happened while it ran.
 fn observe(
-    inbound: Inbound<'_>,
+    sources: &Sources<'_>,
     target: SocketAddr,
     probe: impl FnOnce() -> Result<Outcome>,
 ) -> Result<Observation> {
-    let before = Received::now(inbound, target)?;
+    let before = Counted::now(sources, target)?;
     let started = Instant::now();
     let outcome = probe()?;
     let elapsed = started.elapsed();
     Ok(Observation {
         outcome,
         elapsed,
-        received: Received::now(inbound, target)?.since(before)?,
+        counted: Counted::now(sources, target)?.since(&before)?,
     })
 }
 
@@ -319,7 +385,7 @@ impl Probes {
 
 /// Every probe in both families. Each runs whatever the others showed, so a
 /// failure reports the whole observation.
-pub(super) fn probe(fixture: &Fixture, inbound: Inbound<'_>, enabled: bool) -> Probes {
+pub(super) fn probe(fixture: &Fixture, sources: &Sources<'_>, enabled: bool) -> Probes {
     let nonce = fixture.nonce();
     let expected = |refusable: bool| {
         if enabled && refusable {
@@ -354,11 +420,11 @@ pub(super) fn probe(fixture: &Fixture, inbound: Inbound<'_>, enabled: bool) -> P
                 probes.insert(name.to_owned(), receipt);
             };
         let target = SocketAddr::new(remote, ENCRYPTED_DNS_PORT);
-        let seen = observe(inbound, target, || connect(nonce, local, target));
+        let seen = observe(sources, target, || connect(nonce, local, target));
         judge("encrypted_dns_tcp", target, seen, true);
         for probe in datagrams(nonce, family) {
             let target = SocketAddr::new(remote, probe.port);
-            let seen = observe(inbound, target, || datagram(local, target, &probe.payload));
+            let seen = observe(sources, target, || datagram(local, target, &probe.payload));
             judge(probe.name, target, seen, probe.refusable);
         }
         observed.insert(family.to_owned(), Value::Object(probes));

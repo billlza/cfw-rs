@@ -367,13 +367,9 @@ fn exercise(
         .map_err(|error| error.to_string())?;
     let before =
         library::counters(adapter.luid, adapter.name).map_err(|error| error.to_string())?;
-    // The adapter's count of packets taken from the pump, for the leak
-    // protection probes' record of what came back to each of them.
-    let inbound = || {
-        library::counters(adapter.luid, adapter.name)
-            .map(|counters| counters.in_unicast_packets)
-            .map_err(|error| error.to_string())
-    };
+    // The leak protection probes record what the adapter counted while each ran.
+    let adapter_counters =
+        || library::counters(adapter.luid, adapter.name).map_err(|error| error.to_string());
     let (traffic, observed, stopped, retired) = thread::scope(|scope| {
         let pump = match PacketPump::start(scope, &mut *session, server, policy) {
             Ok(pump) => pump,
@@ -390,10 +386,15 @@ fn exercise(
         let control = pump.control();
         // The leak protection probes follow the bulk exchange on the same
         // engine and pump.
+        let pump_report = || pump.report();
+        let sources = leak_protection::Sources {
+            adapter: &adapter_counters,
+            pump: &pump_report,
+        };
         let traffic = exchange::exchange(&fixture, mtu).map(|bulk| {
             (
                 bulk,
-                leak_protection::probe(&fixture, &inbound, case.leak_protection),
+                leak_protection::probe(&fixture, &sources, case.leak_protection),
             )
         });
         let observed = traffic
@@ -416,7 +417,7 @@ fn exercise(
     let traffic = traffic.and_then(|(bulk, probes)| {
         record(
             run.output,
-            &format!("{}-leak-protection.json", case.label()),
+            &format!("{}-probes.json", case.label()),
             &probes.observed,
         )
         .map(|()| (bulk, probes))

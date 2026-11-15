@@ -14,12 +14,12 @@ overlay cannot change production files; its before/after hashes are recorded
 separately. The original GA tree and six patch pins remain unchanged. Native CI
 also repeats the corrected fixture 200 times and retains the full event log.
 
-The component starts local, SystemProxy and Tunnel data planes; SystemProxy
-settings require the separate durable owner described below, and a Tunnel run
-feeds the engine from SYSTEM's own adapter as described under Tunnel. The
-combined Tunnel and System Proxy mode is not admitted. A stopped child is not
-proof of `NativeEngineStatus::Off`. The full Windows feature/UI target remains
-in `docs/planning/cfw-0.5.0.md`.
+The component starts local, SystemProxy, Tunnel and combined data planes;
+SystemProxy settings require the separate durable owner described below, and a
+run with a tunnel feeds the engine from SYSTEM's own adapter as described under
+Tunnel. A combined run has both, as described under Combined mode. A stopped
+child is not proof of `NativeEngineStatus::Off`. The full Windows feature/UI
+target remains in `docs/planning/cfw-0.5.0.md`.
 
 ## Configuration and identity
 
@@ -29,8 +29,9 @@ in `docs/planning/cfw-0.5.0.md`.
   The caller must first resolve material for the projection's exact audience
   under its lifecycle guard. This component does not grant vault authorization.
   All four modes can be checked. `PreparedConfig` separately admits local,
-  SystemProxy and packet-fed Tunnel data planes, so a checked projection is not
-  a start capability. A local projection cannot become SystemProxy ownership.
+  SystemProxy, packet-fed Tunnel and combined data planes, so a checked
+  projection is not a start capability. A local projection cannot become
+  SystemProxy ownership.
   Optional LAN sharing remains a separate observed listener. Only the
   `cfw-system-proxy` inbound supplies the current-user OS proxy endpoint;
   `cfw-lan-proxy` cannot replace it or cause an otherwise valid shared
@@ -61,7 +62,9 @@ mixed/LAN roles and the shared LAN source policy. A checked tunnel candidate
 cannot become UserAgent proxy ownership; Tunnel preparation admits exactly one
 gVisor `cfw-tunnel` inbound fed by an inherited endpoint, without auto_route,
 and requires `route.auto_detect_interface` so the engine's own sockets stay on
-the physical interface.
+the physical interface. A combined candidate additionally has exactly one
+`cfw-system-proxy` listener, on 127.0.0.1 and on the port its digest-bound
+network options name; a plain Tunnel candidate has none.
 
 The template contains the original process's controller key, so a receiver keeps
 those bytes rather than reprojecting with a different key. Owned template and
@@ -215,6 +218,49 @@ Windows may still send name queries to other interfaces' resolvers; the
 adapter's resolvers are preferred, not exclusive. A family the profile does not
 enable is not captured, as on macOS. The installed-host `Tunnel` suite runs the
 product through the shared backend with real system DNS and HTTP traffic.
+
+## Combined mode
+
+A combined run is one engine with both: SYSTEM's adapter, routes, resolvers
+and packet pump as in a Tunnel run, and this user's WinINet settings as in a
+SystemProxy run, naming the engine's loopback `cfw-system-proxy` listener. The
+Authority records it as `RunMode::TunnelSystemProxy`. `RunMode` is the Windows
+record of what a run owns. It serializes under the names of the shared
+`authority_v1::AuthorityMode`, which stays the macOS contract and has no such
+value: on macOS the proxy is part of the tunnel's own network settings. Records
+and peers of the three earlier modes read as before, and the journal schema is
+unchanged.
+
+- Start goes tunnel first, proxy second. The durable proxy journal is
+  published before Bind, and an existing explicit proxy or PAC, a policy or
+  another owner refuses the start there, exactly as for a SystemProxy run. The
+  UserAgent then opens and confirms the tunnel endpoint, starts the engine and
+  sends `RouteTunnel`: SYSTEM installs the routes and resolvers while the lease
+  is still Starting. Only then are the proxy settings applied, so they never
+  name a run without its tunnel. Ready still attests SYSTEM's pump bounds.
+- Stop restores the proxy settings first, while the engine still serves, as
+  for a SystemProxy run. SYSTEM retires its network by itself: once the
+  processes of the run are gone, or at once when the stop is quarantined or
+  the lease is in recovery. It waits for no Desktop.
+- Off needs both proofs and has one committer. It is recorded only through
+  the proxy proof of a Desktop of the same account (`ReconcileProxyCleanup`),
+  and SYSTEM accepts that proof only while it itself observes the adapter
+  absent and the endpoint handoff retired. A proof that arrives earlier is
+  refused with `CleanupUnproven` and records nothing: the settings are
+  restored already, and the Desktop gives its proof again until SYSTEM has
+  retired the network. SYSTEM alone never records Off for a combined run,
+  because it cannot read or restore another account's settings.
+- After a crash, a sign-out or a restart the record therefore waits in
+  Recovering with its network already retired, until a Desktop of that account
+  restores the settings. A SystemProxy record waits the same way.
+
+`RouteTunnel` is a UserAgent command, admitted only for a combined lease in
+Starting whose pump runs; with it the wire version is 9. The installed-host
+`Combined` suites run the product through the shared backend: traffic through
+the proxy listener and through the adapter, a start that fails after the
+adapter exists, a terminated UserAgent, and a run abandoned with its proxy
+applied, whose network SYSTEM retires alone and which the next Desktop brings
+to Off.
 
 ## Service peer admission
 
@@ -484,9 +530,10 @@ OS I/O cannot be retired within cleanup is not reported as successfully joined.
 
 `UserAgentSession` binds a checked `UserAgentPlan` through the native Authority
 channel before starting the child. The plan separately checks the configuration
-bytes digest and product identity digest and rejects the combined mode; a
-pre-resolved configuration carries no network options and cannot plan a Tunnel
-run. A dedicated control worker renews the same bound connection while native
+bytes digest and product identity digest, and that the lease records the
+projection's own mode; a pre-resolved configuration carries no network options
+and cannot plan a run with a tunnel. A dedicated control worker renews the same
+bound connection while native
 engine operations run. Revocation interrupts engine RPC waits; an
 Authority/transport failure remains an error. The synchronous lifecycle owner
 must run on a dedicated thread, and its caller retains it on failure for

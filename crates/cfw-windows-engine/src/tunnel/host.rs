@@ -66,7 +66,8 @@ impl From<&PumpReport> for PumpSummary {
             ring_full_waits: report.ring_full_waits,
             refused_packets: refused.destination.packets
                 + refused.source.packets
-                + refused.protocol.packets,
+                + refused.protocol.packets
+                + refused.neighbor.packets,
         }
     }
 }

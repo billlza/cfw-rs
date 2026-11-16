@@ -108,14 +108,14 @@ pub(super) fn proxy_digest(snapshot: &ProxySettings) -> Result<String> {
 
 /// The GUI this scenario launched, verified as the installed desktop in the
 /// observer's own user session at medium integrity.
-struct ObservedGui {
-    pid: u32,
-    process: NativePeerProcess,
+pub(super) struct ObservedGui {
+    pub(super) pid: u32,
+    pub(super) process: NativePeerProcess,
     image: PathBuf,
     launch: serde_json::Value,
 }
 impl ObservedGui {
-    fn open(source: &str, receipts: &Path) -> Result<Self> {
+    pub(super) fn open(source: &str, receipts: &Path) -> Result<Self> {
         let installed = cfw_windows_engine::runtime_host::InstalledRuntime::open()
             .map_err(|e| e.to_string())?;
         let _image = installed.desktop().map_err(|e| e.to_string())?;
@@ -159,7 +159,7 @@ impl ObservedGui {
     }
     /// This public observation revalidates identity/liveness on the retained
     /// process object before and after querying its image, without reopening PID.
-    fn recheck(&self, failure: &str) -> Result<()> {
+    pub(super) fn recheck(&self, failure: &str) -> Result<()> {
         if self
             .process
             .observed_image_path()
@@ -172,7 +172,7 @@ impl ObservedGui {
         }
         Ok(())
     }
-    fn original_proxy_digest(&self) -> Result<&str> {
+    pub(super) fn original_proxy_digest(&self) -> Result<&str> {
         self.launch["user_proxy_before_sha256"]
             .as_str()
             .ok_or_else(|| "missing original user proxy digest".into())

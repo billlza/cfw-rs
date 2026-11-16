@@ -4,6 +4,7 @@ use super::*;
 use std::os::windows::io::AsHandle;
 
 mod input_desktop;
+mod leak_protection;
 mod network;
 
 fn validation_context() -> Result<(String, PathBuf)> {
@@ -35,6 +36,15 @@ pub(super) fn tunnel_probe(operation: &str, installation: &str) -> Result<()> {
 
 pub(super) fn combined_probe(installation: &str, port: &str) -> Result<()> {
     network::combined_probe(installation, port)
+}
+
+pub(super) fn leak_protection_probe(
+    operation: &str,
+    installation: &str,
+    resolver: &str,
+    stun_server: &str,
+) -> Result<()> {
+    leak_protection::probe(operation, installation, resolver, stun_server)
 }
 
 pub(super) fn run() -> Result<()> {

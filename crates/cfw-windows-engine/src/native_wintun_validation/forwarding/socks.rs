@@ -1,10 +1,14 @@
 //! A bounded SOCKS5 endpoint standing in for a remote proxy node. It accepts
 //! only this host's own address as client (the engine's outbound source) and
-//! serves only the fixed forwarding targets; every other request is refused
-//! and recorded. It is never an open proxy and never dials anything itself.
-use super::super::{
-    Result,
-    network::{REMOTE, REMOTE6},
+//! serves only the fixed forwarding targets and those of the leak protection
+//! probes; every other request is refused and recorded. It is never an open
+//! proxy and never dials anything itself.
+use super::{
+    super::{
+        Result,
+        network::{REMOTE, REMOTE6},
+    },
+    leak_protection,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -376,6 +380,11 @@ fn serve(
                 .map_err(Failure::broken)?;
             http(&mut stream, nonce, *address).map_err(Failure::Broken)
         }
+        (1, Target::Address(address)) if leak_protection::tcp_target(*address) => {
+            reply(&mut stream, 0, SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))
+                .map_err(Failure::broken)?;
+            leak_probe(&mut stream, nonce, *address).map_err(Failure::Broken)
+        }
         (3, _) => {
             let relay = UdpSocket::bind(SocketAddrV4::new(host, 0)).map_err(text)?;
             let SocketAddr::V4(bound) = relay.local_addr().map_err(text)? else {
@@ -447,6 +456,23 @@ fn http(stream: &mut TcpStream, nonce: &str, target: SocketAddr) -> Result<Value
     )
 }
 
+/// A connection of the leak protection probes: this run's token, answered
+/// transformed.
+fn leak_probe(stream: &mut TcpStream, nonce: &str, target: SocketAddr) -> Result<Value> {
+    let mut token = [0u8; leak_protection::TOKEN_BYTES];
+    stream.read_exact(&mut token).map_err(text)?;
+    if token != leak_protection::token(nonce, target) {
+        return Err("leak protection probe does not carry this run's token".into());
+    }
+    stream.write_all(&transform(&token)).map_err(text)?;
+    stream.flush().map_err(text)?;
+    stream.shutdown(Shutdown::Write).map_err(text)?;
+    Ok(
+        json!({"command":"connect","target":target.to_string(),"family":family(target),
+        "leak_protection_probe":true}),
+    )
+}
+
 fn associate(
     control: TcpStream,
     relay: UdpSocket,
@@ -514,7 +540,7 @@ fn associate(
             ),
             kind => return Err(format!("SOCKS5 UDP address type {kind} is not served")),
         };
-        if !UDP_TARGETS.contains(&target) {
+        if !UDP_TARGETS.contains(&target) && !leak_protection::udp_target(target) {
             other.push(json!({"target":target.to_string(),"bytes":data.len()}));
             continue;
         }

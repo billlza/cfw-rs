@@ -172,13 +172,14 @@ fn protocol_and_header_are_closed_before_dispatch() {
     let good = Request::new(Command::Observe).unwrap().encode().unwrap();
     let text = std::str::from_utf8(good.as_bytes()).unwrap();
     for altered in [
-        text.replace("\"version\":7", "\"version\":1"),
-        text.replace("\"version\":7", "\"version\":2"),
-        text.replace("\"version\":7", "\"version\":3"),
-        text.replace("\"version\":7", "\"version\":4"),
-        text.replace("\"version\":7", "\"version\":5"),
-        text.replace("\"version\":7", "\"version\":6"),
-        text.replace("\"version\":7", "\"version\":8"),
+        text.replace("\"version\":8", "\"version\":1"),
+        text.replace("\"version\":8", "\"version\":2"),
+        text.replace("\"version\":8", "\"version\":3"),
+        text.replace("\"version\":8", "\"version\":4"),
+        text.replace("\"version\":8", "\"version\":5"),
+        text.replace("\"version\":8", "\"version\":6"),
+        text.replace("\"version\":8", "\"version\":7"),
+        text.replace("\"version\":8", "\"version\":9"),
         text.replace(PROTOCOL, "cfm.authority"),
     ] {
         assert!(matches!(
@@ -187,11 +188,11 @@ fn protocol_and_header_are_closed_before_dispatch() {
         ));
     }
     for altered in [
-        text.replace("\"version\":7", "\"version\":7,\"version\":7"),
+        text.replace("\"version\":8", "\"version\":8,\"version\":8"),
         text.replace("\"kind\":\"observe\"", "\"kind\":\"reconcile_off\""),
         text.replace("\"payload\":{}", "\"payload\":{\"ticket\":[1]}"),
         format!("{text}{{}}"),
-        text.replace("\"version\":7", "\"unknown\":true,\"version\":7"),
+        text.replace("\"version\":8", "\"unknown\":true,\"version\":8"),
     ] {
         assert!(Request::decode(altered.as_bytes()).is_err());
     }
@@ -382,7 +383,7 @@ fn bound_keeper_receipts_reject_unsafe_values_and_never_adopt_from_the_codec() {
         response(&request, &serde_json::to_vec(&missing).unwrap(), &owner()),
         Err(WireError::Malformed)
     ));
-    for version in [1, 2, 3, 4, 5, 6, 8] {
+    for version in [1, 2, 3, 4, 5, 6, 7, 9] {
         let mut changed = original.clone();
         changed["version"] = serde_json::json!(version);
         assert!(matches!(
@@ -514,7 +515,7 @@ fn recovery_grant_and_receipt_bind_current_observer_and_full_old_scope() {
     let confirm = Request::new(Command::ConfirmProxyRecovery(recovery_report())).unwrap();
     let receipt = Response::ProxyRecoveryObserved(ProxyRecoveryReceipt {
         context: context.clone(),
-        retired_process_count: 3,
+        retirement: ProcessRetirement::Counted { total: 3 },
     });
     let message = receipt.encode(confirm.id).unwrap();
     assert!(matches!(
@@ -522,7 +523,7 @@ fn recovery_grant_and_receipt_bind_current_observer_and_full_old_scope() {
         Ok(Response::ProxyRecoveryObserved(_))
     ));
     let mut value: serde_json::Value = serde_json::from_slice(message.as_bytes()).unwrap();
-    value["payload"]["retired_process_count"] = serde_json::json!(0);
+    value["payload"]["retirement"] = serde_json::json!({"counted": {"total": 0}});
     assert!(matches!(
         response(&confirm, &serde_json::to_vec(&value).unwrap(), &owner()),
         Err(WireError::Correlation)
@@ -554,7 +555,7 @@ fn cleanup_requires_its_own_challenge_purpose_and_exact_off_publication() {
     let receipt = ProxyCleanupReceipt {
         recovery: ProxyRecoveryReceipt {
             context: context.clone(),
-            retired_process_count: 3,
+            retirement: ProcessRetirement::Counted { total: 3 },
         },
         snapshot: AuthoritySnapshot {
             state: AuthorityState::Off,
@@ -579,8 +580,8 @@ fn cleanup_requires_its_own_challenge_purpose_and_exact_off_publication() {
             serde_json::json!("observe"),
         ),
         (
-            "/payload/recovery/retired_process_count",
-            serde_json::json!(0),
+            "/payload/recovery/retirement",
+            serde_json::json!({"counted": {"total": 0}}),
         ),
     ] {
         let mut changed = original.clone();

@@ -1,6 +1,12 @@
 use super::*;
-use cfw_windows_engine::authority::{ProxyRecoveryTarget, ReadyReport, wire::Rejection};
+use cfw_windows_engine::authority::{
+    ProcessRetirement, ProxyRecoveryTarget, ReadyReport, wire::Rejection,
+};
 
+/// The count covers the whole tree: at least the UserAgent and its engine.
+fn counted_whole_tree(retirement: ProcessRetirement) -> bool {
+    matches!(retirement, ProcessRetirement::Counted { total } if total >= 2)
+}
 fn rejected(channel: &mut AuthorityChannel, request: Request, expected: Rejection) -> Result<()> {
     match channel.request(request, Instant::now() + LIMIT) {
         Err(WireError::Rejected(actual)) if actual == expected => Ok(()),
@@ -96,7 +102,7 @@ pub(super) fn exercise(
     else {
         return Err("recovery did not acknowledge scoped observations".into());
     };
-    if receipt.context().target() != &target || receipt.retired_process_count() < 2 {
+    if receipt.context().target() != &target || !counted_whole_tree(receipt.retirement()) {
         return Err("recovery receipt lost exact target or entire process tree".into());
     }
     cases.push("fresh_native_proxy_and_service_job_observed");
@@ -185,7 +191,7 @@ fn reconcile(
         return Err("cleanup did not return an Off publication receipt".into());
     };
     if receipt.recovery().context().target() != &target
-        || receipt.recovery().retired_process_count() < 2
+        || !counted_whole_tree(receipt.recovery().retirement())
     {
         return Err("cleanup lost its scope or whole-Job observation".into());
     }

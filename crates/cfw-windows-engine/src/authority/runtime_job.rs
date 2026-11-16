@@ -3,6 +3,7 @@
 //! Assign before issuing Bind: every subsequently created engine inherits this
 //! job, including the interval before it joins its own cleanup job. Never set
 //! kill-on-close here: losing the service must allow per-user proxy restoration.
+use super::ProcessRetirement;
 use crate::{NativePeerProcess, PeerIdentityError, ServicePeerError};
 use cfw_engine_api::authority_v1::RootContext;
 use std::{
@@ -88,6 +89,10 @@ pub enum RuntimeProcessState {
     /// Preparing was committed but no Bind grant could have been published.
     /// Does not assert that a launch-side Agent process has exited.
     NeverAuthorized,
+    /// The Job of an admitted run cannot be reopened, and the logon that run
+    /// ran under has ended. Every process of the run belonged to that logon,
+    /// so none is left. This is not a native process count.
+    OwnerLogonEnded,
     Accounting {
         active: u32,
         total: u32,
@@ -114,20 +119,60 @@ impl RuntimeProcessObservation {
             self.state,
             RuntimeProcessState::NoRuntimeRoot
                 | RuntimeProcessState::DurablyRetired
+                | RuntimeProcessState::OwnerLogonEnded
                 | RuntimeProcessState::Accounting { active: 0, .. }
         )
     }
+    /// How every process of the run admitted under `root` is known to be
+    /// gone, when it is. A root that admitted no run has no such proof.
+    pub fn run_retirement(&self, root: &RootContext) -> Option<ProcessRetirement> {
+        if &self.root != root {
+            return None;
+        }
+        match self.state {
+            RuntimeProcessState::Accounting {
+                active: 0,
+                total: total @ 1..,
+            } => Some(ProcessRetirement::Counted { total }),
+            RuntimeProcessState::OwnerLogonEnded => Some(ProcessRetirement::LogonEnded),
+            _ => None,
+        }
+    }
+    /// What still proves anything once a record's Job cannot be reopened:
+    /// the record itself, or the end of the logon an admitted run ran under.
     pub(super) fn unexecutable_record(
         state: &crate::authority_journal::AuthorityCommittedState,
     ) -> Result<Self> {
+        Self::unexecutable_record_with(state, crate::peer::observe_recorded_logon)
+    }
+    /// `logon` observes whether the logon an admitted run ran under exists.
+    fn unexecutable_record_with(
+        state: &crate::authority_journal::AuthorityCommittedState,
+        logon: impl FnOnce(
+            &crate::authority_journal::RecordedOwner,
+        )
+            -> std::result::Result<crate::peer::RecordedLogon, PeerIdentityError>,
+    ) -> Result<Self> {
         use cfw_engine_api::authority_v1::AuthorityState;
-        let proof = match state.state() {
-            AuthorityState::Off if state.operation().is_none() => {
-                RuntimeProcessState::DurablyRetired
-            }
-            AuthorityState::Preparing if state.operation().is_some() => {
-                RuntimeProcessState::NeverAuthorized
-            }
+        let proof = match (state.state(), state.operation()) {
+            (AuthorityState::Off, None) => RuntimeProcessState::DurablyRetired,
+            (AuthorityState::Preparing, Some(_)) => RuntimeProcessState::NeverAuthorized,
+            // A run that may have been admitted. SYSTEM admits a UserAgent only
+            // from the logon of its lease owner, and the product starts no
+            // process of a run under another token, so every process of the
+            // run belonged to that logon.
+            (
+                AuthorityState::Starting
+                | AuthorityState::Active
+                | AuthorityState::Stopping
+                | AuthorityState::Quarantined,
+                Some(operation),
+            ) => match logon(operation.owner())? {
+                crate::peer::RecordedLogon::Ended => RuntimeProcessState::OwnerLogonEnded,
+                crate::peer::RecordedLogon::Present => {
+                    return Err(RuntimeJobError::Unavailable);
+                }
+            },
             _ => return Err(RuntimeJobError::Unavailable),
         };
         Ok(Self {

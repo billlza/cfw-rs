@@ -23,6 +23,7 @@ impl Service {
         if before.state != AuthorityState::Recovering || authority.lease_owner().is_some() {
             return Err("local recovery restored execution before cleanup".into());
         }
+        let owner_logon = owner_logon(&prior)?;
         let verified = authority
             .reconcile_local_recovery()
             .map_err(|e| e.to_string())?;
@@ -53,11 +54,56 @@ impl Service {
             &serde_json::json!({
                 "prior":prior,"before":before,"processes":authority_wire::process_report("local_recovery",verified.processes()),
                 "snapshot":verified.snapshot(),"metadata":metadata,"production_cleanup":true,"lease_restored":false,"replay_rejected":true,
+                "owner_logon":owner_logon,
             }),
         )?;
         self.cleanup_publications += 1;
         Ok(())
     }
+}
+
+/// What SYSTEM reads about the logon this run was recorded under. That is
+/// the proof a restarted machine relies on once the run's Job is gone. The
+/// Desktop that owns this run is alive here, so its logon exists; the same
+/// record under an identifier no session has, or under another account,
+/// names a logon that has ended.
+fn owner_logon(
+    prior: &cfw_windows_engine::authority_journal::AuthorityCommittedState,
+) -> Result<serde_json::Value> {
+    use cfw_windows_engine::authority_journal::RecordedOwner;
+    let owner = prior
+        .operation()
+        .ok_or("local recovery record names no owner")?
+        .owner();
+    let ended = |owner: &RecordedOwner| {
+        cfw_windows_engine::recorded_logon_ended_for_validation(owner).map_err(|e| e.to_string())
+    };
+    let altered = |field: &str, value: serde_json::Value| -> Result<RecordedOwner> {
+        let mut record = serde_json::to_value(owner).map_err(|e| e.to_string())?;
+        record[field] = value;
+        serde_json::from_value(record).map_err(|e| e.to_string())
+    };
+    let mut other_account = owner.sid_bytes().to_vec();
+    *other_account
+        .last_mut()
+        .ok_or("recorded owner has no account")? ^= 1;
+    let unallocated = altered("authentication_id", serde_json::json!(u64::MAX - 1))?;
+    let other_account = altered("sid", serde_json::json!(other_account))?;
+    let report = serde_json::json!({
+        "recorded_owner_ended":ended(owner)?,
+        "unallocated_identifier_ended":ended(&unallocated)?,
+        "other_account_ended":ended(&other_account)?,
+    });
+    if report
+        != serde_json::json!({
+            "recorded_owner_ended":false,"unallocated_identifier_ended":true,"other_account_ended":true,
+        })
+    {
+        return Err(format!(
+            "SYSTEM misread the logon of the recorded owner: {report}"
+        ));
+    }
+    Ok(report)
 }
 
 pub(super) fn observe(

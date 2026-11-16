@@ -73,11 +73,16 @@ fn ordinary_user_cannot_assign_or_observe_service_runtime_jobs() {
 }
 
 #[test]
-fn missing_job_cannot_retire_a_previously_authorized_runtime() {
+fn a_missing_job_retires_an_admitted_run_only_when_its_logon_has_ended() {
     use crate::authority_journal::{
         AuthorityCommittedState, JournalOperation, JournalTransition, RecordedOwner,
     };
+    use crate::peer::RecordedLogon;
     use cfw_engine_api::authority_v1::{AuthorityMode, AuthorityState};
+    type Logon = std::result::Result<RecordedLogon, PeerIdentityError>;
+    fn never_asked(_: &RecordedOwner) -> Logon {
+        panic!("a record that admitted no run has no logon to ask about")
+    }
     let owner: RecordedOwner = serde_json::from_value(serde_json::json!({
         "sid":[1,1,0,0,0,0,0,5,21,0,0,0], "authentication_id":1, "session_id":1
     }))
@@ -88,46 +93,86 @@ fn missing_job_cannot_retire_a_previously_authorized_runtime() {
         [1; 32],
         [2; 32],
         uuid::Uuid::new_v4(),
-        owner,
+        owner.clone(),
     )
     .unwrap();
-    for state in [
-        AuthorityState::Starting,
-        AuthorityState::Active,
-        AuthorityState::Stopping,
-        AuthorityState::Quarantined,
-        AuthorityState::Recovering,
-    ] {
-        let record = AuthorityCommittedState::new(
+    let record = |state| {
+        AuthorityCommittedState::new(
             root(),
             3,
             JournalTransition::Checkpoint,
             state,
             Some(operation.clone()),
         )
-        .unwrap();
+        .unwrap()
+    };
+    for state in [
+        AuthorityState::Starting,
+        AuthorityState::Active,
+        AuthorityState::Stopping,
+        AuthorityState::Quarantined,
+    ] {
+        let record = record(state);
+        // Its logon still exists: a missing name is not a count of zero.
         assert!(
             matches!(
-                RuntimeProcessObservation::unexecutable_record(&record),
+                RuntimeProcessObservation::unexecutable_record_with(&record, |asked| {
+                    assert_eq!(asked, &owner);
+                    Ok(RecordedLogon::Present)
+                }),
                 Err(RuntimeJobError::Unavailable)
             ),
             "{state:?}"
         );
+        // The observation failed: that is unknown, not ended.
+        assert!(
+            matches!(
+                RuntimeProcessObservation::unexecutable_record_with(&record, |_| Err(
+                    PeerIdentityError::InvalidIdentity
+                )),
+                Err(RuntimeJobError::Peer(_))
+            ),
+            "{state:?}"
+        );
+        // Its logon has ended: no process of the run is left.
+        let observation = RuntimeProcessObservation::unexecutable_record_with(&record, |_| {
+            Ok(RecordedLogon::Ended)
+        })
+        .unwrap();
+        assert_eq!(observation.state(), RuntimeProcessState::OwnerLogonEnded);
+        assert_eq!(observation.root(), record.root());
+        assert!(observation.processes_retired(), "{state:?}");
+        assert_eq!(
+            observation.run_retirement(record.root()),
+            Some(ProcessRetirement::LogonEnded)
+        );
+        // It says nothing about a run under another root.
+        assert_eq!(observation.run_retirement(&root()), None);
     }
+    // A recorded Recovering state names no run this rule covers.
+    assert!(matches!(
+        RuntimeProcessObservation::unexecutable_record_with(
+            &record(AuthorityState::Recovering),
+            never_asked
+        ),
+        Err(RuntimeJobError::Unavailable)
+    ));
     let preparing = AuthorityCommittedState::new(
         root(),
         2,
         JournalTransition::Prepare,
         AuthorityState::Preparing,
-        Some(operation),
+        Some(operation.clone()),
     )
     .unwrap();
-    let observation = RuntimeProcessObservation::unexecutable_record(&preparing).unwrap();
+    let observation =
+        RuntimeProcessObservation::unexecutable_record_with(&preparing, never_asked).unwrap();
     assert_eq!(observation.state(), RuntimeProcessState::NeverAuthorized);
     assert!(
         !observation.processes_retired(),
         "no grant is not proof of Agent exit"
     );
+    assert_eq!(observation.run_retirement(preparing.root()), None);
     let off = AuthorityCommittedState::new(
         root(),
         4,
@@ -136,8 +181,48 @@ fn missing_job_cannot_retire_a_previously_authorized_runtime() {
         None,
     )
     .unwrap();
-    let observation = RuntimeProcessObservation::unexecutable_record(&off).unwrap();
+    let observation =
+        RuntimeProcessObservation::unexecutable_record_with(&off, never_asked).unwrap();
     assert_eq!(observation.state(), RuntimeProcessState::DurablyRetired);
     assert_eq!(observation.root(), off.root());
     assert!(observation.processes_retired());
+    // A record that is Off names no run that still needs this proof.
+    assert_eq!(observation.run_retirement(off.root()), None);
+}
+
+#[test]
+fn only_an_empty_job_that_admitted_a_process_counts_as_a_retired_run() {
+    let root = root();
+    let observed = |state| RuntimeProcessObservation {
+        root: root.clone(),
+        state,
+    };
+    let emptied = RuntimeProcessState::Accounting {
+        active: 0,
+        total: 3,
+    };
+    assert_eq!(
+        observed(emptied).run_retirement(&root),
+        Some(ProcessRetirement::Counted { total: 3 })
+    );
+    for state in [
+        RuntimeProcessState::Accounting {
+            active: 0,
+            total: 0,
+        },
+        RuntimeProcessState::Accounting {
+            active: 1,
+            total: 3,
+        },
+        RuntimeProcessState::NoRuntimeRoot,
+        RuntimeProcessState::DurablyRetired,
+        RuntimeProcessState::NeverAuthorized,
+    ] {
+        assert_eq!(observed(state).run_retirement(&root), None, "{state:?}");
+    }
+    let other = RootContext {
+        generation: root.generation + 1,
+        ..root.clone()
+    };
+    assert_eq!(observed(emptied).run_retirement(&other), None);
 }

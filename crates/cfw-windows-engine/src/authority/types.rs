@@ -326,3 +326,20 @@ impl Peer {
 pub(super) fn metadata_lease_id(value: Option<&AuthorityCommittedState>) -> Option<Uuid> {
     value.and_then(|s| s.operation().map(JournalOperation::lease_id))
 }
+
+/// How SYSTEM knows that every process of an admitted run is gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProcessRetirement {
+    /// It counted the run's Job at zero, of `total` processes ever admitted.
+    Counted { total: u32 },
+    /// The Job cannot be reopened and the logon the run ran under has ended,
+    /// so no process of that logon is left. This is not a process count.
+    LogonEnded,
+}
+impl ProcessRetirement {
+    /// A count is evidence only when at least one process was admitted.
+    pub(super) fn valid(self) -> bool {
+        !matches!(self, Self::Counted { total: 0 })
+    }
+}

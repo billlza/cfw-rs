@@ -1,7 +1,7 @@
 //! Production reconciliation for the schema-6 SystemProxy resource contract.
 //! Tunnel modes require their own native adapter/pump observations and cannot
 //! enter this constructor. No wire Boolean becomes a cleanup fact here.
-use super::super::{ProxyRecoveryObservation, ProxyRecoveryPurpose, RuntimeProcessState};
+use super::super::{ProcessRetirement, ProxyRecoveryObservation, ProxyRecoveryPurpose};
 use super::*;
 use cfw_engine_api::authority_v1::AuthorityMode;
 
@@ -28,23 +28,21 @@ impl WindowsAuthority {
         )?;
 
         // Reopen under the lifecycle guard again immediately before composing
-        // cleanup evidence. Missing names never establish retired processes.
+        // cleanup evidence. A missing name alone never establishes retired
+        // processes.
         let processes = self.observe_runtime_processes()?;
         let target = observed.context.target();
-        let retired = processes.root() == &target.root
-            && matches!(
-                processes.state(),
-                RuntimeProcessState::Accounting {
-                    active: 0,
-                    total: 1..
-                }
-            );
+        let retirement = processes.run_retirement(&target.root);
+        let retired = retirement.is_some();
         // Independently read both native TCP listener tables. A reused PID
         // with any listener conservatively blocks cleanup; a lookup failure is
-        // not an empty result and cannot be turned into Off.
-        let listeners_closed = crate::listeners::owned(observed.recorded_process_id())
-            .map_err(AuthorityError::RuntimeEndpoints)?
-            .is_empty();
+        // not an empty result and cannot be turned into Off. A run whose logon
+        // has ended is the exception: its process identifier can only name a
+        // process of a later logon, whose listeners this run never owned.
+        let listeners_closed = retirement == Some(ProcessRetirement::LogonEnded)
+            || crate::listeners::owned(observed.recorded_process_id())
+                .map_err(AuthorityError::RuntimeEndpoints)?
+                .is_empty();
 
         // This admitted mode creates only an ordinary UserAgent/engine tree.
         // UserAgentPlan and CheckedStartConfiguration reject Tunnel activation,
@@ -72,7 +70,7 @@ impl WindowsAuthority {
         let authority_cleared = execution_material_retired && self.proxy_recovery.is_none();
         // The consumed report has dropped its zeroizing ticket. Dispatch erased
         // the raw request copy. The Authority never receives profile secrets;
-        // runtime-owner address spaces and their private IPC died with the Job.
+        // runtime-owner address spaces and their private IPC died with the run.
         let request_erased = authorization.request().body().is_empty();
         let evidence = CleanupEvidence {
             binding: CleanupBinding::Runtime(target.clone()),

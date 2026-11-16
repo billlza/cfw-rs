@@ -46,6 +46,8 @@ pub use configuration::{
 mod lineage;
 #[cfg(windows)]
 mod peer;
+#[cfg(all(windows, feature = "native-service-validation"))]
+pub use peer::recorded_logon_ended_for_validation;
 #[cfg(windows)]
 pub use peer::{
     LiveConsoleSession, NativePeerIdentity, NativePeerProcess, NativeUserSession,

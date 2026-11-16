@@ -124,7 +124,7 @@ const { renderLogs, patchLogStream, scheduleLogStreamPatch } = createLogsView({ 
 // Controllers, created after everything they use. A controller created later
 // is reached through a function that runs only once startup is complete.
 const { applyEngineStatus, loadEngineStatus, reconcileStartupServices } = createEngineStatus({
-  renderPage, updateStatusBar, cancelDelayTest,
+  renderPage, updateStatusBar, cancelDelayTest, reloadSavedProfilePolicy: () => loadSavedProfilePolicy(),
 });
 const automationSettingsUI = createAutomationSettingsUI({ state, invoke, renderPage, appendLog,
   dismissOtherDialogs: () => { dismissNativeProfileMenu(); runtimeSettingsUI.close(); state.glassDialog = null; state.profileContextMenu = null; } });
@@ -151,7 +151,9 @@ const { renderProviders, loadProvidersSnapshot, bindProviderButtons, handleProvi
   },
 });
 
-const { loadProfilesSnapshot, resolveProfileSource, invokeProfileChange, selectProfileById, applyActiveProfile } = createProfileData({
+const {
+  loadProfilesSnapshot, loadSavedProfilePolicy, resolveProfileSource, invokeProfileChange, selectProfileById, applyActiveProfile,
+} = createProfileData({
   cancelDelayTest, loadProvidersSnapshot, providerSelectionChanged, loadEngineStatus, loadRuntimeProjection,
 });
 const settings = createSettingsController({

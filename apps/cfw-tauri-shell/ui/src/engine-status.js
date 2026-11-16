@@ -10,7 +10,7 @@ import { captureEngineIdentityToken, engineIdentityTokenIsCurrent, engineRuntime
 import { clearControllerBackedState } from "./controller-snapshot.js";
 import { invalidateControllerMutationIntents } from "./controller-intents.js";
 
-export function createEngineStatus({ renderPage, updateStatusBar, cancelDelayTest }) {
+export function createEngineStatus({ renderPage, updateStatusBar, cancelDelayTest, reloadSavedProfilePolicy }) {
   function invalidateEngineBoundState(active) {
     runtime.engineIdentityEpoch += 1;
     invalidateControllerMutationIntents();
@@ -116,6 +116,9 @@ export function createEngineStatus({ renderPage, updateStatusBar, cancelDelayTes
     scheduleStartupRecovery();
     if (engineRuntimeIdentityChanged(previous, next)) {
       invalidateEngineBoundState(next.active);
+      // A running core saves each node chosen on it with the profile, so the
+      // saved view that takes the controller's place after a stop is read again.
+      if (previous.active && !next.active) void reloadSavedProfilePolicy().then(() => renderPage());
     } else if (!next.active) {
       // Off is an expected steady state. Repeated snapshots still clear any
       // event/request result that arrived between native status reads.

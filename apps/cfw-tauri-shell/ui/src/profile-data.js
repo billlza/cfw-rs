@@ -171,5 +171,5 @@ export function createProfileData({ cancelDelayTest, loadProvidersSnapshot, prov
     }
   }
 
-  return { loadProfilesSnapshot, resolveProfileSource, invokeProfileChange, selectProfileById, applyActiveProfile };
+  return { loadProfilesSnapshot, loadSavedProfilePolicy, resolveProfileSource, invokeProfileChange, selectProfileById, applyActiveProfile };
 }

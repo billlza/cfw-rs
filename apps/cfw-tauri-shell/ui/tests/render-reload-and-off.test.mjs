@@ -330,3 +330,36 @@ test("Provider metadata survives core Stop while live rule snapshots remain gene
     await reloadButton.click();
   }
 });
+
+test("Stop shows a node chosen on the running core as the profile's saved choice", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalProfiles = responses.profiles_snapshot;
+  const originalText = responses.read_profile_text;
+  const originalGroup = state.activeProxyGroup;
+  const text = (choice) => ({ id: "nodes-profile", name: "Nodes", digest: "d", source_url: null,
+    proxy_selections: { "cfw-proxy-selector": choice },
+    app_selector: { tag: "cfw-proxy-selector", members: ["first", "second"], default: "first" },
+    body: JSON.stringify({ outbounds: [{ type: "socks5", tag: "first" }, { type: "socks5", tag: "second" }] }) });
+  const selected = (html) => [...html.matchAll(/class="cfw-node-card selected[^"]*" data-proxy-node="([^"]+)"/gu)].map((match) => match[1]);
+  try {
+    responses.profiles_snapshot = { profiles: [{ id: "nodes-profile", name: "Nodes", active: true, bytes: 200, source_kind: "local", updated_epoch_secs: 1 }], invalid_profiles: [] };
+    responses.read_profile_text = text("second");
+    await setEngine(OFF_ENGINE);
+    await reloadButton.click();
+    state.activeProxyGroup = "cfw-proxy-selector";
+    assert.deepEqual(selected(await renderPage("proxies")), ["second"]);
+    await setEngine(RUNNING_ENGINE);
+    // The running core saves a node chosen on it with the profile.
+    responses.read_profile_text = text("first");
+    responses.engine_snapshot = OFF_ENGINE;
+    await emit("cfw://engine-event", { type: "snapshot_changed" });
+    assert.deepEqual(selected(await renderPage("proxies")), ["first"], "the saved view is the one the running core left");
+  } finally {
+    state.activeProxyGroup = originalGroup;
+    responses.profiles_snapshot = originalProfiles;
+    responses.read_profile_text = originalText;
+    responses.engine_snapshot = originalEngine;
+    await setEngine(originalEngine);
+    await reloadButton.click();
+  }
+});

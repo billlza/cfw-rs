@@ -21,6 +21,9 @@
   chosen when the language changes.
 - Write `Updating…` and `Checking…` on the Providers page with an ellipsis
   character in English too, where they had three full stops.
+- Show a node chosen while the core runs as the saved choice once the core
+  stops. The choice was saved with the profile, but the Proxies page kept
+  showing the node saved before the start until the profile was read again.
 
 ### Profiles
 

@@ -6,9 +6,7 @@ use cfw_engine_api::EngineMode;
 use cfw_profiles::{LockedCredentialProfileMutation, StoredProfile};
 use cfw_singbox_config::{EngineSettings, RuntimePreferences, ValidatedSingBoxProfile};
 
-use super::{
-    EngineEndpointBinding, ManagedEngine, authorize_proxy_transition, record_endpoint_runtime,
-};
+use super::{EngineEndpointBinding, ManagedEngine, record_endpoint_runtime};
 use crate::{
     commands::ManagedProfiles, platform_maintenance::PlatformMaintenanceGate, settings_store,
 };
@@ -52,7 +50,7 @@ pub(crate) async fn change_runtime_preferences(
     }
     let coordinator = engine.coordinator.clone();
     let endpoints = engine.endpoints.clone();
-    let authorization = engine.system_proxy_authorization.clone();
+    let authorization = engine.mode_authorization();
     let repository = profiles.repository().clone();
     let (result, lease) = lease
         .run_to_completion(async move {
@@ -133,12 +131,10 @@ pub(crate) async fn change_runtime_preferences(
             let result = coordinator
                 .change_profile(settings, async move {
                     if mode != EngineMode::Off {
-                        authorize_proxy_transition(
-                            authorization.as_ref(),
-                            mode != EngineMode::SystemProxy,
-                        )
-                        .await
-                        .map_err(EngineCoordinatorError::ProfilePreparation)?;
+                        authorization
+                            .authorize(mode)
+                            .await
+                            .map_err(EngineCoordinatorError::ProfilePreparation)?;
                     }
                     Ok(ProfileChange {
                         profile_id,

@@ -19,9 +19,8 @@ pub(crate) struct PlatformRuntime {
     pub(crate) tunnel_approval: Option<Arc<dyn TunnelApprovalBackend>>,
     pub(crate) proxy_available: bool,
     pub(crate) tunnel_available: bool,
-    /// Whether one run may carry both Tunnel and System Proxy. Windows routes
-    /// a Tunnel run through SYSTEM's adapter but does not yet own the combined
-    /// mode's user proxy settings, so it offers each mode only on its own.
+    /// Whether one run may carry both Tunnel and System Proxy. It is a
+    /// capability of its own: each mode may be offered without it.
     pub(crate) tunnel_system_proxy_available: bool,
     pub(crate) unavailable_reason: Option<String>,
     generations: Result<Arc<dyn EngineGenerationStore>, String>,
@@ -214,10 +213,11 @@ impl PlatformRuntime {
             // A Windows Tunnel installation never awaits a person's approval.
             tunnel_approval: None,
             proxy_available: true,
-            // SYSTEM owns a Tunnel run's adapter, routes and resolvers; the
-            // backend refuses the combined mode, so it is not offered.
+            // SYSTEM owns the adapter, routes and resolvers of a run with a
+            // tunnel. A combined run also has its UserAgent own this user's
+            // proxy settings, as a System Proxy run does.
             tunnel_available: true,
-            tunnel_system_proxy_available: false,
+            tunnel_system_proxy_available: true,
             unavailable_reason: None,
             operation_timeout: cfw_windows_engine::backend::OUTER_WATCHDOG,
         })

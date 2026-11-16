@@ -26,6 +26,8 @@ use crate::engine::endpoints::{CANDIDATE_COUNT, EndpointCandidateCursor};
 use cfw_application::{EngineControllerAccess, EngineModeCoordinator};
 
 struct EndpointRetryBackend {
+    /// The platform this backend reports; its coordinator runs on it.
+    platform: EngineRuntimePlatform,
     conflicts_before_success: usize,
     tunnel_failures_before_success: usize,
     tunnel_failure: BackendErrorKind,
@@ -42,6 +44,7 @@ struct EndpointRetryBackend {
 impl EndpointRetryBackend {
     fn new(conflicts_before_success: usize) -> Self {
         Self {
+            platform: EngineRuntimePlatform::MacOs,
             conflicts_before_success,
             tunnel_failures_before_success: 0,
             tunnel_failure: BackendErrorKind::TicketExpired,
@@ -60,8 +63,8 @@ impl EndpointRetryBackend {
 }
 
 impl EngineBackend for EndpointRetryBackend {
-    fn runtime_platform(&self) -> cfw_engine_api::EngineRuntimePlatform {
-        cfw_engine_api::EngineRuntimePlatform::MacOs
+    fn runtime_platform(&self) -> EngineRuntimePlatform {
+        self.platform
     }
 
     fn check_configuration(&self, _request: EngineStartRequest) -> BackendFuture<'_, ()> {

@@ -1,11 +1,10 @@
 use super::{AuthorityError, Result, secret::Ticket};
+use crate::RunMode;
 use crate::{
     authority_journal::{AuthorityCommittedState, JournalOperation, RecordedOwner},
     connection_binding::ConnectionBinding,
 };
-use cfw_engine_api::authority_v1::{
-    AuthorityMode, AuthorityState, PacketPumpLimits, RootContext, WireValidate,
-};
+use cfw_engine_api::authority_v1::{AuthorityState, PacketPumpLimits, RootContext, WireValidate};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -32,7 +31,7 @@ impl AuthorityLineage {
 pub struct PrepareRequest {
     pub root: RootContext,
     pub operation_id: Uuid,
-    pub mode: AuthorityMode,
+    pub mode: RunMode,
     pub config_sha256: [u8; 32],
     pub identity_sha256: [u8; 32],
     pub expected_revision: u64,
@@ -54,7 +53,7 @@ impl PrepareRequest {
 pub struct OperationContext {
     pub root: RootContext,
     pub operation_id: Uuid,
-    pub mode: AuthorityMode,
+    pub mode: RunMode,
     pub config_sha256: [u8; 32],
     pub identity_sha256: [u8; 32],
     pub owner: RecordedOwner,
@@ -129,12 +128,12 @@ impl ReadyReport {
         if self.observed_millis == 0
             || self.runtime_digest != self.context.operation.identity_sha256
             || self.ready_flags
-                != if mode == AuthorityMode::LocalProxy {
+                != if mode == RunMode::LocalProxy {
                     0b011
                 } else {
                     0b111
                 }
-            || (mode == AuthorityMode::Tunnel) != self.packet_pump_limits.is_some()
+            || mode.owns_tunnel() != self.packet_pump_limits.is_some()
             || self
                 .packet_pump_limits
                 .as_ref()
@@ -222,9 +221,9 @@ impl CleanupEvidence {
         match &self.binding {
             CleanupBinding::LocalRuntime(target) | CleanupBinding::TunnelRuntime(target) => {
                 let mode = if matches!(self.binding, CleanupBinding::LocalRuntime(_)) {
-                    AuthorityMode::LocalProxy
+                    RunMode::LocalProxy
                 } else {
-                    AuthorityMode::Tunnel
+                    RunMode::Tunnel
                 };
                 target.validate()?;
                 let operation = target.operation().ok_or(AuthorityError::CleanupUnproven)?;

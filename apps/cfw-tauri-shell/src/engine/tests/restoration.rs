@@ -143,9 +143,9 @@ pub(crate) fn engine_with_rights_bridge(
     }
 }
 
-/// Each integration on its own does not admit their combination: Windows
-/// offers Tunnel and System Proxy separately while the combined mode is closed,
-/// and the UI reads the separate capability from the status payload.
+/// Each integration on its own does not admit their combination: the
+/// combined mode is a capability of its own, and the UI reads it from the
+/// status payload.
 #[tokio::test]
 async fn combined_mode_requires_its_own_capability() {
     let mut engine = engine_with_rights_bridge(Arc::new(RestorationRightsBridge::default()));
@@ -171,6 +171,43 @@ async fn combined_mode_requires_its_own_capability() {
         engine.require_capability(EngineMode::TunnelSystemProxy),
         Ok(())
     );
+}
+
+/// A transition asks to take over this user's proxy settings exactly where
+/// the platform writes them for that mode, so settings the user made by hand
+/// refuse it before the running engine is touched. Every other transition,
+/// to Off included, asks only to restore what an earlier run left. The
+/// platform is the one the engine's own coordinator runs on.
+#[tokio::test]
+async fn a_mode_asks_for_the_proxy_settings_only_where_its_platform_writes_them() {
+    use cfw_engine_api::EngineRuntimePlatform as Platform;
+    for (platform, mode, takes_over) in [
+        (Platform::MacOs, EngineMode::Off, false),
+        (Platform::MacOs, EngineMode::LocalProxy, false),
+        (Platform::MacOs, EngineMode::SystemProxy, true),
+        (Platform::MacOs, EngineMode::Tunnel, false),
+        // The tunnel's own network settings carry the proxy.
+        (Platform::MacOs, EngineMode::TunnelSystemProxy, false),
+        (Platform::Windows, EngineMode::Off, false),
+        (Platform::Windows, EngineMode::LocalProxy, false),
+        (Platform::Windows, EngineMode::SystemProxy, true),
+        (Platform::Windows, EngineMode::Tunnel, false),
+        (Platform::Windows, EngineMode::TunnelSystemProxy, true),
+    ] {
+        let bridge = Arc::new(RestorationRightsBridge::default());
+        let mut backend = EndpointRetryBackend::new(0);
+        backend.platform = platform;
+        let engine = crate::engine::ManagedEngine {
+            coordinator: endpoint_retry_coordinator(Arc::new(backend)),
+            ..engine_with_rights_bridge(bridge.clone())
+        };
+        assert_eq!(
+            engine.mode_authorization().authorize(mode).await,
+            Ok(()),
+            "{platform:?} {mode:?}"
+        );
+        assert_eq!(bridge.requests(), [!takes_over], "{platform:?} {mode:?}");
+    }
 }
 
 /// "Recover background services" asks macOS for the rights to restore settings

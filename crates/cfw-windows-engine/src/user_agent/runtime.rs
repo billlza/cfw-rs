@@ -8,7 +8,7 @@ use crate::{
     },
     process::ChildLaunchFailure,
 };
-use cfw_engine_api::{EngineCommandContext, authority_v1::AuthorityMode};
+use cfw_engine_api::EngineCommandContext;
 use std::{
     path::PathBuf,
     sync::{
@@ -129,7 +129,7 @@ impl UserAgentSession {
         service_image: Arc<VerifiedExecutable>,
         assets: UserAgentRuntime,
     ) -> Result<Self> {
-        if (plan.context().operation.mode == AuthorityMode::SystemProxy) != assets.proxy.is_some() {
+        if plan.context().operation.mode.owns_system_proxy() != assets.proxy.is_some() {
             return Err(UserAgentError::Mode);
         }
         let UserAgentPlan { binding, config } = plan;
@@ -299,7 +299,7 @@ impl UserAgentSession {
         if stop.load(Ordering::Acquire) {
             return Ok(StopReason::Requested);
         }
-        let tunnel = self.context.operation.mode == AuthorityMode::Tunnel;
+        let tunnel = self.context.operation.mode.owns_tunnel();
         // SYSTEM's adapter and pump exist before the engine is configured; the
         // endpoint is adopted only after SYSTEM confirms this process's copy.
         let packet = if tunnel {
@@ -352,6 +352,11 @@ impl UserAgentSession {
         let config = self.configuration.as_ref().ok_or(UserAgentError::State)?;
         child.start_retained(config, NATIVE_TIMEOUT)?;
         self.started = true;
+        // A combined run has SYSTEM route its adapter first, so that these
+        // proxy settings never point at a run without its tunnel.
+        if tunnel && self.proxy.is_some() {
+            self.control()?.route_tunnel(self.context.clone())?;
+        }
         if let Some(proxy) = &self.proxy {
             let context = self.command_context();
             proxy.activate(

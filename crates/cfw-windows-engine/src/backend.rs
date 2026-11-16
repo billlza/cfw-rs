@@ -88,7 +88,7 @@ impl Retired {
         snapshot: &crate::authority::AuthoritySnapshot,
     ) -> bool {
         self.context == *context
-            && self.mode == mode
+            && same_family(self.mode, mode)
             && snapshot.state == AuthorityState::Off
             && snapshot.revision.is_some()
             && snapshot.root.is_some()
@@ -289,12 +289,15 @@ impl WindowsEngineBackend {
         Box::pin(self.native(move |shared, state, stop, deadline| {
             let request = crate::CheckedStartConfiguration::new(pending.take()?)
                 .map_err(|error| host_error(HostError::Executable(error)))?;
-            if request.mode() != mode {
+            if !same_family(request.mode(), mode) {
                 return Err(fail(
                     Kind::ConfigurationRejected,
                     "requested proxy mode differs from operation",
                 ));
             }
+            // The tunnel operations carry two modes. The run is recorded
+            // under the one that was requested.
+            let mode = request.mode();
             if !matches!(query(shared, state, deadline)?, NativeEngineStatus::Off) {
                 return Err(fail(Kind::GlobalLeaseConflict, "another runtime is active"));
             }
@@ -372,21 +375,7 @@ impl WindowsEngineBackend {
                 || scope.root.epoch != active.context.config_epoch
                 || scope.root.generation != active.context.generation
                 || crate::user_agent::hex(&scope.identity_sha256) != active.digest
-                || scope.mode
-                    != match mode {
-                        ProjectionMode::LocalProxy => {
-                            cfw_engine_api::authority_v1::AuthorityMode::LocalProxy
-                        }
-                        ProjectionMode::SystemProxy => {
-                            cfw_engine_api::authority_v1::AuthorityMode::SystemProxy
-                        }
-                        ProjectionMode::Tunnel => {
-                            cfw_engine_api::authority_v1::AuthorityMode::Tunnel
-                        }
-                        ProjectionMode::TunnelSystemProxy => {
-                            return Err(fail(Kind::Internal, "invalid runtime owner mode"));
-                        }
-                    }
+                || scope.mode != crate::RunMode::from(mode)
                 || ready.authority().state != AuthorityState::Active
             {
                 return Err(fail(
@@ -427,7 +416,7 @@ impl WindowsEngineBackend {
                     "stop has no matching retained runtime",
                 ));
             };
-            if active.context != context || active.mode != mode {
+            if active.context != context || !same_family(active.mode, mode) {
                 return Err(fail(
                     Kind::StaleOperation,
                     "stop cannot revoke another runtime",
@@ -617,14 +606,20 @@ fn query(shared: &Shared, state: &mut State, deadline: Instant) -> Result<Native
         ProjectionMode::SystemProxy => Ok(NativeEngineStatus::SystemProxy {
             runtime: live.runtime,
         }),
-        ProjectionMode::Tunnel => Ok(NativeEngineStatus::Tunnel {
-            runtime: live.runtime,
-        }),
-        ProjectionMode::TunnelSystemProxy => Err(fail(
-            Kind::Internal,
-            "runtime owner contained the combined mode",
-        )),
+        // The shared status has no combined value: the coordinator knows
+        // which of the two tunnel modes it asked for.
+        ProjectionMode::Tunnel | ProjectionMode::TunnelSystemProxy => {
+            Ok(NativeEngineStatus::Tunnel {
+                runtime: live.runtime,
+            })
+        }
     }
+}
+/// The shared backend has one start and one stop for both tunnel modes.
+/// `operation` is the mode those are named after; `mode` is the run's own.
+fn same_family(mode: ProjectionMode, operation: ProjectionMode) -> bool {
+    mode == operation
+        || (operation == ProjectionMode::Tunnel && mode == ProjectionMode::TunnelSystemProxy)
 }
 /// The shared coordinator's owner of a Windows run: the UserAgent for proxy
 /// modes, and the SYSTEM tunnel service, which owns the adapter and pump while
@@ -662,18 +657,6 @@ fn combined(operation: BackendError, cleanup: BackendError) -> BackendError {
         Kind::CleanupUnproven,
         format!("{operation}; cleanup: {cleanup}"),
     )
-}
-fn combined_unavailable<T: Send + 'static>(
-    request: EngineStartRequest,
-) -> BackendFuture<'static, T> {
-    let pending = PendingRequest(Some(request));
-    Box::pin(async move {
-        let _pending = pending;
-        Err(fail(
-            Kind::Unavailable,
-            "the combined Tunnel and System Proxy mode is not yet available on Windows",
-        ))
-    })
 }
 impl SystemProxyAuthorization for WindowsEngineBackend {
     fn authorize_system_proxy(&self, restoration_only: bool) -> BackendFuture<'_, ()> {
@@ -750,14 +733,11 @@ impl EngineBackend for WindowsEngineBackend {
     /// already owns the tunnel network. The request is still checked so an
     /// unsupported mode fails here rather than at start.
     fn authorize_tunnel_configuration(&self, request: EngineStartRequest) -> BackendFuture<'_, ()> {
-        if request.mode == ProjectionMode::TunnelSystemProxy {
-            return combined_unavailable(request);
-        }
         let mut pending = PendingRequest(Some(request));
         Box::pin(async move {
             let request = crate::CheckedStartConfiguration::new(pending.take()?)
                 .map_err(|error| host_error(HostError::Executable(error)))?;
-            if request.mode() != ProjectionMode::Tunnel {
+            if !request.mode().has_tunnel() {
                 return Err(fail(
                     Kind::ConfigurationRejected,
                     "requested tunnel mode differs from operation",
@@ -767,9 +747,6 @@ impl EngineBackend for WindowsEngineBackend {
         })
     }
     fn start_tunnel(&self, request: EngineStartRequest) -> BackendFuture<'_, RuntimeIdentity> {
-        if request.mode == ProjectionMode::TunnelSystemProxy {
-            return combined_unavailable(request);
-        }
         self.start(request, ProjectionMode::Tunnel)
     }
     fn stop_tunnel(&self, context: EngineCommandContext) -> BackendFuture<'_, ()> {

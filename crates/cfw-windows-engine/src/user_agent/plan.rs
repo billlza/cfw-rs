@@ -1,4 +1,5 @@
 use super::{Result, UserAgentError};
+use crate::RunMode;
 use crate::{
     PreparedConfig,
     authority::{
@@ -6,7 +7,6 @@ use crate::{
         wire::{BindRequest, validate_context},
     },
 };
-use cfw_engine_api::authority_v1::AuthorityMode;
 use cfw_singbox_config::ProjectionMode;
 
 /// A checked input, not a start capability. Only the native Authority channel
@@ -32,11 +32,10 @@ impl PlannedConfiguration {
                 let references = request.credential_references();
                 let material =
                     vault.resolve_for_engine(request.credential_audience(), &references)?;
-                Ok(match request.mode() {
-                    ProjectionMode::Tunnel => {
-                        request.prepare_tunnel_data_plane(material.expose_to_engine())?
-                    }
-                    _ => request.prepare_proxy(material.expose_to_engine())?,
+                Ok(if request.mode().has_tunnel() {
+                    request.prepare_tunnel_data_plane(material.expose_to_engine())?
+                } else {
+                    request.prepare_proxy(material.expose_to_engine())?
                 })
             }
         }
@@ -120,14 +119,7 @@ impl UserAgentPlan {
         identity_digest: &str,
     ) -> Result<()> {
         validate_context(&binding.context)?;
-        let mode = match mode {
-            ProjectionMode::LocalProxy => AuthorityMode::LocalProxy,
-            ProjectionMode::SystemProxy => AuthorityMode::SystemProxy,
-            ProjectionMode::Tunnel => AuthorityMode::Tunnel,
-            // The combined mode's system proxy is not yet owned on Windows.
-            ProjectionMode::TunnelSystemProxy => return Err(UserAgentError::Mode),
-        };
-        if binding.context.operation.mode != mode {
+        if binding.context.operation.mode != RunMode::from(mode) {
             return Err(UserAgentError::Mode);
         }
         if configuration_digest != hex(&binding.context.operation.config_sha256)

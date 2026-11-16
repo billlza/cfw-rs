@@ -7,7 +7,7 @@ pub(super) fn local(acknowledged: bool) -> (Machine, Peer, LeaseContext) {
     let runtime = peer(Role::UserAgent);
     let revision = allocate(&mut machine, &host);
     let mut request = input(revision, 1);
-    request.mode = AuthorityMode::LocalProxy;
+    request.mode = RunMode::LocalProxy;
     let ticket = Ticket::for_test([7; 32]);
     let context = machine
         .prepare(&request, &host, Uuid::from_u128(8), ticket.digest(), now)

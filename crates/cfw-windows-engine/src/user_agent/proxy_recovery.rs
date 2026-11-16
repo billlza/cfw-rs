@@ -7,16 +7,21 @@
 //! a stop its UserAgent acknowledged. A run that SYSTEM took into recovery,
 //! because its UserAgent or its Desktop was lost, has no owner any more: any
 //! Desktop of the same account completes it.
+//!
+//! A run that also owned a tunnel is recorded Off only once SYSTEM has seen
+//! its own adapter gone. The settings are not kept waiting for that: they are
+//! restored as soon as the processes are gone, and the proof is given again
+//! until SYSTEM accepts it.
 use super::desktop::{DesktopError, Result, send};
 use crate::{
     WindowsSystemProxy,
     authority::{
         AuthorityChannel, LeaseContext, ProxyRecoveryTarget,
-        wire::{Command, ProxyCleanupReceipt, Rejection, Response, WireError},
+        wire::{Command, ProxyCleanupReceipt, ProxyRecoveryGrant, Rejection, Response, WireError},
     },
     service_transport::check_deadline,
 };
-use cfw_engine_api::authority_v1::{AuthorityMode, AuthorityState};
+use cfw_engine_api::authority_v1::AuthorityState;
 use std::{
     thread,
     time::{Duration, Instant},
@@ -35,8 +40,8 @@ const FOUND_RUN_PATIENCE: Duration = Duration::from_secs(3);
 /// this account's or does not own the proxy settings: SYSTEM completes such a
 /// run by itself.
 ///
-/// Only a typed refusal is asked again, because it stores nothing; a command
-/// whose delivery is uncertain is never repeated.
+/// Only a typed refusal is asked again, because it records nothing; a
+/// command whose delivery is uncertain is never repeated.
 pub(crate) fn complete(
     authority: &mut AuthorityChannel,
     proxy: &WindowsSystemProxy,
@@ -47,7 +52,39 @@ pub(crate) fn complete(
         Some(_) => deadline,
         None => deadline.min(Instant::now() + FOUND_RUN_PATIENCE),
     };
-    let grant = loop {
+    loop {
+        let grant = grant(authority, owner, deadline, patience)?;
+        let Some(grant) = grant else {
+            return Ok(None);
+        };
+        let report = grant.restore_and_observe(proxy)?;
+        match send(authority, Command::ReconcileProxyCleanup(report), deadline) {
+            Ok(Response::ProxyCleanupReconciled(receipt)) => return Ok(Some(receipt)),
+            Ok(_) => return Err(DesktopError::Response),
+            // The settings are restored and proven, and SYSTEM is still
+            // retiring what it owns of the run: give the proof again.
+            Err(
+                refused @ DesktopError::Authority(WireError::Rejected(Rejection::CleanupUnproven)),
+            ) => {
+                if Instant::now() + RETIREMENT_POLL >= patience {
+                    return Err(refused);
+                }
+            }
+            Err(error) => return Err(error),
+        }
+        thread::sleep(RETIREMENT_POLL);
+    }
+}
+
+/// SYSTEM's challenge for the recorded run, once it has seen the processes of
+/// that run gone. `None` when the run is not this account's to complete.
+fn grant(
+    authority: &mut AuthorityChannel,
+    owner: Option<&LeaseContext>,
+    deadline: Instant,
+    patience: Instant,
+) -> Result<Option<ProxyRecoveryGrant>> {
+    loop {
         check_deadline(deadline)?;
         let scope = match send(authority, Command::ReadRuntimeScope, deadline) {
             Ok(Response::RuntimeScope(scope)) => scope,
@@ -60,7 +97,7 @@ pub(crate) fn complete(
         };
         if scope
             .operation()
-            .is_none_or(|operation| operation.mode() != AuthorityMode::SystemProxy)
+            .is_none_or(|operation| !operation.mode().owns_system_proxy())
         {
             return Ok(None);
         }
@@ -82,7 +119,7 @@ pub(crate) fn complete(
             }
         };
         match send(authority, Command::BeginProxyCleanup(target), deadline) {
-            Ok(Response::ProxyRecoveryGranted(grant)) => break grant,
+            Ok(Response::ProxyRecoveryGranted(grant)) => return Ok(Some(grant)),
             Ok(_) => return Err(DesktopError::Response),
             // Processes of the run are still exiting, or SYSTEM has since
             // moved the run into recovery: read the record again. A refusal
@@ -99,12 +136,5 @@ pub(crate) fn complete(
             Err(error) => return Err(error),
         }
         thread::sleep(RETIREMENT_POLL);
-    };
-    let report = grant.restore_and_observe(proxy)?;
-    let Response::ProxyCleanupReconciled(receipt) =
-        send(authority, Command::ReconcileProxyCleanup(report), deadline)?
-    else {
-        return Err(DesktopError::Response);
-    };
-    Ok(Some(receipt))
+    }
 }

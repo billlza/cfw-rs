@@ -4,6 +4,7 @@ use super::{
     types::*,
     *,
 };
+use crate::RunMode;
 use crate::{
     authority_journal::{
         AuthorityCommittedState, JournalCursor, JournalRecovery, JournalTransition, RecordedOwner,
@@ -11,10 +12,11 @@ use crate::{
     },
     connection_binding::ConnectionBinding,
 };
-use cfw_engine_api::authority_v1::{AuthorityMode, AuthorityState, PacketPumpLimits, RootContext};
+use cfw_engine_api::authority_v1::{AuthorityState, PacketPumpLimits, RootContext};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+mod combined;
 mod local_recovery;
 mod local_stop;
 mod startup;
@@ -63,7 +65,7 @@ fn input(revision: u64, generation: u64) -> PrepareRequest {
             generation,
         },
         operation_id: Uuid::from_u128(2),
-        mode: AuthorityMode::SystemProxy,
+        mode: RunMode::SystemProxy,
         config_sha256: [3; 32],
         identity_sha256: [4; 32],
         expected_revision: revision,
@@ -333,7 +335,7 @@ fn tunnel_policy_binds_the_user_agent_and_needs_bounded_packet_evidence() {
     let context = value
         .prepare(
             &PrepareRequest {
-                mode: AuthorityMode::Tunnel,
+                mode: RunMode::Tunnel,
                 ..input(revision, 1)
             },
             &host,

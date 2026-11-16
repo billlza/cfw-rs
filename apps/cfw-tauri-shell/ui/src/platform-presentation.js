@@ -37,7 +37,7 @@ const WINDOWS = Object.freeze({
   localProxyUnavailable: "Local proxy is unavailable in this Windows session.",
   systemProxyUnavailable: "System Proxy is unavailable in this Windows session.",
   tunnelUnavailable: "TUN Mode is unavailable in this Windows build.",
-  combinedUnavailable: "TUN Mode and System Proxy cannot run together in this Windows build. Turn one off first.",
+  combinedUnavailable: "TUN Mode and System Proxy cannot run together until both report capability.",
   tunnelInfoHint: "TUN Mode routes device traffic through a Windows virtual network adapter.",
   tunnelInfo: "TUN Mode uses a Windows virtual network adapter to route traffic. The switch is available only when Windows tunnel support is ready.",
   copyProxyCommands: "Copy proxy commands for PowerShell",

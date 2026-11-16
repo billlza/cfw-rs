@@ -95,6 +95,17 @@ impl EngineRuntimePlatform {
             Self::Windows => false,
         }
     }
+
+    /// Whether a start of `mode` takes over the signed-in user's own proxy
+    /// settings. A System Proxy run does on both platforms. A combined run
+    /// does only on Windows: on macOS its proxy travels in the tunnel's own
+    /// network settings and nothing of the user's is written.
+    pub const fn takes_over_proxy_settings(self, mode: EngineMode) -> bool {
+        match self {
+            Self::MacOs => matches!(mode, EngineMode::SystemProxy),
+            Self::Windows => mode.system_proxy_enabled(),
+        }
+    }
 }
 
 impl EngineOwner {

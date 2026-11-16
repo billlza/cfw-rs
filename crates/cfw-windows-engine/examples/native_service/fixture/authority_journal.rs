@@ -1,6 +1,7 @@
 //! Native SYSTEM journal validation, isolated to disposable VM fixture roots.
 use super::*;
-use cfw_engine_api::authority_v1::{AuthorityMode, AuthorityState, RootContext};
+use cfw_engine_api::authority_v1::{AuthorityState, RootContext};
+use cfw_windows_engine::RunMode;
 use cfw_windows_engine::authority_journal::*;
 use cfw_windows_storage::{PrivateDirectory, PrivateMachineRecord};
 use std::io::Write;
@@ -108,7 +109,7 @@ fn prepare(
     assert!(claim.matches_native(owner));
     let operation = JournalOperation::new(
         uuid::Uuid::new_v4(),
-        AuthorityMode::SystemProxy,
+        RunMode::SystemProxy,
         [7; 32],
         [8; 32],
         uuid::Uuid::new_v4(),

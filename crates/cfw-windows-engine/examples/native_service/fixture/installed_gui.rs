@@ -33,6 +33,10 @@ pub(super) fn tunnel_probe(operation: &str, installation: &str) -> Result<()> {
     network::tunnel_probe(operation, installation)
 }
 
+pub(super) fn combined_probe(installation: &str, port: &str) -> Result<()> {
+    network::combined_probe(installation, port)
+}
+
 pub(super) fn run() -> Result<()> {
     let (source, receipts) = validation_context()?;
     let installed =

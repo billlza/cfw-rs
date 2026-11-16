@@ -1,5 +1,6 @@
 use super::*;
-use cfw_engine_api::authority_v1::{AuthorityMode, AuthorityState, RootContext};
+use crate::RunMode;
+use cfw_engine_api::authority_v1::{AuthorityState, RootContext};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::fmt;
 use uuid::Uuid;
@@ -84,7 +85,7 @@ pub enum JournalTransition {
 #[serde(deny_unknown_fields)]
 pub struct JournalOperation {
     operation_id: Uuid,
-    mode: AuthorityMode,
+    mode: RunMode,
     config_sha256: [u8; 32],
     identity_sha256: [u8; 32],
     lease_id: Uuid,
@@ -93,7 +94,7 @@ pub struct JournalOperation {
 impl JournalOperation {
     pub fn new(
         operation_id: Uuid,
-        mode: AuthorityMode,
+        mode: RunMode,
         config_sha256: [u8; 32],
         identity_sha256: [u8; 32],
         lease_id: Uuid,
@@ -113,7 +114,7 @@ impl JournalOperation {
     pub fn operation_id(&self) -> Uuid {
         self.operation_id
     }
-    pub fn mode(&self) -> AuthorityMode {
+    pub fn mode(&self) -> RunMode {
         self.mode
     }
     pub fn config_sha256(&self) -> &[u8; 32] {

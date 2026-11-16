@@ -1,6 +1,9 @@
 use super::*;
+use crate::RunMode;
 use crate::authority_journal::RecordedOwner;
-use cfw_engine_api::authority_v1::{AuthorityMode, RootContext};
+use cfw_engine_api::authority_v1::RootContext;
+
+mod combined;
 
 fn owner() -> RecordedOwner {
     serde_json::from_value(
@@ -17,7 +20,7 @@ fn context() -> LeaseContext {
                 generation: 1,
             },
             operation_id: Uuid::from_u128(2),
-            mode: AuthorityMode::SystemProxy,
+            mode: RunMode::SystemProxy,
             config_sha256: [3; 32],
             identity_sha256: [4; 32],
             owner: owner(),
@@ -172,14 +175,15 @@ fn protocol_and_header_are_closed_before_dispatch() {
     let good = Request::new(Command::Observe).unwrap().encode().unwrap();
     let text = std::str::from_utf8(good.as_bytes()).unwrap();
     for altered in [
-        text.replace("\"version\":8", "\"version\":1"),
-        text.replace("\"version\":8", "\"version\":2"),
-        text.replace("\"version\":8", "\"version\":3"),
-        text.replace("\"version\":8", "\"version\":4"),
-        text.replace("\"version\":8", "\"version\":5"),
-        text.replace("\"version\":8", "\"version\":6"),
-        text.replace("\"version\":8", "\"version\":7"),
-        text.replace("\"version\":8", "\"version\":9"),
+        text.replace("\"version\":9", "\"version\":1"),
+        text.replace("\"version\":9", "\"version\":2"),
+        text.replace("\"version\":9", "\"version\":3"),
+        text.replace("\"version\":9", "\"version\":4"),
+        text.replace("\"version\":9", "\"version\":5"),
+        text.replace("\"version\":9", "\"version\":6"),
+        text.replace("\"version\":9", "\"version\":7"),
+        text.replace("\"version\":9", "\"version\":8"),
+        text.replace("\"version\":9", "\"version\":10"),
         text.replace(PROTOCOL, "cfm.authority"),
     ] {
         assert!(matches!(
@@ -188,11 +192,11 @@ fn protocol_and_header_are_closed_before_dispatch() {
         ));
     }
     for altered in [
-        text.replace("\"version\":8", "\"version\":8,\"version\":8"),
+        text.replace("\"version\":9", "\"version\":9,\"version\":9"),
         text.replace("\"kind\":\"observe\"", "\"kind\":\"reconcile_off\""),
         text.replace("\"payload\":{}", "\"payload\":{\"ticket\":[1]}"),
         format!("{text}{{}}"),
-        text.replace("\"version\":8", "\"unknown\":true,\"version\":8"),
+        text.replace("\"version\":9", "\"unknown\":true,\"version\":9"),
     ] {
         assert!(Request::decode(altered.as_bytes()).is_err());
     }
@@ -383,7 +387,7 @@ fn bound_keeper_receipts_reject_unsafe_values_and_never_adopt_from_the_codec() {
         response(&request, &serde_json::to_vec(&missing).unwrap(), &owner()),
         Err(WireError::Malformed)
     ));
-    for version in [1, 2, 3, 4, 5, 6, 7, 9] {
+    for version in [1, 2, 3, 4, 5, 6, 7, 8, 10] {
         let mut changed = original.clone();
         changed["version"] = serde_json::json!(version);
         assert!(matches!(
@@ -1031,7 +1035,7 @@ fn unknown_publication_is_an_error_and_recorded_scope_cannot_answer_an_owned_lea
 
 fn tunnel_context() -> LeaseContext {
     let mut value = context();
-    value.operation.mode = AuthorityMode::Tunnel;
+    value.operation.mode = RunMode::Tunnel;
     value
 }
 fn tunnel_open(mtu: u16) -> TunnelOpenRequest {

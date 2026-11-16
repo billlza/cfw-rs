@@ -1,9 +1,10 @@
-//! Production reconciliation for the schema-6 SystemProxy resource contract.
-//! Tunnel modes require their own native adapter/pump observations and cannot
-//! enter this constructor. No wire Boolean becomes a cleanup fact here.
+//! Production reconciliation, under the schema-6 resource contract, of a run
+//! that owned this user's proxy settings. A combined run enters only with
+//! SYSTEM's own native observation of its adapter and pump; a plain Tunnel
+//! run never enters. No wire Boolean becomes a cleanup fact here.
 use super::super::{ProcessRetirement, ProxyRecoveryObservation, ProxyRecoveryPurpose};
 use super::*;
-use cfw_engine_api::authority_v1::AuthorityMode;
+use crate::RunMode;
 
 impl WindowsAuthority {
     pub(in crate::authority) fn reconcile_proxy_cleanup(
@@ -44,13 +45,21 @@ impl WindowsAuthority {
                 .map_err(AuthorityError::RuntimeEndpoints)?
                 .is_empty();
 
-        // This admitted mode creates only an ordinary UserAgent/engine tree.
-        // UserAgentPlan and CheckedStartConfiguration reject Tunnel activation,
-        // system WireGuard interfaces and extra services here. The
-        // exclusive Authority sequence required the preceding root to be Off;
-        // a SystemProxy root cannot own a managed TUN adapter or packet pump.
-        // These facts must not be reused for Tunnel or combined-mode cleanup.
-        let no_tunnel_resources = target.operation.mode() == AuthorityMode::SystemProxy;
+        // A SystemProxy run is an ordinary UserAgent/engine tree: its plan and
+        // checked configuration reject a tunnel, system WireGuard interfaces
+        // and extra services, and the exclusive Authority sequence required
+        // the preceding root to be Off, so it owns no adapter or packet pump.
+        // A combined run does. Those are SYSTEM's own, and they are observed
+        // gone here, natively; nothing in this report speaks for them. Until
+        // then the proof is refused and nothing is recorded: the Desktop has
+        // restored the settings already and gives its proof again.
+        let no_tunnel_resources = match target.operation.mode() {
+            RunMode::SystemProxy => true,
+            RunMode::TunnelSystemProxy => {
+                retired && self.combined_tunnel_retired(target.root.installation_id)?
+            }
+            RunMode::LocalProxy | RunMode::Tunnel => false,
+        };
         let execution_material_retired = match self.machine.phase() {
             AuthorityState::Recovering => {
                 self.machine.context().is_none()
@@ -94,6 +103,11 @@ impl WindowsAuthority {
             deadline,
         )?;
         let snapshot = self.reconcile_off(evidence)?;
+        if target.operation.mode().owns_tunnel() {
+            // Off is committed: nothing of the run's network is left to drive.
+            self.tunnel = None;
+            self.tunnel_recovery = None;
+        }
         // Late caller/session failure remains an error, even after a committed
         // record. Unknown publication cannot issue a new lease or claim Off.
         self.after_publication(authorization, deadline)?;

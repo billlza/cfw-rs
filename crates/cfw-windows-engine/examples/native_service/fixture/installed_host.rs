@@ -15,6 +15,7 @@ use std::{
 mod agent_process;
 mod backend;
 mod checks;
+mod combined;
 mod coordinator;
 mod profile;
 mod progress;
@@ -37,6 +38,9 @@ pub(super) enum InstalledSuite {
     ProxyRecovery,
     ProxyAbandon,
     ProxyResume,
+    Combined,
+    CombinedAbandon,
+    CombinedResume,
 }
 impl InstalledSuite {
     fn prefix(self) -> &'static str {
@@ -51,6 +55,9 @@ impl InstalledSuite {
             Self::ProxyRecovery => "installed-host-proxy-recovery",
             Self::ProxyAbandon => "installed-host-proxy-abandon",
             Self::ProxyResume => "installed-host-proxy-resume",
+            Self::Combined => "installed-host-combined",
+            Self::CombinedAbandon => "installed-host-combined-abandon",
+            Self::CombinedResume => "installed-host-combined-resume",
         }
     }
 }
@@ -367,8 +374,9 @@ pub(super) fn exercise_tunnel() -> Result<()> {
     Ok(())
 }
 
-/// The three SystemProxy failure-path clients; see `proxy_recovery`.
-fn exercise_proxy(
+/// A client whose report is one keyed outcome: the SystemProxy failure
+/// paths and the combined mode; see `proxy_recovery` and `combined`.
+fn exercise_keyed(
     key: &str,
     product_agent: bool,
     last_generation: u64,
@@ -388,13 +396,22 @@ fn exercise_proxy(
     Ok(())
 }
 pub(super) fn exercise_proxy_recovery() -> Result<()> {
-    exercise_proxy("proxy_recovery", true, 12, proxy_recovery::exercise)
+    exercise_keyed("proxy_recovery", true, 12, proxy_recovery::exercise)
 }
 pub(super) fn exercise_proxy_abandon() -> Result<()> {
-    exercise_proxy("proxy_abandoned", true, 13, proxy_recovery::abandon)
+    exercise_keyed("proxy_abandoned", true, 13, proxy_recovery::abandon)
 }
 pub(super) fn exercise_proxy_resume() -> Result<()> {
-    exercise_proxy("proxy_resumed", false, 13, proxy_recovery::resume)
+    exercise_keyed("proxy_resumed", false, 13, proxy_recovery::resume)
+}
+pub(super) fn exercise_combined() -> Result<()> {
+    exercise_keyed("combined", true, 16, combined::exercise)
+}
+pub(super) fn exercise_combined_abandon() -> Result<()> {
+    exercise_keyed("combined_abandoned", true, 17, combined::abandon)
+}
+pub(super) fn exercise_combined_resume() -> Result<()> {
+    exercise_keyed("combined_resumed", false, 17, combined::resume)
 }
 
 pub(super) fn exercise_startup() -> Result<()> {
@@ -481,6 +498,11 @@ pub(super) fn check_output(
         InstalledSuite::ProxyRecovery | InstalledSuite::ProxyAbandon | InstalledSuite::ProxyResume
     ) {
         proxy_recovery::accepts(suite, &report)
+    } else if matches!(
+        suite,
+        InstalledSuite::Combined | InstalledSuite::CombinedAbandon | InstalledSuite::CombinedResume
+    ) {
+        combined::accepts(suite, &report)
     } else if suite == InstalledSuite::Startup {
         let startup = &report["startup_registration"];
         startup["source"] == report["source"]
@@ -516,7 +538,10 @@ pub(super) fn check_output(
         || report["product_agent"]
             != !matches!(
                 suite,
-                InstalledSuite::Profile | InstalledSuite::Startup | InstalledSuite::ProxyResume
+                InstalledSuite::Profile
+                    | InstalledSuite::Startup
+                    | InstalledSuite::ProxyResume
+                    | InstalledSuite::CombinedResume
             )
         || report["desktop_is_fixture"] != true
         || report["medium_integrity"] != true

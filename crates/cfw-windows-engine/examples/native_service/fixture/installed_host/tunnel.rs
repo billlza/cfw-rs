@@ -20,7 +20,7 @@ use std::{
 };
 
 const PROFILE: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-const TUNNEL_MTU: u16 = 1500;
+pub(super) const TUNNEL_MTU: u16 = 1500;
 
 pub(super) fn exercise(progress: &mut Progress) -> Result<serde_json::Value> {
     progress.record("tunnel_open", 0)?;
@@ -94,7 +94,7 @@ async fn exercise_async(
         config_epoch: lineage.session.config_epoch,
         generation,
     };
-    let (request, secret) = tunnel_request(&settings, context.clone())?;
+    let (request, secret) = tunnel_request(&settings, context.clone(), ProjectionMode::Tunnel)?;
     drop((controller, mixed));
 
     progress.record("tunnel_check", generation)?;
@@ -268,7 +268,7 @@ async fn agent_crash_recovery(
         config_epoch: lineage.session.config_epoch,
         generation,
     };
-    let (request, _secret) = tunnel_request(&settings, context.clone())?;
+    let (request, _secret) = tunnel_request(&settings, context.clone(), ProjectionMode::Tunnel)?;
     drop((controller, mixed));
     progress.record("tunnel_crash_start", generation)?;
     backend
@@ -338,28 +338,25 @@ async fn agent_crash_recovery(
     }))
 }
 
-/// The coordinator's Windows projection: the packet-endpoint stack, whose
-/// tunnel binds the engine's own sockets to the physical interface.
-fn tunnel_request(
+/// The coordinator's Windows projection of a mode that owns a tunnel: the
+/// packet-endpoint stack, whose tunnel binds the engine's own sockets to the
+/// physical interface. A combined run also names its proxy listener's port.
+pub(super) fn tunnel_request(
     settings: &EngineSettings,
     context: EngineCommandContext,
+    mode: ProjectionMode,
 ) -> Result<(EngineStartRequest, String)> {
     let profile =
         ValidatedSingBoxProfile::parse(r#"{"outbounds":[{"type":"direct","tag":"direct"}]}"#)
             .map_err(|e| e.to_string())?;
     let projection = profile
-        .project_with_tunnel_stack(
-            PROFILE,
-            ProjectionMode::Tunnel,
-            settings,
-            TunnelStack::Gvisor,
-        )
+        .project_with_tunnel_stack(PROFILE, mode, settings, TunnelStack::Gvisor)
         .map_err(|e| e.to_string())?;
     let secret = projection.clash_api().expose_secret().to_owned();
     Ok((
         EngineStartRequest {
             context,
-            mode: ProjectionMode::Tunnel,
+            mode,
             credential_audience: projection.credential_audience().clone(),
             config_json: projection.as_json().to_owned(),
             config_content_digest: projection.configuration_digest().to_owned(),
@@ -370,7 +367,8 @@ fn tunnel_request(
                 bypass_private_networks: settings.bypass_private_networks,
                 direct_ipv4_hosts: projection.direct_ipv4_hosts(),
                 mtu: settings.tunnel_mtu,
-                system_proxy_port: None,
+                system_proxy_port: (mode == ProjectionMode::TunnelSystemProxy)
+                    .then_some(settings.mixed_port),
             }),
         },
         secret,
@@ -378,7 +376,7 @@ fn tunnel_request(
 }
 
 /// One DNS A query to the adapter's resolver, which the engine serves.
-fn query_tunnel_resolver(name: &str) -> Result<Vec<Ipv4Addr>> {
+pub(super) fn query_tunnel_resolver(name: &str) -> Result<Vec<Ipv4Addr>> {
     const ID: u16 = 0x4346;
     let peer: Ipv4Addr = cfw_singbox_config::TUNNEL_ADDRESS_PLAN
         .ipv4_dns_peer
@@ -460,7 +458,7 @@ fn parse_a_records(reply: &[u8], id: u16, question_end: usize) -> Result<Vec<Ipv
 
 /// Fetch the probe over a connection the system routes into the tunnel and,
 /// while it is open, find that connection in the engine's own table.
-fn probe_through_tunnel(
+pub(super) fn probe_through_tunnel(
     target: Ipv4Addr,
     controller: SocketAddr,
     secret: &str,

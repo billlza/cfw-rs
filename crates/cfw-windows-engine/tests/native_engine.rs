@@ -115,6 +115,52 @@ fn request(address: SocketAddr, text: &str) -> String {
     response
 }
 
+/// One GET through the engine's proxy listener to a loopback peer of this
+/// test, which accepts and answers exactly that request.
+fn proxied_get(mixed_address: SocketAddr) {
+    let server = reserve();
+    let destination = server.local_addr().unwrap();
+    server.set_nonblocking(true).unwrap();
+    let worker = thread::spawn(move || {
+        let deadline = Instant::now() + TIMEOUT;
+        let (mut socket, _) = loop {
+            match server.accept() {
+                Ok(connection) => break connection,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && Instant::now() < deadline =>
+                {
+                    thread::sleep(Duration::from_millis(5))
+                }
+                Err(error) => panic!("loopback peer accept failed: {error}"),
+            }
+        };
+        // Windows accepted sockets can retain the listener's nonblocking
+        // mode. The accept loop is bounded separately; peer I/O uses deadlines.
+        socket.set_nonblocking(false).unwrap();
+        socket.set_read_timeout(Some(TIMEOUT)).unwrap();
+        socket.set_write_timeout(Some(TIMEOUT)).unwrap();
+        let mut header = Vec::new();
+        while !header.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            socket.read_exact(&mut byte).unwrap();
+            header.push(byte[0]);
+            assert!(header.len() <= 8192);
+        }
+        assert!(header.starts_with(b"GET /host-lifecycle HTTP/1.1\r\n"));
+        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 16\r\nConnection: close\r\n\r\ncfw-owned-engine").unwrap();
+    });
+    let response = request(
+        mixed_address,
+        &format!(
+            "GET http://{destination}/host-lifecycle HTTP/1.1\r\nHost: {destination}\r\nConnection: close\r\n\r\n"
+        ),
+    );
+    assert!(response.starts_with("HTTP/1.1 200"));
+    assert!(response.ends_with("cfw-owned-engine"));
+    worker.join().unwrap();
+}
+
 #[test]
 fn all_projected_modes_are_checked_without_starting_their_occupied_listeners() {
     let temporary = tempfile::tempdir().unwrap();
@@ -201,47 +247,7 @@ fn rust_owner_runs_real_projected_http_then_closes_and_releases_listeners() {
     ));
     assert_eq!(child.observe(TIMEOUT).unwrap(), running);
 
-    let server = reserve();
-    let destination = server.local_addr().unwrap();
-    server.set_nonblocking(true).unwrap();
-    let worker = thread::spawn(move || {
-        let deadline = Instant::now() + TIMEOUT;
-        let (mut socket, _) = loop {
-            match server.accept() {
-                Ok(connection) => break connection,
-                Err(error)
-                    if error.kind() == std::io::ErrorKind::WouldBlock
-                        && Instant::now() < deadline =>
-                {
-                    thread::sleep(Duration::from_millis(5))
-                }
-                Err(error) => panic!("loopback peer accept failed: {error}"),
-            }
-        };
-        // Windows accepted sockets can retain the listener's nonblocking
-        // mode. The accept loop is bounded separately; peer I/O uses deadlines.
-        socket.set_nonblocking(false).unwrap();
-        socket.set_read_timeout(Some(TIMEOUT)).unwrap();
-        socket.set_write_timeout(Some(TIMEOUT)).unwrap();
-        let mut header = Vec::new();
-        while !header.ends_with(b"\r\n\r\n") {
-            let mut byte = [0];
-            socket.read_exact(&mut byte).unwrap();
-            header.push(byte[0]);
-            assert!(header.len() <= 8192);
-        }
-        assert!(header.starts_with(b"GET /host-lifecycle HTTP/1.1\r\n"));
-        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 16\r\nConnection: close\r\n\r\ncfw-owned-engine").unwrap();
-    });
-    let response = request(
-        mixed_address,
-        &format!(
-            "GET http://{destination}/host-lifecycle HTTP/1.1\r\nHost: {destination}\r\nConnection: close\r\n\r\n"
-        ),
-    );
-    assert!(response.starts_with("HTTP/1.1 200"));
-    assert!(response.ends_with("cfw-owned-engine"));
-    worker.join().unwrap();
+    proxied_get(mixed_address);
 
     let denied = request(
         controller_address,

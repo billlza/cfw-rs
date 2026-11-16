@@ -28,7 +28,9 @@ const PROTOCOL: &str = "cfw.windows.authority";
 // until SYSTEM offers a packet endpoint, and confirm that endpoint.
 // v8 has a recovery receipt say how SYSTEM knew the run's processes were
 // gone: a counted Job, or the end of the logon the run ran under.
-const VERSION: u16 = 8;
+// v9 names a combined tunnel and system proxy run, and lets its bound
+// UserAgent have the adapter routed before it applies the proxy settings.
+const VERSION: u16 = 9;
 
 #[derive(Debug, thiserror::Error)]
 pub enum WireError {
@@ -170,6 +172,7 @@ pub(super) enum CommandTag {
     ConfirmRuntimeKeeper,
     OpenTunnel,
     ConfirmTunnelEndpoint,
+    RouteTunnel,
     Ready,
     Heartbeat,
     BeginStop,
@@ -248,6 +251,7 @@ pub enum Command {
     ConfirmRuntimeKeeper(KeeperRequest),
     OpenTunnel(TunnelOpenRequest),
     ConfirmTunnelEndpoint(KeeperRequest),
+    RouteTunnel(LeaseContext),
     Ready(ReadyReport),
     Heartbeat(LeaseContext),
     BeginStop(StopRequest),
@@ -273,6 +277,7 @@ impl Command {
             Self::ConfirmRuntimeKeeper(_) => CommandTag::ConfirmRuntimeKeeper,
             Self::OpenTunnel(_) => CommandTag::OpenTunnel,
             Self::ConfirmTunnelEndpoint(_) => CommandTag::ConfirmTunnelEndpoint,
+            Self::RouteTunnel(_) => CommandTag::RouteTunnel,
             Self::Ready(_) => CommandTag::Ready,
             Self::Heartbeat(_) => CommandTag::Heartbeat,
             Self::BeginStop(_) => CommandTag::BeginStop,
@@ -310,8 +315,7 @@ impl Command {
             }
             Self::OpenTunnel(input) => {
                 validate_context(&input.context)?;
-                if input.context.operation.mode
-                    != cfw_engine_api::authority_v1::AuthorityMode::Tunnel
+                if !input.context.operation.mode.owns_tunnel()
                     || !crate::tunnel::HANDOFF_MTU.contains(&input.mtu)
                 {
                     return Err(WireError::Malformed);
@@ -320,12 +324,19 @@ impl Command {
             }
             Self::ConfirmTunnelEndpoint(input) => {
                 validate_context(&input.context)?;
-                if input.context.operation.mode
-                    != cfw_engine_api::authority_v1::AuthorityMode::Tunnel
-                {
+                if !input.context.operation.mode.owns_tunnel() {
                     return Err(WireError::Malformed);
                 }
                 validate_handle(input.handle)
+            }
+            // Only a combined run asks for its routes before Ready: its
+            // proxy settings are applied after them.
+            Self::RouteTunnel(context) => {
+                validate_context(context)?;
+                if context.operation.mode != crate::RunMode::TunnelSystemProxy {
+                    return Err(WireError::Malformed);
+                }
+                Ok(())
             }
             Self::Ready(report) => {
                 validate_context(&report.context)?;
@@ -432,9 +443,9 @@ impl Request {
             | Command::ConfirmTunnelEndpoint(input) => envelope(self.id, tag, input),
             Command::OpenTunnel(input) => envelope(self.id, tag, input),
             Command::Ready(input) => envelope(self.id, tag, input),
-            Command::Heartbeat(input) | Command::RetainRuntime(input) => {
-                envelope(self.id, tag, input)
-            }
+            Command::Heartbeat(input)
+            | Command::RetainRuntime(input)
+            | Command::RouteTunnel(input) => envelope(self.id, tag, input),
             Command::BeginStop(input) | Command::AbortPrepared(input) => {
                 envelope(self.id, tag, input)
             }
@@ -476,6 +487,7 @@ impl Request {
             CommandTag::ConfirmRuntimeKeeper => Command::ConfirmRuntimeKeeper(decode(body)?),
             CommandTag::OpenTunnel => Command::OpenTunnel(decode(body)?),
             CommandTag::ConfirmTunnelEndpoint => Command::ConfirmTunnelEndpoint(decode(body)?),
+            CommandTag::RouteTunnel => Command::RouteTunnel(decode(body)?),
             CommandTag::ConfirmRuntimeReference => Command::ConfirmRuntimeReference(decode(body)?),
             CommandTag::RetainRuntime => Command::RetainRuntime(decode(body)?),
             CommandTag::Ready => Command::Ready(decode(body)?),
@@ -934,6 +946,11 @@ pub(super) fn response(
                     value.state == AuthorityState::Starting
                         && input.context.operation.prepared_revision.checked_add(1)
                             == value.revision,
+                ),
+                Command::RouteTunnel(context) => (
+                    context,
+                    value.state == AuthorityState::Starting
+                        && context.operation.prepared_revision.checked_add(1) == value.revision,
                 ),
                 Command::Ready(report) => (
                     &report.context,

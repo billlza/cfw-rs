@@ -31,6 +31,10 @@ mod protocol;
 #[cfg(any(windows, test))]
 mod proxy_endpoints;
 #[cfg(any(windows, test))]
+mod run_mode;
+#[cfg(any(windows, test))]
+pub use run_mode::RunMode;
+#[cfg(any(windows, test))]
 pub mod runtime_host;
 #[cfg(any(windows, test))]
 pub mod tunnel;

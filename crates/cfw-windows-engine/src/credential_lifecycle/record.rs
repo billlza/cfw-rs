@@ -1,10 +1,11 @@
 use super::{CredentialLifecycleError as Error, Result};
+use crate::RunMode;
 use crate::{
     CheckedStartConfiguration, authority::AuthoritySnapshot, authority_journal::JournalOperation,
 };
 use cfw_engine_api::{
     TunnelNetworkOptions,
-    authority_v1::{AuthorityMode, AuthorityState, RootContext, WireValidate},
+    authority_v1::{AuthorityState, RootContext, WireValidate},
 };
 use cfw_singbox_config::{
     CredentialAudience, CredentialBinding, CredentialSlot, MAX_CREDENTIAL_SLOTS, ProjectionMode,
@@ -65,12 +66,8 @@ impl Record {
     pub(super) fn operation_id(&self) -> Uuid {
         self.operation_id
     }
-    pub(super) fn mode(&self) -> AuthorityMode {
-        match self.mode {
-            ProjectionMode::LocalProxy => AuthorityMode::LocalProxy,
-            ProjectionMode::SystemProxy => AuthorityMode::SystemProxy,
-            ProjectionMode::Tunnel | ProjectionMode::TunnelSystemProxy => AuthorityMode::Tunnel,
-        }
+    pub(super) fn mode(&self) -> RunMode {
+        RunMode::from(self.mode)
     }
     pub(super) fn content_digest(&self) -> Result<[u8; 32]> {
         digest(&self.configuration_sha256)

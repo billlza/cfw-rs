@@ -1,5 +1,5 @@
 use super::*;
-use cfw_engine_api::authority_v1::AuthorityMode;
+use crate::RunMode;
 
 impl WindowsAuthority {
     pub(crate) fn start_service_drain(&mut self) -> Result<()> {
@@ -27,23 +27,39 @@ impl WindowsAuthority {
             .metadata()
             .and_then(|m| m.operation())
             .map(|o| o.mode());
-        if mode == Some(AuthorityMode::Tunnel) || self.tunnel.is_some() {
+        if mode.is_some_and(RunMode::owns_tunnel) || self.tunnel.is_some() {
             self.drive_tunnel()?;
-            let reconcilable = match state.state {
-                AuthorityState::Recovering => true,
+            let reconcilable = match (state.state, mode) {
+                (AuthorityState::Recovering, Some(_)) => true,
                 // Only an acknowledged stop keeps its binding until Off.
-                AuthorityState::Stopping => self
-                    .machine
-                    .stopped_cleanup_target(AuthorityMode::Tunnel)
-                    .is_ok(),
+                (AuthorityState::Stopping, Some(mode)) => {
+                    self.machine.stopped_cleanup_target(mode).is_ok()
+                }
                 _ => false,
             };
-            if mode == Some(AuthorityMode::Tunnel) && reconcilable {
-                self.reconcile_tunnel()?;
+            if reconcilable {
+                match mode {
+                    Some(RunMode::Tunnel) => {
+                        self.reconcile_tunnel()?;
+                    }
+                    // SYSTEM retires its network at once. Off waits for the
+                    // proof that this user's proxy settings were restored, which
+                    // may be days away: a retired network is not asked about
+                    // again on every tick.
+                    Some(RunMode::TunnelSystemProxy) => {
+                        let revision = self.machine.revision();
+                        if self.tunnel_retired_at != Some(revision)
+                            && self.retire_combined_tunnel()?
+                        {
+                            self.tunnel_retired_at = Some(revision);
+                        }
+                    }
+                    _ => {}
+                }
             }
             return Ok(self.snapshot());
         }
-        let local = mode == Some(AuthorityMode::LocalProxy);
+        let local = mode == Some(RunMode::LocalProxy);
         if local
             && matches!(
                 state.state,

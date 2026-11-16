@@ -21,15 +21,15 @@ use cfw_windows_engine::{
 const PROFILE: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 /// The generation the tunnel suite leaves behind.
 const FIRST_GENERATION: u64 = 10;
-const FAILED_START_LIMIT: Duration = Duration::from_secs(30);
-const CRASH_LIMIT: Duration = Duration::from_secs(45);
+pub(super) const FAILED_START_LIMIT: Duration = Duration::from_secs(30);
+pub(super) const CRASH_LIMIT: Duration = Duration::from_secs(45);
 
-struct Product {
-    desktop: Arc<InstalledDesktop>,
-    backend: WindowsEngineBackend,
-    runtime: tokio::runtime::Runtime,
+pub(super) struct Product {
+    pub(super) desktop: Arc<InstalledDesktop>,
+    pub(super) backend: WindowsEngineBackend,
+    pub(super) runtime: tokio::runtime::Runtime,
 }
-fn open(label: &str) -> Result<Product> {
+pub(super) fn open(label: &str) -> Result<Product> {
     let desktop = Arc::new(InstalledDesktop::open().map_err(|e| e.to_string())?);
     let diagnostics = std::fs::OpenOptions::new()
         .write(true)
@@ -97,14 +97,22 @@ fn candidate(
     Ok((request, context))
 }
 
+/// The run the product may still report as live while it notices its loss.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum LiveRun {
+    None,
+    SystemProxy,
+    Tunnel,
+}
+
 /// Ask the product for its status until it reports verified Off. While a run
 /// is being cleaned up it may report the recovery, its lost owner or cleanup
 /// that is not yet proven; anything else, or no Off within `limit`, fails.
 /// Returns the kinds of the failures it reported on the way.
-async fn wait_off(
+pub(super) async fn wait_off(
     backend: &WindowsEngineBackend,
     limit: Duration,
-    live_run_admissible: bool,
+    live: LiveRun,
 ) -> Result<Vec<String>> {
     let deadline = Instant::now() + limit;
     let mut kinds: Vec<String> = Vec::new();
@@ -112,7 +120,8 @@ async fn wait_off(
     loop {
         match backend.query_status().await {
             Ok(NativeEngineStatus::Off) => return Ok(kinds),
-            Ok(NativeEngineStatus::SystemProxy { .. }) if live_run_admissible => {}
+            Ok(NativeEngineStatus::SystemProxy { .. }) if live == LiveRun::SystemProxy => {}
+            Ok(NativeEngineStatus::Tunnel { .. }) if live == LiveRun::Tunnel => {}
             Ok(other) => return Err(format!("the product reported another runtime: {other:?}")),
             Err(error)
                 if matches!(
@@ -140,14 +149,14 @@ async fn wait_off(
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
-fn bounded(text: &str) -> String {
+pub(super) fn bounded(text: &str) -> String {
     text.chars().take(600).collect()
 }
 
 /// Put this user's proxy settings back after a failed case, so that a failure
 /// of the product does not also cut the machine under test off. The case has
 /// already failed; this only reports what the fixture itself had to do.
-fn restore_after_failure(desktop: &InstalledDesktop) -> String {
+pub(super) fn restore_after_failure(desktop: &InstalledDesktop) -> String {
     let proxy = desktop.storage().proxy();
     match proxy.inspect() {
         Ok(ProxyOwnershipObservation::NoJournal) => "no ownership record was left".into(),
@@ -163,7 +172,7 @@ fn restore_after_failure(desktop: &InstalledDesktop) -> String {
     }
 }
 
-fn off_of(generation: u64) -> Result<cfw_windows_engine::authority::AuthoritySnapshot> {
+pub(super) fn off_of(generation: u64) -> Result<cfw_windows_engine::authority::AuthoritySnapshot> {
     let snapshot = checks::snapshot()?;
     if snapshot.state != AuthorityState::Off
         || snapshot
@@ -273,7 +282,7 @@ async fn failed_start(product: &Product, progress: &mut Progress) -> Result<serd
         Ok(_) => return Err("SystemProxy started although its proxy port was occupied".into()),
         Err(error) => error.to_string(),
     };
-    let reported = wait_off(backend, FAILED_START_LIMIT, false)
+    let reported = wait_off(backend, FAILED_START_LIMIT, LiveRun::None)
         .await
         .map_err(|error| {
             format!(
@@ -360,7 +369,7 @@ async fn agent_crash(product: &Product, progress: &mut Progress) -> Result<serde
     }
     let agent = agent_process::terminate_user_agent()?;
     progress.record("proxy_crash_recovering", context.generation)?;
-    let recovered = wait_off(backend, CRASH_LIMIT, true).await;
+    let recovered = wait_off(backend, CRASH_LIMIT, LiveRun::SystemProxy).await;
     let restored = desktop
         .storage()
         .proxy()
@@ -536,9 +545,11 @@ pub(super) fn resume(progress: &mut Progress) -> Result<serde_json::Value> {
     ) {
         return Err("the abandoned run's proxy was not applied any more".into());
     }
-    let recovered = product
-        .runtime
-        .block_on(wait_off(&product.backend, FAILED_START_LIMIT, false));
+    let recovered = product.runtime.block_on(wait_off(
+        &product.backend,
+        FAILED_START_LIMIT,
+        LiveRun::None,
+    ));
     let settings = proxy.snapshot().map_err(|e| e.to_string())?;
     let journal = proxy.inspect().map_err(|e| e.to_string())?;
     let restored =

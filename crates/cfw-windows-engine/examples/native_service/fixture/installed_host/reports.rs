@@ -139,6 +139,17 @@ pub(in super::super) fn combine_reports(directory: &Path) -> Result<()> {
             "proxy_resumed",
             "recovered_off",
         ),
+        (InstalledSuite::Combined, "combined", "combined_runtime"),
+        (
+            InstalledSuite::CombinedAbandon,
+            "combined_abandoned",
+            "network_retired_by_system",
+        ),
+        (
+            InstalledSuite::CombinedResume,
+            "combined_resumed",
+            "recovered_off",
+        ),
     ] {
         let report = read(&directory.join(format!("{}-lifecycle.json", suite.prefix())))?;
         if direct["source"] != report["source"]

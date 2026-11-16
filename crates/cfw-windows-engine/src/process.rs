@@ -23,7 +23,6 @@ use crate::{
     Error, PreparedConfig, ResolvedProbe, ResolvedProjection,
     protocol::{self, Exchange},
 };
-use cfw_singbox_config::ProjectionMode;
 use cfw_windows_storage::{PrivateDirectory, WaitOutcome, wait_until};
 use sha2::{Digest, Sha256};
 use windows_sys::Win32::{
@@ -570,16 +569,17 @@ impl EngineProcess {
         self.finish_operation(result)
     }
 
-    /// A Tunnel data plane needs the exact inherited packet endpoint, and a
+    /// A data plane with a packet interface, with or without a proxy
+    /// listener beside it, needs the exact inherited packet endpoint, and a
     /// listener-only data plane must not hold one. Checked before any effect.
     fn admit_packet_mode(&self, config: &PreparedConfig) -> Result<(), Error> {
-        match (config.mode(), config.tunnel_mtu(), self.packet_mtu) {
-            (ProjectionMode::Tunnel, Some(required), Some(owned)) if required == owned => Ok(()),
-            (ProjectionMode::Tunnel, ..) => Err(Error::Protocol(
+        match (config.tunnel_mtu(), self.packet_mtu) {
+            (Some(required), Some(owned)) if required == owned => Ok(()),
+            (Some(_), _) => Err(Error::Protocol(
                 "Tunnel data plane requires its exact inherited packet endpoint",
             )),
-            (_, None, None) => Ok(()),
-            _ => Err(Error::Protocol(
+            (None, None) => Ok(()),
+            (None, Some(_)) => Err(Error::Protocol(
                 "packet endpoint cannot feed a listener-only data plane",
             )),
         }

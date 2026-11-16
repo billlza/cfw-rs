@@ -125,6 +125,9 @@ pub(super) fn main() -> Result<()> {
     if args.len() == 4 && args[1] == "--installed-gui-tunnel-probe" {
         return installed_gui::tunnel_probe(&args[2], &args[3]);
     }
+    if args.len() == 4 && args[1] == "--installed-gui-combined-probe" {
+        return installed_gui::combined_probe(&args[2], &args[3]);
+    }
     if args.len() == 2 && args[1] == "--installed-maintenance-validation" {
         return maintenance::run();
     }
@@ -167,6 +170,9 @@ pub(super) fn main() -> Result<()> {
                 | "--installed-proxy-recovery-client"
                 | "--installed-proxy-abandon-client"
                 | "--installed-proxy-resume-client"
+                | "--installed-combined-client"
+                | "--installed-combined-abandon-client"
+                | "--installed-combined-resume-client"
         )
     {
         if args[2] != cfw_windows_engine::runtime_host::SERVICE_NAME {
@@ -182,6 +188,9 @@ pub(super) fn main() -> Result<()> {
             "--installed-proxy-recovery-client" => installed_host::exercise_proxy_recovery(),
             "--installed-proxy-abandon-client" => installed_host::exercise_proxy_abandon(),
             "--installed-proxy-resume-client" => installed_host::exercise_proxy_resume(),
+            "--installed-combined-client" => installed_host::exercise_combined(),
+            "--installed-combined-abandon-client" => installed_host::exercise_combined_abandon(),
+            "--installed-combined-resume-client" => installed_host::exercise_combined_resume(),
             _ => installed_host::exercise_profile(),
         };
     }

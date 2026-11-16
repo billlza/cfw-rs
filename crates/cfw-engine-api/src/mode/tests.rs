@@ -64,6 +64,25 @@ fn each_platform_names_its_own_owners_stack_and_consent() {
 }
 
 #[test]
+fn a_combined_run_takes_over_the_users_proxy_settings_only_on_windows() {
+    let taking = |platform: EngineRuntimePlatform| {
+        MODES
+            .into_iter()
+            .filter(|mode| platform.takes_over_proxy_settings(*mode))
+            .collect::<Vec<_>>()
+    };
+    // The tunnel's own network settings carry the proxy of a combined run.
+    assert_eq!(
+        taking(EngineRuntimePlatform::MacOs),
+        [EngineMode::SystemProxy]
+    );
+    assert_eq!(
+        taking(EngineRuntimePlatform::Windows),
+        [EngineMode::SystemProxy, EngineMode::TunnelSystemProxy]
+    );
+}
+
+#[test]
 fn proxy_owners_run_only_proxy_modes_and_tunnel_owners_only_tunnel_modes() {
     let supported = |owner: EngineOwner| {
         MODES

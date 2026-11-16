@@ -130,10 +130,10 @@ test("a host without the combined mode refuses the second integration with its o
     hadSystemProxy: Object.hasOwn(responses, "set_system_proxy_enabled"), systemProxy: responses.set_system_proxy_enabled,
     hadTun: Object.hasOwn(responses, "set_tun_enabled"), tun: responses.set_tun_enabled,
   };
-  // Windows offers each integration on its own; the backend refuses the
-  // combined mode, so the capability payload says so separately.
+  // The combined mode is a capability of its own: a host may offer each
+  // integration and still refuse the two together.
   const capabilities = { local_proxy: true, system_proxy: true, tunnel: true, tunnel_system_proxy: false, provider_management: false };
-  const reason = "TUN Mode and System Proxy cannot run together in this Windows build. Turn one off first.";
+  const reason = "TUN Mode and System Proxy cannot run together until both report capability.";
   const offEngine = { snapshot: { desired_mode: "off", generation: 50, config_digest: null, state: { state: "off" } }, capabilities, unavailable_reason: null };
   const switchAttributes = (html, key) => {
     const match = html.match(new RegExp(`<input type="checkbox" data-toggle="${key}"([^>]*)>`, "u"));

@@ -9,10 +9,14 @@ enum Validation {
     Wire(authority_wire::Validation),
     Runtime(user_agent::Validation),
     Restart(user_agent::restart::Service),
+    Endpoint(unconfirmed_endpoint::Validation),
 }
 impl Validation {
-    fn new(name: &str, runtime: bool, restart: Option<user_agent::restart::Mode>) -> Result<Self> {
-        Ok(if let Some(mode) = restart {
+    fn new(name: &str, installed: &Installation) -> Result<Self> {
+        let (runtime, restart) = (installed.runtime.is_some(), installed.restart_runtime);
+        Ok(if installed.unconfirmed_endpoint {
+            Self::Endpoint(unconfirmed_endpoint::Validation::new())
+        } else if let Some(mode) = restart {
             Self::Restart(user_agent::restart::Service::open(name, mode)?)
         } else if runtime {
             Self::Runtime(user_agent::Validation::new())
@@ -31,6 +35,9 @@ impl Validation {
                 .map(|reply| (reply, false)),
             Self::Runtime(value) => value.handle(connection, request),
             Self::Restart(value) => value.handle(connection, request),
+            Self::Endpoint(value) => value
+                .handle(connection, request)
+                .map(|reply| (reply, false)),
         }
     }
     fn finish(&mut self) -> Result<()> {
@@ -38,6 +45,16 @@ impl Validation {
             Self::Wire(value) => value.finish(),
             Self::Runtime(value) => value.finish(),
             Self::Restart(value) => value.finish(),
+            Self::Endpoint(value) => value.finish(),
+        }
+    }
+    fn settle_unconfirmed_endpoint(
+        &mut self,
+        ending: unconfirmed_endpoint::Ending,
+    ) -> Result<Vec<u8>> {
+        match self {
+            Self::Endpoint(value) => value.settle(ending),
+            _ => Err("endpoint settlement requires the endpoint fixture".into()),
         }
     }
     fn reconcile_local_recovery(&mut self) -> Result<()> {
@@ -61,6 +78,7 @@ pub(super) struct Installation {
     session_id: u32,
     pub(super) runtime: Option<user_agent::EngineInstallation>,
     pub(super) restart_runtime: Option<user_agent::restart::Mode>,
+    unconfirmed_endpoint: bool,
 }
 
 pub(super) fn run_desktop_validation(root: &Path, prefix: &str, expected: [u8; 32]) -> Result<()> {
@@ -82,6 +100,7 @@ fn run_desktop(root: &Path, prefix: &str, expected: [u8; 32]) -> Result<()> {
         expected,
         "--desktop-validation",
         serde_json::json!({"success":true,"role":"desktop","native_identity_bound":true,"live_console_authorized":true}),
+        DESKTOP,
     )
 }
 pub(super) fn run_maintenance_desktop(root: &Path, name: &str, expected: [u8; 32]) -> Result<()> {
@@ -91,14 +110,32 @@ pub(super) fn run_maintenance_desktop(root: &Path, name: &str, expected: [u8; 32
         expected,
         "--installed-maintenance-client",
         serde_json::json!({"success":true,"role":"desktop","maintenance_request_acknowledged":true}),
+        DESKTOP,
     )
 }
+pub(super) fn run_unconfirmed_endpoint_desktop(
+    root: &Path,
+    name: &str,
+    expected: [u8; 32],
+) -> Result<()> {
+    run_desktop_program(
+        root,
+        name,
+        expected,
+        "--installed-unconfirmed-endpoint-client",
+        unconfirmed_endpoint::desktop_report(),
+        unconfirmed_endpoint::DESKTOP,
+    )
+}
+/// How long a Desktop fixture program may run.
+const DESKTOP: Duration = Duration::from_secs(90);
 fn run_desktop_program(
     root: &Path,
     prefix: &str,
     expected: [u8; 32],
     flag: &str,
     expected_report: serde_json::Value,
+    limit: Duration,
 ) -> Result<()> {
     let image = root.join("desktop-fixture.exe");
     let _held = verified(&image, expected)?;
@@ -117,7 +154,7 @@ fn run_desktop_program(
         .stderr(output)
         .spawn()
         .map_err(|e| e.to_string())?;
-    let deadline = Instant::now() + Duration::from_secs(90);
+    let deadline = Instant::now() + limit;
     let outcome = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),
@@ -226,6 +263,24 @@ pub(super) fn write_installation_runtime(
     runtime: Option<user_agent::EngineInstallation>,
     restart_runtime: Option<user_agent::restart::Mode>,
 ) -> Result<()> {
+    write_descriptor(root, agent, digest, runtime, restart_runtime, false)
+}
+/// The service hosts the Authority of the unconfirmed-endpoint cases.
+pub(super) fn write_installation_unconfirmed_endpoint(
+    root: &Path,
+    agent: &Path,
+    digest: [u8; 32],
+) -> Result<()> {
+    write_descriptor(root, agent, digest, None, None, true)
+}
+fn write_descriptor(
+    root: &Path,
+    agent: &Path,
+    digest: [u8; 32],
+    runtime: Option<user_agent::EngineInstallation>,
+    restart_runtime: Option<user_agent::restart::Mode>,
+    unconfirmed_endpoint: bool,
+) -> Result<()> {
     let desktop_image = root.join("desktop-fixture.exe");
     std::fs::copy(
         std::env::current_exe().map_err(|e| e.to_string())?,
@@ -244,6 +299,7 @@ pub(super) fn write_installation_runtime(
         session_id: current.identity().session_id(),
         runtime,
         restart_runtime,
+        unconfirmed_endpoint,
     };
     let mut file = std::fs::OpenOptions::new()
         .write(true)
@@ -349,11 +405,7 @@ pub(super) fn serve(name: &str, status_handle: SERVICE_STATUS_HANDLE) -> Result<
     // never by the bootstrap JSON. This exercises the policy input; it is not
     // the product's durable authority lease or runtime state machine.
     let lease_owner = Arc::new(Mutex::new(None));
-    let authority = Arc::new(Mutex::new(Validation::new(
-        name,
-        installed.runtime.is_some(),
-        installed.restart_runtime,
-    )?));
+    let authority = Arc::new(Mutex::new(Validation::new(name, &installed)?));
     // SCM services inherit the service manager's environment, not the CI
     // launcher. Source identity travels in the existing fixture descriptor.
     let timing = Arc::new(Mutex::new(request_timing::Trace::new(
@@ -546,7 +598,11 @@ fn serve_connection(
         // The wire fixture keeps its desktop connection while a restricted
         // child exchanges commands. Existing transport timeout cases retain
         // their five-second deadline; typed fixture connections get LIMIT.
-        let receive_timeout = if wire_connection {
+        // The endpoint fixture's Desktop connection is its lease's host
+        // connection and idles while SYSTEM creates and retires an adapter.
+        let receive_timeout = if installed.unconfirmed_endpoint {
+            unconfirmed_endpoint::IDLE
+        } else if wire_connection {
             LIMIT
         } else {
             Duration::from_secs(5)
@@ -769,6 +825,18 @@ fn serve_connection(
                 thread::sleep(Duration::from_millis(10));
             }
             continue;
+        }
+        if role == ServiceClientRole::Desktop
+            && let Some(ending) = unconfirmed_endpoint::Ending::settlement(request.body())
+        {
+            let outcome = authority
+                .lock()
+                .map_err(|_| "native lifecycle guard poisoned")?
+                .settle_unconfirmed_endpoint(ending)?;
+            connection
+                .reply(request, &outcome, Instant::now() + LIMIT)
+                .map_err(|e| e.to_string())?;
+            break;
         }
         let state_validation =
             if request.body() == b"authority-state" && role == ServiceClientRole::Desktop {

@@ -33,6 +33,8 @@ pub(super) enum ClientCase {
     ProcessObservation,
     UpdateInspection,
     RejectedRuntime,
+    EndpointLost,
+    EndpointStopped,
 }
 impl ClientCase {
     fn flag(self) -> &'static str {
@@ -63,6 +65,8 @@ impl ClientCase {
             Self::ProcessObservation => "--desktop-process-client",
             Self::UpdateInspection => "--update-package-client",
             Self::RejectedRuntime => "--rejected-agent-runtime",
+            Self::EndpointLost => "--endpoint-lost-agent",
+            Self::EndpointStopped => "--endpoint-stopped-agent",
         }
     }
     fn report_prefix(self, name: &str) -> String {
@@ -93,6 +97,8 @@ impl ClientCase {
             Self::ProcessObservation => format!("{name}-process"),
             Self::UpdateInspection => format!("{name}-update"),
             Self::RejectedRuntime => format!("{name}-runtime-rejected"),
+            Self::EndpointLost => format!("{name}-endpoint-lost"),
+            Self::EndpointStopped => format!("{name}-endpoint-stopped"),
         }
     }
     fn report(self) -> serde_json::Value {
@@ -120,6 +126,12 @@ impl ClientCase {
                 user_agent::agent_report(cfw_singbox_config::ProjectionMode::SystemProxy)
             }
             Self::RejectedRuntime => user_agent::rejected_report(),
+            Self::EndpointLost => {
+                serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"endpoint_offered":true,"endpoint_confirmed":false,"stop_acknowledged":false})
+            }
+            Self::EndpointStopped => {
+                serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"endpoint_offered":true,"endpoint_confirmed":false,"stop_acknowledged":true})
+            }
             Self::RuntimeRestartDesktop => {
                 user_agent::restart::desktop_report(user_agent::restart::Mode::System)
             }
@@ -495,6 +507,29 @@ pub(super) fn run_authority(
         Some(zeroize::Zeroizing::new(handoff.to_vec())),
     )
 }
+/// A UserAgent that takes SYSTEM's endpoint offer and ends its lease.
+pub(super) fn run_unconfirmed_endpoint(
+    image: &Path,
+    name: &str,
+    expected: [u8; 32],
+    ending: unconfirmed_endpoint::Ending,
+    handoff: &[u8],
+) -> Result<()> {
+    if handoff.is_empty() || handoff.len() > cfw_windows_engine::authority::wire::MAX_MESSAGE_BYTES
+    {
+        return Err("invalid endpoint handoff length".into());
+    }
+    run_case(
+        image,
+        name,
+        expected,
+        match ending {
+            unconfirmed_endpoint::Ending::Lost => ClientCase::EndpointLost,
+            unconfirmed_endpoint::Ending::Stopped => ClientCase::EndpointStopped,
+        },
+        Some(zeroize::Zeroizing::new(handoff.to_vec())),
+    )
+}
 fn run_case(
     image: &Path,
     name: &str,
@@ -631,6 +666,9 @@ fn run_case(
             | ClientCase::InstalledProxyResumeDesktop
             | ClientCase::InstalledCombinedResumeDesktop
             | ClientCase::UpdateInspection
+            // SYSTEM creates an adapter before it offers the endpoint.
+            | ClientCase::EndpointLost
+            | ClientCase::EndpointStopped
     ) {
         Duration::from_secs(60)
     } else {
@@ -967,6 +1005,22 @@ fn client_body(name: &str, hex: &str, case: ClientCase) -> Result<()> {
             return user_agent::agent(name, &image, expected, case);
         }
         ClientCase::AuthorityRuntime => return authority_wire::agent(name, &image, expected),
+        ClientCase::EndpointLost => {
+            return unconfirmed_endpoint::agent(
+                name,
+                &image,
+                expected,
+                unconfirmed_endpoint::Ending::Lost,
+            );
+        }
+        ClientCase::EndpointStopped => {
+            return unconfirmed_endpoint::agent(
+                name,
+                &image,
+                expected,
+                unconfirmed_endpoint::Ending::Stopped,
+            );
+        }
         ClientCase::CopiedImage => {
             let mut channel = ServiceChannel::connect(
                 name,

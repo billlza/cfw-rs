@@ -25,6 +25,7 @@ use windows_sys::Win32::{
     System::{Services::*, Threading::*},
 };
 
+mod agent_handoff;
 mod attacks;
 mod authority_journal;
 mod authority_state;
@@ -44,6 +45,7 @@ mod restricted;
 mod stress;
 mod transport;
 mod tunnel_probe;
+mod unconfirmed_endpoint;
 mod update_package;
 mod user_agent;
 type Result<T> = std::result::Result<T, String>;
@@ -134,6 +136,12 @@ pub(super) fn main() -> Result<()> {
     if args.len() == 4 && args[1] == "--installed-maintenance-client" {
         return maintenance::client(&args[2], &args[3]);
     }
+    if args.len() == 2 && args[1] == "--installed-unconfirmed-endpoint-validation" {
+        return unconfirmed_endpoint::run();
+    }
+    if args.len() == 4 && args[1] == "--installed-unconfirmed-endpoint-client" {
+        return unconfirmed_endpoint::desktop(&args[2], &args[3]);
+    }
     if args.len() == 2 && args[1] == "--desktop-process-validation" {
         return restricted::run_desktop_process_observation();
     }
@@ -220,6 +228,8 @@ pub(super) fn main() -> Result<()> {
                 Some(restricted::ClientCase::RuntimeLocalRestartDesktop)
             }
             "--rejected-agent-runtime" => Some(restricted::ClientCase::RejectedRuntime),
+            "--endpoint-lost-agent" => Some(restricted::ClientCase::EndpointLost),
+            "--endpoint-stopped-agent" => Some(restricted::ClientCase::EndpointStopped),
             _ => None,
         };
         if let Some(case) = case {

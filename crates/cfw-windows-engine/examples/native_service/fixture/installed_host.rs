@@ -12,14 +12,18 @@ use std::{
     net::{Ipv4Addr, TcpListener},
     sync::mpsc,
 };
+mod agent_process;
 mod backend;
 mod checks;
 mod coordinator;
 mod profile;
 mod progress;
+mod proxy_recovery;
+mod reports;
 mod startup_registration;
 mod tunnel;
 use progress::Progress;
+pub(super) use reports::{combine_reports, timeout_snapshot};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum InstalledSuite {
@@ -30,6 +34,9 @@ pub(super) enum InstalledSuite {
     Coordinator,
     Startup,
     Tunnel,
+    ProxyRecovery,
+    ProxyAbandon,
+    ProxyResume,
 }
 impl InstalledSuite {
     fn prefix(self) -> &'static str {
@@ -41,6 +48,9 @@ impl InstalledSuite {
             Self::Coordinator => "installed-host-coordinator",
             Self::Startup => "installed-host-startup",
             Self::Tunnel => "installed-host-tunnel",
+            Self::ProxyRecovery => "installed-host-proxy-recovery",
+            Self::ProxyAbandon => "installed-host-proxy-abandon",
+            Self::ProxyResume => "installed-host-proxy-resume",
         }
     }
 }
@@ -357,6 +367,36 @@ pub(super) fn exercise_tunnel() -> Result<()> {
     Ok(())
 }
 
+/// The three SystemProxy failure-path clients; see `proxy_recovery`.
+fn exercise_proxy(
+    key: &str,
+    product_agent: bool,
+    last_generation: u64,
+    exercise: impl FnOnce(&mut Progress) -> Result<serde_json::Value>,
+) -> Result<()> {
+    require_opt_in()?;
+    let mut progress = Progress::new()?;
+    progress.record("open_desktop", 0)?;
+    let outcome = exercise(&mut progress)?;
+    progress.record("complete", last_generation)?;
+    let mut report = serde_json::json!({
+        "source":std::env::var("CFW_NATIVE_SERVICE_SOURCE").map_err(|e|e.to_string())?,
+        "product_service":true,"product_agent":product_agent,"desktop_is_fixture":true,
+        "medium_integrity":true,"release_accepted":false});
+    report[key] = outcome;
+    println!("{report}");
+    Ok(())
+}
+pub(super) fn exercise_proxy_recovery() -> Result<()> {
+    exercise_proxy("proxy_recovery", true, 12, proxy_recovery::exercise)
+}
+pub(super) fn exercise_proxy_abandon() -> Result<()> {
+    exercise_proxy("proxy_abandoned", true, 13, proxy_recovery::abandon)
+}
+pub(super) fn exercise_proxy_resume() -> Result<()> {
+    exercise_proxy("proxy_resumed", false, 13, proxy_recovery::resume)
+}
+
 pub(super) fn exercise_startup() -> Result<()> {
     require_opt_in()?;
     let mut progress = Progress::new()?;
@@ -436,6 +476,11 @@ pub(super) fn check_output(
             && tunnel["fresh_queries"] == 3
             && tunnel["agent_crash_recovery"]["adapter_absent_after_off"] == true
             && tunnel["agent_crash_recovery"]["physical_route_restored"] == true
+    } else if matches!(
+        suite,
+        InstalledSuite::ProxyRecovery | InstalledSuite::ProxyAbandon | InstalledSuite::ProxyResume
+    ) {
+        proxy_recovery::accepts(suite, &report)
     } else if suite == InstalledSuite::Startup {
         let startup = &report["startup_registration"];
         startup["source"] == report["source"]
@@ -469,7 +514,10 @@ pub(super) fn check_output(
     if !valid_case
         || report["product_service"] != (suite != InstalledSuite::Startup)
         || report["product_agent"]
-            != !matches!(suite, InstalledSuite::Profile | InstalledSuite::Startup)
+            != !matches!(
+                suite,
+                InstalledSuite::Profile | InstalledSuite::Startup | InstalledSuite::ProxyResume
+            )
         || report["desktop_is_fixture"] != true
         || report["medium_integrity"] != true
         || report["release_accepted"] != false
@@ -499,152 +547,5 @@ pub(super) fn check_output(
         return Err("installed final report exceeds its original bound".into());
     }
     std::fs::write(directory.join(format!("{prefix}-lifecycle.json")), report)
-        .map_err(|e| e.to_string())
-}
-
-/// Failure diagnostics only: the expired test remains failed. Query before
-/// terminating the exact client, so loss of that owner cannot erase its phase.
-pub(super) fn timeout_snapshot(directory: &Path, prefix: &str) -> Result<()> {
-    let observed = (|| -> Result<serde_json::Value> {
-        let installed = InstalledRuntime::open().map_err(|e| e.to_string())?;
-        let mut channel = AuthorityChannel::connect(
-            SERVICE_NAME,
-            ServiceClientRole::Desktop,
-            Arc::new(installed.runtime().map_err(|e| e.to_string())?),
-        )
-        .map_err(|e| e.to_string())?;
-        let response = channel
-            .request(
-                Request::new(Command::ReadRuntimeScope).map_err(|e| e.to_string())?,
-                Instant::now() + Duration::from_secs(5),
-            )
-            .map_err(|e| e.to_string())?;
-        let Response::RuntimeScope(scope) = response else {
-            return Err("timeout diagnostic omitted runtime scope".into());
-        };
-        Ok(serde_json::json!({"snapshot":scope.snapshot(),"operation":scope.operation()}))
-    })();
-    let observation = match observed {
-        Ok(scope) => serde_json::json!({"status":"observed","scope":scope}),
-        Err(error) => serde_json::json!({"status":"observation_failed","error":error}),
-    };
-    let bytes = serde_json::to_vec_pretty(&serde_json::json!({
-        "product_source":std::env::var("CFW_NATIVE_SERVICE_SOURCE").map_err(|e|e.to_string())?,
-        "test_deadline_exceeded":true,"observation":observation,"release_accepted":false,
-    }))
-    .map_err(|e| e.to_string())?;
-    if bytes.len() > 16384 {
-        return Err("timeout diagnostic exceeds its bound".into());
-    }
-    std::fs::write(
-        directory.join(format!("{prefix}-timeout-scope.json")),
-        bytes,
-    )
-    .map_err(|e| e.to_string())
-}
-
-pub(super) fn combine_reports(directory: &Path) -> Result<()> {
-    fn read(path: &Path) -> Result<serde_json::Value> {
-        let mut bytes = Vec::new();
-        std::fs::File::open(path)
-            .map_err(|e| e.to_string())?
-            .take(16385)
-            .read_to_end(&mut bytes)
-            .map_err(|e| e.to_string())?;
-        if bytes.len() > 16384 {
-            return Err("installed case report exceeds its bound".into());
-        }
-        serde_json::from_slice(&bytes).map_err(|e| e.to_string())
-    }
-    let mut direct = read(&directory.join("installed-host-lifecycle.json"))?;
-    let modes = read(&directory.join("installed-host-backend-lifecycle.json"))?;
-    let exited = read(&directory.join("installed-host-backend-exit-lifecycle.json"))?;
-    for (report, key) in [(&modes, "backend_modes"), (&exited, "backend_exit")] {
-        if report["source"] != direct["source"]
-            || report["release_accepted"] != false
-            || report[key]["shared_engine_backend"] != true
-            || report[key]["proxy_restored"] != true
-            || report[key]["listeners_released"] != true
-        {
-            return Err("backend suites do not share verified source and cleanup".into());
-        }
-    }
-    let mut backend = modes["backend_modes"].clone();
-    let combined = backend
-        .as_object_mut()
-        .ok_or("missing normal backend evidence")?;
-    if combined
-        .insert(
-            "failure_case".into(),
-            exited["backend_exit"]["failure_case"].clone(),
-        )
-        .is_some()
-        || combined
-            .insert(
-                "exited_engine_query_rejected".into(),
-                exited["backend_exit"]["exited_engine_query_rejected"].clone(),
-            )
-            .is_some()
-    {
-        return Err("backend failure evidence was already combined".into());
-    }
-    combined
-        .get_mut("authorizations")
-        .and_then(serde_json::Value::as_array_mut)
-        .ok_or("missing normal authorization evidence")?
-        .extend(
-            exited["backend_exit"]["authorizations"]
-                .as_array()
-                .ok_or("missing final authorization evidence")?
-                .iter()
-                .cloned(),
-        );
-    if direct
-        .as_object_mut()
-        .ok_or("installed report is not an object")?
-        .insert("backend".into(), backend)
-        .is_some()
-    {
-        return Err("backend evidence was already combined".into());
-    }
-    for (suite, key, proof) in [
-        (
-            InstalledSuite::Profile,
-            "profile_probes",
-            "shared_profile_delay_backend",
-        ),
-        (
-            InstalledSuite::Coordinator,
-            "coordinator",
-            "shared_mode_coordinator",
-        ),
-        (
-            InstalledSuite::Startup,
-            "startup_registration",
-            "registration_removed",
-        ),
-        (InstalledSuite::Tunnel, "backend_tunnel", "tunnel_runtime"),
-    ] {
-        let report = read(&directory.join(format!("{}-lifecycle.json", suite.prefix())))?;
-        if direct["source"] != report["source"]
-            || report[key][proof] != true
-            || report["release_accepted"] != false
-        {
-            return Err("installed suites do not share verified source and scope".into());
-        }
-        if direct
-            .as_object_mut()
-            .ok_or("installed report is not an object")?
-            .insert(key.into(), report[key].clone())
-            .is_some()
-        {
-            return Err("installed suite report was already combined".into());
-        }
-    }
-    let bytes = serde_json::to_vec(&direct).map_err(|e| e.to_string())?;
-    if bytes.len() > 16384 {
-        return Err("combined installed report exceeds its original bound".into());
-    }
-    std::fs::write(directory.join("installed-host-lifecycle.json"), bytes)
         .map_err(|e| e.to_string())
 }

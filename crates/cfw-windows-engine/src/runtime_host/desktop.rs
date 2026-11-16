@@ -168,6 +168,27 @@ impl InstalledDesktop {
             _ => Err(HostError::State("Authority omitted its status observation")),
         }
     }
+    /// Complete a SystemProxy run of this account that SYSTEM holds in
+    /// recovery: its UserAgent or its Desktop was lost, and nothing else
+    /// restores the proxy settings it left. `None` means the recorded run is
+    /// not this Desktop's to complete.
+    pub(crate) fn recover_proxy_run(&self, deadline: Instant) -> Result<Option<AuthoritySnapshot>> {
+        self.require_current_process()?;
+        crate::user_agent::launcher::medium_process()?;
+        let mut channel = AuthorityChannel::connect(
+            SERVICE_NAME,
+            ServiceClientRole::Desktop,
+            Arc::clone(&self.image),
+        )
+        .map_err(crate::LineageError::from)?;
+        let completed = crate::user_agent::proxy_recovery::complete(
+            &mut channel,
+            self.storage.proxy(),
+            None,
+            deadline,
+        )?;
+        Ok(completed.map(|receipt| receipt.snapshot().clone()))
+    }
 
     /// Spawn and admit the installed Agent, then prepare its lease. The
     /// diagnostic sink is the application's; the stop signal cancels the

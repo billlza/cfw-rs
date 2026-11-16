@@ -56,6 +56,16 @@ const PHASES: &[&str] = &[
     "tunnel_crash_start",
     "tunnel_crash_recovering",
     "tunnel_crash_off",
+    "proxy_recovery_open",
+    "proxy_failed_start",
+    "proxy_failed_start_off",
+    "proxy_crash_start",
+    "proxy_crash_recovering",
+    "proxy_crash_off",
+    "proxy_abandon_start",
+    "proxy_abandoned",
+    "proxy_resume",
+    "proxy_resume_off",
     "complete",
 ];
 #[derive(Serialize, Deserialize)]

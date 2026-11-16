@@ -11,13 +11,12 @@ impl ProxyRecoveryGrant {
     pub fn context(&self) -> &ProxyRecoveryContext {
         &self.context
     }
-    /// Observe after receiving the challenge. Old observations cannot be
-    /// substituted, and no caller-provided Boolean can create this report.
+    /// The runtime this challenge names, once the caller is its observer.
     #[cfg(windows)]
-    pub fn observe_restoration(
-        self,
-        proxy: &crate::WindowsSystemProxy,
-    ) -> std::result::Result<ProxyRecoveryReport, crate::ProxyError> {
+    fn observed_runtime(
+        &self,
+    ) -> std::result::Result<(cfw_engine_api::EngineCommandContext, String), crate::ProxyError>
+    {
         let identity = crate::system_proxy::user_identity()?;
         if !self
             .context
@@ -38,6 +37,16 @@ impl ProxyRecoveryGrant {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect();
+        Ok((context, digest))
+    }
+    /// Observe after receiving the challenge. Old observations cannot be
+    /// substituted, and no caller-provided Boolean can create this report.
+    #[cfg(windows)]
+    pub fn observe_restoration(
+        self,
+        proxy: &crate::WindowsSystemProxy,
+    ) -> std::result::Result<ProxyRecoveryReport, crate::ProxyError> {
+        let (context, digest) = self.observed_runtime()?;
         let observed = proxy.observe_restoration(&context, &digest)?;
         Ok(ProxyRecoveryReport {
             context: self.context,
@@ -45,6 +54,26 @@ impl ProxyRecoveryGrant {
             recorded_process_id: observed.recorded_process_id(),
             recorded_process_creation_time: observed.recorded_process_creation_time(),
         })
+    }
+    /// Restore what the run left applied, then observe. SYSTEM saw every
+    /// process of the run retired before it issued this challenge, so no
+    /// owner of those settings is left. Only a cleanup challenge may write.
+    #[cfg(windows)]
+    pub fn restore_and_observe(
+        self,
+        proxy: &crate::WindowsSystemProxy,
+    ) -> std::result::Result<ProxyRecoveryReport, crate::ProxyError> {
+        if self.context.purpose != ProxyRecoveryPurpose::ReconcileOff {
+            return Err(crate::ProxyError::RuntimeMismatch);
+        }
+        let (context, _) = self.observed_runtime()?;
+        match proxy.restore(&context) {
+            // Nothing is recorded as owned: restored before, or never
+            // taken. The observation decides which, and whether it is proven.
+            Ok(_) | Err(crate::ProxyError::OwnershipMissing) => {}
+            Err(error) => return Err(error),
+        }
+        self.observe_restoration(proxy)
     }
 }
 

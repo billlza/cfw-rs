@@ -1,7 +1,10 @@
 //! Durable ownership of this user's WinINet LAN proxy settings. This is below
 //! service/engine authority: a settings receipt is never a global-Off proof.
+mod lan;
 mod native;
+mod pending;
 mod restoration;
+pub use lan::{LanProxyObservation, observe_lan_proxy_ports, observe_lan_proxy_state};
 pub use restoration::ProxyRestorationObservation;
 
 use crate::{EngineProcess, NativePeerIdentity, NativePeerProcess, PreparedConfig};
@@ -18,32 +21,6 @@ use windows_sys::Win32::Networking::WinInet::{
 const MAX_STRING_UNITS: usize = 8192;
 const MAX_JOURNAL_BYTES: usize = 512 * 1024;
 const JOURNAL: &str = "system-proxy-v1.json";
-
-/// Read-only UI summary of this user's WinINet LAN options. Raw proxy/PAC
-/// strings, bypass rules and ownership records never enter this payload.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub struct LanProxyObservation {
-    pub manual_proxy_enabled: bool,
-    pub auto_config_enabled: bool,
-    pub auto_detect_enabled: bool,
-}
-
-pub fn observe_lan_proxy_state() -> Result<LanProxyObservation, ProxyError> {
-    cfw_windows_storage::require_process_identity()?;
-    user_identity()?;
-    Ok(native::observe_read_only()?.public_observation())
-}
-
-/// Read this interactive process user's WinINet LAN manual-proxy reservations.
-/// This never opens a journal, requests mutation rights, evaluates PAC/WPAD,
-/// resolves a hostname, or reports global runtime ownership.
-pub fn observe_lan_proxy_ports() -> Result<std::collections::BTreeSet<u16>, ProxyError> {
-    cfw_windows_storage::require_process_identity()?;
-    user_identity()?;
-    let settings = native::observe_read_only()?;
-    crate::proxy_endpoints::loopback_ports(settings.flags & PROXY_TYPE_PROXY != 0, &settings.server)
-        .map_err(|()| ProxyError::InvalidObservation)
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProxyError {
@@ -79,6 +56,8 @@ pub enum ProxyError {
     RestorationMissing,
     #[error("Windows proxy restoration record is invalid")]
     InvalidRestorationRecord,
+    #[error("Windows proxy pending-ownership record is invalid")]
+    InvalidPendingRecord,
     #[error("Windows proxy request does not match the running engine")]
     RuntimeMismatch,
     #[error("Windows proxy publication may have changed settings; recovery is required: {0}")]
@@ -186,17 +165,20 @@ fn valid_context(context: &EngineCommandContext) -> bool {
         && context.config_epoch > 0
         && context.generation > 0
 }
+/// A configuration identity as every record states it: lowercase SHA-256.
+fn valid_digest(digest: &str) -> bool {
+    digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
 
 impl Record {
     fn encode(&self, sid: &str) -> Result<Vec<u8>, ProxyError> {
         if self.version != 1
             || self.user_sid != sid
             || !valid_context(&self.context)
-            || self.config_digest.len() != 64
-            || !self
-                .config_digest
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            || !valid_digest(&self.config_digest)
             || self.process_id == 0
             || self.process_created_at == 0
             || self.endpoint.port() == 0
@@ -468,6 +450,8 @@ impl WindowsSystemProxy {
                     &record.encode(self.identity.user_sid())?,
                     MAX_JOURNAL_BYTES,
                 )?;
+                // From here the ownership record says how far this run got.
+                pending::retire(transaction)?;
                 if native::observe()? != record.before {
                     return Err(ProxyError::SettingsChanged);
                 }

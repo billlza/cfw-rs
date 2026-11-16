@@ -262,6 +262,18 @@ impl UserAgentSession {
         if stop.load(Ordering::Acquire) {
             return Ok(StopReason::Requested);
         }
+        // Before Bind: a run that fails or is lost before it takes the proxy
+        // must still be able to prove that it never did.
+        if let Some(proxy) = self
+            .assets
+            .as_ref()
+            .and_then(|assets| assets.proxy.as_ref())
+        {
+            proxy.record_pending(
+                &self.command_context(),
+                &super::plan::hex(&self.context.operation.identity_sha256),
+            )?;
+        }
         let binding = self.binding.take().ok_or(UserAgentError::State)?;
         self.control = Some(ControlSession::start(
             self.service.clone(),

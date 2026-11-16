@@ -167,6 +167,35 @@ fn normal_stop_selector_cannot_substitute_an_operation_or_crash_recovery() {
 }
 
 #[test]
+fn a_lost_run_is_selected_only_by_its_own_lease_and_only_in_recovery() {
+    let now = Instant::now();
+    let (live, _, _, context) = active(now);
+    // While the lease is live there is nothing to recover.
+    assert!(matches!(
+        ProxyRecoveryTarget::from_lost(&live.recorded_runtime_scope().unwrap(), &context),
+        Err(AuthorityError::Recovering)
+    ));
+    let lost = recovered(live.metadata().cloned());
+    let scope = lost.recorded_runtime_scope().unwrap();
+    assert_eq!(
+        ProxyRecoveryTarget::from_lost(&scope, &context).unwrap(),
+        ProxyRecoveryTarget::from_recorded(&scope).unwrap()
+    );
+    for pointer in [
+        "/lease_id",
+        "/operation/operation_id",
+        "/operation/root/installation_id",
+    ] {
+        let mut changed = serde_json::to_value(&context).unwrap();
+        *changed.pointer_mut(pointer).unwrap() = serde_json::json!(Uuid::from_u128(99));
+        assert!(matches!(
+            ProxyRecoveryTarget::from_lost(&scope, &serde_json::from_value(changed).unwrap()),
+            Err(AuthorityError::Stale)
+        ));
+    }
+}
+
+#[test]
 fn normal_cleanup_revalidates_uncertainty_and_closed_owner_before_consumption() {
     for unknown in [false, true] {
         let (mut machine, host, _, _, target, now) = stopping(true);

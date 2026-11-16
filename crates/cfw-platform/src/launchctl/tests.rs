@@ -137,7 +137,7 @@ fn a_run_succeeds_only_with_a_zero_status_and_silent_diagnostics() {
     for (result, message) in [
         (
             Err(timed_out(LAUNCHCTL)),
-            "/bin/launchctl print x failed without an exit status: /bin/launchctl exceeded its 3000ms timeout (group kill: ok; child kill: ok; wait: signal: 9 (SIGKILL))",
+            "/bin/launchctl print x failed without an exit status: /bin/launchctl exceeded its 3000ms timeout (group kill: ok; child kill: ok; signalled again: 0; wait: signal: 9 (SIGKILL); output: closed)",
         ),
         (
             Ok(signalled(9)),

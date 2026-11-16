@@ -29,6 +29,6 @@ pub(crate) fn timed_out(program: &str) -> BoundedCommandError {
     BoundedCommandError::TimedOut {
         program: program.into(),
         timeout: Duration::from_secs(3),
-        cleanup: "group kill: ok; child kill: ok; wait: signal: 9 (SIGKILL)".into(),
+        cleanup: "group kill: ok; child kill: ok; signalled again: 0; wait: signal: 9 (SIGKILL); output: closed".into(),
     }
 }

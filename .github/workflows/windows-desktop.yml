@@ -275,7 +275,7 @@ jobs:
             -DesktopDirectory $evidence -EngineDirectory (Join-Path $evidence 'engine') `
             -Source (git rev-parse HEAD) -Output (Join-Path $evidence 'msi')
       - name: Install and exercise the actual ordinary-user desktop
-        # Four separately retained GUI sessions (each bounded at 200 seconds)
+        # Five separately retained GUI sessions (each bounded at 200 seconds)
         # plus bounded MSI work.
         timeout-minutes: 24
         env:

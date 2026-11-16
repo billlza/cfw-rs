@@ -30,12 +30,14 @@ $outputRoot = (Resolve-Path -LiteralPath $Output).Path
 $receipt = [ordered]@{
     source=$Source; package_sha256=$package.package_sha256; installed=$null; uninstalled=$null
     engine_notices_installed=$false; wintun_payload_installed=$false
-    fresh_off_session=$null; local_proxy_session=$null; tunnel_session=$null; system_proxy_quit_session=$null
+    fresh_off_session=$null; node_choice_session=$null; local_proxy_session=$null; tunnel_session=$null
+    system_proxy_quit_session=$null
     native_gui_exercised=$false; ordinary_user=$false; page_count=0; graceful_exit_observed=$false
     startup_registration_exercised=$false; settings_controls_exercised=$false; actual_sign_in_exercised=$false
     physical_display_exercised=$false; network_mode_exercised=$false; release_accepted=$false
 }
 $fresh = $null
+$nodeChoice = $null
 $network = $null
 $tunnel = $null
 $systemProxy = $null
@@ -103,12 +105,22 @@ try {
         $fresh.actual_sign_in_exercised) {
         throw 'The independent fresh-Off GUI case did not pass'
     }
+    $nodeChoiceRoot = Join-Path $outputRoot 'node-choice'
+    New-Item -ItemType Directory -Path $nodeChoiceRoot -ErrorAction Stop | Out-Null
+    & $sessionScript -Launcher $Launcher -Source $Source -Output $nodeChoiceRoot -Scenario 'node-choice' -SessionResult ([ref]$nodeChoice)
+    if (-not $nodeChoice.graceful_exit_observed -or -not $nodeChoice.network_mode_exercised -or
+        -not $nodeChoice.node_choice_exercised -or -not $nodeChoice.engine_stopped -or -not $nodeChoice.profile_deleted -or
+        ($fresh.process_id -eq $nodeChoice.process_id -and $fresh.process_creation_time -eq $nodeChoice.process_creation_time)) {
+        throw 'The separate GUI node choice lifecycle did not pass'
+    }
     $networkRoot = Join-Path $outputRoot 'local-proxy'
     New-Item -ItemType Directory -Path $networkRoot -ErrorAction Stop | Out-Null
     & $sessionScript -Launcher $Launcher -Source $Source -Output $networkRoot -Scenario 'local-proxy' -SessionResult ([ref]$network)
     if (-not $network.graceful_exit_observed -or -not $network.network_mode_exercised -or
         -not $network.http_forwarding_verified -or -not $network.engine_stopped -or -not $network.listener_released -or
-        ($fresh.process_id -eq $network.process_id -and $fresh.process_creation_time -eq $network.process_creation_time)) {
+        -not $network.connection_diagnostics_exercised -or
+        ($fresh.process_id -eq $network.process_id -and $fresh.process_creation_time -eq $network.process_creation_time) -or
+        ($nodeChoice.process_id -eq $network.process_id -and $nodeChoice.process_creation_time -eq $network.process_creation_time)) {
         throw 'The separate GUI LocalProxy lifecycle did not pass'
     }
     $tunnelRoot = Join-Path $outputRoot 'tunnel'
@@ -165,6 +177,7 @@ try {
     }
 } finally {
     $receipt.fresh_off_session = $fresh
+    $receipt.node_choice_session = $nodeChoice
     $receipt.local_proxy_session = $network
     $receipt.tunnel_session = $tunnel
     $receipt.system_proxy_quit_session = $systemProxy
@@ -174,12 +187,13 @@ try {
         $receipt.startup_registration_exercised = $fresh.startup_registration_exercised
         $receipt.settings_controls_exercised = $fresh.settings_controls_exercised
     }
-    if ($null -ne $fresh -and $null -ne $network -and $null -ne $tunnel -and $null -ne $systemProxy) {
-        $receipt.ordinary_user = $fresh.ordinary_user -and $network.ordinary_user -and $tunnel.ordinary_user -and $systemProxy.ordinary_user
-        $receipt.graceful_exit_observed = $fresh.graceful_exit_observed -and $network.graceful_exit_observed -and
-            $tunnel.graceful_exit_observed -and $systemProxy.graceful_exit_observed
-        $receipt.network_mode_exercised = $network.network_mode_exercised -and $tunnel.network_mode_exercised -and
-            $systemProxy.network_mode_exercised
+    if ($null -ne $fresh -and $null -ne $nodeChoice -and $null -ne $network -and $null -ne $tunnel -and $null -ne $systemProxy) {
+        $receipt.ordinary_user = $fresh.ordinary_user -and $nodeChoice.ordinary_user -and $network.ordinary_user -and
+            $tunnel.ordinary_user -and $systemProxy.ordinary_user
+        $receipt.graceful_exit_observed = $fresh.graceful_exit_observed -and $nodeChoice.graceful_exit_observed -and
+            $network.graceful_exit_observed -and $tunnel.graceful_exit_observed -and $systemProxy.graceful_exit_observed
+        $receipt.network_mode_exercised = $nodeChoice.network_mode_exercised -and $network.network_mode_exercised -and
+            $tunnel.network_mode_exercised -and $systemProxy.network_mode_exercised
     }
     $receipt | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'receipt.json') -Encoding utf8NoBOM
 }

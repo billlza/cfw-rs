@@ -3371,6 +3371,73 @@ macOS 契约不动，旧记录照常可读；启动时先建隧道再设系统�
 - 被拒数据报在 macOS 与 Windows 上的表现没有对照（macOS 的套接字是否立即报错）。
 - 用户真机上的 GUI 验收。
 
+### 2026-11-16：节点选择与连接诊断进入安装版 GUI 验证（托管 Windows 已通过）
+
+功能对齐的下一批。已安装 GUI 此前覆盖九页、开机启动、设置控件、LocalProxy、TUN、组合模式、防泄漏与
+SystemProxy 退出；0.5.0 之后的两项还没有在 Windows 上实际运行过：无分组配置的节点选择（应用在这类
+配置前放的 `cfw-proxy-selector`）与 Connections 页的连接诊断。
+
+- 新增 `node-choice` 会话，排在 local-proxy 与 tunnel 之间：在 local-proxy 会话留下的配置旁导入两个
+  SOCKS5 节点、没有分组的配置（地址是 example.com 下不存在的主机，本会话不产生经过它们的流量；从文本
+  导入的配置会被立即选中）；核心关闭时在 Proxies 页选第二个节点，配置旁保存该选择，文档与摘要不变；
+  启动 LocalProxy 后控制器里的应用选择器以保存的节点开始；在运行中的核心上改选第一个节点，控制器确认、
+  配置保存，核心不被替换（状态、代次、配置摘要不变）；停止后 Proxies 页显示第一个节点为已保存选择。
+  节点配置此时仍被选中，配置仓库拒绝删除选中的配置，所以它右键菜单里的 Delete 是禁用的并给出原因；
+  点击 local-proxy 配置的卡片重新选中它，再通过右键菜单与确认对话框删除节点配置。tunnel 会话因此仍从
+  只有 local-proxy 配置且它被选中的状态开始：验证脚本核对 node-choice 留下的正是 local-proxy 导入的
+  配置，tunnel 会话原有的检查也要求它用同一个配置。
+- local-proxy 会话在原生 HTTP 探测之后、停止之前，通过可见控件运行连接诊断：显示 IP、Run checks、
+  Check UDP、Check DNS。必须满足：路由为“Through the running CFM proxy”，系统与 CFM 两条出口都给出
+  地址，IPv4／IPv6 两行和四个服务行各有且只有一个结果，Cloudflare 回了 HTTP 状态，控制器的上下行累计
+  在检查期间增长（只有经核心的检查会用到它的监听端口），STUN 得到地址，核心不变。只记录不要求：
+  IPv6、另三个服务的结果、UDP 与 HTTPS 出口的比较、DNS 检查（bash.ws）和流量增量；这些取决于提供方与
+  runner 的网络。读完后再隐藏 IP，截图与无障碍快照里只有 Hidden，回执只保留地址族。IPQuery 查询（第三方
+  限流）与 Cancel（与完成竞争）不演练。
+- 工作流步骤注释改为五个会话；24 分钟上限仍覆盖五个各 200 秒的会话与 MSI 安装、卸载。
+
+本机演练（构建的界面加替身宿主，在浏览器面板里跑脚本；替身的 `page.evaluate` 按源码重建函数，依赖闭包
+的读取也会失败）发现一个产品缺陷，与 macOS 共用：在运行中的核心上选择节点时后端已把选择存进配置，但
+界面缓存的已保存视图没有重读，停止核心后 Proxies 页仍显示启动前保存的节点，直到别的操作重读配置。
+修正：引擎状态从运行变为未运行时重读已保存视图（按钮、托盘与事件都经过这里；托盘在运行中的选择走同一
+保存命令）。启动时不重读，免得控制器就绪前把已保存视图清空一次。两项测试修正前都失败：渲染测试（运行中
+保存了新选择后停止，页面应显示新选择）与引擎状态单元测试（只有停止重读，重复的 Off 与启动都不重读，
+读完再渲染）；四个变异（不重读、任何身份变化都重读、启动也重读、读完不渲染）都被杀死。修正后整条序列
+（node-choice 四步、local-proxy 的启动、诊断、停止）在演练中通过；五种注入故障（选节点替换核心、离线
+选择未保存、删除后配置仍在、诊断流量不经核心、STUN 无应答）各自被预期的检查拒绝。演练不证明 Playwright
+本身的语义、WebView2 与原生宿主。
+
+首轮托管结果（2026-11-17，提交 ae4f13b3，桌面作业 run 43982494369）：当时 node-choice 排在 fresh-off
+之后。离线选择、启动、在运行中的核心上改选、停止都通过，停止后 Proxies 页显示第一个节点，上面的修正在
+Windows 上成立。删除失败：确认后对话框 30 秒没有关闭。原因是 `ProfileRepository::delete` 按设计拒绝删除
+选中的配置（`SelectedProfileDeletion`），而脚本删的正是唯一且被选中的配置；替身宿主没有模拟这条规则，
+演练没有发现。界面对选中的配置仍提供 Delete，确认后对话框不关，拒绝只写进日志，用户看不到发生了什么，
+这是与 macOS 共用的缺陷。修正：选中配置的 Delete 带原因“Select another profile before deleting this
+one.”（四种语言），页内菜单与原生菜单都显示为禁用；两处测试修正前失败，四个变异（不给原因、只给其他配置、
+给所有配置、Delete 不声明原因）都被杀死。会话改排在 local-proxy 之后：一旦选中过配置，界面里就回不到空
+安装。这一轮在第一处失败就停止，local-proxy（含诊断）及之后的会话没有运行。同一天 macOS 的 Rust/UI
+质量门禁在下载 crate 时因 runner 网络（connection reset、broken pipe）失败（“Cargo workspace archive
+fetch emitted a warning”），与本改动无关，随下一次推送重跑。
+
+修正后的演练：替身宿主现在也拒绝删除选中的配置，演练页面加上与应用相同的 CSP `style-src 'self'`。旧脚本
+按旧顺序运行时与托管作业一样停在删除对话框；新顺序（local-proxy 的启动、诊断、停止，再 node-choice 的
+离线选择、启动并改选、停止、删除）通过，结束时只剩 local-proxy 的配置且它被选中。三种新故障各自被预期的
+检查拒绝：界面没有修正（选中配置的 Delete 可用）、重新选中不生效、删除不生效。
+
+复跑结果（2026-11-19，提交 1ea2e4cd，桌面作业 run 44451563426）：五个会话全部通过。node-choice 启动时
+控制器里的应用选择器是 Selector，当前为保存的 second，成员 first 与 second；节点配置被选中时 Delete 禁用且
+原因正确；删除后只剩 local-proxy 的配置且它被选中，tunnel 会话用的也是它。连接诊断的必需项全部满足，包括
+WebView2 的 STUN 得到地址。只记录的结果：IPv4 有、IPv6 连接失败（runner 没有 IPv6），UDP 与 HTTPS 出口
+一致，Claude 返回 403（拒绝或质询），ChatGPT、Anthropic 与 Cloudflare 返回 200，DNS 检查看到 4 个 IPv4
+解析器、4 次系统查询都没有失败，经核心的流量下行约 45 KB、上行约 4.6 KB，截图前重新隐藏了 10 处地址。
+同一提交的 macOS libbox 任务在安装 Rust 工具链时因 runner 网络失败（请求 static.rust-lang.org 的清单
+30 秒没有发出），与本改动无关。
+
+另见：Windows 控制台记录了 8 条 CSP 违规（Applying inline style violates ... style-src 'self'），来自页内
+配置菜单的 `style="left…;top…"`，这是界面里唯一的内联样式。CSP 下该属性从未生效，菜单位置由脚本随后
+设置；在同样的 CSP 下演练，菜单位置正确。没有功能影响，本次不改。
+
+仍未验证：ipify、三个服务与 bash.ws 的可用性只记录，不作要求；用户真机上的 GUI 验收。
+
 ### 2026-11-19：更新校验进程不带控制台（先在托管 Windows 复现，再修复）
 
 托管作业“Windows native update package inspection”在一个只改了文档的提交上失败过一次（运行

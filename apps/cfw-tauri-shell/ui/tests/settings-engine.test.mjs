@@ -14,12 +14,20 @@ import {
 } from "./support/settings-engine-harness.mjs";
 
 function engineStatus(overrides = {}) {
-  const d = { renderPage: spy(), updateStatusBar: spy(), cancelDelayTest: spy(), ...overrides };
+  const d = { renderPage: spy(), updateStatusBar: spy(), cancelDelayTest: spy(),
+    reloadSavedProfilePolicy: spy(async () => {}), ...overrides };
   return { d, status: createEngineStatus(d) };
 }
 
 const OFF_PAYLOAD = {
   snapshot: { desired_mode: "off", generation: 0, config_digest: null, state: { state: "off" } },
+  capabilities: { system_proxy: true, tunnel: true, tunnel_system_proxy: true, provider_management: false },
+  unavailable_reason: null,
+};
+
+const RUNNING_PAYLOAD = {
+  snapshot: { desired_mode: "system_proxy", generation: 3, config_digest: "digest",
+    state: { state: "proxy_active", runtime: { owner: "proxy_agent", context: { installation_id: "i", config_epoch: 1, generation: 3 }, config_digest: "digest", ready: true } } },
   capabilities: { system_proxy: true, tunnel: true, tunnel_system_proxy: true, provider_management: false },
   unavailable_reason: null,
 };
@@ -137,13 +145,7 @@ test("a failed automatic recovery attempt is logged and the page explains what i
 
 test("a running engine's controller version is read for that engine only", async () => {
   const { status } = engineStatus();
-  const RUNNING = {
-    snapshot: { desired_mode: "system_proxy", generation: 3, config_digest: "digest",
-      state: { state: "proxy_active", runtime: { owner: "proxy_agent", context: { installation_id: "i", config_epoch: 1, generation: 3 }, config_digest: "digest", ready: true } } },
-    capabilities: { system_proxy: true, tunnel: true, tunnel_system_proxy: true, provider_management: false },
-    unavailable_reason: null,
-  };
-  host.respond("engine_snapshot", RUNNING);
+  host.respond("engine_snapshot", RUNNING_PAYLOAD);
   host.respond("geoip_database_status", { state: "ready" });
   host.respond("controller_version", { version: "1.14.4" });
   await status.loadEngineStatus();
@@ -159,6 +161,22 @@ test("a running engine's controller version is read for that engine only", async
   await status.loadEngineStatus();
   assert.equal(state.controllerVersion, null);
   assert.equal(state.engineStartedAt, null);
+});
+
+test("a stop alone reads the saved profile again, as the running core saved its node choices", async () => {
+  const { d, status } = engineStatus();
+  runEngine();
+  status.applyEngineStatus(OFF_PAYLOAD);
+  status.applyEngineStatus(OFF_PAYLOAD);
+  assert.equal(d.reloadSavedProfilePolicy.count(), 1, "a repeated Off status reads nothing again");
+  assert.equal(d.renderPage.count(), 0);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(d.renderPage.count(), 1, "the page shows the saved view once it is read");
+  status.applyEngineStatus(RUNNING_PAYLOAD);
+  assert.equal(state.engine.active, true);
+  assert.equal(d.reloadSavedProfilePolicy.count(), 1, "a running core's controller is the view, not the saved profile");
+  status.applyEngineStatus(OFF_PAYLOAD);
+  assert.equal(d.reloadSavedProfilePolicy.count(), 2);
 });
 
 test("network switches are unavailable in a handoff window and during startup recovery", () => {

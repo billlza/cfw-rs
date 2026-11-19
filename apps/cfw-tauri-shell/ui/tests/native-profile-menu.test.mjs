@@ -7,7 +7,7 @@ const actions = [
   { id: "edit", label: "Edit", icon: "edit" },
   { id: "update", label: "Update", icon: "refresh", remoteOnly: true },
   { id: "credentials", label: "Credentials", icon: "gear", needsEngineOff: true },
-  { id: "delete", label: "Delete", icon: "trash", danger: true },
+  { id: "delete", label: "Delete", icon: "trash", danger: true, activeReason: "Select another profile first" },
 ];
 const t = (key, args = {}) => key.replace("{sourceError}", args.sourceError);
 const options = (engineOff) => ({ engineOff, engineNotOffReason: "Stop the engine first", t });
@@ -19,10 +19,12 @@ test("native material keeps original action ordering, hidden selection and disab
         const items = profileMenuItems(actions, { active, sourceUrl }, options(engineOff));
         assert.deepEqual(items.map(({ id }) => id), actions.filter((a) => !(a.needsInactive && active)).map(({ id }) => id));
         assert.equal(items.find(({ id }) => id === "credentials").reason, engineOff ? null : "Stop the engine first");
+        assert.equal(items.find(({ id }) => id === "delete").reason, active ? "Select another profile first" : null);
         const update = items.find(({ id }) => id === "update");
         assert.equal(update.reason, sourceUrl === undefined ? "Reading this profile…" : sourceUrl === null ? "This profile was imported locally and has no subscription URL." : null);
         const native = nativeMenuItems(items);
         assert.equal(native.find(({ id }) => id === "update").enabled, sourceUrl !== undefined && sourceUrl !== null);
+        assert.equal(native.find(({ id }) => id === "delete").enabled, !active);
         assert.ok(native.at(-1).danger);
         assert.equal(native.filter(({ danger }) => danger).length, 1);
       }

@@ -12,6 +12,8 @@ export function profileMenuItems(actions, profile, { engineOff, engineNotOffReas
         reason = t("This profile was imported locally and has no subscription URL.");
       }
     }
+    // An action the repository refuses for the selected profile says so.
+    if (!reason && action.activeReason && profile.active) reason = action.activeReason;
     if (!reason && action.needsEngineOff && !engineOff) reason = engineNotOffReason;
     return { ...action, reason };
   });

@@ -2,7 +2,7 @@ param(
     [Parameter(Mandatory)][string]$Launcher,
     [Parameter(Mandatory)][string]$Source,
     [Parameter(Mandatory)][string]$Output,
-    [Parameter(Mandatory)][ValidateSet('fresh-off', 'local-proxy', 'tunnel', 'system-proxy-quit')][string]$Scenario,
+    [Parameter(Mandatory)][ValidateSet('fresh-off', 'local-proxy', 'node-choice', 'tunnel', 'system-proxy-quit')][string]$Scenario,
     [Parameter(Mandatory)][ref]$SessionResult
 )
 Set-StrictMode -Version Latest
@@ -28,13 +28,14 @@ $receipt = [ordered]@{
     source=$Source; scenario=$Scenario; process_id=$null; process_creation_time=$null
     native_gui_exercised=$false; ordinary_user=$false; page_count=0; graceful_exit_observed=$false
     debugger_detach_preserved_gui=$false; debugger_detached_before_exit_wait=$false
-    imported_profile_id=$null; active_runtime=$null; proxy_port=$null
+    imported_profile_id=$null; kept_profile_id=$null; active_runtime=$null; proxy_port=$null
     http_forwarding_verified=$false; listener_released=$false; engine_stopped=$false; user_proxy_unchanged=$false
     wininet_proxy_verified=$false; active_quit_exercised=$false; original_user_proxy_restored=$false
     tunnel_runtime=$null; http_through_tunnel_verified=$false
     combined_runtime=$null; combined_mode_exercised=$false; leak_protection_exercised=$false
     tunnel_adapter_retired=$false; core_preserved_after_tunnel=$false
     startup_registration_exercised=$false; settings_controls_exercised=$false; actual_sign_in_exercised=$false
+    node_choice_exercised=$false; profile_deleted=$false; connection_diagnostics_exercised=$false
     physical_display_exercised=$false; network_mode_exercised=$false; release_accepted=$false
 }
 $SessionResult.Value = $receipt
@@ -72,7 +73,7 @@ function Invoke-Playwright([string]$Name, [string[]]$Arguments) {
         return ($result -join "`n")
     } finally { Pop-Location }
 }
-function Invoke-GuiScenario([ValidateSet('startup-off', 'startup-registration', 'settings-controls', 'network-start', 'network-stop', 'tunnel-start', 'tunnel-stop', 'combined-start', 'combined-stop', 'leak-protection-on', 'leak-protection-off', 'system-proxy-start', 'quit')][string]$Name) {
+function Invoke-GuiScenario([ValidateSet('startup-off', 'startup-registration', 'settings-controls', 'node-choice-offline', 'node-choice-online', 'profile-delete', 'network-start', 'connection-diagnostics', 'network-stop', 'tunnel-start', 'tunnel-stop', 'combined-start', 'combined-stop', 'leak-protection-on', 'leak-protection-off', 'system-proxy-start', 'quit')][string]$Name) {
     $observer = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'gui/observe.js'))
     # Both leak protection steps run one script, which is told its step.
     $scenarioFile = if ($Name -ceq 'quit') { 'quit-with-state' } elseif ($Name -clike 'leak-protection-*') { 'leak-protection' } else { $Name }
@@ -248,6 +249,44 @@ try {
             throw 'The installed GUI did not keep its display language, update interval, leak protection switches and scroll position'
         }
         $receipt.settings_controls_exercised = $true
+    } elseif ($Scenario -ceq 'node-choice') {
+        # Beside the LocalProxy session's profile, a profile of two remote nodes and
+        # no group: one choice saved while the core is off, one made on the running
+        # core. The repository refuses to delete the selected profile, so the
+        # LocalProxy profile is selected again before the node profile is deleted,
+        # and the next session begins as this one did.
+        $offline = (Invoke-GuiScenario 'node-choice-offline') | ConvertFrom-Json
+        $offline | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'node-choice-offline.json') -Encoding utf8NoBOM
+        if ($offline.release_accepted -or $offline.profile -ceq $offline.kept) { throw 'The offline node choice receipt is invalid' }
+        $receipt.native_gui_exercised = $true
+        $receipt.imported_profile_id = $offline.profile
+        $receipt.kept_profile_id = $offline.kept
+        $online = (Invoke-GuiScenario 'node-choice-online') | ConvertFrom-Json
+        $online | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'node-choice-online.json') -Encoding utf8NoBOM
+        if ($online.before.saved.id -cne $receipt.imported_profile_id -or $online.release_accepted) {
+            throw 'The node choice core did not start the profile chosen while it was off'
+        }
+        $receipt.active_runtime = $online.active.snapshot.state.runtime
+        $stopped = (Invoke-GuiScenario 'network-stop') | ConvertFrom-Json
+        $stopped | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'network-stop.json') -Encoding utf8NoBOM
+        $chosenIdentity = $online.active.snapshot.state.runtime | ConvertTo-Json -Depth 20 -Compress
+        $stoppedIdentity = $stopped.before.snapshot.state.runtime | ConvertTo-Json -Depth 20 -Compress
+        if ($chosenIdentity -cne $stoppedIdentity -or $stopped.stopped.snapshot.state.state -cne 'off' -or
+            $stopped.stopped.snapshot.desired_mode -cne 'off') {
+            throw 'GUI stop did not retire the core that carried both node choices'
+        }
+        $receipt.engine_stopped = $true
+        $receipt.node_choice_exercised = $true
+        $receipt.network_mode_exercised = $true
+        $deleted = (Invoke-GuiScenario 'profile-delete') | ConvertFrom-Json
+        $deleted | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'profile-delete.json') -Encoding utf8NoBOM
+        $remaining = @($deleted.deleted.profiles)
+        if ($deleted.before.saved.id -cne $receipt.imported_profile_id -or $deleted.kept -cne $receipt.kept_profile_id -or
+            -not $deleted.refused.disabled -or $remaining.Count -ne 1 -or $remaining[0].id -cne $receipt.kept_profile_id -or
+            -not $remaining[0].active -or $deleted.release_accepted) {
+            throw 'The node choice profile was not deleted through the GUI once the LocalProxy profile was selected again'
+        }
+        $receipt.profile_deleted = $true
     } elseif ($Scenario -ceq 'local-proxy') {
         $started = (Invoke-GuiScenario 'network-start') | ConvertFrom-Json
         $started | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'network-start.json') -Encoding utf8NoBOM
@@ -261,6 +300,15 @@ try {
         $receipt.active_runtime = $started.active.snapshot.state.runtime
         $http = Invoke-NativeNetworkProbe 'http' $proxyPort $launch
         $receipt.http_forwarding_verified = $true
+        # The diagnostics' routed checks pass through this same core.
+        $diagnostics = (Invoke-GuiScenario 'connection-diagnostics') | ConvertFrom-Json
+        $diagnostics | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'connection-diagnostics.json') -Encoding utf8NoBOM
+        $diagnosedIdentity = $diagnostics.before.engine.snapshot.state.runtime | ConvertTo-Json -Depth 20 -Compress
+        if ($diagnosedIdentity -cne ($started.active.snapshot.state.runtime | ConvertTo-Json -Depth 20 -Compress) -or
+            -not $diagnostics.connection_diagnostics_exercised -or $diagnostics.release_accepted) {
+            throw 'Connection diagnostics did not run on the LocalProxy core started by this scenario'
+        }
+        $receipt.connection_diagnostics_exercised = $true
         $stopped = (Invoke-GuiScenario 'network-stop') | ConvertFrom-Json
         $stopped | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'network-stop.json') -Encoding utf8NoBOM
         $startedIdentity = $started.active.snapshot.state.runtime | ConvertTo-Json -Depth 20 -Compress

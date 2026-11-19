@@ -3371,7 +3371,7 @@ macOS 契约不动，旧记录照常可读；启动时先建隧道再设系统�
 - 被拒数据报在 macOS 与 Windows 上的表现没有对照（macOS 的套接字是否立即报错）。
 - 用户真机上的 GUI 验收。
 
-### 2026-11-16：节点选择与连接诊断进入安装版 GUI 验证（首轮托管结果已读，修正后复跑待托管作业）
+### 2026-11-16：节点选择与连接诊断进入安装版 GUI 验证（托管 Windows 已通过）
 
 功能对齐的下一批。已安装 GUI 此前覆盖九页、开机启动、设置控件、LocalProxy、TUN、组合模式、防泄漏与
 SystemProxy 退出；0.5.0 之后的两项还没有在 Windows 上实际运行过：无分组配置的节点选择（应用在这类
@@ -3423,12 +3423,20 @@ fetch emitted a warning”），与本改动无关，随下一次推送重跑。
 离线选择、启动并改选、停止、删除）通过，结束时只剩 local-proxy 的配置且它被选中。三种新故障各自被预期的
 检查拒绝：界面没有修正（选中配置的 Delete 可用）、重新选中不生效、删除不生效。
 
+复跑结果（2026-11-19，提交 1ea2e4cd，桌面作业 run 44451563426）：五个会话全部通过。node-choice 启动时
+控制器里的应用选择器是 Selector，当前为保存的 second，成员 first 与 second；节点配置被选中时 Delete 禁用且
+原因正确；删除后只剩 local-proxy 的配置且它被选中，tunnel 会话用的也是它。连接诊断的必需项全部满足，包括
+WebView2 的 STUN 得到地址。只记录的结果：IPv4 有、IPv6 连接失败（runner 没有 IPv6），UDP 与 HTTPS 出口
+一致，Claude 返回 403（拒绝或质询），ChatGPT、Anthropic 与 Cloudflare 返回 200，DNS 检查看到 4 个 IPv4
+解析器、4 次系统查询都没有失败，经核心的流量下行约 45 KB、上行约 4.6 KB，截图前重新隐藏了 10 处地址。
+同一提交的 macOS libbox 任务在安装 Rust 工具链时因 runner 网络失败（请求 static.rust-lang.org 的清单
+30 秒没有发出），与本改动无关。
+
 另见：Windows 控制台记录了 8 条 CSP 违规（Applying inline style violates ... style-src 'self'），来自页内
 配置菜单的 `style="left…;top…"`，这是界面里唯一的内联样式。CSP 下该属性从未生效，菜单位置由脚本随后
 设置；在同样的 CSP 下演练，菜单位置正确。没有功能影响，本次不改。
 
-仍未验证：托管 Windows 上新顺序的结果与连接诊断（含 WebView2 的 WebRTC 是否给出 srflx 地址、经核心的
-诊断请求与控制器计数）；ipify、三个服务与 bash.ws 的可用性只记录；用户真机上的 GUI 验收。
+仍未验证：ipify、三个服务与 bash.ws 的可用性只记录，不作要求；用户真机上的 GUI 验收。
 
 ### 2026-10-23：开放事项（需要用户决定或外部条件）
 

@@ -24,6 +24,9 @@
 - Show a node chosen while the core runs as the saved choice once the core
   stops. The choice was saved with the profile, but the Proxies page kept
   showing the node saved before the start until the profile was read again.
+- Disable Delete in the context menu of the selected profile and say why.
+  The selected profile cannot be deleted, so confirming its deletion kept the
+  dialog open and reported the refusal only in the log.
 
 ### Profiles
 

@@ -504,6 +504,7 @@
   "Select": "Select",
   "Select All": "Select All",
   "Select a profile containing providers.": "Select a profile containing providers.",
+  "Select another profile before deleting this one.": "Select another profile before deleting this one.",
   "Selected profile": "Selected profile",
   "Selecting proxy in {groupName}": "Selecting proxy in {groupName}",
   "Selections apply on the next start.": "Selections apply on the next start.",

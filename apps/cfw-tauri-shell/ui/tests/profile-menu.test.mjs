@@ -53,9 +53,12 @@ test("the in-page menu lists every item and states why an item is unavailable", 
   assert.doesNotMatch(html, /data-profile-menu="select"/u, "the active profile offers no Select");
   state.profileContextMenu = { id: "work", x: 0, y: 0 };
   assert.match(menu.renderInPageMenu(), /data-profile-menu="select"/u, "another profile can be selected");
+  assert.doesNotMatch(menu.renderInPageMenu(), /data-profile-menu="delete"[^>]*disabled/u, "another profile can be deleted");
   state.profileContextMenu = { id: "local", x: 10.4, y: 20.6 };
   assert.match(html, /data-profile-menu="update"[^>]*disabled title=/u, "a local profile has no subscription to update");
   assert.match(html, /glass-menu-item danger" data-profile-menu="delete"/u);
+  // The repository refuses to delete the selected profile.
+  assert.match(html, /data-profile-menu="delete"[^>]*disabled title="Select another profile before deleting this one\."/u);
   state.profileContextMenu = { id: "missing", x: 0, y: 0 };
   assert.equal(menu.renderInPageMenu(), "", "a vanished profile has no menu");
   state.payload.native_ui.profile_menu = true;

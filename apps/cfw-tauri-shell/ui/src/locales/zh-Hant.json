@@ -504,6 +504,7 @@
   "Select": "選取",
   "Select All": "全選",
   "Select a profile containing providers.": "請選取包含提供者的設定檔。",
+  "Select another profile before deleting this one.": "刪除前請先選取其他設定檔。",
   "Selected profile": "目前的設定檔",
   "Selecting proxy in {groupName}": "正在為 {groupName} 選取代理",
   "Selections apply on the next start.": "選擇將在下次啟動時套用。",

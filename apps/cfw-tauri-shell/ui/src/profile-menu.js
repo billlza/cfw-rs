@@ -30,7 +30,8 @@ const PROFILE_MENU_ACTIONS = [
   { id: "qrcode", label: "QRCode", icon: "qr", remoteOnly: true },
   { id: "credentials", get label() { return t("Credentials"); }, icon: "gear", needsEngineOff: true },
   { id: "settings", get label() { return t("Settings"); }, icon: "gear" },
-  { id: "delete", get label() { return t("Delete"); }, icon: "trash", danger: true },
+  { id: "delete", get label() { return t("Delete"); }, icon: "trash", danger: true,
+    get activeReason() { return t("Select another profile before deleting this one."); } },
 ];
 
 export function createProfileMenu({ renderPage, renderGlassOverlays, resolveProfileSource, selectProfileById, invokeProfileChange, loadProfilesSnapshot, openCredentialSetup }) {

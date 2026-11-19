@@ -504,6 +504,7 @@
   "Select": "選択",
   "Select All": "すべてを選択",
   "Select a profile containing providers.": "プロバイダーを含むプロファイルを選択してください。",
+  "Select another profile before deleting this one.": "削除する前に、別のプロファイルを選択してください。",
   "Selected profile": "選択中のプロファイル",
   "Selecting proxy in {groupName}": "{groupName} のプロキシを選択中",
   "Selections apply on the next start.": "選択内容は次回起動時に適用されます。",

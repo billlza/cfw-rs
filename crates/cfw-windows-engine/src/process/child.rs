@@ -23,9 +23,9 @@ use windows_sys::Win32::{
         Pipes::CreatePipe,
         Threading::{
             CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
-            EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetExitCodeProcess,
-            PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW,
-            TerminateProcess, WaitForSingleObject,
+            DETACHED_PROCESS, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetExitCodeProcess,
+            PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES,
+            STARTUPINFOEXW, STARTUPINFOW, TerminateProcess, WaitForSingleObject,
         },
     },
 };
@@ -56,6 +56,23 @@ pub(super) struct NativeChild {
 pub(super) enum Program {
     Engine,
     PackageInspection,
+}
+impl Program {
+    /// The creation flag that decides whether the worker has a console.
+    fn console(self) -> PROCESS_CREATION_FLAGS {
+        match self {
+            // A console without a window. The engine's owner only waits for
+            // its Job to empty, and the process that hosts the console ends
+            // with the rest of that Job.
+            Self::Engine => CREATE_NO_WINDOW,
+            // No console. Windows hosts a console in a process of its own,
+            // started as the worker's child, so it joins the worker's Job
+            // and leaves with a quick worker before the owner has observed
+            // it; the owner must account for every process the Job ever
+            // held. Every handle the worker uses is passed explicitly.
+            Self::PackageInspection => DETACHED_PROCESS,
+        }
+    }
 }
 impl AsRawHandle for NativeChild {
     fn as_raw_handle(&self) -> RawHandle {
@@ -139,7 +156,7 @@ impl NativeChild {
                 null(),
                 null(),
                 1,
-                CREATE_NO_WINDOW
+                program.console()
                     | CREATE_SUSPENDED
                     | CREATE_UNICODE_ENVIRONMENT
                     | EXTENDED_STARTUPINFO_PRESENT,

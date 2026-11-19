@@ -3485,6 +3485,82 @@ WebView2 的 STUN 得到地址。只记录的结果：IPv4 有、IPv6 连接失�
   影响，是否去掉没有评估。
 - 实体 Windows 机器上没有运行过。
 
+### 2026-11-19：DNS 重试测试等待复用探测，Windows 专用的同步补丁退役
+
+main 上的托管作业“libbox, Network Extension, and app skeleton gates”失败过一次（运行
+43971466322，提交 cab516b9，2026-11-17）：
+`TestRuntimeDNSPoolRetriesSERVFAILButPreservesNegativeAnswers/NXDOMAIN` 的测试服务器在
+`runtime_policy_test.go:563` 报 `write: connection reset by peer`。2026-11-03 至 11-19 完成的
+51 次 CI 运行里只有这一次。用户在 2026-11-19 要求先查清原因，再修。
+
+根因：
+
+- TCP 与 TLS 的 DNS 传输在第一次向某个服务器发查询时启动“复用探测”
+  （`dns/transport/multiplexer.go`）：另开一条连接，连续写出同名的 A 和 AAAA 两个问题，再等两个
+  应答。真正的查询同时走它自己的连接。
+- 探测是受生命周期管理的后台任务，`Box.Close` 取消它并立即关闭它的连接。这是 DNS failover 补丁
+  有意为之的行为，Box 关闭之后探测结果没有用处。
+- 这个测试只问一个 TXT 问题。NXDOMAIN 不重试，拿到一个应答测试就结束并关闭 Box，测试服务器这时
+  可能还没写完探测的两个应答。它在应答写入失败时调用 `t.Error`，向已关闭的探测连接写应答就让
+  测试失败。
+- 这是测试夹具的缺陷，不涉及产品路径。它与 10 月在 Windows 上遇到的是同一个竞态（见上文
+  `dbba859` 的记录）。当时只在 Windows 构建树上叠加了同步补丁
+  `native/windows/engine-tests/dns-response-lifecycle.patch`，共享的测试没有改，macOS 作业因此
+  仍会遇到。
+
+复现（临时实验，用封存的 51006 源码树和固定 Go 1.27.4 的克隆，不进仓库）：
+
+- 测试服务器把探测的应答推迟 100 毫秒、Box 立即关闭：TXT 在一条连接上，A 和 AAAA 在另一条上；
+  AAAA 应答写入失败（本机是 `broken pipe`），TXT 没有失败。Box 晚 500 毫秒关闭时三个写入都成功。
+- 在原测试的结构里强制这个次序（A 应答扣到 Box 关闭之后才写，再处理 AAAA）：5 次都在测试服务器
+  的 `t.Error` 处失败。
+- 不加干预时，本机空闲状态下顺序运行 2,300 次没有失败。
+
+修复：
+
+- 测试改用同一个包里已有的探测等待（`policy_test.go` 的 `policyTCPProbeDrain` 和
+  `policyTCPProbeReader`）：测试服务器的读取包装在探测连接读到 EOF 时报告；测试在 Box 之后注册
+  一个清理函数等它，这个函数因此先于 `Box.Close` 运行，上限 6 秒（探测自身的超时是 5 秒）。
+  `policy_test.go` 里原来内联的等待改成两个测试共用的 `wait` 方法。
+- Windows 专用的叠加补丁退役。它是绑定行号的零上下文补丁，改的是同一个测试，测试改动之后无法再
+  套用；它的作用已经由共享的测试自己承担。`scripts/windows_engine.py` 的 `apply_test_overlay`、
+  回执里的 `windows_test_overlay` 字段和两项单元测试一并删除。Windows 上 200 轮的专项重复保留。
+- DNS failover 补丁里只有 `dns/policy_test.go` 和 `dns/runtime_policy_test.go` 两个测试文件的
+  部分变了，`SING_BOX_DNS_FAILOVER_PATCH_SHA256` 和 `SING_BOX_COMBINED_DIFF_SHA256` 随之更新。
+  引擎的产品代码没有变。
+
+验证：
+
+- 次序实验（探测应答推迟 100 毫秒）：不等待时，A 应答在 Box 关闭之后 101 毫秒才写；加上等待后，
+  TXT、A、AAAA 分别在 Box 关闭之前 206、105、3 毫秒写完，没有失败的写入。把等待注册在 Box 之前
+  （于是它在关闭之后才运行），探测的一个应答写入失败：起作用的正是等待的位置。
+- 带等待的这个测试，连同原本就用同一个等待的
+  `TestDNSGeoIPAcceptAllRejectsMixedAnswersInEitherOrder`，开启 race 顺序运行 400 次全部通过。
+- 改动之前，由待编辑的源码树重新生成的这两个文件的补丁段与补丁原文逐字节相同。
+  `materialize-libbox-source` 用新补丁和新 pin 通过，得到的源码树与编辑后的树一致；
+  `libbox-source-tests` 和 `build-libbox` 通过。构建出的 `Libbox.xcframework` 的 20 个文件和
+  树摘要与已封存的 0.5.1（51006）构建相同，清单里只有上述两个摘要不同。
+- Windows 脚本的源码准备步骤在本机原样执行（`git apply --whitespace=error-all --unidiff-zero`
+  和两处摘要校验）：接受新补丁和新 pin，拒绝旧的合并摘要，得到的树与门禁生成的一致。
+  `scripts.tests.test_windows_engine` 的 20 项通过。
+
+同类位置。全树里检查应答写入结果的测试服务器共四处：
+
+- `dns/policy_test.go`：已有同样的等待。
+- `dns/runtime_policy_test.go`：本次修复。
+- `dns/socks_setup_budget_test.go`：UDP，没有复用探测。
+- `dns/routed_dialer_test.go` 的 TCP 分支：没有改。它的测试服务器要经过另一个 Box 的 SOCKS 代理
+  才能到达，对端是这个在子测试期间一直存活的代理，不是发起探测的 Box。实验把探测的应答推迟
+  100 毫秒：应答在发起探测的 Box 关闭之后约 90 毫秒才写，3 次运行都没有写入错误。
+
+仍未验证或未覆盖：
+
+- 这个等待在本测试里还没有在 Windows 上运行过。`policy_test.go` 用的是同一个等待，它在 Windows
+  引擎作业里一直通过。这项改动的 PR 上，Windows 引擎作业的 200 轮重复是第一次，结果记录在 PR 上。
+- 托管 macOS 报的是 `connection reset by peer`，本机在试过的各种次序里都是 `broken pipe`。差异的
+  原因没有查明。
+- 实体 Windows 机器上没有运行过。
+
 ### 2026-10-23：开放事项（需要用户决定或外部条件）
 
 以下事项不能由托管 CI 单独完成，或会改变发布身份、持久化契约与产品方向，保持开放：

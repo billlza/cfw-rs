@@ -861,10 +861,10 @@ index 0000000000000000000000000000000000000000..4d537dddafcf10761daf507af2b46ee9
 +}
 diff --git a/dns/policy_test.go b/dns/policy_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..9b97b0c40f357cc20dafabd490952ab383766a83
+index 0000000000000000000000000000000000000000..fb51c8421fac193ed5a211e4e0dfc96cda07084e
 --- /dev/null
 +++ b/dns/policy_test.go
-@@ -0,0 +1,276 @@
+@@ -0,0 +1,281 @@
 +package dns_test
 +
 +import (
@@ -1075,16 +1075,7 @@ index 0000000000000000000000000000000000000000..9b97b0c40f357cc20dafabd490952ab3
 +			// Register after the Box cleanup, so this runs before Box.Close even
 +			// when a policy assertion fails. All WriteMsg errors remain fatal to
 +			// the test; cancellation/Close itself is covered by transport tests.
-+			t.Cleanup(func() {
-+				select {
-+				case err := <-probe.done:
-+					if !errors.Is(err, io.EOF) {
-+						t.Errorf("reuse probe peer did not finish cleanly: %v", err)
-+					}
-+				case <-time.After(6 * time.Second):
-+					t.Error("reuse probe peer did not finish before policy fixture cleanup")
-+				}
-+			})
++			t.Cleanup(func() { probe.wait(t) })
 +			query := new(mdns.Msg)
 +			query.SetQuestion("mixed.example.", mdns.TypeA)
 +			main, _ := transports.Transport("main")
@@ -1122,6 +1113,20 @@ index 0000000000000000000000000000000000000000..9b97b0c40f357cc20dafabd490952ab3
 +	}
 +	p.remote = remote
 +	return nil
++}
++
++// wait returns once the probe's connection has ended. A test registers it
++// after its Box, so that it runs before Box.Close.
++func (p *policyTCPProbeDrain) wait(t *testing.T) {
++	t.Helper()
++	select {
++	case err := <-p.done:
++		if !errors.Is(err, io.EOF) {
++			t.Errorf("reuse probe peer did not finish cleanly: %v", err)
++		}
++	case <-time.After(6 * time.Second):
++		t.Error("reuse probe peer did not finish before the fixture closed its Box")
++	}
 +}
 +
 +type policyTCPProbeReader struct {
@@ -2692,10 +2697,10 @@ index 0000000000000000000000000000000000000000..2c37d0d90d8b9446f655ebd814f8a242
 +}
 diff --git a/dns/runtime_policy_test.go b/dns/runtime_policy_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..5d855cdc3cd2316488112528f66229143da25a55
+index 0000000000000000000000000000000000000000..4e24be8f544f609d868e9933710a0dc29d8c6417
 --- /dev/null
 +++ b/dns/runtime_policy_test.go
-@@ -0,0 +1,593 @@
+@@ -0,0 +1,610 @@
 +package dns_test
 +
 +import (
@@ -3255,7 +3260,18 @@ index 0000000000000000000000000000000000000000..5d855cdc3cd2316488112528f6622914
 +			if err != nil {
 +				t.Fatal(err)
 +			}
-+			server := &mdns.Server{Listener: listener, Net: "tcp", Handler: mdns.HandlerFunc(func(w mdns.ResponseWriter, request *mdns.Msg) {
++			probe := &policyTCPProbeDrain{done: make(chan error, 1)}
++			server := &mdns.Server{Listener: listener, Net: "tcp", DecorateReader: func(reader mdns.Reader) mdns.Reader {
++				return &policyTCPProbeReader{Reader: reader, probe: probe}
++			}, Handler: mdns.HandlerFunc(func(w mdns.ResponseWriter, request *mdns.Msg) {
++				// The test asks TXT. The AAAA question identifies the TCP
++				// transport's reuse probe, which has a connection of its own
++				// and is cancelled when the Box closes.
++				if request.Question[0].Qtype == mdns.TypeAAAA {
++					if err := probe.observe(w.RemoteAddr().String()); err != nil {
++						t.Error(err)
++					}
++				}
 +				response := new(mdns.Msg).SetRcode(request, rcode)
 +				if err := w.WriteMsg(response); err != nil {
 +					t.Error(err)
@@ -3272,6 +3288,12 @@ index 0000000000000000000000000000000000000000..5d855cdc3cd2316488112528f6622914
 +				"route": map[string]any{"default_domain_resolver": "last"},
 +			}
 +			router, _ := startPolicyBox(t, config)
++			// Registered after the Box, so it runs before Box.Close. With
++			// NXDOMAIN the test ends after one answer, while the probe waits
++			// for two on its own connection: a Box closed before both are
++			// written leaves the stub writing a probe answer to a closed
++			// connection, and that write is checked.
++			t.Cleanup(func() { probe.wait(t) })
 +			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 +			defer cancel()
 +			response, err := router.Exchange(ctx, new(mdns.Msg).SetQuestion("rcode.test.", mdns.TypeTXT), adapter.DNSQueryOptions{})

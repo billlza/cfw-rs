@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "observed_at": "2026-10-21",
+  "repository": "billlza/cfw-rs",
+  "windows_integration_branch": "lza/cfw-0.5.0-windows",
+  "windows_snapshots": [
+    "lza/cfw-0.5.0-backend-authorization",
+    "lza/cfw-0.5.0-backend-diagnostics",
+    "lza/cfw-0.5.0-backend-lifecycle",
+    "lza/cfw-0.5.0-backend-suites",
+    "lza/cfw-0.5.0-console-admission",
+    "lza/cfw-0.5.0-desktop-runtime",
+    "lza/cfw-0.5.0-engine-inheritance",
+    "lza/cfw-0.5.0-installed-desktop",
+    "lza/cfw-0.5.0-installed-host",
+    "lza/cfw-0.5.0-installed-lifecycle",
+    "lza/cfw-0.5.0-job-keeper-probe",
+    "lza/cfw-0.5.0-keeper-confirmation",
+    "lza/cfw-0.5.0-local-recovery",
+    "lza/cfw-0.5.0-normal-proxy-stop",
+    "lza/cfw-0.5.0-profile-probes",
+    "lza/cfw-0.5.0-proxy-cleanup",
+    "lza/cfw-0.5.0-proxy-recovery",
+    "lza/cfw-0.5.0-proxy-restoration",
+    "lza/cfw-0.5.0-recorded-scope",
+    "lza/cfw-0.5.0-runtime-keeper",
+    "lza/cfw-0.5.0-runtime-observation",
+    "lza/cfw-0.5.0-scm-restart",
+    "lza/cfw-0.5.0-startup-off",
+    "lza/cfw-0.5.0-windows-backend",
+    "lza/cfw-0.5.0-windows-shell"
+  ],
+  "windows_experiments": [
+    "lza/cfw-worker-retirement"
+  ],
+  "independent_review_branches": [
+    "feat/mobile-egress-observer",
+    "fix/macos-network-identity-ipv6"
+  ],
+  "historical_release_branches": [
+    "feat/liquid-glass-dialogs",
+    "release/macos-0.4.0"
+  ],
+  "main_branch": "main"
+}

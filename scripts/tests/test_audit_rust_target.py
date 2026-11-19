@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -27,41 +28,78 @@ from scripts.publication.bounded_process import BoundedProcessError
 from scripts.publication.rust_targets import MACOS_TARGET, WINDOWS_TARGET
 
 
-def metadata_fixture() -> dict:
+REGISTRY = "registry+https://example.invalid/index"
+APP = "path+file:///repo#app@0.4.0"
+
+
+def declaration(name: str, *, rename=None, kind=None, optional=False) -> dict:
+    return {"name": name, "rename": rename, "kind": kind, "target": None, "optional": optional}
+
+
+def edge(name: str, identifier: str, *kinds) -> dict:
     return {
-        "workspace_members": ["path+file:///repo#app@0.4.0"],
+        "name": name,
+        "pkg": identifier,
+        "dep_kinds": [{"kind": kind, "target": None} for kind in kinds or (None,)],
+    }
+
+
+def graph(*packages) -> dict:
+    """Build metadata from (id, features, resolved features, declarations, edges)."""
+    return {
+        "workspace_members": [APP],
         "resolve": {
             "nodes": [
-                {
-                    "id": "path+file:///repo#app@0.4.0",
-                    "deps": [
-                        {
-                            "name": "mac_only",
-                            "pkg": "registry+https://example.invalid/index#mac-only@1.0.0",
-                        }
-                    ],
-                },
-                {
-                    "id": "registry+https://example.invalid/index#mac-only@1.0.0",
-                    "deps": [],
-                },
+                {"id": identifier, "features": resolved, "deps": edges}
+                for identifier, _table, resolved, _declarations, edges in packages
             ]
         },
         "packages": [
             {
-                "id": "path+file:///repo#app@0.4.0",
-                "name": "app",
-                "version": "0.4.0",
-                "source": None,
-            },
-            {
-                "id": "registry+https://example.invalid/index#mac-only@1.0.0",
-                "name": "mac-only",
-                "version": "1.0.0",
-                "source": "registry+https://example.invalid/index",
-            },
+                "id": identifier,
+                "name": identifier.rsplit("#", 1)[1].split("@")[0],
+                "version": identifier.rsplit("@", 1)[1],
+                "source": None if identifier == APP else REGISTRY,
+                "features": table,
+                "dependencies": declarations,
+            }
+            for identifier, table, _resolved, declarations, _edges in packages
         ],
     }
+
+
+def metadata_fixture() -> dict:
+    mac_only = f"{REGISTRY}#mac-only@1.0.0"
+    return graph(
+        (APP, {}, [], [declaration("mac-only")], [edge("mac_only", mac_only)]),
+        (mac_only, {}, [], [], []),
+    )
+
+
+WITH = f"{REGISTRY}#with@3.24.0"
+CHRONO = f"{REGISTRY}#chrono@0.4.45"
+TRAITS = f"{REGISTRY}#num-traits@0.2.19"
+WEAK_TABLE = {
+    "alloc": ["chrono_0_4?/alloc"],
+    "chrono_0_4": ["dep:chrono_0_4"],
+    "default": ["alloc"],
+}
+
+
+def weak_feature_fixture(table=WEAK_TABLE, resolved=("alloc", "default")) -> dict:
+    """A dependency that names chrono only through a weak feature, as serde_with does."""
+    return graph(
+        (APP, {}, [], [declaration("with")], [edge("with", WITH)]),
+        (
+            WITH,
+            table,
+            list(resolved),
+            [declaration("chrono", rename="chrono_0_4", optional=True)],
+            [edge("chrono_0_4", CHRONO)],
+        ),
+        (CHRONO, {"alloc": []}, ["alloc"], [declaration("num-traits")], [edge("num_traits", TRAITS)]),
+        (TRAITS, {}, [], [], []),
+    )
 
 
 class TargetAuditTests(unittest.TestCase):
@@ -73,6 +111,156 @@ class TargetAuditTests(unittest.TestCase):
                 "registry+https://example.invalid/index#mac-only@1.0.0",
             },
         )
+
+    def test_weak_feature_dependency_is_outside_the_audited_graph(self) -> None:
+        self.assertEqual(reachable_package_ids(weak_feature_fixture()), {APP, WITH})
+
+    def test_enabled_optional_dependency_is_audited(self) -> None:
+        for label, table, resolved in (
+            ("implicit feature", WEAK_TABLE, ("alloc", "chrono_0_4", "default")),
+            ("dep: in another feature", {"clock": ["dep:chrono_0_4"]}, ("clock",)),
+            ("strong feature", {"alloc": ["chrono_0_4/alloc"]}, ("alloc",)),
+        ):
+            with self.subTest(label):
+                self.assertEqual(
+                    reachable_package_ids(weak_feature_fixture(table, resolved)),
+                    {APP, WITH, CHRONO, TRAITS},
+                )
+
+    def test_a_required_edge_audits_a_package_another_edge_skips(self) -> None:
+        metadata = weak_feature_fixture()
+        metadata["workspace_members"].append(APP)
+        metadata["packages"][0]["dependencies"].append(declaration("chrono"))
+        metadata["resolve"]["nodes"][0]["deps"].append(edge("chrono", CHRONO))
+        self.assertEqual(reachable_package_ids(metadata), {APP, WITH, CHRONO, TRAITS})
+
+    def test_required_declaration_keeps_an_optional_edge(self) -> None:
+        metadata = weak_feature_fixture()
+        package = metadata["packages"][1]
+        package["dependencies"].append(declaration("chrono", rename="chrono_0_4", kind="build"))
+        metadata["resolve"]["nodes"][1]["deps"] = [edge("chrono_0_4", CHRONO, None, "build")]
+        self.assertEqual(reachable_package_ids(metadata), {APP, WITH, CHRONO, TRAITS})
+
+    def test_only_the_resolved_declaration_counts(self) -> None:
+        for kind, target in (("dev", None), (None, "cfg(windows)")):
+            with self.subTest(kind=kind, target=target):
+                metadata = weak_feature_fixture()
+                required = declaration("chrono", rename="chrono_0_4", kind=kind)
+                required["target"] = target
+                metadata["packages"][1]["dependencies"].append(required)
+                self.assertEqual(reachable_package_ids(metadata), {APP, WITH})
+
+    def test_renamed_declarations_follow_their_own_features(self) -> None:
+        first, second = f"{REGISTRY}#indexmap@1.9.3", f"{REGISTRY}#indexmap@2.14.2"
+        metadata = graph(
+            (APP, {}, [], [declaration("with")], [edge("with", WITH)]),
+            (
+                WITH,
+                {"indexmap_1": ["dep:indexmap_1"], "indexmap_2": ["dep:indexmap_2"]},
+                ["indexmap_1"],
+                [
+                    declaration("indexmap", rename="indexmap_1", optional=True),
+                    declaration("indexmap", rename="indexmap_2", optional=True),
+                ],
+                [edge("indexmap_1", first), edge("indexmap_2", second)],
+            ),
+            (first, {}, [], [], []),
+            (second, {}, [], [], []),
+        )
+        self.assertEqual(reachable_package_ids(metadata), {APP, WITH, first})
+
+    def test_unaccountable_metadata_fails_closed(self) -> None:
+        def undeclared(metadata):
+            metadata["resolve"]["nodes"][1]["features"] = ["missing"]
+
+        def featureless(metadata):
+            del metadata["resolve"]["nodes"][1]["features"]
+
+        def kindless(metadata):
+            metadata["resolve"]["nodes"][1]["deps"][0]["dep_kinds"] = []
+
+        def undeclared_edge(metadata):
+            metadata["packages"][1]["dependencies"] = [declaration("other")]
+
+        def ambiguous_optional(metadata):
+            metadata["packages"][1]["dependencies"][0]["optional"] = None
+
+        def missing_dependency(metadata):
+            del metadata["packages"][2]
+
+        def missing_member(metadata):
+            del metadata["packages"][0]
+
+        def no_inventory(metadata):
+            metadata["packages"] = {}
+
+        def invalid_package(metadata):
+            metadata["packages"].append([])
+
+        def anonymous_package(metadata):
+            metadata["packages"].append({"name": "anonymous"})
+
+        def duplicate_package(metadata):
+            metadata["packages"].append(dict(metadata["packages"][0]))
+
+        def no_resolve(metadata):
+            del metadata["resolve"]
+
+        def no_nodes(metadata):
+            metadata["resolve"]["nodes"] = {}
+
+        def invalid_node(metadata):
+            metadata["resolve"]["nodes"].append([])
+
+        def duplicate_node(metadata):
+            metadata["resolve"]["nodes"].append(dict(metadata["resolve"]["nodes"][0]))
+
+        def numeric_member(metadata):
+            metadata["workspace_members"] = [1]
+
+        def unresolved_member(metadata):
+            metadata["workspace_members"].append("path+file:///repo#other@0.4.0")
+
+        def no_dependency_list(metadata):
+            metadata["resolve"]["nodes"][0]["deps"] = {}
+
+        def invalid_edge(metadata):
+            metadata["resolve"]["nodes"][0]["deps"] = [[]]
+
+        def unnamed_dependency(metadata):
+            metadata["packages"][1]["name"] = None
+
+        def nameless_package(metadata):
+            metadata["packages"].append({"id": f"{REGISTRY}#x@1.0.0", "version": "1.0.0"})
+
+        for mutate, message in (
+            (undeclared, "does not declare resolved feature 'missing'"),
+            (featureless, "no resolved features"),
+            (kindless, "invalid dependency"),
+            (undeclared_edge, "no declaration for resolved dependency chrono_0_4"),
+            (ambiguous_optional, "no declaration for resolved dependency chrono_0_4"),
+            (missing_dependency, f"missing from metadata: {CHRONO}"),
+            (missing_member, f"missing from metadata: {APP}"),
+            (no_inventory, "no package inventory"),
+            (invalid_package, "invalid package"),
+            (anonymous_package, "identity is incomplete"),
+            (duplicate_package, "duplicate cargo package identifier"),
+            (nameless_package, "identity is incomplete"),
+            (no_resolve, "no complete resolve graph"),
+            (no_nodes, "resolve graph has no nodes"),
+            (invalid_node, "invalid resolve node"),
+            (duplicate_node, f"duplicate cargo resolve node: {APP}"),
+            (numeric_member, "identifier is not a string"),
+            (unresolved_member, "absent from target resolve graph"),
+            (no_dependency_list, f"no dependency list: {APP}"),
+            (invalid_edge, f"invalid dependency: {APP}"),
+            (unnamed_dependency, f"invalid dependency: {APP}"),
+        ):
+            with self.subTest(mutate.__name__):
+                metadata = weak_feature_fixture()
+                mutate(metadata)
+                with self.assertRaisesRegex(AuditContractError, re.escape(message)):
+                    target_package_keys(metadata)
 
     def test_target_inventory_excludes_non_resolved_platform_package(self) -> None:
         keys = target_package_keys(metadata_fixture())

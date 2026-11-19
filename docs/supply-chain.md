@@ -308,6 +308,21 @@ tokio `1.53.1` to the fixed `1.53.3`, which changes no other locked package.
 That release deprecates those constructors; the workspace calls none of them,
 so the move adds no warning.
 
+`RUSTSEC-2026-0543` (informational, unmaintained; in the database since
+2026-11-18) reports that chrono is unmaintained, and no release fixes it.
+chrono is in Cargo.lock only because serde_with, which Tauri's `tauri-utils`
+uses with its default features, names it in weak features such as
+`chrono_0_4?/alloc`. Cargo records such a dependency in the lockfile and in the
+resolve graph of `cargo metadata`, although no enabled feature builds it, so
+neither shipped program compiles chrono. The target audit therefore follows a
+resolved dependency only when one of its declarations is required or a
+resolved feature of the dependent enables it, and fails closed on an edge,
+feature or declaration it cannot account for. That removed fourteen packages
+from each program's audited graph (macOS 323 to 309, Windows 321 to 307), among
+them chrono, jiff, schemars 0.9 and 1, and zlib-rs. `cargo tree` with all
+features lists none of the fourteen for either target, and every package it
+lists for the macOS program is still audited.
+
 `SING_BOX_VERSION` follows the newest upstream stable release, and its tag
 commit carries a verified upstream signature. The six patches were ported onto
 upstream's scoped component lifecycle, in which a component registers its

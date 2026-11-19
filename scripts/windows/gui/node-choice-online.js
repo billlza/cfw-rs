@@ -8,13 +8,14 @@
   const before = await page.evaluate(async () => {
     const invoke = window.__TAURI_INTERNALS__.invoke;
     const profiles = await invoke('profiles_snapshot');
-    const id = profiles.profiles.length === 1 ? profiles.profiles[0].id : null;
+    const id = profiles.profiles.find(profile => profile.active)?.id ?? null;
     return { engine: await invoke('engine_snapshot'), profiles, saved: id === null ? null : await invoke('read_profile_text', { id }) };
   });
   if (before.engine.unavailable_reason !== null || before.engine.snapshot.state.state !== 'off' ||
       before.engine.snapshot.desired_mode !== 'off' || before.engine.capabilities.local_proxy !== true ||
-      before.profiles.invalid_profiles.length !== 0 || before.profiles.profiles.length !== 1 ||
-      before.profiles.profiles[0].active !== true || before.saved?.proxy_selections[selector] !== 'second') {
+      before.profiles.invalid_profiles.length !== 0 || before.profiles.profiles.length !== 2 ||
+      before.profiles.profiles.filter(profile => profile.active).length !== 1 ||
+      before.saved?.proxy_selections[selector] !== 'second') {
     throw new Error(`The node choice case did not keep its stopped profile and offline choice: ${JSON.stringify(before)}`);
   }
   await page.locator('[data-action="toggle-core"]').filter({ hasText: 'Start core' }).click();

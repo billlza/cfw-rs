@@ -105,23 +105,25 @@ try {
         $fresh.actual_sign_in_exercised) {
         throw 'The independent fresh-Off GUI case did not pass'
     }
-    $nodeChoiceRoot = Join-Path $outputRoot 'node-choice'
-    New-Item -ItemType Directory -Path $nodeChoiceRoot -ErrorAction Stop | Out-Null
-    & $sessionScript -Launcher $Launcher -Source $Source -Output $nodeChoiceRoot -Scenario 'node-choice' -SessionResult ([ref]$nodeChoice)
-    if (-not $nodeChoice.graceful_exit_observed -or -not $nodeChoice.network_mode_exercised -or
-        -not $nodeChoice.node_choice_exercised -or -not $nodeChoice.engine_stopped -or -not $nodeChoice.profile_deleted -or
-        ($fresh.process_id -eq $nodeChoice.process_id -and $fresh.process_creation_time -eq $nodeChoice.process_creation_time)) {
-        throw 'The separate GUI node choice lifecycle did not pass'
-    }
     $networkRoot = Join-Path $outputRoot 'local-proxy'
     New-Item -ItemType Directory -Path $networkRoot -ErrorAction Stop | Out-Null
     & $sessionScript -Launcher $Launcher -Source $Source -Output $networkRoot -Scenario 'local-proxy' -SessionResult ([ref]$network)
     if (-not $network.graceful_exit_observed -or -not $network.network_mode_exercised -or
         -not $network.http_forwarding_verified -or -not $network.engine_stopped -or -not $network.listener_released -or
         -not $network.connection_diagnostics_exercised -or
-        ($fresh.process_id -eq $network.process_id -and $fresh.process_creation_time -eq $network.process_creation_time) -or
-        ($nodeChoice.process_id -eq $network.process_id -and $nodeChoice.process_creation_time -eq $network.process_creation_time)) {
+        ($fresh.process_id -eq $network.process_id -and $fresh.process_creation_time -eq $network.process_creation_time)) {
         throw 'The separate GUI LocalProxy lifecycle did not pass'
+    }
+    # Beside the LocalProxy profile, which it selects again before the next session.
+    $nodeChoiceRoot = Join-Path $outputRoot 'node-choice'
+    New-Item -ItemType Directory -Path $nodeChoiceRoot -ErrorAction Stop | Out-Null
+    & $sessionScript -Launcher $Launcher -Source $Source -Output $nodeChoiceRoot -Scenario 'node-choice' -SessionResult ([ref]$nodeChoice)
+    if (-not $nodeChoice.graceful_exit_observed -or -not $nodeChoice.network_mode_exercised -or
+        -not $nodeChoice.node_choice_exercised -or -not $nodeChoice.engine_stopped -or -not $nodeChoice.profile_deleted -or
+        $nodeChoice.kept_profile_id -cne $network.imported_profile_id -or
+        ($fresh.process_id -eq $nodeChoice.process_id -and $fresh.process_creation_time -eq $nodeChoice.process_creation_time) -or
+        ($network.process_id -eq $nodeChoice.process_id -and $network.process_creation_time -eq $nodeChoice.process_creation_time)) {
+        throw 'The separate GUI node choice lifecycle did not pass'
     }
     $tunnelRoot = Join-Path $outputRoot 'tunnel'
     New-Item -ItemType Directory -Path $tunnelRoot -ErrorAction Stop | Out-Null
@@ -135,7 +137,8 @@ try {
         $tunnel.combined_runtime.context.installation_id -cne $network.active_runtime.context.installation_id -or
         $tunnel.imported_profile_id -cne $network.imported_profile_id -or
         $tunnel.tunnel_runtime.context.installation_id -cne $network.active_runtime.context.installation_id -or
-        ($tunnel.process_id -eq $network.process_id -and $tunnel.process_creation_time -eq $network.process_creation_time)) {
+        ($tunnel.process_id -eq $network.process_id -and $tunnel.process_creation_time -eq $network.process_creation_time) -or
+        ($tunnel.process_id -eq $nodeChoice.process_id -and $tunnel.process_creation_time -eq $nodeChoice.process_creation_time)) {
         throw 'The separate GUI TUN lifecycle did not pass'
     }
     $systemProxyRoot = Join-Path $outputRoot 'system-proxy-quit'

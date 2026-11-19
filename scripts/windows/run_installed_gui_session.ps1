@@ -2,7 +2,7 @@ param(
     [Parameter(Mandatory)][string]$Launcher,
     [Parameter(Mandatory)][string]$Source,
     [Parameter(Mandatory)][string]$Output,
-    [Parameter(Mandatory)][ValidateSet('fresh-off', 'node-choice', 'local-proxy', 'tunnel', 'system-proxy-quit')][string]$Scenario,
+    [Parameter(Mandatory)][ValidateSet('fresh-off', 'local-proxy', 'node-choice', 'tunnel', 'system-proxy-quit')][string]$Scenario,
     [Parameter(Mandatory)][ref]$SessionResult
 )
 Set-StrictMode -Version Latest
@@ -28,7 +28,7 @@ $receipt = [ordered]@{
     source=$Source; scenario=$Scenario; process_id=$null; process_creation_time=$null
     native_gui_exercised=$false; ordinary_user=$false; page_count=0; graceful_exit_observed=$false
     debugger_detach_preserved_gui=$false; debugger_detached_before_exit_wait=$false
-    imported_profile_id=$null; active_runtime=$null; proxy_port=$null
+    imported_profile_id=$null; kept_profile_id=$null; active_runtime=$null; proxy_port=$null
     http_forwarding_verified=$false; listener_released=$false; engine_stopped=$false; user_proxy_unchanged=$false
     wininet_proxy_verified=$false; active_quit_exercised=$false; original_user_proxy_restored=$false
     tunnel_runtime=$null; http_through_tunnel_verified=$false
@@ -250,14 +250,17 @@ try {
         }
         $receipt.settings_controls_exercised = $true
     } elseif ($Scenario -ceq 'node-choice') {
-        # A profile of two remote nodes and no group: one choice saved while the
-        # core is off, one made on the running core; then the profile is deleted
-        # so the LocalProxy session again begins with an empty installation.
+        # Beside the LocalProxy session's profile, a profile of two remote nodes and
+        # no group: one choice saved while the core is off, one made on the running
+        # core. The repository refuses to delete the selected profile, so the
+        # LocalProxy profile is selected again before the node profile is deleted,
+        # and the next session begins as this one did.
         $offline = (Invoke-GuiScenario 'node-choice-offline') | ConvertFrom-Json
         $offline | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'node-choice-offline.json') -Encoding utf8NoBOM
-        if ($offline.release_accepted) { throw 'The offline node choice receipt is invalid' }
+        if ($offline.release_accepted -or $offline.profile -ceq $offline.kept) { throw 'The offline node choice receipt is invalid' }
         $receipt.native_gui_exercised = $true
-        $receipt.imported_profile_id = $offline.selected.profiles[0].id
+        $receipt.imported_profile_id = $offline.profile
+        $receipt.kept_profile_id = $offline.kept
         $online = (Invoke-GuiScenario 'node-choice-online') | ConvertFrom-Json
         $online | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'node-choice-online.json') -Encoding utf8NoBOM
         if ($online.before.saved.id -cne $receipt.imported_profile_id -or $online.release_accepted) {
@@ -277,9 +280,11 @@ try {
         $receipt.network_mode_exercised = $true
         $deleted = (Invoke-GuiScenario 'profile-delete') | ConvertFrom-Json
         $deleted | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'profile-delete.json') -Encoding utf8NoBOM
-        if ($deleted.before.saved.id -cne $receipt.imported_profile_id -or @($deleted.deleted.profiles).Count -ne 0 -or
-            $deleted.release_accepted) {
-            throw 'The node choice profile was not deleted through the GUI'
+        $remaining = @($deleted.deleted.profiles)
+        if ($deleted.before.saved.id -cne $receipt.imported_profile_id -or $deleted.kept -cne $receipt.kept_profile_id -or
+            -not $deleted.refused.disabled -or $remaining.Count -ne 1 -or $remaining[0].id -cne $receipt.kept_profile_id -or
+            -not $remaining[0].active -or $deleted.release_accepted) {
+            throw 'The node choice profile was not deleted through the GUI once the LocalProxy profile was selected again'
         }
         $receipt.profile_deleted = $true
     } elseif ($Scenario -ceq 'local-proxy') {

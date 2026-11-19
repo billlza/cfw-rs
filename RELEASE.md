@@ -524,7 +524,13 @@ dependency is proven unreachable in the shipped target and the project owner
 accepts the exact documented boundary; advisory IDs are never silently ignored.
 `rust-target-audit` derives the exact `aarch64-apple-darwin` all-features resolve
 graph before running `cargo-audit` with vulnerability and warning advisories
-denied. It disables only cargo-audit's duplicate per-package yanked query.
+denied. It disables only cargo-audit's duplicate per-package yanked query. The
+graph follows a resolved dependency only when one of its declarations is
+required or a resolved feature of the dependent enables it (`dep:name` or
+`name/feature`). Cargo also keeps an optional dependency that only a weak
+feature (`name?/feature`) names in Cargo.lock and in its resolve graph, but no
+build of the program includes it, so it is outside the shipped target; this is
+the documented boundary for `RUSTSEC-2026-0543` (chrono, through serde_with).
 `cargo-deny` is the sole owner of current yanked status and consumes that same
 closed target metadata: bans, licenses and sources are evaluated against the
 verified offline Cargo inputs, while advisories and yanked status use a fresh

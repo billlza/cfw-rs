@@ -20,7 +20,7 @@ struct ProcessIds {
 }
 
 pub(super) struct RetirementWitnesses {
-    descendants: std::collections::BTreeMap<u32, OwnedHandle>,
+    pub(super) descendants: std::collections::BTreeMap<u32, OwnedHandle>,
 }
 
 impl RetirementWitnesses {

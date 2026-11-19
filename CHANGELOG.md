@@ -88,6 +88,11 @@
 - Read Clash subscriptions with saphyr-parser 0.3.4 instead of 0.1.2.
 - Build the interface with Node 26.13.1 and npm 12.2.2, run the release tools
   on Python 3.14.10, and audit the Rust graph with cargo-audit 0.23.0.
+- Audit only the Rust packages a build of the program can include. Cargo keeps
+  an optional dependency that only a weak feature names, such as chrono
+  through serde_with, in Cargo.lock without building it, and the target audit
+  failed on `RUSTSEC-2026-0543` (chrono is unmaintained) although neither
+  program includes chrono.
 
 ## 0.5.1 — 2026-11-11
 

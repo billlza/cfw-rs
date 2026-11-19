@@ -398,6 +398,75 @@ fn retirement_rejects_a_census_that_missed_later_descendants() {
 }
 
 #[test]
+fn a_worker_that_creates_no_process_is_the_only_member_of_its_job() {
+    // The owner accounts for every process its Job ever held, and it cannot
+    // account for one that came and went between two observations. A console
+    // is hosted by a system process that starts as the worker's child, joins
+    // the Job and leaves with the worker, so a quick worker that has one
+    // fails its cleanup by timing alone. Hold a waiting worker, which creates
+    // no process, and require that its Job never had another member.
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("worker");
+    let assets = spawn_assets_for(
+        fixture(),
+        &directory,
+        None,
+        child::Program::PackageInspection,
+        None,
+    )
+    .unwrap();
+    let mut owner = OneShot {
+        assets,
+        io: None,
+        assigned: false,
+        closed: false,
+        witnesses: None,
+    };
+    let worker = RefCell::new(None);
+    let operation = owner.exchange(
+        b"read".to_vec(),
+        Instant::now() + Duration::from_secs(10),
+        &|| {
+            // The fixture writes its marker from main, after Windows has set
+            // up whatever console the process was created with.
+            let mut worker = worker.borrow_mut();
+            if worker.is_none() {
+                *worker = observed(&directory.join("worker.json"));
+            }
+            worker.is_some()
+        },
+    );
+    let census = owner.observe_members();
+    let accounting = job_accounting(&owner.assets.job).unwrap();
+    let others: Vec<_> = owner
+        .witnesses
+        .iter()
+        .flat_map(|witnesses| witnesses.descendants.values())
+        .map(process_image_path)
+        .collect();
+    let retired = owner.retire(true);
+    println!(
+        "native worker Job while its worker waits: total={} active={} other members {others:?}",
+        accounting.TotalProcesses, accounting.ActiveProcesses
+    );
+    assert!(matches!(operation, Err(Error::Cancelled)));
+    census.unwrap();
+    retired.unwrap();
+    assert!(
+        accounting.TotalProcesses == 1 && accounting.ActiveProcesses == 1 && others.is_empty(),
+        "the inspection worker's Job held total={} active={} and other members {others:?}",
+        accounting.TotalProcesses,
+        accounting.ActiveProcesses
+    );
+    assert_retired(
+        &worker
+            .into_inner()
+            .expect("worker observed before cancellation"),
+        "single-member worker",
+    );
+}
+
+#[test]
 fn precreation_cancellation_and_invalid_bounds_create_no_working_directory() {
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("worker");

@@ -19,6 +19,7 @@ fn main() {
 fn run() -> Result<i32, Box<dyn std::error::Error>> {
     use std::{
         io::{Read, Write},
+        os::windows::process::CommandExt,
         process::{Command, Stdio},
         time::Duration,
     };
@@ -68,11 +69,14 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
         b"tree" => {
             // The descendant inherits the owned Job and pipe handles. No
             // breakaway flag or independently owned process is requested.
+            // It is given no console: the system process that hosts one
+            // would join the Job beside the fixture's own processes.
             let mut child = Command::new(std::env::current_exe()?)
                 .arg("--fixture-descendant")
                 .stdin(Stdio::inherit())
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit())
+                .creation_flags(windows_sys::Win32::System::Threading::DETACHED_PROCESS)
                 .spawn()?;
             let status = child.wait()?;
             return Err(format!("descendant exited before Job cancellation: {status}").into());

@@ -2,6 +2,8 @@
 //! The existing explicit handle list and atomic cleanup Job are shared with
 //! engine launch. A result requires observed process exits, drained I/O and an
 //! empty Job whose lifetime process population is completely accounted for.
+//! The worker has no console, so that population is the worker and the
+//! processes it creates itself.
 use super::*;
 use std::io::Write;
 

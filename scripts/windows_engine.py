@@ -27,8 +27,6 @@ from publication.license_resolution import candidate_license_files
 
 
 PATCHES = ("SECURITY", "RAW_PACKET", "DNS_FAILOVER", "ENDPOINT_CONFLICT", "PROFILE_PROBE", "SOCKS_LIFECYCLE")
-WINDOWS_TEST_OVERLAY = "native/windows/engine-tests/dns-response-lifecycle.patch"
-WINDOWS_TEST_FILE = "dns/runtime_policy_test.go"
 WINTUN_PACKAGE = "github.com/sagernet/sing-tun/internal/wintun"
 # The two programs this lane links: the engine and our process entry point.
 ENGINE_MODULE = "github.com/sagernet/sing-box"
@@ -393,32 +391,6 @@ def prepare_host_source(repository: Path, source: Path, destination: Path) -> di
     return expected
 
 
-def apply_test_overlay(repository: Path, source: Path, expected: dict[str, str]) -> tuple[dict[str, str], dict[str, object]]:
-    """Synchronize a Windows fixture without changing any GA production bytes."""
-    require_unchanged(source_files(source), expected, "host source changed before test overlay")
-    patch = pinned_path(repository, WINDOWS_TEST_OVERLAY)
-    # A separate temporary Git directory makes apply behave identically inside
-    # and outside a product checkout. No Git metadata enters the source tree.
-    with tempfile.TemporaryDirectory(prefix="cfw-test-overlay-") as temporary:
-        control = Path(temporary).resolve()
-        template = control / "empty-template"
-        template.mkdir()
-        git(control, "init", "--quiet", f"--template={template}")
-        prefix = (f"--git-dir={control / '.git'}", f"--work-tree={source.resolve()}")
-        changes = git(source, *prefix, "apply", "--numstat", str(patch)).decode().splitlines()
-        require(len(changes) == 1 and changes[0].split("\t")[-1] == WINDOWS_TEST_FILE,
-                "Windows test overlay may change only the DNS test fixture")
-        git(source, *prefix, "apply", "--whitespace=error-all", "--unidiff-zero", "--check", str(patch))
-        git(source, *prefix, "apply", "--whitespace=error-all", "--unidiff-zero", str(patch))
-    actual = source_files(source)
-    changed = {name for name in expected.keys() | actual.keys() if expected.get(name) != actual.get(name)}
-    require(actual.keys() == expected.keys() and changed == {WINDOWS_TEST_FILE},
-            "Windows test overlay changed production bytes or source membership")
-    return actual, {"path": WINDOWS_TEST_OVERLAY, "sha256": sha256(patch),
-                    "files": {WINDOWS_TEST_FILE: {"before_sha256": expected[WINDOWS_TEST_FILE],
-                                                   "after_sha256": actual[WINDOWS_TEST_FILE]}}}
-
-
 def test_packages(repository: Path, pins: dict[str, str]) -> list[str]:
     path = pinned_path(repository, pins["LIBBOX_MODULE_CACHE_CONTRACT_PATH"])
     require(sha256(path) == pins["LIBBOX_MODULE_CACHE_CONTRACT_SHA256"], "module/test contract digest mismatch")
@@ -647,7 +619,6 @@ def build(repository: Path, work: Path, pins: dict[str, str]) -> None:
     baseline_files = source_files(baseline_source)
     source = work / "host-source"
     expected_files = prepare_host_source(repository, baseline_source, source)
-    expected_files, test_overlay = apply_test_overlay(repository, source, expected_files)
     output = work / "artifacts"
     output.mkdir()
     fixture_directory = work / "dns-projections"
@@ -726,6 +697,10 @@ def build(repository: Path, work: Path, pins: dict[str, str]) -> None:
                      if event.get("Action") == "skip" and "Test" in event]
     require(not skipped_tests, "native engine tests were skipped; inspect the complete Go test event log")
     packages_without_tests = [event["Package"] for event in test_events if event.get("Action") == "skip" and "Test" not in event]
+    # The fixture must keep its engine alive until the transport's reuse probe
+    # has ended: a stub that answers the probe after the engine closed its
+    # connection fails the test. One run rarely shows a fixture that stopped
+    # waiting, so the test is repeated here.
     print("Repeating the synchronized DNS response fixture on native Windows", flush=True)
     stress_name = "TestRuntimeDNSPoolRetriesSERVFAILButPreservesNegativeAnswers"
     stress = subprocess.run([str(go), "test", "-json", "-count=200", "-timeout=5m",
@@ -760,7 +735,6 @@ def build(repository: Path, work: Path, pins: dict[str, str]) -> None:
                "source_files_sha256": hashlib.sha256(json.dumps(baseline_files, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
                "host_source_files_sha256": hashlib.sha256(json.dumps(expected_files, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
                "host_source_additions": source_files(repository / "native/windows/engine-host"),
-               "windows_test_overlay": test_overlay,
                "dns_fixture_stress": {"test": stress_name, "repetitions": 200, "passed_events": stress_passed},
                "go_version": pins["GO_VERSION"], "go_archive_sha256": pins["GO_WINDOWS_AMD64_SHA256"],
                "build_tags": tags.split(","), "cgo_enabled": False, "independent_cache_builds_equal": True,

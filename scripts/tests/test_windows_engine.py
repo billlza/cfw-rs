@@ -55,49 +55,6 @@ def scan_report_text(pins: dict[str, str], *, go: str | None = None, scanner: st
 
 
 class WindowsEngineContractTests(unittest.TestCase):
-    def test_real_windows_fixture_overlay_preserves_all_production_and_ga_bytes(self) -> None:
-        pins = engine.read_pins(REPOSITORY)
-        patch = engine.pinned_path(REPOSITORY, pins["SING_BOX_DNS_FAILOVER_PATCH_PATH"]).read_text()
-        # This GA patch adds the entire fixture. Reconstruct that existing input
-        # rather than keeping a second hand-maintained copy in the repository.
-        section = patch.split("+++ b/dns/runtime_policy_test.go\n", 1)[1].split("diff --git ", 1)[0]
-        original = "".join(line[1:] for line in section.splitlines(keepends=True) if line.startswith("+"))
-        self.assertIn("NXDOMAIN was changed or retried", original)
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary).resolve()
-            baseline = root / "ga-source"
-            (baseline / "dns").mkdir(parents=True)
-            (baseline / "dns/runtime_policy_test.go").write_bytes(original.encode())
-            (baseline / "go.mod").write_bytes(b"module untouched\n")
-            (baseline / "runtime.go").write_bytes(b"package unchanged\n")
-            before = engine.source_files(baseline)
-            source = root / "host-source"
-            expected = engine.prepare_host_source(REPOSITORY, baseline, source)
-            actual, receipt = engine.apply_test_overlay(REPOSITORY, source, expected)
-            self.assertEqual(engine.source_files(baseline), before)
-            self.assertEqual(engine.source_files(source), actual)
-            self.assertEqual({name for name in actual if actual[name] != expected[name]}, {engine.WINDOWS_TEST_FILE})
-            self.assertEqual(receipt["files"][engine.WINDOWS_TEST_FILE]["before_sha256"], before[engine.WINDOWS_TEST_FILE])
-            self.assertEqual((source / "runtime.go").read_bytes(), b"package unchanged\n")
-            self.assertNotIn(".git", {path.name for path in source.iterdir()})
-            text = (source / engine.WINDOWS_TEST_FILE).read_text()
-            self.assertIn("NXDOMAIN was changed or retried", text)
-            self.assertIn("server failure did not reach the next configured resolver", text)
-            self.assertIn("response write for %s: %v", text)
-            self.assertIn("fixture writes did not complete", text)
-            # The overlay is a zero-context diff bound to line numbers, so a GA
-            # patch that grows the file would land its hunks outside the retry
-            # test, which the digest checks above cannot see: pin where they land.
-            start = text.index("func TestRuntimeDNSPoolRetriesSERVFAILButPreservesNegativeAnswers(")
-            end = text.index("\n\t\t})\n\t}\n}\n", start)
-            body = text[start:end]
-            self.assertLess(body.index("writesDone := make(chan uint16, 3)"), body.index("server := &mdns.Server{"))
-            self.assertIn("writesDone <- request.Question[0].Qtype", body)
-            self.assertLess(body.index("server failure did not reach the next configured resolver"),
-                            body.index("fixture writes did not complete"))
-            self.assertNotIn("writesDone", text[:start])
-            self.assertNotIn("writesDone", text[end:])
-
     def test_unchanged_source_check_names_the_added_changed_and_missing_paths(self) -> None:
         expected = {"daemon/a.go": "1", "daemon/b.go": "2", "gone.go": "3"}
         actual = {"daemon/a.go": "1", "daemon/b.go": "9", "daemon/cache.db": "4"}
@@ -108,20 +65,6 @@ class WindowsEngineContractTests(unittest.TestCase):
             str(failure.exception),
             "build or tests changed engine source bytes: daemon/b.go, daemon/cache.db, gone.go",
         )
-
-    def test_windows_fixture_overlay_rejects_a_production_file_change(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary).resolve()
-            patch = root / engine.WINDOWS_TEST_OVERLAY
-            patch.parent.mkdir(parents=True)
-            patch.write_bytes(b"diff --git a/runtime.go b/runtime.go\n--- a/runtime.go\n+++ b/runtime.go\n@@ -1 +1 @@\n-package original\n+package modified\n")
-            source = root / "source"
-            source.mkdir()
-            (source / "runtime.go").write_bytes(b"package original\n")
-            before = engine.source_files(source)
-            with self.assertRaisesRegex(RuntimeError, "only the DNS test fixture"):
-                engine.apply_test_overlay(root, source, before)
-            self.assertEqual(engine.source_files(source), before)
 
     def test_host_source_is_an_exact_overlay_without_mutating_ga_baseline(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

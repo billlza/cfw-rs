@@ -17,7 +17,9 @@ import { openProfileInspector } from "./profile-inspector.js";
 /// `remoteOnly` items need the profile's subscription URL, which a profile list
 /// deliberately never publishes. Opening the menu reads the single profile, so
 /// the URL is known here; when that read fails the item is shown disabled with
-/// the reason instead of being hidden.
+/// the reason instead of being hidden. `needsKnownSource` items wait for the
+/// same read but need no URL: Settings saves its URL field back, and a field
+/// shown empty before the read would remove the subscription URL.
 const PROFILE_MENU_ACTIONS = [
   { id: "select", get label() { return t("Select"); }, icon: "check", needsInactive: true },
   { id: "edit", get label() { return t("Edit"); }, icon: "edit" },
@@ -29,7 +31,7 @@ const PROFILE_MENU_ACTIONS = [
   { id: "copy", get label() { return t("Copy"); }, icon: "copy" },
   { id: "qrcode", label: "QRCode", icon: "qr", remoteOnly: true },
   { id: "credentials", get label() { return t("Credentials"); }, icon: "gear", needsEngineOff: true },
-  { id: "settings", get label() { return t("Settings"); }, icon: "gear" },
+  { id: "settings", get label() { return t("Settings"); }, icon: "gear", needsKnownSource: true },
   { id: "delete", get label() { return t("Delete"); }, icon: "trash", danger: true,
     get activeReason() { return t("Select another profile before deleting this one."); } },
 ];

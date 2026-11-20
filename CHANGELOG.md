@@ -32,6 +32,12 @@
   that URL when it was opened again, so saving it once more, even only to
   rename the profile, wrote the old URL back; and Update in the context menu
   stayed disabled for a profile that had just been given a URL.
+- Offer a profile's Settings only once its subscription URL has been read.
+  Settings opened before the read had finished, or after it had failed,
+  showed an empty URL field, and saving it, even only to rename the profile,
+  removed the subscription URL and made the profile a local one. While the
+  URL is being read, or when it could not be read, Settings is disabled with
+  the reason, as Update is.
 
 ### Profiles
 

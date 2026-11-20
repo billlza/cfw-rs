@@ -16,13 +16,7 @@
   ];
   const read = () => page.evaluate(async () => {
     const invoke = window.__TAURI_INTERNALS__.invoke;
-    const automation = await invoke('read_automation_settings');
-    // The runner's addresses stay out of the receipt; their families do not.
-    const network = automation.network === null ? null : {
-      kind: automation.network.kind, interface: automation.network.interface, ssid: automation.network.ssid,
-      address_families: [...new Set(automation.network.addresses.map(address => address.includes(':') ? 'ipv6' : 'ipv4'))].sort(),
-    };
-    return { automation: { ...automation, network }, engine: await invoke('engine_snapshot') };
+    return { automation: await invoke('read_automation_settings'), engine: await invoke('engine_snapshot') };
   });
   await page.locator('#nav button[data-page="general"][aria-current="page"]').waitFor();
   const before = await page.evaluate(async () => {
@@ -42,9 +36,11 @@
       automation.network_active !== false || automation.error !== null) {
     throw new Error(`The automation case did not begin without shortcuts and network rules: ${JSON.stringify(automation)}`);
   }
-  // A rule for a wired network can only act where Windows reports one.
+  // A rule for a wired network can only act where Windows reports one. The
+  // view names the interface; the addresses the rule compares stay in the
+  // backend.
   if (automation.network_error !== null || automation.network?.kind !== 'wired' || automation.network.ssid !== null ||
-      !automation.network.interface || automation.network.address_families.length === 0) {
+      !automation.network.interface) {
     throw new Error(`Windows did not report a wired physical network: ${JSON.stringify(automation)}`);
   }
   await page.locator('#nav button[data-page="settings"]').click();

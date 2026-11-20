@@ -3561,7 +3561,7 @@ main 上的托管作业“libbox, Network Extension, and app skeleton gates”�
   原因没有查明。
 - 实体 Windows 机器上没有运行过。
 
-### 2026-11-20：全局快捷键与网络规则进入安装版 GUI 验证（本机检查完成，原生结果待托管作业）
+### 2026-11-20：全局快捷键与网络规则进入安装版 GUI 验证（托管第一轮暴露一个脚本错误并已修正，原生结果待第二轮）
 
 功能对齐的下一批。自动化（Settings › Background controls › Shortcuts & network rules）在 Windows 上早已实现：
 `cfw-platform` 读取物理网卡，全局快捷键走 `tauri-plugin-global-shortcut`（Windows 上是隐藏窗口加
@@ -3627,13 +3627,28 @@ stderr，不读上一次留下的回执；驱动脚本调用的探针与模块�
   特性的全部目标、不带特性的库与测试、`cfw-tauri-shell` 的全部目标。壳的构建脚本要调用资源编译器，本机用只
   产生空输出的替身（与 cc、ar 的替身同类）；什么都不链接、不运行。
 
+托管第一轮（提交 266f3947，Windows desktop 运行 44646214337）：
+
+- 探针回执测试在 Windows 上通过（5 项）：`.cmd` 替身启动器可用，模块在 runner 的 PowerShell 上工作。前三个
+  会话（fresh-off、local-proxy、node-choice）照常通过，验证脚本在每个会话之后立即核对。
+- `automation` 会话在第一步 `automation-rule` 失败，此时还没有做任何改动：`page.evaluate: TypeError: Cannot
+  read properties of undefined (reading 'map')`。这是脚本自己的错误：它从 `read_automation_settings` 返回的
+  `network.addresses` 里取地址族写进回执，但 `NetworkContext::addresses` 带 `#[serde(skip)]`，从不发给界面——
+  界面只用 `interface`、`kind`、`ssid`，地址只在后端参与网络变化的判断。本机演练的替身宿主却返回了地址，所以
+  演练没能发现。从失败的位置可以确定 Windows 报告了一个物理网络（`network` 不为 null，`kind` 也已读到）；它是
+  不是有线，这一轮没有记录下来。
+- 修正：两个脚本按后端实际发送的结构读取视图，去掉地址族的记录和“至少有一个地址族”的检查（Windows 的观察
+  本身已要求候选网卡至少有一个可用地址）；`automation-shortcut.js` 去掉基于同一错误前提的投影。替身宿主改成与
+  后端一致（视图不带地址）后，旧脚本在本机以同样的错误、同样的位置（求值函数第 7 行第 66 列）失败；修正后整条
+  序列通过，八种注入故障仍各自被预期的检查拒绝。`AutomationView` 的其余字段逐一与替身核对过；引擎的过渡状态
+  名与已在托管上通过的 `network-start.js`、`network-stop.js` 一致。
+
 仍未验证，等托管作业：
 
-- 托管 runner 是否把它的网卡报告为有线物理网卡。上一轮的页面快照里有一块 Up 的“Ethernet 4”，它的
-  `HardwareInterface` 标志未知；不满足时会话在前置检查处失败，失败信息里带着观察到的内容。
+- 托管 runner 报告的物理网络是不是有线（第一轮只确定它报告了一个）。不是有线时会话在前置检查处失败，失败
+  信息里带着观察到的内容。
 - `SendInput` 的按键是否到达热键，以及 `RegisterHotKey` 在托管会话里是否工作（此前从未用过）。
 - Playwright 真实的 `selectOption`、对话框与复选框点击；新会话的实际耗时。
-- 探针测试的 `.cmd` 替身启动器（本机运行的是 sh 版本）；模块在 runner 的 PowerShell 版本上的行为。
 - 用户真机上的 GUI 验收。
 
 ### 2026-10-23：开放事项（需要用户决定或外部条件）

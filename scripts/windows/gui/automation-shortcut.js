@@ -15,12 +15,8 @@
   const shortcut = 'Control+Alt+Shift+F9';
   const registered = 'shift+control+alt+F9';
   const refusal = 'global shortcuts require Control, Alt or Super (Windows key)';
-  const engine =() => page.evaluate(() => window.__TAURI_INTERNALS__.invoke('engine_snapshot'));
-  const automation = () => page.evaluate(async () => {
-    const view = await window.__TAURI_INTERNALS__.invoke('read_automation_settings');
-    // The runner's addresses stay out of the receipt.
-    return { ...view, network: view.network === null ? null : { kind: view.network.kind, interface: view.network.interface, ssid: view.network.ssid } };
-  });
+  const engine = () => page.evaluate(() => window.__TAURI_INTERNALS__.invoke('engine_snapshot'));
+  const automation = () => page.evaluate(() => window.__TAURI_INTERNALS__.invoke('read_automation_settings'));
   // The shortcut and the rule as automation-rule.js left them: stored,
   // registered with Windows and followed on the wired network.
   const inForce = ({ settings, registered_shortcuts, network_active, error, network_error, network }) =>

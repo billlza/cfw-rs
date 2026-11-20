@@ -17,7 +17,7 @@ jobs:
   desktop:
     name: Windows x64 shared desktop application
     runs-on: windows-2025
-    timeout-minutes: 54
+    timeout-minutes: 58
     defaults:
       run:
         shell: pwsh
@@ -280,9 +280,9 @@ jobs:
             -DesktopDirectory $evidence -EngineDirectory (Join-Path $evidence 'engine') `
             -Source (git rev-parse HEAD) -Output (Join-Path $evidence 'msi')
       - name: Install and exercise the actual ordinary-user desktop
-        # Six separately retained GUI sessions (each bounded at 200 seconds)
+        # Seven separately retained GUI sessions (each bounded at 200 seconds)
         # plus bounded MSI work.
-        timeout-minutes: 28
+        timeout-minutes: 32
         env:
           CFW_NATIVE_SERVICE_MUTATION_TESTS: '1'
         run: |

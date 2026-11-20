@@ -404,6 +404,24 @@ fn upstream_sing_box_json_rejects_full_configs_and_unsafe_semantics() {
 }
 
 #[test]
+fn an_exit_node_advertisement_is_refused_in_this_platforms_words() {
+    let error = import_subscription_document(
+        r#"{"outbounds":[],"endpoints":[{"type":"tailscale","tag":"T","auth_key":"TopSecretValue!","exit_node":"exit-node","advertise_exit_node":true}]}"#,
+    )
+    .expect_err("an exit-node advertisement is refused");
+    #[cfg(target_os = "macos")]
+    assert_eq!(
+        error,
+        "sing-box Tailscale exit-node advertisement is unsupported: this Mac only uses an exit node"
+    );
+    #[cfg(windows)]
+    assert_eq!(
+        error,
+        "sing-box Tailscale exit-node advertisement is unsupported: this PC only uses an exit node"
+    );
+}
+
+#[test]
 fn sing_box_certificate_pins_pass_through_unchanged() {
     let document = |tls: Value| {
         json!({"outbounds":[{"type":"hysteria2","tag":"pinned","server":"hy2.example.com","server_port":443,

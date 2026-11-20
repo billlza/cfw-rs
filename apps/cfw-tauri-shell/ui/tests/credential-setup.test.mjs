@@ -173,6 +173,26 @@ test("credential cleanup previews unused entries, deletes them once and cancels 
   assert.equal(d.closeGlassOverlays.count(), 5);
 });
 
+test("on Windows the credential dialogs name protected storage, as Settings does, and never the Keychain", async () => {
+  const { credentials } = setup();
+  const payload = state.payload;
+  state.payload = { product: { name: "Clash for Windows", version: null, operating_system: "windows" } };
+  try {
+    state.credentialSetup = { profileId: "work", profileName: "Work", requiredCount: 2, presentCount: 1, missing: [SECOND], vaultAvailable: true, error: null };
+    let html = credentials.dialogs.render({ kind: "credentials" });
+    assert.match(html, /1 of 2 reference\(s\) are already present\. Enter every missing value once; the batch goes straight to Windows protected storage and is never written to the profile, the log, or the configuration digest\./u);
+    assert.doesNotMatch(html, /Keychain/u);
+
+    host.respond("preview_credential_gc", { preview_id: PREVIEW, orphan_count: 1, orphan_references: [FIRST] });
+    await credentials.actions["preview-credential-gc"]();
+    html = credentials.dialogs.render({ kind: "credential-cleanup" });
+    assert.match(html, /Unused protected credentials: 1\. Cleanup revalidates the repository snapshot and the vault revision before one atomic deletion\./u);
+    assert.doesNotMatch(html, /Keychain/u);
+  } finally {
+    state.payload = payload;
+  }
+});
+
 test("a refused cleanup preview is shown where it was asked for", async () => {
   const { d, credentials } = setup();
   host.respond("preview_credential_gc", new Error("invalid profiles are listed"));

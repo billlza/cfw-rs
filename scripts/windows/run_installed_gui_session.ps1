@@ -2,7 +2,7 @@ param(
     [Parameter(Mandatory)][string]$Launcher,
     [Parameter(Mandatory)][string]$Source,
     [Parameter(Mandatory)][string]$Output,
-    [Parameter(Mandatory)][ValidateSet('fresh-off', 'local-proxy', 'node-choice', 'tunnel', 'system-proxy-quit')][string]$Scenario,
+    [Parameter(Mandatory)][ValidateSet('fresh-off', 'local-proxy', 'node-choice', 'automation', 'tunnel', 'system-proxy-quit')][string]$Scenario,
     [Parameter(Mandatory)][ref]$SessionResult
 )
 Set-StrictMode -Version Latest
@@ -36,6 +36,7 @@ $receipt = [ordered]@{
     tunnel_adapter_retired=$false; core_preserved_after_tunnel=$false
     startup_registration_exercised=$false; settings_controls_exercised=$false; actual_sign_in_exercised=$false
     node_choice_exercised=$false; profile_deleted=$false; connection_diagnostics_exercised=$false
+    automation_exercised=$false
     physical_display_exercised=$false; network_mode_exercised=$false; release_accepted=$false
 }
 $SessionResult.Value = $receipt
@@ -73,10 +74,12 @@ function Invoke-Playwright([string]$Name, [string[]]$Arguments) {
         return ($result -join "`n")
     } finally { Pop-Location }
 }
-function Invoke-GuiScenario([ValidateSet('startup-off', 'startup-registration', 'settings-controls', 'node-choice-offline', 'node-choice-online', 'profile-delete', 'network-start', 'connection-diagnostics', 'network-stop', 'tunnel-start', 'tunnel-stop', 'combined-start', 'combined-stop', 'leak-protection-on', 'leak-protection-off', 'system-proxy-start', 'quit')][string]$Name) {
+function Invoke-GuiScenario([ValidateSet('startup-off', 'startup-registration', 'settings-controls', 'node-choice-offline', 'node-choice-online', 'profile-delete', 'network-start', 'connection-diagnostics', 'network-stop', 'tunnel-start', 'tunnel-stop', 'combined-start', 'combined-stop', 'leak-protection-on', 'leak-protection-off', 'automation-rule', 'automation-shortcut-stop', 'automation-shortcut-start', 'automation-shortcut-removed', 'system-proxy-start', 'quit')][string]$Name) {
     $observer = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'gui/observe.js'))
-    # Both leak protection steps run one script, which is told its step.
-    $scenarioFile = if ($Name -ceq 'quit') { 'quit-with-state' } elseif ($Name -clike 'leak-protection-*') { 'leak-protection' } else { $Name }
+    # The leak protection steps run one script, which is told its step; so do
+    # the steps that follow a press of the global shortcut.
+    $scenarioFile = if ($Name -ceq 'quit') { 'quit-with-state' } elseif ($Name -clike 'leak-protection-*') { 'leak-protection' }
+        elseif ($Name -clike 'automation-shortcut-*') { 'automation-shortcut' } else { $Name }
     $scenarioCode = [IO.File]::ReadAllText((Join-Path $PSScriptRoot "gui/$scenarioFile.js"))
     $quitInput = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'gui/quit.js'))
     $controllerObserver = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'gui/controller.js'))
@@ -87,111 +90,8 @@ function Invoke-GuiScenario([ValidateSet('startup-off', 'startup-registration', 
     [IO.File]::WriteAllText($path, $code)
     return Invoke-Playwright $Name @('--raw', 'run-code', "--filename=$path")
 }
-# One native probe of the fixture, run in this session; returns its receipt.
-function Invoke-NativeProbe([string]$Name, [string[]]$Arguments, [int]$TimeoutMs = 30000) {
-    $start = [Diagnostics.ProcessStartInfo]::new($Launcher)
-    $start.UseShellExecute = $false
-    $start.RedirectStandardOutput = $true
-    $start.RedirectStandardError = $true
-    foreach ($argument in $Arguments) { $start.ArgumentList.Add($argument) }
-    $start.Environment['CFW_NATIVE_SERVICE_SOURCE'] = $Source
-    $start.Environment['CFW_NATIVE_SERVICE_RECEIPTS'] = $outputRoot
-    $process = [Diagnostics.Process]::Start($start)
-    $probeStdout = $process.StandardOutput.ReadToEndAsync()
-    $probeStderr = $process.StandardError.ReadToEndAsync()
-    try {
-        if (-not $process.WaitForExit($TimeoutMs)) {
-            $process.Kill()
-            if (-not $process.WaitForExit(5000)) { throw "Timed-out native GUI $Name probe did not retire" }
-            throw "Native GUI $Name probe exceeded its observation deadline"
-        }
-        if ($process.ExitCode -ne 0) { throw "Native GUI $Name probe failed; see its retained stderr" }
-        return Get-Content -LiteralPath (Join-Path $outputRoot "$Name-probe.json") -Raw | ConvertFrom-Json
-    } finally {
-        if ($process.HasExited) {
-            [IO.File]::WriteAllText((Join-Path $outputRoot "$Name-probe-stdout.log"), $probeStdout.GetAwaiter().GetResult())
-            [IO.File]::WriteAllText((Join-Path $outputRoot "$Name-probe-stderr.log"), $probeStderr.GetAwaiter().GetResult())
-        }
-        $process.Dispose()
-    }
-}
-function Invoke-NativeNetworkProbe([ValidateSet('http', 'closed', 'system-http')][string]$Operation, [int]$Port, $LaunchReceipt) {
-    $record = Invoke-NativeProbe $Operation @('--installed-gui-network-probe', $Operation, $Port.ToString([Globalization.CultureInfo]::InvariantCulture)) 20000
-    if ($record.document -cne 'cfw-installed-gui-network-probe-v1' -or $record.source -cne $Source -or
-        $record.operation -cne $Operation -or $record.gui_process_id -ne $LaunchReceipt.process_id -or
-        $record.gui_process_creation_time -ne $LaunchReceipt.process_creation_time -or
-        -not $record.gui_same_user_session -or $record.proxy_address -cne "127.0.0.1:$Port" -or
-        $record.original_user_proxy_sha256 -cne $LaunchReceipt.user_proxy_before_sha256 -or
-        $record.http_forwarding_verified -ne ($Operation -cne 'closed') -or
-        $record.listener_refused -ne ($Operation -ceq 'closed') -or $record.release_accepted) {
-        throw 'Native network proof differs from the UI-owned runtime and original user proxy'
-    }
-    if ($Operation -ceq 'system-http') {
-        if (-not $record.system_proxy_applied -or -not $record.applied_user_proxy_unchanged -or
-            -not $record.wininet_via_proxy_verified -or ($record.wininet_request_flags -band 4) -ne 4 -or
-            $record.user_proxy_unchanged -or $record.user_proxy_sha256 -ceq $LaunchReceipt.user_proxy_before_sha256) {
-            throw 'WinINet did not observe the GUI-owned system proxy'
-        }
-    } elseif ($record.user_proxy_sha256 -cne $LaunchReceipt.user_proxy_before_sha256 -or -not $record.user_proxy_unchanged) {
-        throw 'The native user proxy differs from the original'
-    }
-    return $record
-}
-function Invoke-NativeTunnelProbe([ValidateSet('tunnel-http', 'tunnel-closed')][string]$Operation, [string]$Installation, $LaunchReceipt) {
-    $record = Invoke-NativeProbe $Operation @('--installed-gui-tunnel-probe', $Operation, $Installation)
-    $on = $Operation -ceq 'tunnel-http'
-    if ($record.document -cne 'cfw-installed-gui-tunnel-probe-v1' -or $record.source -cne $Source -or
-        $record.operation -cne $Operation -or $record.gui_process_id -ne $LaunchReceipt.process_id -or
-        $record.gui_process_creation_time -ne $LaunchReceipt.process_creation_time -or
-        -not $record.gui_same_user_session -or $record.installation_id -cne $Installation -or
-        $record.adapter_absent -eq $on -or $record.route_entered_tunnel -ne $on -or
-        $record.http_through_tunnel_verified -ne $on -or
-        ($on -and ($record.route_luid -ne $record.adapter_luid -or $record.local_address -cnotlike '198.18.64.1:*')) -or
-        -not $record.user_proxy_unchanged -or $record.user_proxy_sha256 -cne $LaunchReceipt.user_proxy_before_sha256 -or
-        $record.release_accepted) {
-        throw 'Native tunnel proof differs from the UI-owned TUN runtime and the original user proxy'
-    }
-    return $record
-}
-function Invoke-NativeCombinedProbe([string]$Installation, [int]$Port, $LaunchReceipt) {
-    $record = Invoke-NativeProbe 'combined-http' @('--installed-gui-combined-probe', $Installation, $Port.ToString([Globalization.CultureInfo]::InvariantCulture))
-    $ports = @($record.native_user_proxy.ports)
-    if ($record.document -cne 'cfw-installed-gui-combined-probe-v1' -or $record.source -cne $Source -or
-        $record.gui_process_id -ne $LaunchReceipt.process_id -or
-        $record.gui_process_creation_time -ne $LaunchReceipt.process_creation_time -or
-        -not $record.gui_same_user_session -or $record.installation_id -cne $Installation -or
-        -not $record.route_entered_tunnel -or $record.route_luid -ne $record.adapter_luid -or
-        $record.local_address -cnotlike '198.18.64.1:*' -or -not $record.http_through_tunnel_verified -or
-        $record.proxy_address -cne "127.0.0.1:$Port" -or -not $record.http_forwarding_verified -or
-        -not $record.system_proxy_applied -or -not $record.native_user_proxy.manual_proxy_enabled -or
-        $record.native_user_proxy.auto_config_enabled -or $record.native_user_proxy.auto_detect_enabled -or
-        $ports.Count -ne 1 -or $ports[0] -ne $Port -or
-        $record.original_user_proxy_sha256 -cne $LaunchReceipt.user_proxy_before_sha256 -or
-        $record.user_proxy_sha256 -ceq $LaunchReceipt.user_proxy_before_sha256 -or $record.release_accepted) {
-        throw 'Native combined proof differs from the UI-owned runtime, its tunnel and its proxy listener'
-    }
-    return $record
-}
-function Invoke-NativeLeakProtectionProbe([ValidateSet('leak-open', 'leak-refused', 'leak-reopened')][string]$Operation, [string]$Installation, [string]$Resolver, [string]$StunServer, $LaunchReceipt) {
-    $record = Invoke-NativeProbe $Operation @('--installed-gui-leak-protection-probe', $Operation, $Installation, $Resolver, $StunServer)
-    $protected = $Operation -ceq 'leak-refused'
-    $flow = if ($protected) { 'refused' } else { 'connected' }
-    $last = @($record.encrypted_dns_attempts)[-1]
-    if ($record.document -cne 'cfw-installed-gui-leak-protection-probe-v1' -or $record.source -cne $Source -or
-        $record.operation -cne $Operation -or $record.gui_process_id -ne $LaunchReceipt.process_id -or
-        $record.gui_process_creation_time -ne $LaunchReceipt.process_creation_time -or
-        -not $record.gui_same_user_session -or $record.installation_id -cne $Installation -or
-        -not $record.route_entered_tunnel -or ($Resolver -cne 'any' -and $record.resolver -cne $Resolver) -or
-        $record.encrypted_dns_tcp -cne $flow -or $last.outcome -cne $flow -or $last.target -cne "$($record.resolver):853" -or
-        ($StunServer -cne 'any' -and $record.stun.target -cne $StunServer) -or ($record.stun.outcome -ceq 'answered') -eq $protected -or
-        $record.http_through_tunnel_verified -ne $protected -or
-        ($protected -and $record.http_local_address -cnotlike '198.18.64.1:*') -or
-        -not $record.user_proxy_unchanged -or $record.user_proxy_sha256 -cne $LaunchReceipt.user_proxy_before_sha256 -or
-        $record.release_accepted) {
-        throw "Native leak protection proof differs from the UI-owned TUN runtime with both switches $(if ($protected) { 'on' } else { 'off' })"
-    }
-    return $record
-}
+# The native probes of this session and what each of their receipts must say.
+Import-Module (Join-Path $PSScriptRoot 'installed_gui_probes.psm1') -Force -ArgumentList $Launcher, $Source, $outputRoot
 
 try {
     # Allocate a loopback-only debugging endpoint. These variables are passed
@@ -287,6 +187,54 @@ try {
             throw 'The node choice profile was not deleted through the GUI once the LocalProxy profile was selected again'
         }
         $receipt.profile_deleted = $true
+    } elseif ($Scenario -ceq 'automation') {
+        # A global shortcut and a network rule entered in Settings, with the
+        # LocalProxy profile alone. The rule starts the core on the runner's wired
+        # network. Each press of the shortcut is real keyboard input: the first
+        # stops that core, the second starts another, and the third, after the
+        # shortcut is removed, changes nothing. Nothing in this session presses
+        # Start; the last core is stopped through the GUI.
+        $ruled = (Invoke-GuiScenario 'automation-rule') | ConvertFrom-Json
+        $ruled | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'automation-rule.json') -Encoding utf8NoBOM
+        if (-not $ruled.core_started_by_network_rule -or $ruled.release_accepted) { throw 'The network rule receipt is invalid' }
+        $receipt.native_gui_exercised = $true
+        $receipt.kept_profile_id = $ruled.before.profiles.profiles[0].id
+        $receipt.active_runtime = $ruled.active.snapshot.state.runtime
+        Invoke-NativeShortcutProbe 'shortcut-stop' $launch | Out-Null
+        $halted = (Invoke-GuiScenario 'automation-shortcut-stop') | ConvertFrom-Json
+        $halted | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'automation-shortcut-stop.json') -Encoding utf8NoBOM
+        if (-not $halted.core_stopped_by_shortcut -or -not $halted.network_rule_left_core_stopped -or
+            $halted.held.milliseconds -lt 12000 -or $halted.held.looks -lt 12 -or $halted.release_accepted) {
+            throw 'The shortcut did not stop the core the network rule started, or the rule started it again'
+        }
+        Invoke-NativeShortcutProbe 'shortcut-start' $launch | Out-Null
+        $resumed = (Invoke-GuiScenario 'automation-shortcut-start') | ConvertFrom-Json
+        $resumed | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'automation-shortcut-start.json') -Encoding utf8NoBOM
+        $ruleRuntime = $ruled.active.snapshot.state.runtime | ConvertTo-Json -Depth 20 -Compress
+        $shortcutRuntime = $resumed.active.snapshot.state.runtime | ConvertTo-Json -Depth 20 -Compress
+        if (-not $resumed.core_started_by_shortcut -or -not $resumed.refusal_names_platform_keys -or
+            $ruleRuntime -ceq $shortcutRuntime -or $resumed.active.snapshot.generation -le $ruled.active.snapshot.generation -or
+            $resumed.release_accepted) {
+            throw 'The shortcut did not start a core of its own after the core of the rule had stopped, or the refusal did not name the Windows keys'
+        }
+        Invoke-NativeShortcutProbe 'shortcut-removed' $launch | Out-Null
+        $ignored = (Invoke-GuiScenario 'automation-shortcut-removed') | ConvertFrom-Json
+        $ignored | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'automation-shortcut-removed.json') -Encoding utf8NoBOM
+        if (-not $ignored.removed_shortcut_ignored -or $ignored.held.milliseconds -lt 6000 -or $ignored.held.looks -lt 6 -or
+            ($ignored.held.last.snapshot.state.runtime | ConvertTo-Json -Depth 20 -Compress) -cne $shortcutRuntime -or
+            $ignored.release_accepted) {
+            throw 'The removed shortcut still changed the core'
+        }
+        $stopped = (Invoke-GuiScenario 'network-stop') | ConvertFrom-Json
+        $stopped | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'network-stop.json') -Encoding utf8NoBOM
+        $stoppedIdentity = $stopped.before.snapshot.state.runtime | ConvertTo-Json -Depth 20 -Compress
+        if ($shortcutRuntime -cne $stoppedIdentity -or $stopped.stopped.snapshot.state.state -cne 'off' -or
+            $stopped.stopped.snapshot.desired_mode -cne 'off') {
+            throw 'GUI stop did not retire the core the shortcut started'
+        }
+        $receipt.engine_stopped = $true
+        $receipt.automation_exercised = $true
+        $receipt.network_mode_exercised = $true
     } elseif ($Scenario -ceq 'local-proxy') {
         $started = (Invoke-GuiScenario 'network-start') | ConvertFrom-Json
         $started | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'network-start.json') -Encoding utf8NoBOM

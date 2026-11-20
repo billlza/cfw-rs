@@ -133,6 +133,9 @@ pub(super) fn main() -> Result<()> {
     if args.len() == 6 && args[1] == "--installed-gui-leak-protection-probe" {
         return installed_gui::leak_protection_probe(&args[2], &args[3], &args[4], &args[5]);
     }
+    if args.len() == 3 && args[1] == "--installed-gui-shortcut-probe" {
+        return installed_gui::shortcut_probe(&args[2]);
+    }
     if args.len() == 2 && args[1] == "--installed-maintenance-validation" {
         return maintenance::run();
     }

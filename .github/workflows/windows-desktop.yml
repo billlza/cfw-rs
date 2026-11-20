@@ -17,7 +17,7 @@ jobs:
   desktop:
     name: Windows x64 shared desktop application
     runs-on: windows-2025
-    timeout-minutes: 50
+    timeout-minutes: 54
     defaults:
       run:
         shell: pwsh
@@ -57,6 +57,11 @@ jobs:
           python -m unittest discover -s scripts/windows/tests -p test_webview_probe.py -v 2>&1 |
             Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/webview-probe-tests.log')
           if ($LASTEXITCODE -ne 0) { throw 'WebView2 readiness boundary tests failed' }
+      - name: Verify installed GUI probe receipt checks
+        run: |
+          python -m unittest discover -s scripts/windows/tests -p test_installed_gui_probes.py -v 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/installed-gui-probe-tests.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Installed GUI probe receipt tests failed' }
       - name: Build the pinned native engine for the installed desktop
         run: |
           $evidence = Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence'
@@ -275,9 +280,9 @@ jobs:
             -DesktopDirectory $evidence -EngineDirectory (Join-Path $evidence 'engine') `
             -Source (git rev-parse HEAD) -Output (Join-Path $evidence 'msi')
       - name: Install and exercise the actual ordinary-user desktop
-        # Five separately retained GUI sessions (each bounded at 200 seconds)
+        # Six separately retained GUI sessions (each bounded at 200 seconds)
         # plus bounded MSI work.
-        timeout-minutes: 24
+        timeout-minutes: 28
         env:
           CFW_NATIVE_SERVICE_MUTATION_TESTS: '1'
         run: |

@@ -49,6 +49,12 @@ pub(crate) struct AutomationView {
     network_error: Option<String>,
 }
 
+/// What a change is told when the shortcut plugin did not start.
+#[cfg(target_os = "macos")]
+const REGISTRATION_UNAVAILABLE: &str = "macOS global shortcut registration is unavailable";
+#[cfg(windows)]
+const REGISTRATION_UNAVAILABLE: &str = "Windows global shortcut registration is unavailable";
+
 fn report(app: &AppHandle, message: String) {
     if let Ok(mut stored) = app.state::<ManagedAutomation>().last_error.write() {
         if stored.as_ref() == Some(&message) {
@@ -241,7 +247,7 @@ async fn apply_settings(
         .try_state::<tauri_plugin_global_shortcut::GlobalShortcut<tauri::Wry>>()
         .is_none()
     {
-        return Err("macOS global shortcut registration is unavailable".into());
+        return Err(REGISTRATION_UNAVAILABLE.into());
     }
 
     if app.state::<crate::LaunchContext>().is_migration_handoff() {

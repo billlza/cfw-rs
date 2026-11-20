@@ -6,6 +6,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use tauri_plugin_global_shortcut::{Modifiers, Shortcut};
 
+/// What a shortcut without one of the three keys is told. The keys carry the
+/// names the Settings dialog gives them on this platform.
+#[cfg(target_os = "macos")]
+const REQUIRED_KEYS_REFUSAL: &str = "global shortcuts require Control, Option or Command";
+#[cfg(windows)]
+const REQUIRED_KEYS_REFUSAL: &str = "global shortcuts require Control, Alt or Super (Windows key)";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ShortcutAction {
@@ -68,7 +75,7 @@ impl AutomationPreferences {
                 .mods
                 .intersects(Modifiers::CONTROL | Modifiers::ALT | Modifiers::SUPER)
             {
-                return Err("global shortcuts require Control, Option or Command".into());
+                return Err(REQUIRED_KEYS_REFUSAL.into());
             }
             if !ids.insert(shortcut.id()) || !actions.insert(binding.action) {
                 return Err("shortcut keys and actions must be unique".into());
@@ -212,5 +219,26 @@ mod tests {
             };
             assert!(prefs.validate().is_err());
         }
+    }
+    #[test]
+    fn a_shortcut_without_a_required_key_is_refused_in_this_platforms_words() {
+        let prefs = AutomationPreferences {
+            shortcuts: vec![ShortcutBinding {
+                action: ShortcutAction::ToggleCore,
+                shortcut: "Shift+F9".into(),
+            }],
+            ..Default::default()
+        };
+        let refusal = prefs.validate().unwrap_err();
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            refusal,
+            "global shortcuts require Control, Option or Command"
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            refusal,
+            "global shortcuts require Control, Alt or Super (Windows key)"
+        );
     }
 }

@@ -6,6 +6,7 @@ use std::os::windows::io::AsHandle;
 mod input_desktop;
 mod leak_protection;
 mod network;
+mod shortcut;
 
 fn validation_context() -> Result<(String, PathBuf)> {
     if std::env::var("GITHUB_ACTIONS").as_deref() != Ok("true")
@@ -45,6 +46,10 @@ pub(super) fn leak_protection_probe(
     stun_server: &str,
 ) -> Result<()> {
     leak_protection::probe(operation, installation, resolver, stun_server)
+}
+
+pub(super) fn shortcut_probe(operation: &str) -> Result<()> {
+    shortcut::probe(operation)
 }
 
 pub(super) fn run() -> Result<()> {

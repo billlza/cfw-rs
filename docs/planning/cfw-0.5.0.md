@@ -3561,6 +3561,118 @@ main 上的托管作业“libbox, Network Extension, and app skeleton gates”�
   原因没有查明。
 - 实体 Windows 机器上没有运行过。
 
+### 2026-11-20：全局快捷键与网络规则进入安装版 GUI 验证（托管第二轮自动化全部通过，退出步骤的名单遗漏已修正，待第三轮）
+
+功能对齐的下一批。自动化（Settings › Background controls › Shortcuts & network rules）在 Windows 上早已实现：
+`cfw-platform` 读取物理网卡，全局快捷键走 `tauri-plugin-global-shortcut`（Windows 上是隐藏窗口加
+`RegisterHotKey`），对话框文案有 Windows 版本；但它从未在安装的应用里运行过。另两项候选经核对不在本批：
+离线应用选择器已由 node-choice 会话覆盖（`node-choice-offline.js` 检查 `cfw-proxy-selector` 并离线选节点）；
+自动订阅更新无法在一次托管会话里触发（最短间隔 6 小时，下载只接受可路由主机的 https 地址），调度器是共享
+Rust，由单元测试覆盖。
+
+- 新增 `automation` 会话，排在 node-choice 与 tunnel 之间，开始时只有 local-proxy 的配置、核心关闭。
+  - `automation-rule`：前置检查（Windows、核心 off、唯一且选中的配置、没有快捷键和规则、Windows 报告一块
+    有线物理网卡）；打开对话框，核对标题、两段 Windows 提示、`Current network: Wired · <网卡名>`、四个快捷键
+    输入框（示例 `Control+Alt+P`）、没有 Wi-Fi 帮助；给 Start / stop core 填 `Control+Alt+Shift+F9`，加一条
+    “Wired → Local proxy”规则并启用，Apply。对话框关闭后逐字段核对已保存的设置、已注册的快捷键
+    （`shift+control+alt+F9`，库注册后的写法）、规则循环在运行、修订号已变；然后不按 Start，等规则自己把核心
+    启动到 `local_proxy_active`（规则每 5 秒看一次网络，连续两次相同才动作；上限 45 秒）。
+  - 三次按键是真实键盘输入：新的原生探针 `--installed-gui-shortcut-probe`
+    （`fixture/installed_gui/shortcut.rs`）先核对 GUI 进程身份与输入桌面（WinSta0\Default），再用一次
+    `SendInput` 调用插入 8 个事件（Control、Alt、Shift、F9 依次按下，逆序松开）。Windows 把已注册的热键从输入流
+    里取走，所以探针不指向产品的任何窗口，也不需要焦点。8 个事件必须全部被接受。
+  - 第一次按键（`automation-shortcut-stop`）：核心停止；此后 12 秒里每 500 ms 看一次，核心一直是 off，而规则
+    仍然在位（修订号不变、循环仍在运行）。这是对话框里的承诺“Manual Stop stays stopped on the same
+    network”：规则在这张网络上已经动作过一次，不再重新启动。
+  - 第二次按键（`automation-shortcut-start`）：核心启动，是另一次运行（运行身份不同、代次更大）。然后重新打开
+    对话框，核对它显示已保存的值；把快捷键改成 `Shift+F9` 并 Apply，必须出现拒绝提示，且键名与对话框的 Windows
+    提示一致，已保存和已注册的内容不变；再清空快捷键、删除规则、关闭开关并 Apply，设置为空、没有注册的快捷键，
+    运行中的核心不变。
+  - 第三次按键（`automation-shortcut-removed`）：快捷键已移除，6 秒内核心身份不变。最后通过界面停止核心。
+  - 规则用 `local_proxy`，本会话不改用户代理（启动器在退出时核对）。全部改动通过可见控件或键盘，IPC 只读。
+- 工作流注释改为六个会话；GUI 步骤上限 24 → 28 分钟，作业上限 50 → 54 分钟。上一轮（提交 ddf99fcf）五个会话
+  连同 MSI 安装与卸载实际用了 5 分钟。
+
+读代码时发现一个只影响 Windows 的产品缺陷：自动化模块有两条后端消息在 Windows 上用了 Mac 的名称，并原样显示
+在对话框的警告里——缺少必需键时的“global shortcuts require Control, Option or Command”，插件未启动时的
+“macOS global shortcut registration is unavailable”。界面自己的 Windows 提示写的是“Control, Alt or Super
+(Windows key)”。修正：两条消息改成按平台取值的常量；macOS 文案逐字节不变，Windows 上是“global shortcuts
+require Control, Alt or Super (Windows key)”与“Windows global shortcut registration is unavailable”。新单元测试
+`a_shortcut_without_a_required_key_is_refused_in_this_platforms_words` 在两个平台各断言自己的文案。macOS 上它在
+修正前后都通过（文案没变），把 Mac 常量换成 Windows 文案后失败。Windows 那一半在本机只做了
+`x86_64-pc-windows-msvc` 目标的类型检查与 clippy（把断言改坏后编译失败，说明它确实被编译）；修正前它在 Windows
+上会失败这一点是按源码推断的，没有运行过。第二条消息没有测试（需要一个插件没有启动的应用）。
+
+会话驱动脚本的拆分：加上本会话后 `run_installed_gui_session.ps1` 有 638 行，超过每个文件 600 行的上限。原生
+探针及其回执检查移到 `installed_gui_probes.psm1`，由模块参数接收 launcher、source 和回执目录；驱动脚本 521
+行，模块 134 行。移动的五个函数与主干逐字节相同，只有回执目录的变量改了名。新增
+`scripts/windows/tests/test_installed_gui_probes.py`，工作流在引擎构建之前运行它：用替身启动器在真实的
+PowerShell 里运行模块，不需要 GUI。五项测试：每个探针的每种操作各有一份被接受的回执，并核对启动器收到的参数与
+source；快捷键回执的 12 种偏差逐一被拒绝；其余四个探针拒绝别的 source 与别的 GUI 进程；探针失败时报告并保留
+stderr，不读上一次留下的回执；驱动脚本调用的探针与模块导出的一致，导入语句按模块参数的顺序传参。31 个变异
+全部被杀死：逐条去掉快捷键检查的 12 个条件（每个只让对应的那一种偏差失败）、其余探针的 12 个身份条件、探针
+失败不报告、source 传错、stderr 不保留、快捷键探针传错参数、不导出、导入参数对调、调用模块没有的探针。
+
+本机验证（这台 Mac，PowerShell 7.6.4）：
+
+- 演练（构建的界面加替身宿主，在浏览器面板里跑两个新脚本与 `network-stop.js`）：整条序列通过——规则约 10 秒后
+  启动核心，停止后的 12 秒看了 24 次，拒绝文案正确，移除后第三次按键的 6 秒看了 12 次，最后停止。八种注入
+  故障各自被预期的检查拒绝：后端仍用 Mac 文案、规则在停止后重新启动核心、移除后的快捷键仍然动作、设置没有
+  保存、没有物理网络、网络是 Wi-Fi、没有配置、按键没有到达。演练还发现了脚本自己的一个错误：用
+  `JSON.stringify` 比较已保存的设置依赖键的顺序，现在逐字段比较，替身也按后端的字段顺序保存。
+- 驱动脚本的 automation 分支和验证脚本对该会话的检查，是从两个脚本的语法树里取出来、在严格模式下执行的，
+  输入是演练各步的真实返回值，GUI 调用和按键探针用替身：调用顺序正确，回执填写正确且没有多出键，验证脚本
+  接受；13 种改动过的步骤结果和 9 种改动过的会话回执各自被拒绝。这项检查的工具不在仓库里。
+- Windows 目标的 clippy（`-D warnings`，rustup stable，比固定的 1.99.1 旧）无警告：`cfw-windows-engine` 带验证
+  特性的全部目标、不带特性的库与测试、`cfw-tauri-shell` 的全部目标。壳的构建脚本要调用资源编译器，本机用只
+  产生空输出的替身（与 cc、ar 的替身同类）；什么都不链接、不运行。
+
+托管第一轮（提交 266f3947，Windows desktop 运行 44646214337）：
+
+- 壳的单元测试在 GUI 步骤之前于 Windows 上运行：510 项通过，其中包括
+  `a_shortcut_without_a_required_key_is_refused_in_this_platforms_words` 的 Windows 一半；新探针在 runner 上通过了
+  `-D warnings` 的 clippy 与格式检查。修正前它在 Windows 上会失败这一点仍是按源码推断的。
+- 探针回执测试在 Windows 上通过（5 项）：`.cmd` 替身启动器可用，模块在 runner 的 PowerShell 上工作。前三个
+  会话（fresh-off、local-proxy、node-choice）照常通过，验证脚本在每个会话之后立即核对。
+- `automation` 会话在第一步 `automation-rule` 失败，此时还没有做任何改动：`page.evaluate: TypeError: Cannot
+  read properties of undefined (reading 'map')`。这是脚本自己的错误：它从 `read_automation_settings` 返回的
+  `network.addresses` 里取地址族写进回执，但 `NetworkContext::addresses` 带 `#[serde(skip)]`，从不发给界面——
+  界面只用 `interface`、`kind`、`ssid`，地址只在后端参与网络变化的判断。本机演练的替身宿主却返回了地址，所以
+  演练没能发现。从失败的位置可以确定 Windows 报告了一个物理网络（`network` 不为 null，`kind` 也已读到）；它是
+  不是有线，这一轮没有记录下来。
+- 修正：两个脚本按后端实际发送的结构读取视图，去掉地址族的记录和“至少有一个地址族”的检查（Windows 的观察
+  本身已要求候选网卡至少有一个可用地址）；`automation-shortcut.js` 去掉基于同一错误前提的投影。替身宿主改成与
+  后端一致（视图不带地址）后，旧脚本在本机以同样的错误、同样的位置（求值函数第 7 行第 66 列）失败；修正后整条
+  序列通过，八种注入故障仍各自被预期的检查拒绝。`AutomationView` 的其余字段逐一与替身核对过；引擎的过渡状态
+  名与已在托管上通过的 `network-start.js`、`network-stop.js` 一致。
+
+托管第二轮（提交 0020c368，Windows desktop 运行 44720136383）：
+
+- 自动化部分全部通过。Windows 报告有线物理网卡（`Current network: Wired · Ethernet 3`，没有 SSID）；对话框的
+  标题、两段 Windows 提示、四个输入框及示例与演练一致；Apply 后快捷键注册为 `shift+control+alt+F9`，规则循环
+  在运行；规则在 Apply 后约 14.6 秒自己把核心启动到 `local_proxy_active`。Playwright 真实的 `selectOption`、
+  对话框与复选框点击都正常。
+- 三次原生按键：每次 `SendInput` 的 8 个事件全部被接受，输入桌面是 `WinSta0\Default`。第一次按键触发热键，
+  停止核心，此后 12 秒看了 24 次一直是 off，规则仍在位、修订号不变；第二次启动了另一次运行（代次 7，规则启动
+  的是 5）；拒绝提示是“global shortcuts require Control, Alt or Super (Windows key)”，设置与注册不变；清空并
+  删除后没有注册的快捷键、规则循环停止，运行中的核心不受影响；第三次按键后 6 秒看了 12 次，核心身份不变；最后
+  通过界面停止核心。会话从附加到准备退出约 1 分钟。
+- 失败在会话最后的退出步骤：`quit-with-state.js` 报“Unknown Quit scenario”。它自己保存了一份会话名单
+  （fresh-off、local-proxy、node-choice、tunnel、system-proxy-quit），是驱动脚本 `$Scenario` 的 `ValidateSet`
+  的副本；加新会话时这份副本没有跟着改（#102 加 node-choice 时改过）。本机演练没有跑退出步骤，语法树检查里
+  GUI 调用是替身，所以都没发现。
+- 修正：删去这份副本。驱动脚本只接受自己的六个会话，副本只可能与它不一致，不能多拦住什么；退出前的状态
+  检查保留（除 system-proxy-quit 外都必须是 off）。本机演练先在完整序列之后以同样的“Unknown Quit scenario”
+  复现，修正后整条序列连同退出步骤通过；核心关闭时按 system-proxy-quit 退出、核心运行时按 automation 退出，
+  仍各自被状态检查拒绝。全仓库再查了逐个列出会话名的地方：只有驱动脚本、验证脚本与这一处，前两者都已包含
+  automation。
+
+仍未验证，等托管作业：
+
+- 退出步骤之后的部分：GUI 正常退出、退出时用户代理设置不变、验证脚本对 automation 会话的核对，以及排在它
+  后面的 tunnel 与 system-proxy-quit 会话，本轮都没有运行。
+- 用户真机上的 GUI 验收。
+
 ### 2026-10-23：开放事项（需要用户决定或外部条件）
 
 以下事项不能由托管 CI 单独完成，或会改变发布身份、持久化契约与产品方向，保持开放：

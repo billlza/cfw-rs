@@ -30,7 +30,8 @@ $outputRoot = (Resolve-Path -LiteralPath $Output).Path
 $receipt = [ordered]@{
     source=$Source; package_sha256=$package.package_sha256; installed=$null; uninstalled=$null
     engine_notices_installed=$false; wintun_payload_installed=$false
-    fresh_off_session=$null; node_choice_session=$null; local_proxy_session=$null; tunnel_session=$null
+    fresh_off_session=$null; node_choice_session=$null; local_proxy_session=$null; automation_session=$null
+    tunnel_session=$null
     system_proxy_quit_session=$null
     native_gui_exercised=$false; ordinary_user=$false; page_count=0; graceful_exit_observed=$false
     startup_registration_exercised=$false; settings_controls_exercised=$false; actual_sign_in_exercised=$false
@@ -38,6 +39,7 @@ $receipt = [ordered]@{
 }
 $fresh = $null
 $nodeChoice = $null
+$automation = $null
 $network = $null
 $tunnel = $null
 $systemProxy = $null
@@ -125,6 +127,19 @@ try {
         ($network.process_id -eq $nodeChoice.process_id -and $network.process_creation_time -eq $nodeChoice.process_creation_time)) {
         throw 'The separate GUI node choice lifecycle did not pass'
     }
+    # With the LocalProxy profile alone again: the shortcut and the network rule.
+    $automationRoot = Join-Path $outputRoot 'automation'
+    New-Item -ItemType Directory -Path $automationRoot -ErrorAction Stop | Out-Null
+    & $sessionScript -Launcher $Launcher -Source $Source -Output $automationRoot -Scenario 'automation' -SessionResult ([ref]$automation)
+    if (-not $automation.graceful_exit_observed -or -not $automation.network_mode_exercised -or
+        -not $automation.automation_exercised -or -not $automation.engine_stopped -or
+        $automation.kept_profile_id -cne $network.imported_profile_id -or
+        $automation.active_runtime.context.installation_id -cne $network.active_runtime.context.installation_id -or
+        ($fresh.process_id -eq $automation.process_id -and $fresh.process_creation_time -eq $automation.process_creation_time) -or
+        ($network.process_id -eq $automation.process_id -and $network.process_creation_time -eq $automation.process_creation_time) -or
+        ($nodeChoice.process_id -eq $automation.process_id -and $nodeChoice.process_creation_time -eq $automation.process_creation_time)) {
+        throw 'The separate GUI automation lifecycle did not pass'
+    }
     $tunnelRoot = Join-Path $outputRoot 'tunnel'
     New-Item -ItemType Directory -Path $tunnelRoot -ErrorAction Stop | Out-Null
     & $sessionScript -Launcher $Launcher -Source $Source -Output $tunnelRoot -Scenario 'tunnel' -SessionResult ([ref]$tunnel)
@@ -138,7 +153,8 @@ try {
         $tunnel.imported_profile_id -cne $network.imported_profile_id -or
         $tunnel.tunnel_runtime.context.installation_id -cne $network.active_runtime.context.installation_id -or
         ($tunnel.process_id -eq $network.process_id -and $tunnel.process_creation_time -eq $network.process_creation_time) -or
-        ($tunnel.process_id -eq $nodeChoice.process_id -and $tunnel.process_creation_time -eq $nodeChoice.process_creation_time)) {
+        ($tunnel.process_id -eq $nodeChoice.process_id -and $tunnel.process_creation_time -eq $nodeChoice.process_creation_time) -or
+        ($tunnel.process_id -eq $automation.process_id -and $tunnel.process_creation_time -eq $automation.process_creation_time)) {
         throw 'The separate GUI TUN lifecycle did not pass'
     }
     $systemProxyRoot = Join-Path $outputRoot 'system-proxy-quit'
@@ -182,6 +198,7 @@ try {
     $receipt.fresh_off_session = $fresh
     $receipt.node_choice_session = $nodeChoice
     $receipt.local_proxy_session = $network
+    $receipt.automation_session = $automation
     $receipt.tunnel_session = $tunnel
     $receipt.system_proxy_quit_session = $systemProxy
     if ($null -ne $fresh) {
@@ -190,13 +207,15 @@ try {
         $receipt.startup_registration_exercised = $fresh.startup_registration_exercised
         $receipt.settings_controls_exercised = $fresh.settings_controls_exercised
     }
-    if ($null -ne $fresh -and $null -ne $nodeChoice -and $null -ne $network -and $null -ne $tunnel -and $null -ne $systemProxy) {
+    if ($null -ne $fresh -and $null -ne $nodeChoice -and $null -ne $network -and $null -ne $automation -and
+        $null -ne $tunnel -and $null -ne $systemProxy) {
         $receipt.ordinary_user = $fresh.ordinary_user -and $nodeChoice.ordinary_user -and $network.ordinary_user -and
-            $tunnel.ordinary_user -and $systemProxy.ordinary_user
+            $automation.ordinary_user -and $tunnel.ordinary_user -and $systemProxy.ordinary_user
         $receipt.graceful_exit_observed = $fresh.graceful_exit_observed -and $nodeChoice.graceful_exit_observed -and
-            $network.graceful_exit_observed -and $tunnel.graceful_exit_observed -and $systemProxy.graceful_exit_observed
+            $network.graceful_exit_observed -and $automation.graceful_exit_observed -and
+            $tunnel.graceful_exit_observed -and $systemProxy.graceful_exit_observed
         $receipt.network_mode_exercised = $nodeChoice.network_mode_exercised -and $network.network_mode_exercised -and
-            $tunnel.network_mode_exercised -and $systemProxy.network_mode_exercised
+            $automation.network_mode_exercised -and $tunnel.network_mode_exercised -and $systemProxy.network_mode_exercised
     }
     $receipt | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'receipt.json') -Encoding utf8NoBOM
 }

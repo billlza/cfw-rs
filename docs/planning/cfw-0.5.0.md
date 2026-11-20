@@ -3561,7 +3561,7 @@ main 上的托管作业“libbox, Network Extension, and app skeleton gates”�
   原因没有查明。
 - 实体 Windows 机器上没有运行过。
 
-### 2026-11-20：全局快捷键与网络规则进入安装版 GUI 验证（托管第二轮自动化全部通过，退出步骤的名单遗漏已修正，待第三轮）
+### 2026-11-20：全局快捷键与网络规则进入安装版 GUI 验证（托管 Windows 已通过）
 
 功能对齐的下一批。自动化（Settings › Background controls › Shortcuts & network rules）在 Windows 上早已实现：
 `cfw-platform` 读取物理网卡，全局快捷键走 `tauri-plugin-global-shortcut`（Windows 上是隐藏窗口加
@@ -3667,10 +3667,111 @@ stderr，不读上一次留下的回执；驱动脚本调用的探针与模块�
   仍各自被状态检查拒绝。全仓库再查了逐个列出会话名的地方：只有驱动脚本、验证脚本与这一处，前两者都已包含
   automation。
 
-仍未验证，等托管作业：
+托管第三轮（提交 4ff29a12；CI 44766073081、Windows shared contracts 44766073235、Windows desktop 44766072963）：
+十一项检查全部通过，PR #106 以 0be496b3 合并。
 
-- 退出步骤之后的部分：GUI 正常退出、退出时用户代理设置不变、验证脚本对 automation 会话的核对，以及排在它
-  后面的 tunnel 与 system-proxy-quit 会话，本轮都没有运行。
+- automation 会话正常退出（退出码 0，用户代理设置不变），验证脚本接受了它；其后的 tunnel 与 system-proxy-quit
+  会话通过，MSI 卸载完成。
+- 自动化各步与第二轮一致：有线“Ethernet 3”，规则在 Apply 后约 14.8 秒启动核心，三次按键每次 8 个事件全部
+  被接受，两段保持分别看了 24 次与 12 次，第二次按键启动的是代次 7。
+- GUI 步骤跑完六个会话连同 MSI 安装与卸载用了 6 分 55 秒（主干 ddf99fcf 上五个会话是 5 分钟）；作业用了
+  28 分 54 秒，上限 54 分钟。
+
+仍未验证：
+
+- Windows 那一半单元测试在修正前会失败，这一点按源码推断，没有在去掉修正后运行过。
+- 第二条消息“Windows global shortcut registration is unavailable”没有测试（需要一个快捷键插件没有启动的应用）。
+- 用户真机上的 GUI 验收。
+
+### 2026-11-20：按 URL 导入并更新订阅进入安装版 GUI 验证（本机检查完成，托管结果待运行）
+
+功能对齐的下一批（用户选定“按 URL 导入并更新订阅”）。订阅导入在 Windows 上早已实现：下载用 reqwest + rustls，
+服务器证书经 `rustls-platform-verifier` 由 Windows 信任库校验；Clash 文档在导入边界转换成 sing-box 配置，节点
+密码只进入当前用户的 DPAPI 凭据库（`cfw-windows-credentials`），配置里只留 `credential_ref`；改名、改地址、更新、
+删除与凭据清理都是共享代码加 Windows 凭据库。但这些从未在安装的应用里运行过。
+
+- 两份订阅文档 `scripts/windows/gui/subscriptions/first.yaml`、`second.yaml`，各两个 Shadowsocks 节点；second
+  去掉“second”、新增“third”。下载路径只接受 https 地址，主机解析出的也必须是公网地址，所以不能用本机回环服务
+  代替：会话按被测提交从 GitHub 取文档，
+  `https://raw.githubusercontent.com/<仓库>/<提交>/scripts/windows/gui/subscriptions/<文件>`，仓库取自
+  `GITHUB_REPOSITORY`，缺失或格式不对就拒绝。节点地址是不会被拨号的 `example.com` 名字，密码是测试值。
+- 新增 `subscription` 会话，排在 automation 与 tunnel 之间，开始与结束时都只有 local-proxy 的配置、核心关闭。
+  全部改动通过可见控件，IPC 只读。
+  - `subscription-import`：前置检查后先在 Settings › Credentials › Unused credentials 点 Review，必须没有未使用
+    的凭据；在 Profiles 页粘贴 first.yaml 的地址并导入。新配置被选中、列为订阅；凭据对话框显示
+    “All 2 credential reference(s) are already present in the vault.”；读回的配置有来源地址、两个 `shadowsocks`
+    出站（aes-256-gcm，`credential_ref` 种类 `shadowsocks_password`，正文里没有密码）、应用选择器
+    `[first, second]`；凭据库报告两条引用都在。然后通过界面启动核心：Windows 的启动计划要按配置的 audience
+    逐条取出密码，缺一条就失败，所以核心进入 `local_proxy_active` 说明保存的密码确实到了运行时。控制器里选择器
+    指向 first，两个节点报告为 Shadowsocks。没有节点被拨号。随后复用 `network-stop` 停止核心。
+  - `subscription-update`（核心关闭）：配置的 Settings 对话框显示名字与 first.yaml 的地址；改名为
+    “Subscription check”、地址改为 second.yaml 并保存，名字与地址已存，正文与摘要不变；再次打开对话框必须显示
+    刚保存的内容。然后用右键菜单的 Update 更新：摘要改变，出站变为 first 与 third，选择器 `[first, third]`，两条
+    引用的密码都在，核心仍关闭。
+  - `subscription-delete`：重新选中 local-proxy 的配置，通过右键菜单删除订阅配置；Review 列出删除留下的凭据
+    （“Unused protected credentials: N”，每行一条引用），Delete unused credentials 之后再 Review 必须为空。驱动
+    脚本核对列出的引用恰好是导入时和更新后的引用，共四条：凭据库拒绝把“second”的引用绑定到“third”的密码
+    （引用不可变），更新因此换用两条新引用，旧摘要的两条留待清理。
+  - 验证脚本在会话结束后立即核对（正常退出、配置已删、核心已停、保留的是 local-proxy 的配置、同一安装、进程
+    不同于前四个会话）；tunnel 会话的“进程不同”检查加入本会话；汇总回执包含它。
+- 工作流注释改为七个会话。每个会话不超过 200 秒（启动器只等 GUI 180 秒），七个会话加 MSI 安装与卸载最多
+  1760 秒，所以 GUI 步骤上限 28 → 32 分钟，作业上限 54 → 58 分钟。
+
+路上发现并修正三个界面缺陷，都先写会失败的测试：
+
+1. 提交 bdef46ad：Windows 上的凭据对话框说值直接存进“the signed native Keychain vault”，清理对话框写
+   “Unused Keychain entries”，而 Settings 自己写的是“Windows protected storage”。现在两个对话框在 Windows 上
+   都说 Windows protected storage（日、简、繁译文同步），macOS 文案不变；新界面测试断言 Windows 上的完整文案且
+   不出现 Keychain。另外，sing-box 文档声明本机为 Tailscale 出口节点时的拒绝提示在 Windows 上写的是
+   “this Mac only uses an exit node”，现在按平台取值（Windows 是“this PC”），新 Rust 测试在两个平台各断言自己的
+   文案。Windows 那一半由 `x86_64-pc-windows-msvc` 目标的 clippy 编译：把 Windows 常量改名、把断言改坏，分别
+   报 E0425 与 E0599。
+2. 提交 571f7ddd（共享界面，macOS 同样受影响）：Profiles 页把读到的订阅地址缓存在配置上，重新读取配置列表时
+   沿用。Settings 保存新地址后缓存仍是旧地址：再次打开对话框显示旧地址，这时哪怕只改名字再保存，也会把旧地址
+   写回去；本地导入的配置刚设了地址，右键菜单的 Update 也仍是禁用。修正：拥有缓存的数据模块提供
+   `forgetProfileSource`，Settings 在后端保存成功后调用，下一次菜单或对话框重新读取；保存被拒绝时保留已读到的
+   地址。新测试接上真实的数据模块与对话框处理函数，修正前以 actual `…/old`、expected `…/new` 失败；去掉调用、
+   或去掉其中的缓存清除，测试都会失败。CHANGELOG 记一条。
+3. 提交 a82dc88d（共享界面）：右键菜单打开时才读取配置的订阅地址，但 Settings 一开始就可点。读取完成前、或读取
+   失败后打开的对话框，URL 字段是空的；这时保存（哪怕只改名字）会删掉订阅地址，配置变成本地配置（后端把空 URL
+   当作不再订阅）。第 2 项修正让每次保存后都重新读取，这个窗口因此在每次保存后都会重现。现在 Settings 与 Update、
+   QRCode 一样等待读取：读取中显示“Reading this profile…”并禁用，读取失败时显示错误并禁用；本地配置的 Settings
+   照旧可用，没有新文案。三个测试在修正前失败（页内菜单、原生菜单项、保存后把真实数据模块接到真实菜单）；去掉
+   Settings 的标记、判定忽略该标记、或把本地配置的 Settings 也禁用，测试都会失败。CHANGELOG 记一条；
+   `subscription-update.js` 等 Settings 本身可用后再点。
+
+本机验证：
+
+- 两份文档经真实的导入与更新函数（一个不提交的临时测试）：各得两个带 `credential_ref` 的 Shadowsocks 出站，
+  选择器分别为 `[first, second]`、`[first, third]`。更新沿用引用时“third”拿到“second”的引用，正是凭据库会
+  拒绝、更新随之换新引用的情形。
+- 演练（构建的界面加替身宿主；替身按 Windows 后端建模：凭据按 audience 绑定、引用不可变、旧 audience 留待
+  清理、requirements 与 presence 按引用 id 排序）：三个新脚本、`network-stop.js` 与退出步骤整条通过，约 7 秒；
+  把单个配置的读取都放慢到 400 ms 也通过，约 13 秒。
+  演练发现脚本初稿的一个错误：它按位置比较出站的引用与 requirements，但后端按 id 排序返回，托管上约一半的运行会
+  因两个随机 UUID 的先后而失败；现在按集合比较，强制让 id 顺序与出站顺序相反再跑一遍也通过。用不含第 2 项修正
+  的界面构建跑，在再次打开的 Settings 对话框处失败（新名字、旧的 first.yaml 地址），即复现了该缺陷；放慢读取时，
+  不含第 3 项修正的界面在第一次打开的 Settings 对话框处失败，URL 字段为空。八种注入
+  故障各自被预期的检查拒绝：会话开始前已有未使用的凭据、控制器报告的节点种类不对、保存设置改变了正文、删除
+  配置时凭据被一并删掉、清理什么都没删、导入没有存密码（对话框显示“0 of 2 reference(s) are already present …
+  Windows protected storage …”）、保存设置什么都没存、下载失败（在 75 秒上限处拒绝；失败时的窗口采集会打开
+  Logs 页，保留真实原因）。
+- 驱动脚本的 subscription 分支和验证脚本对该会话的检查，从两个脚本的语法树取出、在严格模式下以演练各步的
+  真实结果执行（PowerShell 7.6.4）：调用顺序正确，回执没有多出键，验证脚本接受；17 种改动过的步骤结果（包括
+  多一条或少一条待清理的引用、只列出导入时的引用）和 11 种改动过的会话回执各自被拒绝。`Invoke-GuiScenario`
+  也从语法树取出执行，它拼出的场景代码在 Node 里运行：订阅步骤收到按提交拼出的地址作为第七个参数，其他步骤
+  收到 null；`GITHUB_REPOSITORY` 缺失或格式不对时拒绝；订阅步骤拿不到地址时立即失败。这些工具不在仓库里。
+- Windows 目标的 clippy（`-D warnings`，rustup stable）对 `cfw-tauri-shell` 全部目标无警告；探针回执测试（5 项）
+  与 `scripts/windows/tests` 全部 9 项通过；本地门禁无警告：`ui-build`、`ui-test`（605 项）、`rust-fmt`、
+  `rust-clippy`、`rust-test`（1957 项）、`ci-no-masking`、`version-contract`、`build-script-boundary`、
+  `evidence-manifest-lane`、`release-tool-tests`（3862 项，跳过 2 项）。
+
+仍未验证：
+
+- 托管 Windows 上的一切：从 raw.githubusercontent.com 真实下载（所用的 HTTPS 客户端与 Windows 证书校验，连接
+  诊断会话已在托管 Windows 上经代理用过）、安装版里的 DPAPI 凭据库，以及清理前向 Windows 授权服务读取运行范围
+  （核心关闭时为空）。
+- 不带名字的 URL 导入被后端命名为“Local profile”（共享行为，这一批没有改）。
 - 用户真机上的 GUI 验收。
 
 ### 2026-10-23：开放事项（需要用户决定或外部条件）

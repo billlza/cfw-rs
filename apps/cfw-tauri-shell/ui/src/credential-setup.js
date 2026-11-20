@@ -68,6 +68,7 @@ export function createCredentialSetup({ renderPage, renderGlassOverlays, closeGl
 
   function renderCredentialsDialog() {
     const setup = state.credentialSetup;
+    const windows = state.payload?.product?.operating_system === "windows";
     const body = !setup
       ? `<p class="glass-dialog-copy">${escapeHtml(t("Reading credential requirements…"))}</p>`
       : !setup.vaultAvailable
@@ -77,7 +78,9 @@ export function createCredentialSetup({ renderPage, renderGlassOverlays, closeGl
                 ? t("This profile references no credentials.")
                 : t("All {requiredCount} credential reference(s) are already present in the vault.", { requiredCount: setup.requiredCount })}</p>`
           : `
-              <p class="glass-dialog-copy">${escapeHtml(t("{present} of {required} reference(s) are already present. Enter every missing value once; the batch goes straight to the signed native Keychain vault and is never written to the profile, the log, or the configuration digest.", { present: setup.presentCount, required: setup.requiredCount }))}</p>
+              <p class="glass-dialog-copy">${escapeHtml(windows
+                ? t("{present} of {required} reference(s) are already present. Enter every missing value once; the batch goes straight to Windows protected storage and is never written to the profile, the log, or the configuration digest.", { present: setup.presentCount, required: setup.requiredCount })
+                : t("{present} of {required} reference(s) are already present. Enter every missing value once; the batch goes straight to the signed native Keychain vault and is never written to the profile, the log, or the configuration digest.", { present: setup.presentCount, required: setup.requiredCount }))}</p>
               ${setup.missing.map((reference, index) => `
                 <label>${escapeHtml(credentialLabel(reference.kind))}
                   <input type="password" autocomplete="new-password" data-credential-secret data-credential-index="${index}" aria-label="${escapeHtml(t("Secret for {credential}", { credential: credentialLabel(reference.kind) }))}" />
@@ -101,6 +104,7 @@ export function createCredentialSetup({ renderPage, renderGlassOverlays, closeGl
 
   function renderCredentialCleanupDialog() {
     const preview = state.credentialGcPreview;
+    const windows = state.payload?.product?.operating_system === "windows";
     const references = (preview?.orphanReferences ?? []).slice(0, 12)
       .map((reference) => `<li>${escapeHtml(credentialLabel(reference.kind))} · ${escapeHtml(reference.id)}</li>`)
       .join("");
@@ -109,7 +113,9 @@ export function createCredentialSetup({ renderPage, renderGlassOverlays, closeGl
         <div class="glass-dialog" role="dialog" aria-label="${escapeHtml(t("Credential cleanup"))}">
           <h3>${escapeHtml(t("Unused credentials"))}</h3>
           <p class="glass-dialog-copy">${preview
-            ? escapeHtml(t("Unused Keychain entries: {count}. Cleanup revalidates the repository snapshot and the vault revision before one atomic deletion.", { count: preview.orphanCount }))
+            ? escapeHtml(windows
+              ? t("Unused protected credentials: {count}. Cleanup revalidates the repository snapshot and the vault revision before one atomic deletion.", { count: preview.orphanCount })
+              : t("Unused Keychain entries: {count}. Cleanup revalidates the repository snapshot and the vault revision before one atomic deletion.", { count: preview.orphanCount }))
             : t("The credential vault has no unused references.")}</p>
           ${references ? `<ul class="glass-list">${references}</ul>` : ""}
           <div class="glass-dialog-actions">

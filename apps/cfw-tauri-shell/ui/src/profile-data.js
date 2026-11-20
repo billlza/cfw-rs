@@ -24,6 +24,16 @@ export function createProfileData({ cancelDelayTest, loadProvidersSnapshot, prov
     return profile.sourceUrl;
   }
 
+  /// Settings can change a profile's subscription URL. The URL read before is
+  /// dropped, so the next menu or dialog reads the stored one instead of
+  /// offering the old one to be saved back.
+  function forgetProfileSource(id) {
+    const profile = state.profiles.find((item) => item.id === id);
+    if (!profile) return;
+    profile.sourceUrl = undefined;
+    profile.sourceError = null;
+  }
+
   /// Applies the selected profile.
   ///
   /// With the engine running this restarts it onto a freshly projected
@@ -171,5 +181,8 @@ export function createProfileData({ cancelDelayTest, loadProvidersSnapshot, prov
     }
   }
 
-  return { loadProfilesSnapshot, loadSavedProfilePolicy, resolveProfileSource, invokeProfileChange, selectProfileById, applyActiveProfile };
+  return {
+    loadProfilesSnapshot, loadSavedProfilePolicy, resolveProfileSource, forgetProfileSource, invokeProfileChange, selectProfileById,
+    applyActiveProfile,
+  };
 }

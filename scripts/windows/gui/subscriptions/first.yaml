@@ -1,0 +1,17 @@
+# The subscription the installed-GUI subscription session imports on hosted
+# Windows. GitHub serves it from the commit under test over public HTTPS. The
+# nodes are never dialled; the passwords are test values that only reach the
+# credential vault.
+proxies:
+  - name: first
+    type: ss
+    server: first.example.com
+    port: 8388
+    cipher: aes-256-gcm
+    password: subscription-check-first
+  - name: second
+    type: ss
+    server: second.example.com
+    port: 8388
+    cipher: aes-256-gcm
+    password: subscription-check-second

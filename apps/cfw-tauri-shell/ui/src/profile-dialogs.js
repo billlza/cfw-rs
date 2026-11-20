@@ -7,7 +7,7 @@ import { t } from "./i18n.js";
 import { appendLog } from "./app-log.js";
 
 export function createProfileDialogs({
-  renderPage, renderGlassOverlays, closeGlassOverlays, closeGlassDialog, loadProfilesSnapshot, invokeProfileChange,
+  renderPage, renderGlassOverlays, closeGlassOverlays, closeGlassDialog, loadProfilesSnapshot, invokeProfileChange, forgetProfileSource,
 }) {
   /// A refused deletion keeps its dialog open and is reported in the log.
   async function confirmProfileDeletion(dialog, id) {
@@ -166,6 +166,7 @@ export function createProfileDialogs({
         const url = document.querySelector("[data-glass-settings-url]")?.value?.trim() ?? "";
         try {
           await invoke("update_profile_info", { id, name, url });
+          forgetProfileSource(id);
           await loadProfilesSnapshot();
           closeGlassOverlays();
           appendLog("info", "profile", t("Profile settings saved: {name}", { name: name }));

@@ -3561,7 +3561,7 @@ main 上的托管作业“libbox, Network Extension, and app skeleton gates”�
   原因没有查明。
 - 实体 Windows 机器上没有运行过。
 
-### 2026-11-20：全局快捷键与网络规则进入安装版 GUI 验证（托管第一轮暴露一个脚本错误并已修正，原生结果待第二轮）
+### 2026-11-20：全局快捷键与网络规则进入安装版 GUI 验证（托管第二轮自动化全部通过，退出步骤的名单遗漏已修正，待第三轮）
 
 功能对齐的下一批。自动化（Settings › Background controls › Shortcuts & network rules）在 Windows 上早已实现：
 `cfw-platform` 读取物理网卡，全局快捷键走 `tauri-plugin-global-shortcut`（Windows 上是隐藏窗口加
@@ -3629,6 +3629,9 @@ stderr，不读上一次留下的回执；驱动脚本调用的探针与模块�
 
 托管第一轮（提交 266f3947，Windows desktop 运行 44646214337）：
 
+- 壳的单元测试在 GUI 步骤之前于 Windows 上运行：510 项通过，其中包括
+  `a_shortcut_without_a_required_key_is_refused_in_this_platforms_words` 的 Windows 一半；新探针在 runner 上通过了
+  `-D warnings` 的 clippy 与格式检查。修正前它在 Windows 上会失败这一点仍是按源码推断的。
 - 探针回执测试在 Windows 上通过（5 项）：`.cmd` 替身启动器可用，模块在 runner 的 PowerShell 上工作。前三个
   会话（fresh-off、local-proxy、node-choice）照常通过，验证脚本在每个会话之后立即核对。
 - `automation` 会话在第一步 `automation-rule` 失败，此时还没有做任何改动：`page.evaluate: TypeError: Cannot
@@ -3643,12 +3646,31 @@ stderr，不读上一次留下的回执；驱动脚本调用的探针与模块�
   序列通过，八种注入故障仍各自被预期的检查拒绝。`AutomationView` 的其余字段逐一与替身核对过；引擎的过渡状态
   名与已在托管上通过的 `network-start.js`、`network-stop.js` 一致。
 
+托管第二轮（提交 0020c368，Windows desktop 运行 44720136383）：
+
+- 自动化部分全部通过。Windows 报告有线物理网卡（`Current network: Wired · Ethernet 3`，没有 SSID）；对话框的
+  标题、两段 Windows 提示、四个输入框及示例与演练一致；Apply 后快捷键注册为 `shift+control+alt+F9`，规则循环
+  在运行；规则在 Apply 后约 14.6 秒自己把核心启动到 `local_proxy_active`。Playwright 真实的 `selectOption`、
+  对话框与复选框点击都正常。
+- 三次原生按键：每次 `SendInput` 的 8 个事件全部被接受，输入桌面是 `WinSta0\Default`。第一次按键触发热键，
+  停止核心，此后 12 秒看了 24 次一直是 off，规则仍在位、修订号不变；第二次启动了另一次运行（代次 7，规则启动
+  的是 5）；拒绝提示是“global shortcuts require Control, Alt or Super (Windows key)”，设置与注册不变；清空并
+  删除后没有注册的快捷键、规则循环停止，运行中的核心不受影响；第三次按键后 6 秒看了 12 次，核心身份不变；最后
+  通过界面停止核心。会话从附加到准备退出约 1 分钟。
+- 失败在会话最后的退出步骤：`quit-with-state.js` 报“Unknown Quit scenario”。它自己保存了一份会话名单
+  （fresh-off、local-proxy、node-choice、tunnel、system-proxy-quit），是驱动脚本 `$Scenario` 的 `ValidateSet`
+  的副本；加新会话时这份副本没有跟着改（#102 加 node-choice 时改过）。本机演练没有跑退出步骤，语法树检查里
+  GUI 调用是替身，所以都没发现。
+- 修正：删去这份副本。驱动脚本只接受自己的六个会话，副本只可能与它不一致，不能多拦住什么；退出前的状态
+  检查保留（除 system-proxy-quit 外都必须是 off）。本机演练先在完整序列之后以同样的“Unknown Quit scenario”
+  复现，修正后整条序列连同退出步骤通过；核心关闭时按 system-proxy-quit 退出、核心运行时按 automation 退出，
+  仍各自被状态检查拒绝。全仓库再查了逐个列出会话名的地方：只有驱动脚本、验证脚本与这一处，前两者都已包含
+  automation。
+
 仍未验证，等托管作业：
 
-- 托管 runner 报告的物理网络是不是有线（第一轮只确定它报告了一个）。不是有线时会话在前置检查处失败，失败
-  信息里带着观察到的内容。
-- `SendInput` 的按键是否到达热键，以及 `RegisterHotKey` 在托管会话里是否工作（此前从未用过）。
-- Playwright 真实的 `selectOption`、对话框与复选框点击；新会话的实际耗时。
+- 退出步骤之后的部分：GUI 正常退出、退出时用户代理设置不变、验证脚本对 automation 会话的核对，以及排在它
+  后面的 tunnel 与 system-proxy-quit 会话，本轮都没有运行。
 - 用户真机上的 GUI 验收。
 
 ### 2026-10-23：开放事项（需要用户决定或外部条件）

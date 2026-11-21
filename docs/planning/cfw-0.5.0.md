@@ -3793,6 +3793,122 @@ stderr，不读上一次留下的回执；驱动脚本调用的探针与模块�
   “Local profile”。
 - 用户真机上的 GUI 验收。
 
+### 2026-11-21：运行设置进入安装版 GUI 验证（本机检查完成，托管结果待定）
+
+功能对齐的下一批（用户选定“运行设置”）。本地代理端口、局域网共享、日志级别与 TUN MTU 在 Windows 上早已实现，
+而且全是共享代码：`write_runtime_settings_snapshot` 校验设置、核对读取时的版本号、换算端口，再经
+`change_profile` 生效。核心关闭时只保存；核心运行时，只有配置、摘要、节点选择与设置全都没变才保留引擎，否则
+检查新配置、停掉旧引擎、启动新引擎，失败就恢复旧引擎。但这些从未在安装的应用里运行过。
+
+- 驱动脚本按会话拆分（提交 e39dfd9c）。`run_installed_gui_session.ps1` 有 576 行，再加一个会话就超过 600 行，
+  所以每个会话的步骤移到 `scripts/windows/sessions/<会话>.ps1`，由驱动脚本在自己的 try 块里点源执行：步骤仍在
+  驱动脚本的作用域里运行，失败处理不变。七个旧会话的步骤原样搬移（把七个文件拼回去，逐字节得到拆分前的驱动
+  脚本），驱动脚本剩 285 行。新的契约测试要求每个会话都有自己的文件、没有多余的文件、点源语句只有一条，并且
+  验证脚本把每个会话各运行一次。各步收到的第七个参数从订阅地址改为“会话交代给步骤的内容”（`$sessionInput`）：
+  订阅会话仍是地址，本会话是它的计划，其余为 null。
+- 原生探针：
+  - network 与 tunnel 探针可以带一个标签。同一个操作在一个会话里重复时，回执以标签命名，不覆盖上一份；标签
+    只能是小写字母、数字与连字符，最多 40 个字符。
+  - tunnel 探针的回执新增 `adapter_mtu`：Windows 自己报告的适配器 IPv4 接口 MTU（`GetIpInterfaceEntry` 的
+    `NlMtu`）。产品在配置链路时写入并读回这个值（`tunnel/network.rs` 的 `configure_interface`）。
+  - 新增 `--installed-gui-lan-probe`。会话把本机默认路由上的私有 IPv4 地址作为唯一受信来源。`lan-shared`
+    要求 `0.0.0.0:<端口>` 上有监听，从该私有地址发出的请求被转发，从回环地址发出的请求被拒绝并且没有到达
+    源站；`lan-closed` 要求该端口没有监听、连接被拒绝。两者都要求用户代理选项与 GUI 启动时相同，回执写明
+    `other_devices_exercised: false`。
+  - PowerShell 模块新增 `Invoke-NativeLanProbe`。模块测试 5 → 7 项：带标签的三种调用确实把标签交给启动器并
+    读取以标签命名的回执；LAN 回执的 15 种不符与关闭共享后的 3 种不符各自被拒绝。
+- 新增 `runtime-settings` 会话（提交 440125f2），排在 subscription 与 tunnel 之间，开始与结束时都只有
+  local-proxy 的配置、核心关闭、设置为默认值。全部改动通过可见控件，IPC 只读。会话先取两个没有监听的端口
+  （本地代理端口与 LAN 端口）和本机的私有地址。
+  - `runtime-settings-apply`：前置检查后启动核心，核心只在自动端口上监听。打开 General 页的 Network
+    settings，对话框必须显示默认值；填入端口，勾选 Allow LAN，填入 LAN 端口与来源 `<私有地址>/32`，Apply。
+    对话框关闭；运行中的核心被代次更高、摘要不同的核心取代；保存的与生效的设置就是填入的值；投影里
+    `cfw-system-proxy` 监听 `127.0.0.1:<端口>`，`cfw-lan-proxy` 监听 `0.0.0.0:<LAN 端口>`，第一条路由规则
+    拒绝受信范围以外的来源；General 页显示新端口、Configured port、Bind 与 Trusted sources only；控制器
+    通过验证。随后探针确认新端口转发 HTTP、自动端口已经没有监听（标签 `automatic-closed`）、`lan-shared`。
+  - `runtime-settings-refused`：对话框显示已应用的值。在来源里加上公网的文档网段 `203.0.113.0/24` 再 Apply：
+    对话框保持打开，显示后端的原话（`… LAN source ranges must be distinct canonical CIDRs within private
+    IPv4 networks`）；引擎快照、保存的设置与投影都没有变。
+  - `runtime-settings-general`：General 页的日志级别选 debug，核心被取代，保存、生效与投影的级别都是 debug，
+    LAN 入站与规则不变，运行中的引擎经控制器报告 `log-level` 为 debug。再关掉 Allow LAN 开关，核心再被取代：
+    `allow_lan` 为 false 而保存的监听设置保留，投影里没有 LAN 入站与规则，页面显示 Bind: Off 与 Local
+    devices only。随后探针确认 `lan-closed`，并且本地端口仍然转发（标签 `unshared-http`）。
+  - 复用 `network-stop` 停止核心，探针确认端口已释放。
+  - `runtime-settings-mtu`（核心关闭）：MTU 改为 1400 并 Apply，只保存，引擎快照不变。
+  - 复用 `tunnel-start`：TUN Mode 以保存的 MTU 启动，`tunnel-http` 探针的 `adapter_mtu` 必须是 1400。
+  - `runtime-settings-live-mtu`：TUN Mode 运行时把 MTU 改为 1280。TUN 运行被代次更高、摘要不同的运行取代，
+    投影的 tun 入站是 1280，TUN 开关仍然打开；探针（标签 `tunnel-mtu-changed`）的 `adapter_mtu` 必须是 1280，
+    适配器仍是这个安装的适配器。
+  - 复用 `tunnel-stop` 交回本地核心，`tunnel-closed` 探针确认适配器退役；再用 `network-stop` 停止核心。
+  - `runtime-settings-defaults`：对话框必须显示全部改过的值。端口清空（自动）、日志级别改回 info、MTU 改回
+    会话开始时的值、清空来源，Apply：保存的与生效的设置同会话开始时读到的完全相同，引擎快照不变。
+  - 驱动脚本逐步核对运行身份的衔接：被拒绝的改动之后仍是同一个核心；停止的正是上一步留下的核心；改 MTU 的
+    正是以保存的 MTU 启动的那个 TUN 运行。验证脚本在会话结束后立即核对（正常退出、设置已演练、转发、端口
+    释放、隧道流量、适配器退役、核心已停、用户代理未变、保留的是 local-proxy 的配置、同一安装、进程不同于
+    前五个会话）；tunnel 会话的“进程不同”检查加入本会话；汇总回执包含它。
+- 工作流注释改为八个会话。八个会话加 MSI 安装与卸载最多 1960 秒，所以 GUI 步骤上限 32 → 36 分钟，作业上限
+  58 → 62 分钟。
+
+路上发现并修正一个界面缺陷（提交 8b2d052b；共享界面，macOS 同样受影响），先写会失败的测试：
+
+- 打开 Network settings、关掉 Allow LAN、选择日志级别，这三个动作都先读一次已保存的设置，用的是页面后台
+  刷新共用的 `load()`：只要这次读取返回之前又开始了一次读取，它就返回 false。引擎每次改变状态，页面都会收到
+  事件并刷新设置。动作的读取撞上刷新时：对话框不打开，也没有提示；Allow LAN 开关与日志级别退回原值，日志里
+  只有一条内容为 `null` 的错误。IPv6 DNS 等开关早已各自读取（`toggleSwitch`），不受影响。
+- 修正：三个动作改用 `loadForAction()`。它读到什么就用什么，后台刷新夺不走这次读取；写入时带上这份快照的
+  版本号，由后端核对。在它之前已经在途的读取从此作废，不会把页面改回旧值。读取失败时照旧报告错误，不写入。
+- 五个新测试，前三个在修正前失败（对话框没有打开；`Error: null`；没有写入）。把修正逐处改回的六种变异各自
+  让对应的测试失败。CHANGELOG 记一条。
+- 演练里把引擎事件推迟 250 ms、把设置的读取放慢到 400 ms，在事件到达后 20 ms 操作：不含修正的界面构建
+  没有打开对话框，选了日志级别却没有写入；含修正的构建打开对话框并存下 debug。托管会话的步骤不容易撞上它
+  （对话框都是在事件过去很久之后才打开的），这个修正不是让会话通过的条件。
+
+本机验证：
+
+- 演练（构建的界面加替身宿主；替身为这一批建模了运行设置：未知字段的拒绝与字段的省略规则、后端的校验顺序
+  与原话、版本号核对、端口游标、引擎替换与代次、按模式生成且键序固定的投影、`cfw://engine-event` 事件）：
+  六个新步骤、复用的 `network-stop`（两次）、`tunnel-start`、`tunnel-stop` 与退出共十一步整条通过，没有点不中
+  的控件；读取放慢、写入放慢、事件推迟、从未保存过设置时也通过，不含修正的界面构建同样通过；视口缩小到
+  1000×680 与 860×520 时也整条通过（应用窗口是 1100×760，上一轮托管截图是 1028×729），对话框在自己内部
+  滚动。演练用的界面构建与本地 `ui-build` 门禁的产物逐字节相同。
+- 十四种注入故障各自被预期的检查拒绝：后端接受了公网网段、用别的话拒绝、拒绝之前先重启了引擎；写入没有替换
+  运行中的引擎、端口没有换、缺少 LAN 访问规则、该规则排在最后、写入总是遇到已变的版本号；引擎仍按第一次
+  启动时的级别记日志、关闭共享时删掉了保存的监听设置、关闭共享后 LAN 监听仍在（在 30 秒上限处拒绝）；核心
+  关闭时的写入推进了引擎代次；隧道仍是 MTU 1500；恢复默认后自动端口变成了下一个候选端口。
+- 会话文件与验证脚本对该会话的检查，在严格模式下以演练各步的真实结果执行（PowerShell 7.6.4；驱动脚本的回执
+  初值、`Invoke-GuiScenario` 与点源语句取自它的语法树，探针由替身启动器按托管回执的样子作答）：调用顺序、
+  探针参数与标签都对，回执只多出其他会话同样会加的 `controller_verified`，验证脚本接受。33 种改动过的步骤
+  结果或探针回执、17 种改动过的会话回执、以及 tunnel 会话与本会话是同一进程的情形，各自以预期的原话被拒绝。
+  `Invoke-GuiScenario` 拼出的代码在 Node 里运行到第一次使用页面为止：各步收到会话的计划，最后一步还收到
+  会话开始时的设置，其中的 null 原样保留。这些工具不在仓库里。
+- 对会话文件、探针模块与验证脚本的 24 种变异各自让模块测试失败，文件随后恢复。
+- 只能在 Windows 上运行的 Rust 探针由 Windows 目标的 clippy（`-D warnings`，rustup stable）对
+  `cfw-windows-engine` 全部目标编译，无警告；把 LAN 探针与 MTU 读取各改坏一处，分别报 E0425 与 E0308。
+  `scripts/windows/tests` 全部 11 项通过；本地门禁无警告：`ui-build`、`ui-test`（610 项）、`rust-fmt`、
+  `rust-clippy`、`rust-test`（1957 项）、`ci-no-masking`、`version-contract`、`build-script-boundary`、
+  `evidence-manifest-lane`、`release-tool-tests`（3862 项，跳过 2 项）。
+
+读代码得到、尚未在 Windows 上复现的一处差异（不在这一批里改）：
+
+- 端口被占用时，macOS 的原生桥报告 `MixedEndpointInUse`／`ControllerEndpointInUse`。协调器清理并证明 Off 后
+  返回 `StartEndpointConflictAfterOff`：启动时壳层在同一端口上重试一次，再换下一个自动端口；设置改动则回滚
+  到旧核心。Windows 后端不产生这两种错误，UserAgent 绑定之后的启动失败被归为 `CleanupUnproven`，要求显式
+  对账。按代码推断，自动端口 7890 被别的程序占用时不会换到下一个端口；把端口改成一个被占用的端口，结果会是
+  `ProfileChangeRecoveryRequired`，而不是 Mac 上的回滚。应先在托管 Windows 上复现，再决定修法；建议作为下
+  一批对齐。
+
+仍未验证：
+
+- 托管 Windows 上的结果：Playwright 的真实语义、原生宿主与 WebView2 只有托管作业能证明。按上一轮各会话回执
+  的时间估算，本会话约 100 秒，与当时最长的 tunnel 会话（96–98 秒）相当（启动器只等 GUI 180 秒）；整轮的
+  第一个隧道适配器现在由它创建。
+- 别的设备能否连到 LAN 端口。这由 Windows 防火墙决定，产品不写防火墙规则；探针只从本机的两个地址发请求。
+- 这一批没有碰的运行设置：Mainland China direct 与 IPv6 DNS 开关在运行中的核心上的效果；端口被占用时的行为
+  （见上）。
+- 后端拒绝时的原话以 `unsupported credential-free policy shape at $.runtime_settings:` 开头，对用户并不
+  好懂（共享行为，这一批没有改）。
+- 用户真机上的 GUI 验收。
+
 ### 2026-10-23：开放事项（需要用户决定或外部条件）
 
 以下事项不能由托管 CI 单独完成，或会改变发布身份、持久化契约与产品方向，保持开放：

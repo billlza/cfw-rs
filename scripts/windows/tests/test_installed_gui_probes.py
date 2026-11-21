@@ -13,6 +13,8 @@ import unittest
 SCRIPTS = Path(__file__).resolve().parents[1]
 MODULE = SCRIPTS / "installed_gui_probes.psm1"
 RUNNER = SCRIPTS / "run_installed_gui_session.ps1"
+SESSIONS = SCRIPTS / "sessions"
+VALIDATOR = SCRIPTS / "validate_installed_gui.ps1"
 SOURCE = "0123456789abcdef0123456789abcdef01234567"
 INSTALLATION = "6a1f0c2e9b7d4835a0c4e1f29b3d7a56"
 ORIGINAL_PROXY = "a" * 64
@@ -49,19 +51,44 @@ $results = foreach ($case in $plan.cases) {
 }
 ConvertTo-Json -InputObject @($results) -Depth 8 -Compress
 """
+# The runner dot-sources one file of the sessions directory for its scenario,
+# so the steps of a session are read from there, and the validator is read
+# for the scenarios it runs.
 CONTRACT = r"""
-param([string]$ProbeModule, [string]$Runner)
+param([string]$ProbeModule, [string]$Runner, [string]$Sessions, [string]$Validator)
 $ErrorActionPreference = 'Stop'
 $module = Import-Module $ProbeModule -Force -PassThru -ArgumentList 'launcher', 'source', 'receipts'
-$tokens = $null
-$errors = $null
-$ast = [System.Management.Automation.Language.Parser]::ParseFile($Runner, [ref]$tokens, [ref]$errors)
-$commands = @($ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] }, $true))
+$parseErrors = 0
+function Read-Commands([string]$Path) {
+    $tokens = $null
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$errors)
+    $script:parseErrors += @($errors).Count
+    return [pscustomobject]@{ ast=$ast
+        commands=@($ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] }, $true)) }
+}
+$session = Read-Commands $Runner
+$files = @(Get-ChildItem -LiteralPath $Sessions)
+$steps = @($files | ForEach-Object { (Read-Commands $_.FullName).commands })
+$scenario = @($session.ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -ceq 'Scenario' })
+$accepted = @($scenario.Attributes | Where-Object { $_.TypeName.Name -ceq 'ValidateSet' })
+$run = foreach ($command in (Read-Commands $Validator).commands) {
+    $elements = $command.CommandElements
+    for ($index = 0; $index -lt $elements.Count - 1; $index++) {
+        if ($elements[$index] -is [System.Management.Automation.Language.CommandParameterAst] -and
+            $elements[$index].ParameterName -ceq 'Scenario') { $elements[$index + 1].Extent.Text }
+    }
+}
 [ordered]@{
-    parse_errors=@($errors).Count
+    parse_errors=$parseErrors
     exported=@($module.ExportedFunctions.Keys | Sort-Object)
-    called=@($commands | ForEach-Object { $_.GetCommandName() } | Where-Object { $_ -like 'Invoke-Native*' } | Sort-Object -Unique)
-    imports=@($commands | Where-Object { $_.GetCommandName() -ceq 'Import-Module' } | ForEach-Object { $_.Extent.Text })
+    called=@(@($session.commands) + $steps | ForEach-Object { $_.GetCommandName() } |
+        Where-Object { $_ -like 'Invoke-Native*' } | Sort-Object -Unique)
+    imports=@($session.commands | Where-Object { $_.GetCommandName() -ceq 'Import-Module' } | ForEach-Object { $_.Extent.Text })
+    scenarios=@($accepted.PositionalArguments | ForEach-Object { $_.Extent.Text })
+    session_files=@($files | ForEach-Object Name)
+    dot_sourced=@($session.commands | Where-Object { $_.InvocationOperator -eq 'Dot' } | ForEach-Object { $_.Extent.Text })
+    validated=@($run)
 } | ConvertTo-Json -Compress
 """
 
@@ -258,17 +285,36 @@ class ProbeReceiptTests(unittest.TestCase):
         self.assertEqual(results[1]["failure"], "Native GUI shortcut-stop probe failed; see its retained stderr")
         self.assertEqual(logs["shortcut-stop-probe-stderr.log"].strip(), "stand-in probe failure")
 
-    def test_the_session_calls_the_probes_the_module_exports_and_imports_it_in_parameter_order(self):
+    def contract(self):
+        """What the runner, its session files, the validator and the module say of each other."""
         with tempfile.TemporaryDirectory(prefix="cfw-gui-probes-") as directory:
             script = Path(directory) / "contract.ps1"
             script.write_text(CONTRACT, encoding="utf-8")
-            contract = self.powershell(script, "-ProbeModule", str(MODULE), "-Runner", str(RUNNER))
+            contract = self.powershell(script, "-ProbeModule", str(MODULE), "-Runner", str(RUNNER),
+                                       "-Sessions", str(SESSIONS), "-Validator", str(VALIDATOR))
         self.assertEqual(contract["parse_errors"], 0)
+        return contract
+
+    def test_the_session_calls_the_probes_the_module_exports_and_imports_it_in_parameter_order(self):
+        contract = self.contract()
         self.assertEqual(contract["exported"], sorted({planned["probe"] for planned in ACCEPTED}))
         self.assertEqual(contract["called"], contract["exported"])
         # The module takes its launcher, source and receipt directory by position.
         self.assertIn("Import-Module (Join-Path $PSScriptRoot 'installed_gui_probes.psm1') -Force "
                       "-ArgumentList $Launcher, $Source, $outputRoot", contract["imports"])
+
+    def test_every_scenario_has_its_session_file_and_the_validator_runs_each_once(self):
+        contract = self.contract()
+        scenarios = [name.strip("'") for name in contract["scenarios"]]
+        self.assertEqual(contract["scenarios"], [f"'{name}'" for name in scenarios])
+        self.assertIn("fresh-off", scenarios)
+        self.assertEqual(len(set(scenarios)), len(scenarios))
+        # A scenario without its file fails only when its session starts, and a
+        # file no scenario names is never run.
+        self.assertEqual(sorted(contract["session_files"]), sorted(f"{name}.ps1" for name in scenarios))
+        self.assertEqual(contract["dot_sourced"], ['. (Join-Path $PSScriptRoot "sessions/$Scenario.ps1")'])
+        # A scenario the validator leaves out would pass by not running.
+        self.assertEqual(sorted(contract["validated"]), sorted(contract["scenarios"]))
 
 
 if __name__ == "__main__":

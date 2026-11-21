@@ -38,8 +38,11 @@ function Invoke-NativeProbe([string]$Name, [string[]]$Arguments, [int]$TimeoutMs
         $process.Dispose()
     }
 }
-function Invoke-NativeNetworkProbe([ValidateSet('http', 'closed', 'system-http')][string]$Operation, [int]$Port, $LaunchReceipt) {
-    $record = Invoke-NativeProbe $Operation @('--installed-gui-network-probe', $Operation, $Port.ToString([Globalization.CultureInfo]::InvariantCulture)) 20000
+# A session that repeats a network or tunnel operation gives each further run
+# a label, which names that run's receipt instead of the operation.
+function Invoke-NativeNetworkProbe([ValidateSet('http', 'closed', 'system-http')][string]$Operation, [int]$Port, $LaunchReceipt, [string]$Label = '') {
+    $arguments = @('--installed-gui-network-probe', $Operation, $Port.ToString([Globalization.CultureInfo]::InvariantCulture))
+    $record = if ($Label) { Invoke-NativeProbe $Label ($arguments + $Label) 20000 } else { Invoke-NativeProbe $Operation $arguments 20000 }
     if ($record.document -cne 'cfw-installed-gui-network-probe-v1' -or $record.source -cne $Source -or
         $record.operation -cne $Operation -or $record.gui_process_id -ne $LaunchReceipt.process_id -or
         $record.gui_process_creation_time -ne $LaunchReceipt.process_creation_time -or
@@ -74,8 +77,9 @@ function Invoke-NativeShortcutProbe([ValidateSet('shortcut-stop', 'shortcut-star
     }
     return $record
 }
-function Invoke-NativeTunnelProbe([ValidateSet('tunnel-http', 'tunnel-closed')][string]$Operation, [string]$Installation, $LaunchReceipt) {
-    $record = Invoke-NativeProbe $Operation @('--installed-gui-tunnel-probe', $Operation, $Installation)
+function Invoke-NativeTunnelProbe([ValidateSet('tunnel-http', 'tunnel-closed')][string]$Operation, [string]$Installation, $LaunchReceipt, [string]$Label = '') {
+    $arguments = @('--installed-gui-tunnel-probe', $Operation, $Installation)
+    $record = if ($Label) { Invoke-NativeProbe $Label ($arguments + $Label) } else { Invoke-NativeProbe $Operation $arguments }
     $on = $Operation -ceq 'tunnel-http'
     if ($record.document -cne 'cfw-installed-gui-tunnel-probe-v1' -or $record.source -cne $Source -or
         $record.operation -cne $Operation -or $record.gui_process_id -ne $LaunchReceipt.process_id -or
@@ -129,6 +133,26 @@ function Invoke-NativeLeakProtectionProbe([ValidateSet('leak-open', 'leak-refuse
     }
     return $record
 }
+# LAN sharing as the runtime settings session entered it, with this machine's
+# private address as the only trusted source: a request from that address is
+# forwarded and one from the loopback address is refused; once sharing is off,
+# nothing listens on the port. Other devices are not exercised.
+function Invoke-NativeLanProbe([ValidateSet('lan-shared', 'lan-closed')][string]$Operation, [string]$Address, [int]$Port, $LaunchReceipt) {
+    $record = Invoke-NativeProbe $Operation @('--installed-gui-lan-probe', $Operation, $Address, $Port.ToString([Globalization.CultureInfo]::InvariantCulture))
+    $shared = $Operation -ceq 'lan-shared'
+    if ($record.document -cne 'cfw-installed-gui-lan-probe-v1' -or $record.source -cne $Source -or
+        $record.operation -cne $Operation -or $record.gui_process_id -ne $LaunchReceipt.process_id -or
+        $record.gui_process_creation_time -ne $LaunchReceipt.process_creation_time -or
+        -not $record.gui_same_user_session -or $record.trusted_address -cne "$($Address):$Port" -or
+        $record.untrusted_address -cne "127.0.0.1:$Port" -or
+        $record.trusted_source_forwarded -ne $shared -or $record.untrusted_source_refused -ne $shared -or
+        $record.listener_refused -eq $shared -or $record.other_devices_exercised -or
+        -not $record.user_proxy_unchanged -or $record.user_proxy_sha256 -cne $LaunchReceipt.user_proxy_before_sha256 -or
+        $record.release_accepted) {
+        throw 'Native LAN proof differs from the UI-owned runtime, its trusted source and the original user proxy'
+    }
+    return $record
+}
 
 Export-ModuleMember -Function Invoke-NativeNetworkProbe, Invoke-NativeShortcutProbe, Invoke-NativeTunnelProbe,
-    Invoke-NativeCombinedProbe, Invoke-NativeLeakProtectionProbe
+    Invoke-NativeCombinedProbe, Invoke-NativeLeakProtectionProbe, Invoke-NativeLanProbe

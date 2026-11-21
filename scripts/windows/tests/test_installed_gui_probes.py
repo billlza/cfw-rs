@@ -20,6 +20,8 @@ INSTALLATION = "6a1f0c2e9b7d4835a0c4e1f29b3d7a56"
 ORIGINAL_PROXY = "a" * 64
 APPLIED_PROXY = "b" * 64
 PORT = 7890
+LAN_PORT = 7898
+TRUSTED = "10.1.0.4"
 LAUNCH = {"process_id": 4242, "process_creation_time": 134079552000000000,
           "user_proxy_before_sha256": ORIGINAL_PROXY}
 # What the fixture launcher is to the module: it is started with the probe's
@@ -45,7 +47,9 @@ $results = foreach ($case in $plan.cases) {
     $record = $null
     $failure = $null
     $arguments = @($case.arguments)
-    try { $record = & $case.probe @arguments $plan.launch } catch { $failure = $_.Exception.Message }
+    # A label follows the launch receipt, as in the sessions.
+    $label = @(if ($null -ne $case.PSObject.Properties['label']) { $case.label })
+    try { $record = & $case.probe @arguments $plan.launch @label } catch { $failure = $_.Exception.Message }
     [ordered]@{ record=$record; failure=$failure
         call=(Get-Content -LiteralPath (Join-Path $Receipts 'call.json') -Raw | ConvertFrom-Json) }
 }
@@ -108,9 +112,9 @@ def shortcut(operation):
                              "input_desktop_observed": True, "existing_user_object_permissions_changed": False})
 
 
-def network(operation):
+def network(operation, port=PORT):
     receipt = observed(
-        "cfw-installed-gui-network-probe-v1", operation=operation, proxy_address=f"127.0.0.1:{PORT}",
+        "cfw-installed-gui-network-probe-v1", operation=operation, proxy_address=f"127.0.0.1:{port}",
         original_user_proxy_sha256=ORIGINAL_PROXY, http_forwarding_verified=operation != "closed",
         listener_refused=operation == "closed", user_proxy_sha256=ORIGINAL_PROXY, user_proxy_unchanged=True)
     if operation == "system-http":
@@ -119,11 +123,12 @@ def network(operation):
     return receipt
 
 
-def tunnel(operation):
+def tunnel(operation, mtu=1500):
     entered = operation == "tunnel-http"
     return observed(
         "cfw-installed-gui-tunnel-probe-v1", operation=operation, installation_id=INSTALLATION,
-        adapter_absent=not entered, route_entered_tunnel=entered, http_through_tunnel_verified=entered,
+        adapter_absent=not entered, adapter_mtu=mtu if entered else None,
+        route_entered_tunnel=entered, http_through_tunnel_verified=entered,
         route_luid=1234 if entered else 99, adapter_luid=1234, local_address="198.18.64.1:50000" if entered else None,
         user_proxy_sha256=ORIGINAL_PROXY, user_proxy_unchanged=True)
 
@@ -150,6 +155,15 @@ def leak(operation):
         user_proxy_sha256=ORIGINAL_PROXY, user_proxy_unchanged=True)
 
 
+def lan(operation):
+    shared = operation == "lan-shared"
+    return observed(
+        "cfw-installed-gui-lan-probe-v1", operation=operation, trusted_address=f"{TRUSTED}:{LAN_PORT}",
+        untrusted_address=f"127.0.0.1:{LAN_PORT}", listeners_before=[[4300, f"0.0.0.0:{LAN_PORT}"]] if shared else [],
+        trusted_source_forwarded=shared, untrusted_source_refused=shared, listener_refused=not shared,
+        other_devices_exercised=False, user_proxy_sha256=ORIGINAL_PROXY, user_proxy_unchanged=True)
+
+
 def case(probe, arguments, name, receipt, exit_code=0):
     return {"probe": probe, "arguments": arguments,
             "launcher": {"file": f"{name}-probe.json", "receipt": receipt, "exit": exit_code}}
@@ -174,6 +188,20 @@ ACCEPTED = [
       | {"started_with": ["--installed-gui-leak-protection-probe", operation, INSTALLATION, "192.0.2.53",
                           "stun.example.net:3478"]}
       for operation in ("leak-open", "leak-refused", "leak-reopened")),
+    *(case("Invoke-NativeLanProbe", [operation, TRUSTED, LAN_PORT], operation, lan(operation))
+      | {"started_with": ["--installed-gui-lan-probe", operation, TRUSTED, str(LAN_PORT)]}
+      for operation in ("lan-shared", "lan-closed")),
+    # A repeated operation is given a label, which the launcher is started
+    # with and which names the receipt. Each differs from the receipt its
+    # operation left above, so reading that one instead would show.
+    case("Invoke-NativeNetworkProbe", ["http", PORT + 1], "unshared-http", network("http", PORT + 1))
+    | {"label": "unshared-http", "started_with": ["--installed-gui-network-probe", "http", str(PORT + 1), "unshared-http"]},
+    case("Invoke-NativeNetworkProbe", ["closed", PORT + 2], "automatic-closed", network("closed", PORT + 2))
+    | {"label": "automatic-closed",
+       "started_with": ["--installed-gui-network-probe", "closed", str(PORT + 2), "automatic-closed"]},
+    case("Invoke-NativeTunnelProbe", ["tunnel-http", INSTALLATION], "tunnel-mtu-changed", tunnel("tunnel-http", 1280))
+    | {"label": "tunnel-mtu-changed",
+       "started_with": ["--installed-gui-tunnel-probe", "tunnel-http", INSTALLATION, "tunnel-mtu-changed"]},
 ]
 SHORTCUT_REFUSAL = "The native shortcut press differs from the launched GUI and its input desktop"
 # Every way a shortcut receipt can differ from the launched GUI, the entered
@@ -192,12 +220,33 @@ SHORTCUT_DIFFERENCES = {
     "the product addressed": {"product_addressed": True},
     "a release claim": {"release_accepted": True},
 }
+LAN_REFUSAL = "Native LAN proof differs from the UI-owned runtime, its trusted source and the original user proxy"
+# Every way a receipt of shared LAN access can differ from the launched GUI,
+# the session's trusted source and what sharing must do.
+LAN_DIFFERENCES = {
+    "another document": {"document": "cfw-installed-gui-network-probe-v1"},
+    "another source": {"source": "f" * 40},
+    "another step": {"operation": "lan-closed"},
+    "another process": {"gui_process_id": LAUNCH["process_id"] + 1},
+    "a reused process id": {"gui_process_creation_time": LAUNCH["process_creation_time"] + 1},
+    "another session": {"gui_same_user_session": False},
+    "another trusted source": {"trusted_address": f"10.1.0.5:{LAN_PORT}"},
+    "another port": {"untrusted_address": f"127.0.0.1:{LAN_PORT + 1}"},
+    "the trusted source not forwarded": {"trusted_source_forwarded": False},
+    "the loopback source not refused": {"untrusted_source_refused": False},
+    "no listener": {"listener_refused": True},
+    "a claim about other devices": {"other_devices_exercised": True},
+    "changed user proxy options": {"user_proxy_unchanged": False},
+    "another user proxy": {"user_proxy_sha256": APPLIED_PROXY},
+    "a release claim": {"release_accepted": True},
+}
 MOVED_REFUSALS = {
     "Invoke-NativeNetworkProbe": "Native network proof differs from the UI-owned runtime and original user proxy",
     "Invoke-NativeTunnelProbe": "Native tunnel proof differs from the UI-owned TUN runtime and the original user proxy",
     "Invoke-NativeCombinedProbe": "Native combined proof differs from the UI-owned runtime, its tunnel and its proxy listener",
     "Invoke-NativeLeakProtectionProbe":
         "Native leak protection proof differs from the UI-owned TUN runtime with both switches off",
+    "Invoke-NativeLanProbe": LAN_REFUSAL,
 }
 
 
@@ -260,10 +309,25 @@ class ProbeReceiptTests(unittest.TestCase):
                 self.assertIsNone(result["record"])
                 self.assertEqual(result["failure"], SHORTCUT_REFUSAL)
 
+    def test_a_lan_receipt_that_differs_is_refused(self):
+        cases = [case("Invoke-NativeLanProbe", ["lan-shared", TRUSTED, LAN_PORT], "lan-shared", lan("lan-shared") | difference)
+                 for difference in LAN_DIFFERENCES.values()]
+        # Once sharing is off the same fields are required the other way round.
+        closed = [case("Invoke-NativeLanProbe", ["lan-closed", TRUSTED, LAN_PORT], "lan-closed", lan("lan-closed") | difference)
+                  for difference in ({"listener_refused": False}, {"trusted_source_forwarded": True},
+                                     {"untrusted_source_refused": True})]
+        results, _logs = self.probe(cases + closed)
+        for name, result in zip([*LAN_DIFFERENCES, "a listener", "a forwarded request", "a refused request"],
+                                results, strict=True):
+            with self.subTest(difference=name):
+                self.assertIsNone(result["record"])
+                self.assertEqual(result["failure"], LAN_REFUSAL)
+
     def test_the_other_probes_refuse_another_source_and_another_gui(self):
         one_of_each = [planned for planned in ACCEPTED
                        if planned["launcher"]["file"] in ("http-probe.json", "tunnel-http-probe.json",
-                                                          "combined-http-probe.json", "leak-open-probe.json")]
+                                                          "combined-http-probe.json", "leak-open-probe.json",
+                                                          "lan-shared-probe.json")]
         self.assertEqual([planned["probe"] for planned in one_of_each], list(MOVED_REFUSALS))
         differences = ({"source": "f" * 40}, {"gui_process_id": LAUNCH["process_id"] + 1},
                        {"gui_process_creation_time": LAUNCH["process_creation_time"] + 1})

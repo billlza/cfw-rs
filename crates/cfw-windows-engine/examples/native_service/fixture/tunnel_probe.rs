@@ -9,7 +9,13 @@ use std::{
     net::{Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs},
 };
 use windows_sys::Win32::{
-    NetworkManagement::IpHelper::{GetBestRoute2, MIB_IPFORWARD_ROW2},
+    NetworkManagement::{
+        IpHelper::{
+            GetBestRoute2, GetIpInterfaceEntry, InitializeIpInterfaceEntry, MIB_IPFORWARD_ROW2,
+            MIB_IPINTERFACE_ROW,
+        },
+        Ndis::NET_LUID_LH,
+    },
     Networking::WinSock::{AF_INET, IN_ADDR, IN_ADDR_0, SOCKADDR_IN, SOCKADDR_INET},
 };
 
@@ -109,6 +115,21 @@ fn read_http_response(socket: &mut TcpStream) -> Result<String> {
 /// the product's own interface lookup.
 pub(super) fn adapter_luid(adapter: uuid::Uuid) -> Result<Option<u64>> {
     cfw_windows_engine::tunnel::interface_luid(adapter).map_err(|e| e.to_string())
+}
+
+/// The IPv4 MTU Windows itself reports for an interface.
+pub(super) fn interface_mtu(luid: u64) -> Result<u32> {
+    let mut row = MIB_IPINTERFACE_ROW::default();
+    unsafe { InitializeIpInterfaceEntry(&mut row) };
+    row.Family = AF_INET;
+    row.InterfaceLuid = NET_LUID_LH { Value: luid };
+    let status = unsafe { GetIpInterfaceEntry(&mut row) };
+    if status != 0 {
+        return Err(format!(
+            "observe the IPv4 interface of adapter {luid}: status {status}"
+        ));
+    }
+    Ok(row.NlMtu)
 }
 
 /// The interface Windows itself selects for a destination.

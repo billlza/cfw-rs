@@ -25,9 +25,12 @@ fn listener_observation(port: u16) -> Result<BTreeSet<(u32, std::net::SocketAddr
     cfw_windows_engine::observe_tcp_listeners_at_port(port).map_err(|error| error.to_string())
 }
 
-fn verify_closed_listener(
+/// Nothing listens at `address` and a connection to it is refused. `name`
+/// names the retained observation.
+pub(super) fn verify_closed_listener(
     source: &str,
     receipts: &Path,
+    name: &str,
     address: std::net::SocketAddr,
 ) -> Result<()> {
     let before = listener_observation(address.port())?;
@@ -38,7 +41,7 @@ fn verify_closed_listener(
     let after = listener_observation(address.port())?;
     write(
         receipts,
-        "closed-listener-observation.json",
+        &format!("{name}-listener-observation.json"),
         &serde_json::json!({
             "source": source, "primary": primary, "listeners_before": before, "listeners_after": after,
             "release_accepted": false
@@ -69,7 +72,7 @@ fn verify_closed_listener(
     let target_extended = connect_observation(address, 5);
     write(
         receipts,
-        "closed-listener-diagnostics.json",
+        &format!("{name}-listener-diagnostics.json"),
         &serde_json::json!({
             "source": source, "primary": primary,
             "known_listener_while_open": observed, "known_listener_after_close": control_before,
@@ -179,10 +182,11 @@ impl ObservedGui {
     }
 }
 
-pub(super) fn probe(operation: &str, port: &str) -> Result<()> {
+pub(super) fn probe(operation: &str, port: &str, label: Option<&str>) -> Result<()> {
     if !["http", "closed", "system-http"].contains(&operation) {
         return Err("unknown GUI network probe".into());
     }
+    let name = receipt_name(operation, label)?;
     let (source, receipts) = validation_context()?;
     let port: u16 = port.parse().map_err(|_| "invalid GUI proxy port")?;
     if port == 0 {
@@ -228,7 +232,7 @@ pub(super) fn probe(operation: &str, port: &str) -> Result<()> {
         super::super::user_agent::traffic(address)?;
         None
     } else {
-        verify_closed_listener(&source, &receipts, address)?;
+        verify_closed_listener(&source, &receipts, name, address)?;
         None
     };
     observed.recheck("network probe GUI image changed during observation")?;
@@ -239,7 +243,7 @@ pub(super) fn probe(operation: &str, port: &str) -> Result<()> {
     }
     write(
         &receipts,
-        &format!("{operation}-probe.json"),
+        &format!("{name}-probe.json"),
         &serde_json::json!({
             "document": "cfw-installed-gui-network-probe-v1", "source": source,
             "operation": operation,
@@ -260,13 +264,17 @@ pub(super) fn probe(operation: &str, port: &str) -> Result<()> {
 /// the installation's adapter exists, Windows routes the probe host into it
 /// and a plain HTTP fetch leaves from the adapter's own address; once it is
 /// off, the adapter is gone. TUN Mode never touches the user proxy options.
-pub(super) fn tunnel_probe(operation: &str, installation: &str) -> Result<()> {
-    use super::super::tunnel_probe::{adapter_luid, best_route, fetch_through_tunnel, resolve};
+/// The receipt carries the IPv4 MTU Windows reports for the adapter.
+pub(super) fn tunnel_probe(operation: &str, installation: &str, label: Option<&str>) -> Result<()> {
+    use super::super::tunnel_probe::{
+        adapter_luid, best_route, fetch_through_tunnel, interface_mtu, resolve,
+    };
     let on = match operation {
         "tunnel-http" => true,
         "tunnel-closed" => false,
         _ => return Err("unknown GUI tunnel probe".into()),
     };
+    let name = receipt_name(operation, label)?;
     let (source, receipts) = validation_context()?;
     let installation =
         uuid::Uuid::parse_str(installation).map_err(|_| "invalid GUI installation identity")?;
@@ -278,6 +286,7 @@ pub(super) fn tunnel_probe(operation: &str, installation: &str) -> Result<()> {
     }
     let adapter = cfw_windows_engine::tunnel::adapter_guid(installation);
     let luid = adapter_luid(adapter)?;
+    let mtu = luid.map(interface_mtu).transpose()?;
     let target = resolve()?;
     let route = best_route(target)?;
     let local = if on {
@@ -302,7 +311,7 @@ pub(super) fn tunnel_probe(operation: &str, installation: &str) -> Result<()> {
     }
     write(
         &receipts,
-        &format!("{operation}-probe.json"),
+        &format!("{name}-probe.json"),
         &serde_json::json!({
             "document": "cfw-installed-gui-tunnel-probe-v1", "source": source,
             "operation": operation,
@@ -310,6 +319,7 @@ pub(super) fn tunnel_probe(operation: &str, installation: &str) -> Result<()> {
             "gui_process_creation_time": observed.process.identity().process_creation_time(),
             "gui_same_user_session": true, "installation_id": installation,
             "adapter": adapter, "adapter_luid": luid, "adapter_absent": luid.is_none(),
+            "adapter_mtu": mtu,
             "target": target, "route_luid": route, "route_entered_tunnel": on,
             "local_address": local, "http_through_tunnel_verified": on,
             "user_proxy_sha256": digest, "user_proxy_unchanged": true,
@@ -431,7 +441,7 @@ pub(super) fn verify_exit_network(
         return Err("active GUI exit did not restore the original user proxy".into());
     }
     let address = std::net::SocketAddr::from(([127, 0, 0, 1], expected.proxy_port));
-    verify_closed_listener(source, receipts, address)?;
+    verify_closed_listener(source, receipts, "closed", address)?;
     if proxy_snapshot()? != *original {
         return Err("original user proxy changed during post-exit listener observation".into());
     }

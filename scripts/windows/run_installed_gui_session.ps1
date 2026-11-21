@@ -2,7 +2,7 @@ param(
     [Parameter(Mandatory)][string]$Launcher,
     [Parameter(Mandatory)][string]$Source,
     [Parameter(Mandatory)][string]$Output,
-    [Parameter(Mandatory)][ValidateSet('fresh-off', 'local-proxy', 'node-choice', 'automation', 'subscription', 'tunnel', 'system-proxy-quit')][string]$Scenario,
+    [Parameter(Mandatory)][ValidateSet('fresh-off', 'local-proxy', 'node-choice', 'automation', 'subscription', 'runtime-settings', 'tunnel', 'system-proxy-quit')][string]$Scenario,
     [Parameter(Mandatory)][ref]$SessionResult
 )
 Set-StrictMode -Version Latest
@@ -13,12 +13,13 @@ if (-not $IsWindows -or $env:GITHUB_ACTIONS -cne 'true' -or $env:CFW_NATIVE_SERV
 if ($Source -cnotmatch '^[0-9a-f]{40}$' -or (git rev-parse HEAD) -cne $Source -or $LASTEXITCODE -ne 0) {
     throw 'Installed GUI session source identity mismatch'
 }
-# The subscription session imports documents that GitHub serves from the
-# commit under test over public HTTPS.
-$subscriptionOrigin = $null
+# What the GUI steps of a session are told. The subscription session imports
+# documents that GitHub serves from the commit under test over public HTTPS;
+# the runtime settings session sets its own plan before its first step.
+$sessionInput = $null
 if ($Scenario -ceq 'subscription') {
     if ($env:GITHUB_REPOSITORY -cnotmatch '^[A-Za-z0-9-]+/[A-Za-z0-9_.-]+$') { throw 'The repository of the subscription documents is unknown' }
-    $subscriptionOrigin = "https://raw.githubusercontent.com/$env:GITHUB_REPOSITORY/$Source/scripts/windows/gui/subscriptions"
+    $sessionInput = "https://raw.githubusercontent.com/$env:GITHUB_REPOSITORY/$Source/scripts/windows/gui/subscriptions"
 }
 $outputRoot = (Resolve-Path -LiteralPath $Output).Path
 $userState = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Clash for Windows'
@@ -43,7 +44,7 @@ $receipt = [ordered]@{
     tunnel_adapter_retired=$false; core_preserved_after_tunnel=$false
     startup_registration_exercised=$false; settings_controls_exercised=$false; actual_sign_in_exercised=$false
     node_choice_exercised=$false; profile_deleted=$false; connection_diagnostics_exercised=$false
-    automation_exercised=$false; subscription_exercised=$false
+    automation_exercised=$false; subscription_exercised=$false; runtime_settings_exercised=$false
     physical_display_exercised=$false; network_mode_exercised=$false; release_accepted=$false
 }
 $SessionResult.Value = $receipt
@@ -81,21 +82,22 @@ function Invoke-Playwright([string]$Name, [string[]]$Arguments) {
         return ($result -join "`n")
     } finally { Pop-Location }
 }
-function Invoke-GuiScenario([ValidateSet('startup-off', 'startup-registration', 'settings-controls', 'node-choice-offline', 'node-choice-online', 'profile-delete', 'network-start', 'connection-diagnostics', 'network-stop', 'tunnel-start', 'tunnel-stop', 'combined-start', 'combined-stop', 'leak-protection-on', 'leak-protection-off', 'automation-rule', 'automation-shortcut-stop', 'automation-shortcut-start', 'automation-shortcut-removed', 'subscription-import', 'subscription-update', 'subscription-delete', 'system-proxy-start', 'quit')][string]$Name) {
+function Invoke-GuiScenario([ValidateSet('startup-off', 'startup-registration', 'settings-controls', 'node-choice-offline', 'node-choice-online', 'profile-delete', 'network-start', 'connection-diagnostics', 'network-stop', 'tunnel-start', 'tunnel-stop', 'combined-start', 'combined-stop', 'leak-protection-on', 'leak-protection-off', 'automation-rule', 'automation-shortcut-stop', 'automation-shortcut-start', 'automation-shortcut-removed', 'subscription-import', 'subscription-update', 'subscription-delete', 'runtime-settings-apply', 'runtime-settings-refused', 'runtime-settings-general', 'runtime-settings-mtu', 'runtime-settings-live-mtu', 'runtime-settings-defaults', 'system-proxy-start', 'quit')][string]$Name) {
     $observer = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'gui/observe.js'))
     # The leak protection steps run one script, which is told its step; so do
-    # the steps that follow a press of the global shortcut. The subscription
-    # steps are told where GitHub serves their documents.
+    # the steps that follow a press of the global shortcut and the runtime
+    # settings steps. Every step is told what its session set aside for it.
     $scenarioFile = if ($Name -ceq 'quit') { 'quit-with-state' } elseif ($Name -clike 'leak-protection-*') { 'leak-protection' }
-        elseif ($Name -clike 'automation-shortcut-*') { 'automation-shortcut' } else { $Name }
+        elseif ($Name -clike 'automation-shortcut-*') { 'automation-shortcut' }
+        elseif ($Name -clike 'runtime-settings-*') { 'runtime-settings' } else { $Name }
     $scenarioCode = [IO.File]::ReadAllText((Join-Path $PSScriptRoot "gui/$scenarioFile.js"))
     $quitInput = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'gui/quit.js'))
     $controllerObserver = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'gui/controller.js'))
     $scenarioName = $Scenario | ConvertTo-Json -Compress
     $stepName = $Name | ConvertTo-Json -Compress
-    $origin = ConvertTo-Json -InputObject $subscriptionOrigin -Compress
+    $told = ConvertTo-Json -InputObject $sessionInput -Depth 30 -Compress
     $path = Join-Path $playwrightOutput "$Name.scenario.js"
-    $code = "(async (page) => {`nconst observeNative = (`n" + $observer + "`n);`nconst quitInput = (`n" + $quitInput + "`n);`nconst observeController = (`n" + $controllerObserver + "`n);`nreturn await (`n" + $scenarioCode + "`n)(page, observeNative, " + $scenarioName + ", quitInput, observeController, " + $stepName + ", " + $origin + ");`n})"
+    $code = "(async (page) => {`nconst observeNative = (`n" + $observer + "`n);`nconst quitInput = (`n" + $quitInput + "`n);`nconst observeController = (`n" + $controllerObserver + "`n);`nreturn await (`n" + $scenarioCode + "`n)(page, observeNative, " + $scenarioName + ", quitInput, observeController, " + $stepName + ", " + $told + ");`n})"
     [IO.File]::WriteAllText($path, $code)
     return Invoke-Playwright $Name @('--raw', 'run-code', "--filename=$path")
 }
@@ -140,8 +142,8 @@ try {
     $initialOff | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'startup-off.json') -Encoding utf8NoBOM
     # The steps of each session are in sessions/<scenario>.ps1. The file is
     # dot-sourced, so it runs in this scope: it fills $receipt, reads $launch,
-    # $outputRoot and $Source, calls Invoke-GuiScenario and the native probes,
-    # and a failure in it is handled below like any other.
+    # $outputRoot and $Source, may set $sessionInput, calls Invoke-GuiScenario
+    # and the native probes, and a failure in it is handled below like any other.
     . (Join-Path $PSScriptRoot "sessions/$Scenario.ps1")
     Invoke-Playwright 'console' @('console', 'error') | Out-Null
     # CDP attachment is a test-owned resource. First prove that releasing it

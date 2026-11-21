@@ -38,6 +38,12 @@
   removed the subscription URL and made the profile a local one. While the
   URL is being read, or when it could not be read, Settings is disabled with
   the reason, as Update is.
+- Open the Network settings, turn Allow LAN off and change the log level
+  while the page refreshes the saved settings too. Each of the three read
+  the settings first and gave up when a refresh began before that read was
+  answered, as one does whenever the core changes state: the dialog did not
+  open, and the switch and the log level went back to what they were, with
+  `null` as the only message in the log.
 
 ### Profiles
 

@@ -226,6 +226,112 @@ test("a background settings refresh does not cancel a pending IPv6 choice", asyn
   assert.equal(state.toggles.ipv6DNS, true);
 });
 
+// The dialog, the Allow LAN switch and the log level select read the settings
+// for their own action too. In each test the action's read is still on its
+// way when a background refresh starts and ends.
+test("a background settings refresh does not keep the network settings from opening", async () => {
+  const state = {toggles:{},engineMutationBusy:false,migrationHandoff:false};
+  let resolveRead;
+  const pendingRead = new Promise((resolve) => { resolveRead = resolve; });
+  let reads = 0;
+  const ui = createRuntimeSettingsUI({state,invoke:async (command) => {
+    assert.equal(command, "read_runtime_settings_snapshot");
+    return ++reads === 1 ? pendingRead : response();
+  },appendLog(){},renderPage(){},refreshRuntime(){},dismissOtherDialogs(){}});
+  const opening = ui.open();
+  assert.equal(await ui.load(), true);
+  resolveRead({ ...response(), revision: "read-for-the-dialog" });
+  await opening;
+  assert.equal(state.runtimeSettingsDialog?.revision, "read-for-the-dialog");
+  assert.equal(state.runtimeSettings.revision, "read-for-the-dialog", "the page shows what the dialog was filled from");
+  assert.equal(state.runtimeSettingsError, null);
+});
+
+test("a background settings refresh does not cancel turning LAN sharing off", async () => {
+  const state = {toggles:{},engineMutationBusy:false,migrationHandoff:false};
+  const lan = { listen: "0.0.0.0", port: 7898, allowed_source_cidrs: ["192.168.1.0/24"] };
+  const shared = { ...response(), settings: { ...preferences, allow_lan: true, lan_proxy: lan }, revision: "shared" };
+  let resolveRead;
+  const pendingRead = new Promise((resolve) => { resolveRead = resolve; });
+  let reads = 0;
+  const writes = [];
+  const ui = createRuntimeSettingsUI({state,invoke:async (command, args) => {
+    if (command === "read_runtime_settings_snapshot") return ++reads === 1 ? pendingRead : structuredClone(shared);
+    assert.equal(command, "write_runtime_settings_snapshot");
+    writes.push(args);
+    return { ...shared, settings: args.settings, revision: "unshared" };
+  },appendLog(){},renderPage(){},refreshRuntime(){},dismissOtherDialogs(){assert.fail("turning sharing off opens no dialog");}});
+  const changing = ui.toggleLAN(false);
+  assert.equal(await ui.load(), true);
+  resolveRead(structuredClone(shared));
+  assert.equal(await changing, true);
+  assert.deepEqual(writes, [{ settings: { ...preferences, allow_lan: false, lan_proxy: lan }, revision: "shared" }]);
+  assert.equal(state.toggles.allowLan, false);
+});
+
+test("a background settings refresh does not cancel a chosen log level", async () => {
+  const state = {toggles:{},engineMutationBusy:false,migrationHandoff:false};
+  let resolveRead;
+  const pendingRead = new Promise((resolve) => { resolveRead = resolve; });
+  let reads = 0;
+  const writes = [];
+  const messages = [];
+  const ui = createRuntimeSettingsUI({state,invoke:async (command, args) => {
+    if (command === "read_runtime_settings_snapshot") return ++reads === 1 ? pendingRead : response();
+    assert.equal(command, "write_runtime_settings_snapshot");
+    writes.push(args);
+    return { ...response(), settings: args.settings, revision: "levelled", effective: { ...response().effective, log_level: args.settings.log_level } };
+  },appendLog(...args){messages.push(args);},renderPage(){},refreshRuntime(){},dismissOtherDialogs(){}});
+  const originalDocument = globalThis.document;
+  let choose;
+  globalThis.document = { querySelectorAll: (selector) => (selector === "[data-runtime-log-level]"
+    ? [{ value: "debug", addEventListener: (_event, listener) => { choose = listener; } }] : []) };
+  try {
+    ui.bindPage();
+    const changing = choose();
+    assert.equal(await ui.load(), true);
+    resolveRead(response());
+    await changing;
+  } finally {
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
+  }
+  assert.deepEqual(writes, [{ settings: { ...preferences, log_level: "debug" }, revision: null }]);
+  assert.equal(state.logLevel, "debug");
+  assert.deepEqual(messages.filter(([level]) => level === "error"), []);
+});
+
+test("a read that was already on its way cannot take the settings back from an action", async () => {
+  const state = {toggles:{},engineMutationBusy:false,migrationHandoff:false};
+  let rejectRead;
+  const pendingRead = new Promise((_resolve, reject) => { rejectRead = reject; });
+  let reads = 0;
+  const ui = createRuntimeSettingsUI({state,invoke:async () => (++reads === 1 ? pendingRead : response()),
+    appendLog(){},renderPage(){},refreshRuntime(){},dismissOtherDialogs(){}});
+  const refreshing = ui.load();
+  await ui.open();
+  rejectRead(new Error("settings store is locked"));
+  assert.equal(await refreshing, false);
+  assert.equal(state.runtimeSettingsError, null, "the dialog's own read succeeded after that one began");
+  assert.equal(state.runtimeSettingsDialog.revision, null);
+});
+
+test("an action on the network settings reports a read that failed and changes nothing", async () => {
+  const state = {toggles:{},engineMutationBusy:false,migrationHandoff:false};
+  const calls = [];
+  const ui = createRuntimeSettingsUI({state,invoke:async (command) => {
+    calls.push(command);
+    throw new Error("settings store is locked");
+  },appendLog(){},renderPage(){},refreshRuntime(){},dismissOtherDialogs(){assert.fail("no dialog without settings");}});
+  await ui.open();
+  assert.equal(state.runtimeSettingsDialog, undefined);
+  assert.equal(state.runtimeSettingsError, "settings store is locked");
+  state.runtimeSettingsError = null;
+  await assert.rejects(ui.toggleLAN(false), /settings store is locked/u);
+  assert.equal(state.runtimeSettingsError, "settings store is locked");
+  assert.deepEqual(calls, ["read_runtime_settings_snapshot", "read_runtime_settings_snapshot"]);
+});
+
 test("IPv6 refuses concurrent mutations and restores observed state after a rejected save", async () => {
   const state = {toggles:{},engineMutationBusy:true,migrationHandoff:false};
   const calls = [];

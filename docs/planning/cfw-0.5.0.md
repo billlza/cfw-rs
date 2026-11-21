@@ -3561,7 +3561,7 @@ main 上的托管作业“libbox, Network Extension, and app skeleton gates”�
   原因没有查明。
 - 实体 Windows 机器上没有运行过。
 
-### 2026-11-20：全局快捷键与网络规则进入安装版 GUI 验证（托管第二轮自动化全部通过，退出步骤的名单遗漏已修正，待第三轮）
+### 2026-11-20：全局快捷键与网络规则进入安装版 GUI 验证（托管 Windows 已通过）
 
 功能对齐的下一批。自动化（Settings › Background controls › Shortcuts & network rules）在 Windows 上早已实现：
 `cfw-platform` 读取物理网卡，全局快捷键走 `tauri-plugin-global-shortcut`（Windows 上是隐藏窗口加
@@ -3667,10 +3667,20 @@ stderr，不读上一次留下的回执；驱动脚本调用的探针与模块�
   仍各自被状态检查拒绝。全仓库再查了逐个列出会话名的地方：只有驱动脚本、验证脚本与这一处，前两者都已包含
   automation。
 
-仍未验证，等托管作业：
+托管第三轮（提交 4ff29a12；CI 44766073081、Windows shared contracts 44766073235、Windows desktop 44766072963）：
+十一项检查全部通过，PR #106 以 0be496b3 合并。
 
-- 退出步骤之后的部分：GUI 正常退出、退出时用户代理设置不变、验证脚本对 automation 会话的核对，以及排在它
-  后面的 tunnel 与 system-proxy-quit 会话，本轮都没有运行。
+- automation 会话正常退出（退出码 0，用户代理设置不变），验证脚本接受了它；其后的 tunnel 与 system-proxy-quit
+  会话通过，MSI 卸载完成。
+- 自动化各步与第二轮一致：有线“Ethernet 3”，规则在 Apply 后约 14.8 秒启动核心，三次按键每次 8 个事件全部
+  被接受，两段保持分别看了 24 次与 12 次，第二次按键启动的是代次 7。
+- GUI 步骤跑完六个会话连同 MSI 安装与卸载用了 6 分 55 秒（主干 ddf99fcf 上五个会话是 5 分钟）；作业用了
+  28 分 54 秒，上限 54 分钟。
+
+仍未验证：
+
+- Windows 那一半单元测试在修正前会失败，这一点按源码推断，没有在去掉修正后运行过。
+- 第二条消息“Windows global shortcut registration is unavailable”没有测试（需要一个快捷键插件没有启动的应用）。
 - 用户真机上的 GUI 验收。
 
 ### 2026-10-23：开放事项（需要用户决定或外部条件）

@@ -73,6 +73,21 @@ test("credentials need a stopped core and say so", () => {
   assert.match(menu.renderInPageMenu(), /data-profile-menu="credentials"[^>]*disabled title="Stop the core/u);
 });
 
+test("Settings waits until the subscription URL is known, because saving it writes the URL field back", () => {
+  const menu = createProfileMenu(deps());
+  const settings = () => menu.renderInPageMenu().match(/<button[^>]*data-profile-menu="settings"[^>]*>/u)[0];
+  state.profiles[0].sourceUrl = undefined;
+  state.profileContextMenu = { id: "work", x: 0, y: 0 };
+  assert.match(settings(), /disabled title="Reading this profile…"/u, "an unread URL would be shown as an empty field");
+  state.profiles[0].sourceError = "source read failed";
+  assert.match(settings(), /disabled title="Subscription URL could not be read: source read failed"/u);
+  state.profiles[0].sourceError = null;
+  state.profiles[0].sourceUrl = "https://example.test/sub";
+  assert.doesNotMatch(settings(), /disabled/u, "a known URL");
+  state.profileContextMenu = { id: "local", x: 0, y: 0 };
+  assert.doesNotMatch(settings(), /disabled/u, "a local profile has no URL to lose");
+});
+
 test("the in-page menu stays inside the window and shows its more marker only while items are hidden", async () => {
   const menu = createProfileMenu(deps());
   menu.positionGlassMenu();

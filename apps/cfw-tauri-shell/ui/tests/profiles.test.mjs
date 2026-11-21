@@ -5,6 +5,7 @@ import { state, runtime } from "../src/state.js";
 import { createProfileActions } from "../src/profile-actions.js";
 import { createProfileData } from "../src/profile-data.js";
 import { createProfileDialogs } from "../src/profile-dialogs.js";
+import { createProfileMenu } from "../src/profile-menu.js";
 import { focusProfileEditorSection, openProfileInspector } from "../src/profile-inspector.js";
 import { renderProfiles } from "../src/profiles-view.js";
 
@@ -25,6 +26,7 @@ beforeEach(() => {
   state.profilesUnavailableReason = null;
   state.profileInspector = null;
   state.glassDialog = null;
+  state.profileContextMenu = null;
   state.credentialSetup = null;
   state.logs = [];
   state.engine = { ...state.engine, active: false, state: "Off", desiredMode: "off" };
@@ -372,6 +374,7 @@ function dialogDeps(overrides = {}) {
     closeGlassDialog: spy(),
     loadProfilesSnapshot: spy(async () => true),
     invokeProfileChange: spy(async () => ({ name: "Work copy" })),
+    forgetProfileSource: spy(),
     ...overrides,
   };
 }
@@ -414,6 +417,47 @@ test("editing a profile's name and URL saves both and reports a refusal", async 
   await confirm.fire("click");
   assert.equal(lastLog().message, "Settings failed: invalid URL");
   assert.equal(d.closeGlassOverlays.count(), 2);
+  assert.deepEqual(d.forgetProfileSource.calls, [["work"], ["work"]], "only a saved change drops the URL read before");
+});
+
+test("a URL saved in Settings is read again, so the dialog shows it and never saves the old one back", async () => {
+  const data = createProfileData(dataDeps());
+  const d = dialogDeps({ loadProfilesSnapshot: data.loadProfilesSnapshot, forgetProfileSource: data.forgetProfileSource });
+  const dialogs = createProfileDialogs(d);
+  const confirm = element("button", { dataset: { glassSettingsConfirm: "work" } });
+  dom.setAll("[data-glass-settings-confirm]", [confirm]);
+  dialogs.dialogs.bind();
+  // Opening the context menu reads the URL the profile was imported from.
+  host.respond("read_profile_text", { id: "work", source_url: "https://example.test/old" });
+  assert.equal(await data.resolveProfileSource("work"), "https://example.test/old");
+  host.respond("profiles_snapshot", { profiles: [
+    { id: "work", name: "Office", source_kind: "subscription", active: false },
+    { id: "home", name: "Home", source_kind: "local", active: false },
+  ], invalid_profiles: [] });
+  host.respond("update_profile_info", null);
+  dom.set("[data-glass-settings-name]", element("input", { value: "Office" }));
+  dom.set("[data-glass-settings-url]", element("input", { value: "https://example.test/new" }));
+  await confirm.fire("click");
+  assert.equal(lastLog().message, "Profile settings saved: Office");
+  // The next menu reads the stored URL again and offers Settings only then:
+  // before, the dialog's URL field would be empty and saving it would clear
+  // the URL.
+  const menu = createProfileMenu({ renderPage: spy(), renderGlassOverlays: spy(), resolveProfileSource: data.resolveProfileSource,
+    selectProfileById: spy(), invokeProfileChange: spy(), loadProfilesSnapshot: data.loadProfilesSnapshot, openCredentialSetup: spy() });
+  state.profileContextMenu = { id: "work", x: 0, y: 0 };
+  assert.match(menu.renderInPageMenu(), /data-profile-menu="settings"[^>]*disabled title="Reading this profile…"/u);
+  host.respond("read_profile_text", { id: "work", source_url: "https://example.test/new" });
+  assert.equal(await data.resolveProfileSource("work"), "https://example.test/new");
+  assert.doesNotMatch(menu.renderInPageMenu(), /data-profile-menu="settings"[^>]*disabled/u);
+  assert.equal(host.argsOf("read_profile_text").filter(({ id }) => id === "work").length, 2);
+  const profile = state.profiles.find(({ id }) => id === "work");
+  assert.match(dialogs.dialogs.render({ kind: "settings", id: "work" }, profile), /data-glass-settings-url value="https:\/\/example\.test\/new"/u);
+  // A refused change leaves the URL that was read.
+  host.respond("update_profile_info", new Error("invalid URL"));
+  await confirm.fire("click");
+  assert.equal(lastLog().message, "Settings failed: invalid URL");
+  assert.equal(await data.resolveProfileSource("work"), "https://example.test/new");
+  assert.equal(host.argsOf("read_profile_text").filter(({ id }) => id === "work").length, 2);
 });
 
 test("the delete button confirms the deletion of the profile it names", async () => {

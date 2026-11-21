@@ -26,6 +26,15 @@ use super::{
     parse_hysteria2_bbr_profile, parse_hysteria2_hop_interval_seconds, parse_utls, tls_json,
 };
 
+/// What a document that advertises this device as a Tailscale exit node is
+/// told, naming the device as the platform does.
+#[cfg(target_os = "macos")]
+const EXIT_NODE_ADVERTISEMENT_REFUSAL: &str =
+    "sing-box Tailscale exit-node advertisement is unsupported: this Mac only uses an exit node";
+#[cfg(windows)]
+const EXIT_NODE_ADVERTISEMENT_REFUSAL: &str =
+    "sing-box Tailscale exit-node advertisement is unsupported: this PC only uses an exit node";
+
 /// True when `body` has the node-list shape this adapter converts, which lets
 /// the dispatcher tell a node list the typed schema also reads (credential-free
 /// HTTP lists) from a typed profile this adapter would reject.
@@ -100,7 +109,7 @@ fn convert_endpoint(
             reject_present(ssh_server, "Tailscale SSH server")?;
             reject_present(taildrop_directory, "Taildrop")?;
             if advertise_exit_node {
-                return Err("sing-box Tailscale exit-node advertisement is unsupported: this Mac only uses an exit node".into());
+                return Err(EXIT_NODE_ADVERTISEMENT_REFUSAL.into());
             }
             if system_interface {
                 return Err("sing-box Tailscale system interfaces are unsupported".into());

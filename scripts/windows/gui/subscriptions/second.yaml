@@ -1,0 +1,16 @@
+# The same subscription after its provider changed it. The session points the
+# imported profile at this file and updates it: "first" stays as it was,
+# "second" is gone and "third" is new.
+proxies:
+  - name: first
+    type: ss
+    server: first.example.com
+    port: 8388
+    cipher: aes-256-gcm
+    password: subscription-check-first
+  - name: third
+    type: ss
+    server: third.example.com
+    port: 8389
+    cipher: aes-256-gcm
+    password: subscription-check-third

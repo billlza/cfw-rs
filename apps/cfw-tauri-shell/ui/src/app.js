@@ -152,7 +152,8 @@ const { renderProviders, loadProvidersSnapshot, bindProviderButtons, handleProvi
 });
 
 const {
-  loadProfilesSnapshot, loadSavedProfilePolicy, resolveProfileSource, invokeProfileChange, selectProfileById, applyActiveProfile,
+  loadProfilesSnapshot, loadSavedProfilePolicy, resolveProfileSource, forgetProfileSource, invokeProfileChange, selectProfileById,
+  applyActiveProfile,
 } = createProfileData({
   cancelDelayTest, loadProvidersSnapshot, providerSelectionChanged, loadEngineStatus, loadRuntimeProjection,
 });
@@ -194,7 +195,7 @@ const { dismissNativeProfileMenu, openProfileContextMenu, runProfileMenuAction }
 const updates = createUpdateController({ renderPage, renderGlassOverlays, overlayOpen, closeGlassOverlays });
 const { applyUpdateInfo, invalidateUpdateAuthorization, openProductAboutDialog, updateInstall } = updates;
 const profileDialogs = createProfileDialogs({
-  renderPage, renderGlassOverlays, closeGlassOverlays, closeGlassDialog, loadProfilesSnapshot, invokeProfileChange,
+  renderPage, renderGlassOverlays, closeGlassOverlays, closeGlassDialog, loadProfilesSnapshot, invokeProfileChange, forgetProfileSource,
 });
 const { showInvalidProfileSource } = profileDialogs;
 const diagnosticsDialogs = createDiagnosticsDialogs({ renderPage, renderGlassOverlays, runtimeProjectionActionAllowed });

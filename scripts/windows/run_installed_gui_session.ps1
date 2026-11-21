@@ -2,7 +2,7 @@ param(
     [Parameter(Mandatory)][string]$Launcher,
     [Parameter(Mandatory)][string]$Source,
     [Parameter(Mandatory)][string]$Output,
-    [Parameter(Mandatory)][ValidateSet('fresh-off', 'local-proxy', 'node-choice', 'automation', 'tunnel', 'system-proxy-quit')][string]$Scenario,
+    [Parameter(Mandatory)][ValidateSet('fresh-off', 'local-proxy', 'node-choice', 'automation', 'subscription', 'tunnel', 'system-proxy-quit')][string]$Scenario,
     [Parameter(Mandatory)][ref]$SessionResult
 )
 Set-StrictMode -Version Latest
@@ -12,6 +12,13 @@ if (-not $IsWindows -or $env:GITHUB_ACTIONS -cne 'true' -or $env:CFW_NATIVE_SERV
 }
 if ($Source -cnotmatch '^[0-9a-f]{40}$' -or (git rev-parse HEAD) -cne $Source -or $LASTEXITCODE -ne 0) {
     throw 'Installed GUI session source identity mismatch'
+}
+# The subscription session imports documents that GitHub serves from the
+# commit under test over public HTTPS.
+$subscriptionOrigin = $null
+if ($Scenario -ceq 'subscription') {
+    if ($env:GITHUB_REPOSITORY -cnotmatch '^[A-Za-z0-9-]+/[A-Za-z0-9_.-]+$') { throw 'The repository of the subscription documents is unknown' }
+    $subscriptionOrigin = "https://raw.githubusercontent.com/$env:GITHUB_REPOSITORY/$Source/scripts/windows/gui/subscriptions"
 }
 $outputRoot = (Resolve-Path -LiteralPath $Output).Path
 $userState = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Clash for Windows'
@@ -36,7 +43,7 @@ $receipt = [ordered]@{
     tunnel_adapter_retired=$false; core_preserved_after_tunnel=$false
     startup_registration_exercised=$false; settings_controls_exercised=$false; actual_sign_in_exercised=$false
     node_choice_exercised=$false; profile_deleted=$false; connection_diagnostics_exercised=$false
-    automation_exercised=$false
+    automation_exercised=$false; subscription_exercised=$false
     physical_display_exercised=$false; network_mode_exercised=$false; release_accepted=$false
 }
 $SessionResult.Value = $receipt
@@ -74,10 +81,11 @@ function Invoke-Playwright([string]$Name, [string[]]$Arguments) {
         return ($result -join "`n")
     } finally { Pop-Location }
 }
-function Invoke-GuiScenario([ValidateSet('startup-off', 'startup-registration', 'settings-controls', 'node-choice-offline', 'node-choice-online', 'profile-delete', 'network-start', 'connection-diagnostics', 'network-stop', 'tunnel-start', 'tunnel-stop', 'combined-start', 'combined-stop', 'leak-protection-on', 'leak-protection-off', 'automation-rule', 'automation-shortcut-stop', 'automation-shortcut-start', 'automation-shortcut-removed', 'system-proxy-start', 'quit')][string]$Name) {
+function Invoke-GuiScenario([ValidateSet('startup-off', 'startup-registration', 'settings-controls', 'node-choice-offline', 'node-choice-online', 'profile-delete', 'network-start', 'connection-diagnostics', 'network-stop', 'tunnel-start', 'tunnel-stop', 'combined-start', 'combined-stop', 'leak-protection-on', 'leak-protection-off', 'automation-rule', 'automation-shortcut-stop', 'automation-shortcut-start', 'automation-shortcut-removed', 'subscription-import', 'subscription-update', 'subscription-delete', 'system-proxy-start', 'quit')][string]$Name) {
     $observer = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'gui/observe.js'))
     # The leak protection steps run one script, which is told its step; so do
-    # the steps that follow a press of the global shortcut.
+    # the steps that follow a press of the global shortcut. The subscription
+    # steps are told where GitHub serves their documents.
     $scenarioFile = if ($Name -ceq 'quit') { 'quit-with-state' } elseif ($Name -clike 'leak-protection-*') { 'leak-protection' }
         elseif ($Name -clike 'automation-shortcut-*') { 'automation-shortcut' } else { $Name }
     $scenarioCode = [IO.File]::ReadAllText((Join-Path $PSScriptRoot "gui/$scenarioFile.js"))
@@ -85,8 +93,9 @@ function Invoke-GuiScenario([ValidateSet('startup-off', 'startup-registration', 
     $controllerObserver = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'gui/controller.js'))
     $scenarioName = $Scenario | ConvertTo-Json -Compress
     $stepName = $Name | ConvertTo-Json -Compress
+    $origin = ConvertTo-Json -InputObject $subscriptionOrigin -Compress
     $path = Join-Path $playwrightOutput "$Name.scenario.js"
-    $code = "(async (page) => {`nconst observeNative = (`n" + $observer + "`n);`nconst quitInput = (`n" + $quitInput + "`n);`nconst observeController = (`n" + $controllerObserver + "`n);`nreturn await (`n" + $scenarioCode + "`n)(page, observeNative, " + $scenarioName + ", quitInput, observeController, " + $stepName + ");`n})"
+    $code = "(async (page) => {`nconst observeNative = (`n" + $observer + "`n);`nconst quitInput = (`n" + $quitInput + "`n);`nconst observeController = (`n" + $controllerObserver + "`n);`nreturn await (`n" + $scenarioCode + "`n)(page, observeNative, " + $scenarioName + ", quitInput, observeController, " + $stepName + ", " + $origin + ");`n})"
     [IO.File]::WriteAllText($path, $code)
     return Invoke-Playwright $Name @('--raw', 'run-code', "--filename=$path")
 }
@@ -234,6 +243,52 @@ try {
         }
         $receipt.engine_stopped = $true
         $receipt.automation_exercised = $true
+        $receipt.network_mode_exercised = $true
+    } elseif ($Scenario -ceq 'subscription') {
+        # A subscription imported by its URL beside the LocalProxy profile, with
+        # its passwords in Windows protected storage, starts the core. Once the
+        # core is stopped, the profile is renamed, pointed at the changed
+        # document and updated. The LocalProxy profile is selected again, the
+        # subscription profile is deleted and the credentials it leaves are
+        # cleaned up, so the next session begins as this one did.
+        $imported = (Invoke-GuiScenario 'subscription-import') | ConvertFrom-Json
+        $imported | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'subscription-import.json') -Encoding utf8NoBOM
+        if ($imported.release_accepted -or $imported.profile -ceq $imported.kept -or @($imported.requirements).Count -ne 2) {
+            throw 'The subscription import receipt is invalid'
+        }
+        $receipt.native_gui_exercised = $true
+        $receipt.imported_profile_id = $imported.profile
+        $receipt.kept_profile_id = $imported.kept
+        $receipt.active_runtime = $imported.active.snapshot.state.runtime
+        $stopped = (Invoke-GuiScenario 'network-stop') | ConvertFrom-Json
+        $stopped | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'network-stop.json') -Encoding utf8NoBOM
+        $startedIdentity = $imported.active.snapshot.state.runtime | ConvertTo-Json -Depth 20 -Compress
+        $stoppedIdentity = $stopped.before.snapshot.state.runtime | ConvertTo-Json -Depth 20 -Compress
+        if ($startedIdentity -cne $stoppedIdentity -or $stopped.stopped.snapshot.state.state -cne 'off' -or
+            $stopped.stopped.snapshot.desired_mode -cne 'off') {
+            throw 'GUI stop did not retire the core that ran the subscription'
+        }
+        $receipt.engine_stopped = $true
+        $updated = (Invoke-GuiScenario 'subscription-update') | ConvertFrom-Json
+        $updated | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'subscription-update.json') -Encoding utf8NoBOM
+        if ($updated.before.saved.id -cne $receipt.imported_profile_id -or $updated.updated.digest -ceq $imported.imported.digest -or
+            @($updated.requirements).Count -ne 2 -or $updated.release_accepted) {
+            throw 'The update did not replace the document of the imported subscription'
+        }
+        $deleted = (Invoke-GuiScenario 'subscription-delete') | ConvertFrom-Json
+        $deleted | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'subscription-delete.json') -Encoding utf8NoBOM
+        # The vault keeps the passwords of both documents until the cleanup, so
+        # it offers exactly the references imported and those of the update.
+        $expected = (@($imported.requirements) + @($updated.requirements) | ForEach-Object { $_.id } | Sort-Object) -join ','
+        $offered = (@($deleted.references) | Sort-Object) -join ','
+        $remaining = @($deleted.deleted.profiles)
+        if ($deleted.before.saved.id -cne $receipt.imported_profile_id -or $deleted.kept -cne $receipt.kept_profile_id -or
+            $remaining.Count -ne 1 -or $remaining[0].id -cne $receipt.kept_profile_id -or -not $remaining[0].active -or
+            $offered -cne $expected -or $deleted.release_accepted) {
+            throw 'The subscription profile and the credentials it left were not removed through the GUI'
+        }
+        $receipt.profile_deleted = $true
+        $receipt.subscription_exercised = $true
         $receipt.network_mode_exercised = $true
     } elseif ($Scenario -ceq 'local-proxy') {
         $started = (Invoke-GuiScenario 'network-start') | ConvertFrom-Json

@@ -7,6 +7,7 @@ const actions = [
   { id: "edit", label: "Edit", icon: "edit" },
   { id: "update", label: "Update", icon: "refresh", remoteOnly: true },
   { id: "credentials", label: "Credentials", icon: "gear", needsEngineOff: true },
+  { id: "settings", label: "Settings", icon: "gear", needsKnownSource: true },
   { id: "delete", label: "Delete", icon: "trash", danger: true, activeReason: "Select another profile first" },
 ];
 const t = (key, args = {}) => key.replace("{sourceError}", args.sourceError);
@@ -22,8 +23,11 @@ test("native material keeps original action ordering, hidden selection and disab
         assert.equal(items.find(({ id }) => id === "delete").reason, active ? "Select another profile first" : null);
         const update = items.find(({ id }) => id === "update");
         assert.equal(update.reason, sourceUrl === undefined ? "Reading this profile…" : sourceUrl === null ? "This profile was imported locally and has no subscription URL." : null);
+        // Settings needs the URL read, not a URL: a local profile has none.
+        assert.equal(items.find(({ id }) => id === "settings").reason, sourceUrl === undefined ? "Reading this profile…" : null);
         const native = nativeMenuItems(items);
         assert.equal(native.find(({ id }) => id === "update").enabled, sourceUrl !== undefined && sourceUrl !== null);
+        assert.equal(native.find(({ id }) => id === "settings").enabled, sourceUrl !== undefined);
         assert.equal(native.find(({ id }) => id === "delete").enabled, !active);
         assert.ok(native.at(-1).danger);
         assert.equal(native.filter(({ danger }) => danger).length, 1);
@@ -32,6 +36,7 @@ test("native material keeps original action ordering, hidden selection and disab
   }
   const failure = profileMenuItems(actions, { sourceError: "source read failed" }, options(true));
   assert.equal(failure.find(({ id }) => id === "update").reason, "Subscription URL could not be read: source read failed");
+  assert.equal(failure.find(({ id }) => id === "settings").reason, "Subscription URL could not be read: source read failed");
 });
 
 function transport() {

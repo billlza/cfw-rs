@@ -3,14 +3,12 @@
 export function profileMenuItems(actions, profile, { engineOff, engineNotOffReason, t }) {
   return actions.filter((action) => !(action.needsInactive && profile.active)).map((action) => {
     let reason = null;
-    if (action.remoteOnly) {
-      if (profile.sourceUrl === undefined) {
-        reason = profile.sourceError
-          ? t("Subscription URL could not be read: {sourceError}", { sourceError: profile.sourceError })
-          : t("Reading this profile…");
-      } else if (profile.sourceUrl === null) {
-        reason = t("This profile was imported locally and has no subscription URL.");
-      }
+    if ((action.remoteOnly || action.needsKnownSource) && profile.sourceUrl === undefined) {
+      reason = profile.sourceError
+        ? t("Subscription URL could not be read: {sourceError}", { sourceError: profile.sourceError })
+        : t("Reading this profile…");
+    } else if (action.remoteOnly && profile.sourceUrl === null) {
+      reason = t("This profile was imported locally and has no subscription URL.");
     }
     // An action the repository refuses for the selected profile says so.
     if (!reason && action.activeReason && profile.active) reason = action.activeReason;

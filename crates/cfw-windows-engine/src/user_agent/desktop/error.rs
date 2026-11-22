@@ -3,7 +3,7 @@ use crate::{
     ServiceTransportError,
     authority::wire::WireError,
     credential_lifecycle::CredentialLifecycleError,
-    user_agent::{EndpointConflict, handoff::HandoffError, launcher::LaunchError},
+    user_agent::{StartRefusal, handoff::HandoffError, launcher::LaunchError},
 };
 use std::sync::Arc;
 
@@ -37,8 +37,8 @@ pub enum DesktopError {
     Observation(Arc<Self>),
     /// The Agent ended the run after its engine refused the start, and
     /// cleaned up first; global Off is still to be proven by the caller.
-    #[error("Windows Desktop start: another program holds the address of the {0}")]
-    EndpointConflict(EndpointConflict),
+    #[error("Windows Desktop start: {0}")]
+    StartRefused(StartRefusal),
     #[error("Windows Desktop operation failed ({operation}); cleanup failed ({cleanup})")]
     Cleanup {
         operation: Box<Self>,
@@ -50,9 +50,9 @@ pub type Result<T> = std::result::Result<T, DesktopError>;
 impl DesktopError {
     /// The refusal an Agent reported by its exit code, as a stop that revoked
     /// the lease first observed it.
-    pub(super) fn reported_conflict(&self) -> Option<EndpointConflict> {
+    pub(super) fn reported_refusal(&self) -> Option<StartRefusal> {
         match self {
-            Self::Launch(LaunchError::Exit(code)) => EndpointConflict::of_exit_code(*code),
+            Self::Launch(LaunchError::Exit(code)) => StartRefusal::of_exit_code(*code),
             _ => None,
         }
     }
@@ -63,15 +63,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_an_observed_refusal_exit_is_a_reported_conflict() {
-        assert_eq!(
-            DesktopError::Launch(LaunchError::Exit(0xCF31)).reported_conflict(),
-            Some(EndpointConflict::Mixed)
-        );
-        assert_eq!(
-            DesktopError::Launch(LaunchError::Exit(0xCF32)).reported_conflict(),
-            Some(EndpointConflict::Controller)
-        );
+    fn only_an_observed_refusal_exit_is_a_reported_refusal() {
+        for (code, refusal) in [
+            (0xCF30, StartRefusal::Engine),
+            (0xCF31, StartRefusal::MixedEndpoint),
+            (0xCF32, StartRefusal::ControllerEndpoint),
+        ] {
+            assert_eq!(
+                DesktopError::Launch(LaunchError::Exit(code)).reported_refusal(),
+                Some(refusal)
+            );
+        }
         for error in [
             DesktopError::Launch(LaunchError::Exit(1)),
             // The C runtime's abort().
@@ -80,10 +82,10 @@ mod tests {
             // A stop whose revocation failed too did not see the run end.
             DesktopError::Cleanup {
                 operation: Box::new(DesktopError::Context),
-                cleanup: Box::new(DesktopError::Launch(LaunchError::Exit(0xCF31))),
+                cleanup: Box::new(DesktopError::Launch(LaunchError::Exit(0xCF30))),
             },
         ] {
-            assert_eq!(error.reported_conflict(), None, "{error}");
+            assert_eq!(error.reported_refusal(), None, "{error}");
         }
     }
 }

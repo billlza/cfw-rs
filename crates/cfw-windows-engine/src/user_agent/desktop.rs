@@ -287,10 +287,10 @@ impl DesktopUserAgent {
         match (operated, stopped) {
             (Ok(reason), Ok(stopped)) => Ok(DesktopCompleted { reason, stopped }),
             (Err(error), Ok(_)) | (Ok(_), Err(error)) => Err(error),
-            // The Agent ended the run itself: its engine could not bind an
-            // endpoint another program holds, and it cleaned up first.
-            (Err(operation), Err(cleanup)) => Err(match cleanup.reported_conflict() {
-                Some(conflict) => DesktopError::EndpointConflict(conflict),
+            // The Agent ended the run itself: its engine refused the start,
+            // and it cleaned up first.
+            (Err(operation), Err(cleanup)) => Err(match cleanup.reported_refusal() {
+                Some(refusal) => DesktopError::StartRefused(refusal),
                 None => DesktopError::Cleanup {
                     operation: Box::new(operation),
                     cleanup: Box::new(cleanup),

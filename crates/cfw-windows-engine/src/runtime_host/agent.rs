@@ -1,6 +1,6 @@
 use super::*;
 use crate::user_agent::{
-    EndpointConflict, UserAgentSession, UserRuntimeStorage, launch_channel::LaunchReceiver,
+    StartRefusal, UserAgentSession, UserRuntimeStorage, launch_channel::LaunchReceiver,
 };
 use std::{
     os::windows::io::AsHandle,
@@ -119,11 +119,12 @@ impl Readiness {
 }
 
 /// The UserAgent's exit code after `error`: 1, or the code of a start the
-/// engine refused because another program holds an endpoint.
+/// engine refused.
 pub fn agent_exit_code(error: &HostError) -> i32 {
     match error {
-        HostError::Agent(error) => EndpointConflict::of_agent_error(error)
-            .map_or(1, |conflict| i32::from(conflict.exit_code())),
+        HostError::Agent(error) => {
+            StartRefusal::of_agent_error(error).map_or(1, |refusal| i32::from(refusal.exit_code()))
+        }
         _ => 1,
     }
 }
@@ -143,7 +144,11 @@ mod tests {
         assert_eq!(agent_exit_code(&mixed.unwrap_err()), 0xCF31);
         let controller = Readiness::Ended.outcome(refused("controller_endpoint_in_use"));
         assert_eq!(agent_exit_code(&controller.unwrap_err()), 0xCF32);
-        let other = Readiness::Ended.outcome(refused("start_failed"));
+        for code in ["construct_failed", "start_failed"] {
+            let engine = Readiness::Ended.outcome(refused(code));
+            assert_eq!(agent_exit_code(&engine.unwrap_err()), 0xCF30, "{code}");
+        }
+        let other = Readiness::Ended.outcome(refused("invalid_config"));
         assert_eq!(agent_exit_code(&other.unwrap_err()), 1);
         assert!(matches!(
             Readiness::Ended.outcome(Ok(())),
@@ -156,11 +161,11 @@ mod tests {
     #[test]
     fn a_readiness_failure_of_its_own_is_never_a_refusal() {
         let late = || Readiness::Failed(HostError::State("late"));
-        let both = late()
-            .outcome(refused("mixed_endpoint_in_use"))
-            .unwrap_err();
-        assert!(matches!(both, HostError::Cleanup { .. }));
-        assert_eq!(agent_exit_code(&both), 1);
+        for code in ["start_failed", "mixed_endpoint_in_use"] {
+            let both = late().outcome(refused(code)).unwrap_err();
+            assert!(matches!(both, HostError::Cleanup { .. }));
+            assert_eq!(agent_exit_code(&both), 1);
+        }
         assert!(matches!(
             late().outcome(Ok(())),
             Err(HostError::State("late"))

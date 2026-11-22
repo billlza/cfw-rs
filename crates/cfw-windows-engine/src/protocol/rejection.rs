@@ -2,6 +2,11 @@
 //! error. Any other code is a protocol failure: free-form engine output and
 //! configuration text never leave the child.
 
+/// The engine could not build the configuration it was given.
+pub(crate) const CONSTRUCT_FAILED: &str = "construct_failed";
+/// The engine built the configuration and could not start it: a LAN
+/// listener another program holds, or any other failure of the start itself.
+pub(crate) const START_FAILED: &str = "start_failed";
 /// Another program holds the loopback proxy listener's address.
 pub(crate) const MIXED_ENDPOINT_IN_USE: &str = "mixed_endpoint_in_use";
 /// Another program holds the controller's address.
@@ -13,8 +18,8 @@ const CODES: [&str; 22] = [
     "invalid_check",
     "invalid_config",
     "invalid_log_output",
-    "construct_failed",
-    "start_failed",
+    CONSTRUCT_FAILED,
+    START_FAILED,
     MIXED_ENDPOINT_IN_USE,
     CONTROLLER_ENDPOINT_IN_USE,
     "invalid_observation",

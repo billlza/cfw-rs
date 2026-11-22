@@ -4050,11 +4050,74 @@ Windows 上运行的单元测试。Windows 目标的 clippy 无警告。
 - 其他启动失败（例如 LAN 端口被占用，仍是 `start_failed`）在 Windows 上仍以 `CleanupUnproven` 结束。此前这里写
   macOS 把 LAN 冲突也归为 Mixed，不对：它的 libbox 补丁对任何 mixed 入站都报冲突，但启动回执只接受
   `cfw-system-proxy` 端口上的冲突，所以被占用的 LAN 端口在 macOS 上是普通的引擎启动失败（代理模式
-  `SystemProxyRuntimeFailed`，隧道模式 `Unavailable`），Off 得到证明，不隔离。后续对齐。
+  `SystemProxyRuntimeFailed`，隧道模式 `Unavailable`），Off 得到证明，不隔离。下一节对齐。
 - 冲突时 Desktop 只保留冲突，丢弃启动本身的错误；安全仍由 Off 证明保证。
 - 退出码通道：别的程序以 0xCF31／0xCF32 结束 UserAgent，也会被读成冲突。Off 证明仍然成立，后果是错误的提示与
   跳过一个端口。
 - 共享行为，这一批没有改：端口改动时控制器的游标重置；回滚的原话偏技术化。
+
+### 2026-11-22：另一程序占用的 LAN 端口（与 macOS 对齐；托管结果待定）
+
+上一节留下的一条（用户：“接着对齐”）。LAN 共享所用的端口被另一程序占用时，macOS 的结果是普通的引擎
+启动失败（读源码）：libbox 补丁 `sing-box-v1.14.4-endpoint-conflict.patch` 的 `classifyMixedListenError` 对任何
+mixed 入站的 listen 失败都报冲突，但 `LibboxRuntimeEndpointConflict.validated` 只在 System Proxy 角色、且回执
+里 `cfw-system-proxy` 监听的端口就是冲突端口时才接受，所以 `cfw-lan-proxy` 的冲突成为
+`invalidEndpointConflict`：ProxyAgent 的启动以 `SystemProxyRuntimeFailed` 失败，Packet Tunnel 的以
+`Unavailable` 失败。引擎建不起配置也是这样：`NativeBridgeCoordinatorSupport.swift` 把 `engineCreationFailed` 与
+`engineStartFailed` 归为同一类（ProxyAgent 的是 `systemProxyRuntimeFailed`，Packet Tunnel 的是 `unavailable`）。
+共享协调器对这两类都不要求显式对账：停止并证明 Off，状态 failed，期望模式保留，不隔离；运行中的设置改动
+回滚到旧核心。
+
+Windows 改动前：引擎宿主对 LAN 冲突回答 `start_failed`，UserAgent 以 1 退出，Desktop 的撤销观察到退出码 1，
+结果是 `DesktopError::Cleanup`，后端合成 `CleanupUnproven`，协调器隔离，直到显式停止。托管运行
+[44975936971](https://github.com/billlza/cfw-rs/actions/runs/44975936971) 对代理端口走过同一条路径（宿主那时还
+不区分冲突，原话里是 `start_failed` 与 `exited unsuccessfully (0x1)`）。
+
+改动（服务端、线协议与日志格式不变）：
+
+- `user_agent/endpoint_conflict.rs` 改为 `user_agent/start_refusal.rs`：`StartRefusal` 有三种，
+  `MixedEndpoint`（0xCF31）、`ControllerEndpoint`（0xCF32），以及新的 `Engine`（0xCF30）：单独的
+  `start_failed`（引擎建起了配置却启动不了）或 `construct_failed`（建不起配置），与 macOS 的归类相同。条件与
+  前两种相同：这个拒绝就是运行自身的全部结果，本地清理与 Authority 的 Stopped 确认都已成功。其他拒绝仍以 1
+  退出。`protocol/rejection.rs` 加 `START_FAILED` 与 `CONSTRUCT_FAILED`。
+- Desktop：`DesktopError::EndpointConflict` 改为 `StartRefused`，判读三个退出码；`run_owned` 照旧用
+  `finish_global_stop` 证明 Off，证明失败仍是 `CleanupUnproven`。
+- 后端：`reported_refusal` 认这三类；`refused_start` 再观察一次 Off、退役运行，然后按模式给 `Engine` 命名
+  （`retirement::in_mode`）：两种代理模式 `SystemProxyRuntimeFailed`，两种隧道模式 `Unavailable`，与 macOS
+  相同。Windows 引擎 crate 里只有这一处产生这三类错误。没有 Off 证明的启动仍是 `CleanupUnproven`。
+- `backend.rs`（739 行）与 `desktop.rs`（782 行）没有增长；引擎 README 改写了这一段。
+
+检查（提交 `236dd55e`，先于修复）：`port-conflict` 会话在所有地址上再占一个端口；端口改动被拒之后，新步骤
+`port-conflict-lan` 在 Network settings 里对它打开 LAN 共享，要求协调器“已恢复旧核心”的原话
+（`native operation start_local_proxy failed: SystemProxyRuntimeFailed: Windows Desktop start: the engine could
+not start; the previous runtime was restored`）、代次更高的旧设置核心、配置里没有 `cfw-lan-proxy`、什么都没有
+保存。会话随后要求这次改动从端口改动恢复的核心开始、探针经恢复的核心转发、LAN 端口仍由会话自己的监听应答，
+停止退役的正是这个核心。会话多一次被拒的改动和一次恢复；会话从启动到退出的上限仍是 180 秒。
+
+本机验证：
+
+- 排练（构建出的界面与模拟共享协调器的替身宿主）：1028×729 与 860×520、两种绑定顺序、迟到的引擎事件与慢的
+  设置读写下全部通过，没有点空。LAN 步骤拒绝五个故障模型：改动前的 Windows 后端（隔离）、把 LAN 冲突报成
+  代理监听冲突、被拒的改动仍被保存、旧核心没有再启动、壳层把被拒的 LAN 设置留作生效设置。第五个起初写成
+  “恢复的引擎仍带 LAN 监听”，步骤没有拒绝；这在真实系统里不会发生（端口被占，带 LAN 的引擎起不来），改成了
+  现在这个会发生的缺陷。
+- 会话文件在 PowerShell 7.6.4 上用排练结果、真实监听与替身探针运行：验证器接受；23 个会话故障（新增 5 个）
+  与 16 个验证器故障各自以预期的原话被拒。
+- Rust：macOS 上引擎 crate 的 188 项单元测试通过；五种变异各自让测试失败：`start_failed` 不算拒绝（即改动前
+  的行为）、`construct_failed` 不算、`invalid_config` 也算、`Engine` 以 1 退出、与代理监听共用 0xCF31。
+  Windows 目标的 clippy（CI 特性集全部目标；lib 与测试）无警告，故意破坏一处 Windows 专属代码会被报出。只能在
+  Windows 上运行的测试（退出码、Desktop 的判读、后端的类别与按模式命名）由托管的 shared-contracts 作业运行。
+
+仍未验证：
+
+- 托管 Windows 上的结果。
+- 隧道模式与 System Proxy 模式下被占的 LAN 端口：会话只有 LocalProxy；隧道模式的 `Unavailable` 只有单元测试。
+- 引擎读不了的配置（`invalid_config`）与其他拒绝仍以 `CleanupUnproven` 结束；macOS 对读不了的配置报
+  `SystemProxyConfigurationFailed`。启动前的检查本应先拒绝这些配置。
+- 别的程序以 0xCF30 结束 UserAgent，也会被读成引擎拒绝；Off 证明仍然成立，后果是错误的提示。
+- 会话的时间余量：托管日志没有逐步时间。上一轮从这个会话的进程启动到第五步的失败被报告约 182 秒，其中包括
+  失败后的收尾（按代码可能等满了 180 秒的退出期限），所以第五步之前用了多久不知道；加这一步后的完整时长只有
+  托管结果能给出。
 
 ### 2026-10-23：开放事项（需要用户决定或外部条件）
 

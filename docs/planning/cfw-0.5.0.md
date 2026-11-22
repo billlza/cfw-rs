@@ -3913,7 +3913,7 @@ stderr，不读上一次留下的回执；驱动脚本调用的探针与模块�
   好懂（共享行为，这一批没有改）。
 - 用户真机上的 GUI 验收。
 
-### 2026-11-22：另一程序占用的本地端口（托管 Windows 已复现；修复的托管结果待定）
+### 2026-11-22：另一程序占用的本地端口（托管 Windows 已复现；修复的第一轮暴露一个竞态，已修复，托管结果待定）
 
 功能对齐的下一批（用户选定“端口冲突”）。另一程序占用本地端口时，macOS 的原生桥报告 `MixedEndpointInUse`／
 `ControllerEndpointInUse`，协调器清理并证明 Off 后返回 `StartEndpointConflictAfterOff`，此后全是共享代码：
@@ -4008,14 +4008,49 @@ Agent: Windows user-agent native child: Windows engine rejected operation: start
   `ci-no-masking`、`version-contract`、`build-script-boundary`、`evidence-manifest-lane`、`release-tool-tests`
   （3862 项，跳过 2 项）。
 
+修复的第一轮托管结果（提交 `77938078`）：[shared-contracts 44980871487](https://github.com/billlza/cfw-rs/actions/runs/44980871487)
+与 [CI 44980871485](https://github.com/billlza/cfw-rs/actions/runs/44980871485) 通过，其中有 `native_engine` 的两例
+冲突、Windows 上的宿主 Go 测试和只能在 Windows 上运行的单元测试。[桌面作业 44980871510](https://github.com/billlza/cfw-rs/actions/runs/44980871510)
+里 `port-conflict` 的前两步通过：核心在 7891 与下一个控制器端口上运行，Network settings 里被占用的端口恢复了
+旧核心且没有保存；最后一步 `port-conflict-configured` 失败，此后的会话（tunnel 起）没有运行。UserAgent 的日志
+里这次会话的五次启动全是引擎自己的拒绝（四次 `mixed_endpoint_in_use`、一次 `controller_endpoint_in_use`），前
+四次 Desktop 都判成冲突，第五次的原话是 `CleanupUnproven: OwnerUnresponsive: runtime Ready was not delivered: …;
+cleanup: CleanupUnproven: CleanupUnproven: Windows Desktop operation failed (Windows Desktop operation state:
+authority ended before Ready); cleanup failed (Windows Desktop operation failed (Windows Desktop authority:
+Windows authority command was rejected: Identity); cleanup failed (Windows Desktop launcher: Windows UserAgent
+exited unsuccessfully (0xcf31))); cleanup: OwnerUnresponsive: Windows Desktop operation state: authority connection
+unavailable`。UserAgent 以 0xCF31 退出，没有错。
+
+根因是 Desktop 一直有的竞态，冲突只是让它变得常见。Desktop 观察自己的运行时先发 Observe，在仍有租约的状态
+（Preparing／Starting／Active／Stopping）再发 OwnedLease；Authority 一次答一个请求。UserAgent 自己结束运行时，
+SYSTEM 可能在这两个请求之间提交 Off 并释放租约，`lease_for_owner` 对没有租约的请求回答 `Identity`，与别人
+持有租约时一样。这一次：运行循环读到 Stopping，返回“authority ended before Ready”；随后的撤销又读到 Stopping，
+OwnedLease 却被 `Identity` 拒绝。撤销失败时 `stop()` 按设计关闭 Authority 连接（让 SYSTEM 的计时器撤销绑定），
+`finish_global_stop` 于是没有连接可用，证明不了 Off，结果是 `CleanupUnproven`。前四次没有撞上：按代码，撤销
+的第一次观察要么已经读到 Off，要么租约还在。
+
+修复（服务端与线协议不变）：两次读取移到不依赖平台的 `user_agent/owner_observation.rs`，Desktop 经
+`user_agent/desktop/owner_reads.rs` 使用（`desktop.rs` 799 → 782 行）。OwnedLease 被 `Identity` 拒绝时再观察
+一次：运行已经离开所有带租约的状态（Off、Recovering、Quarantined）就以这次观察为结果，否则拒绝照旧；第二次
+观察失败就以它的错误为结果；其他拒绝不再观察。运行的身份（`RootContext`）仍由每次观察核对。运行循环、Ready
+之后的看守、状态查询与撤销共用这一处；按代码，Agent 在 Ready 之后自己结束运行时，看守也不再因此报错。
+
+本机验证这一处：六个单元测试按 Authority 的回答顺序编排两次读取（先 Stopping 后 Off 等四例、租约仍在时拒绝
+照旧、第二次观察失败、其他拒绝、已证明的租约、没有租约的状态）。先按原来的逻辑写，三例失败，失败的原话就是
+托管上的 `Identity`；修复后全部通过。五种变异（改回原逻辑、接受任何第二次观察、任何拒绝都再观察、仍返回第一次
+观察、Stopping 不算带租约）各自被测试发现。Desktop 对拒绝的判定（只有 Authority 的 `Identity`）另有只在
+Windows 上运行的单元测试。Windows 目标的 clippy 无警告。
+
 仍未验证：
 
-- 托管 Windows 上修复的结果。
+- 托管 Windows 上这次修复的结果；竞态取决于时序，一轮通过不能证明它不再出现，单元测试才是证明。
 - 经协调器的 SystemProxy 与组合模式冲突：托管会话只有 LocalProxy，夹具只经后端。SystemProxy 的冲突走既有的
   `finish_global_stop` 与恢复记录。
 - `WSAEACCES`（保留端口范围）只用合成错误测过。
-- 其他启动失败（例如 LAN 端口被占用，仍是 `start_failed`）在 Windows 上仍以 `CleanupUnproven` 结束；macOS
-  把 LAN 冲突也归为 Mixed。可作后续。
+- 其他启动失败（例如 LAN 端口被占用，仍是 `start_failed`）在 Windows 上仍以 `CleanupUnproven` 结束。此前这里写
+  macOS 把 LAN 冲突也归为 Mixed，不对：它的 libbox 补丁对任何 mixed 入站都报冲突，但启动回执只接受
+  `cfw-system-proxy` 端口上的冲突，所以被占用的 LAN 端口在 macOS 上是普通的引擎启动失败（代理模式
+  `SystemProxyRuntimeFailed`，隧道模式 `Unavailable`），Off 得到证明，不隔离。后续对齐。
 - 冲突时 Desktop 只保留冲突，丢弃启动本身的错误；安全仍由 Off 证明保证。
 - 退出码通道：别的程序以 0xCF31／0xCF32 结束 UserAgent，也会被读成冲突。Off 证明仍然成立，后果是错误的提示与
   跳过一个端口。

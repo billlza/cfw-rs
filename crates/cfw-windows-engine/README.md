@@ -112,7 +112,12 @@ revoke through Authority and retain the child until cleanup/exit is established.
 `DesktopUserAgent` owns one LocalProxy/SystemProxy operation on a dedicated
 native thread. It validates the shared request before preparation, retains the
 original authenticated Authority connection, and only reports Ready after an
-Active observation, the exact owned lease and a live held child agree. It polls
+Active observation, the exact owned lease and a live held child agree. The
+Authority answers the observation and the owned-lease request one at a time, and
+when the Agent ends its run itself SYSTEM can commit Off and release the lease
+between them; the Authority then refuses the lease with `Identity`. Only then is
+the run observed once more: a run past every leased state is read as that
+observation, and any other answer keeps the refusal. It polls
 independently of UI refresh. Stop revokes on that same connection/context, then
 observes agent exit and launch-worker retirement. Only a typed stale-revision
 rejection of BeginStop permits another attempt, at most three in total; a new

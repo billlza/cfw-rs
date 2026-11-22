@@ -31,6 +31,7 @@ use std::{
     time::{Duration, Instant},
 };
 mod error;
+mod owner_reads;
 pub use error::{DesktopError, Result};
 
 const COMMAND_LIMIT: Duration = Duration::from_secs(5);
@@ -479,24 +480,6 @@ impl DesktopUserAgent {
             return Err(DesktopError::Context);
         }
         self.last_authority = Some(snapshot.clone());
-        Ok(snapshot)
-    }
-    fn observe_owned(&mut self, deadline: Instant) -> Result<AuthoritySnapshot> {
-        let snapshot = self.observe(deadline)?;
-        if matches!(
-            snapshot.state,
-            AuthorityState::Preparing
-                | AuthorityState::Starting
-                | AuthorityState::Active
-                | AuthorityState::Stopping
-        ) {
-            let Response::Lease(context) = self.command(Command::OwnedLease, deadline)? else {
-                return Err(DesktopError::Response);
-            };
-            if context != self.context {
-                return Err(DesktopError::Context);
-            }
-        }
         Ok(snapshot)
     }
     fn command(&mut self, command: Command, deadline: Instant) -> Result<Response> {

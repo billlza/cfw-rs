@@ -3793,7 +3793,7 @@ stderr，不读上一次留下的回执；驱动脚本调用的探针与模块�
   “Local profile”。
 - 用户真机上的 GUI 验收。
 
-### 2026-11-21：运行设置进入安装版 GUI 验证（本机检查完成，托管结果待定）
+### 2026-11-21：运行设置进入安装版 GUI 验证（托管 Windows 通过）
 
 功能对齐的下一批（用户选定“运行设置”）。本地代理端口、局域网共享、日志级别与 TUN MTU 在 Windows 上早已实现，
 而且全是共享代码：`write_runtime_settings_snapshot` 校验设置、核对读取时的版本号、换算端口，再经
@@ -3897,14 +3897,18 @@ stderr，不读上一次留下的回执；驱动脚本调用的探针与模块�
   `ProfileChangeRecoveryRequired`，而不是 Mac 上的回滚。应先在托管 Windows 上复现，再决定修法；建议作为下
   一批对齐（复现与修复见 2026-11-22 一节）。
 
+托管结果：[PR #110](https://github.com/billlza/cfw-rs/pull/110) 唯一的一次推送（`20be90b4`）上，
+[桌面作业 44959172915](https://github.com/billlza/cfw-rs/actions/runs/44959172915)、
+[shared-contracts 44959172921](https://github.com/billlza/cfw-rs/actions/runs/44959172921) 与
+[CI 44959172871](https://github.com/billlza/cfw-rs/actions/runs/44959172871) 全部通过：运行设置会话在 Playwright、
+原生宿主与 WebView2 上第一轮就通过，八个会话都在启动器的时限之内。没有审查意见。2026-11-22 依次合并 #109 与
+#110（main `d7cfe743`，树与 `20be90b4` 相同）。
+
 仍未验证：
 
-- 托管 Windows 上的结果：Playwright 的真实语义、原生宿主与 WebView2 只有托管作业能证明。按上一轮各会话回执
-  的时间估算，本会话约 100 秒，与当时最长的 tunnel 会话（96–98 秒）相当（启动器只等 GUI 180 秒）；整轮的
-  第一个隧道适配器现在由它创建。
 - 别的设备能否连到 LAN 端口。这由 Windows 防火墙决定，产品不写防火墙规则；探针只从本机的两个地址发请求。
 - 这一批没有碰的运行设置：Mainland China direct 与 IPv6 DNS 开关在运行中的核心上的效果；端口被占用时的行为
-  （见上）。
+  （见上与 2026-11-22 一节）。
 - 后端拒绝时的原话以 `unsupported credential-free policy shape at $.runtime_settings:` 开头，对用户并不
   好懂（共享行为，这一批没有改）。
 - 用户真机上的 GUI 验收。

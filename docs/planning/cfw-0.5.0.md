@@ -3683,7 +3683,7 @@ stderr，不读上一次留下的回执；驱动脚本调用的探针与模块�
 - 第二条消息“Windows global shortcut registration is unavailable”没有测试（需要一个快捷键插件没有启动的应用）。
 - 用户真机上的 GUI 验收。
 
-### 2026-11-20：按 URL 导入并更新订阅进入安装版 GUI 验证（本机检查完成，托管结果待运行）
+### 2026-11-20：按 URL 导入并更新订阅进入安装版 GUI 验证（托管 Windows 已通过）
 
 功能对齐的下一批（用户选定“按 URL 导入并更新订阅”）。订阅导入在 Windows 上早已实现：下载用 reqwest + rustls，
 服务器证书经 `rustls-platform-verifier` 由 Windows 信任库校验；Clash 文档在导入边界转换成 sing-box 配置，节点
@@ -3766,12 +3766,31 @@ stderr，不读上一次留下的回执；驱动脚本调用的探针与模块�
   `rust-clippy`、`rust-test`（1957 项）、`ci-no-masking`、`version-contract`、`build-script-boundary`、
   `evidence-manifest-lane`、`release-tool-tests`（3862 项，跳过 2 项）。
 
+托管第一轮（提交 ca47b574；CI 44840040254、Windows shared contracts 44840040104、Windows desktop 44840040141）：
+十一项检查全部通过，评审机器人在 ca47b574 上没有发现。PR #107 以 c059a112、PR #108 以 79141e69 合并，主干的树
+等于 ca47b574 的树。安装版里 subscription 会话的回执：
+
+- 导入：清理对话框先确认凭据库没有未使用的引用；应用用 Windows 信任库从
+  `raw.githubusercontent.com/billlza/cfw-rs/ca47b574…/scripts/windows/gui/subscriptions/first.yaml` 下载并导入。
+  新配置被选中、列为 subscription；两个 `shadowsocks` 出站都带 `credential_ref`、正文没有密码，两条引用在
+  凭据库里都在。核心进入 `local_proxy_active`（`windows_user_agent`，代次 9，就绪），控制器的
+  `cfw-proxy-selector` 是 Selector，指向 first，成员 `[first, second]`，两个节点报告为 Shadowsocks。
+- requirements 的顺序在导入和更新两次都与出站顺序相反：脚本初稿按位置比较，在这一轮就会失败；按集合比较通过。
+- Settings 与更新：对话框先显示“Local profile”与 first.yaml；改名并改为 second.yaml 后名字与地址已存、摘要
+  不变；再次打开显示“Subscription check”与 second.yaml（第 2 项修正在安装版里成立）。Update 之后摘要改变，出站为
+  first 与 third，选择器 `[first, third]`；更新后的两条引用与导入时的没有一条相同，即真实的凭据库拒绝了沿用、
+  更新换了新引用，与建模一致。
+- 删除与清理：重新选中 local-proxy 的配置并删除订阅配置后，Review 显示“Unused protected credentials: 4”，四条
+  恰好是导入的两条加更新的两条；清理后再 Review 为空，只剩 local-proxy 的配置且被选中。
+- 会话正常退出（退出码 0），按回执文件的时间从启动到退出约 26 秒；其后的 tunnel 与 system-proxy-quit 会话通过，
+  MSI 卸载完成，汇总回执列出七个会话。GUI 步骤用了 6 分 9 秒（上限 32 分钟），作业 23 分 40 秒（上限 58 分钟）。
+
 仍未验证：
 
-- 托管 Windows 上的一切：从 raw.githubusercontent.com 真实下载（所用的 HTTPS 客户端与 Windows 证书校验，连接
-  诊断会话已在托管 Windows 上经代理用过）、安装版里的 DPAPI 凭据库，以及清理前向 Windows 授权服务读取运行范围
-  （核心关闭时为空）。
-- 不带名字的 URL 导入被后端命名为“Local profile”（共享行为，这一批没有改）。
+- 第 3 项修正的禁用状态本身：真实应用里读取很快，托管会话只是在 Settings 可用后点击，看不到“读取中”的那一刻；
+  它由三个界面测试和放慢读取的演练覆盖。
+- 不带名字的 URL 导入被后端命名为“Local profile”（共享行为，这一批没有改）；托管回执里，改名前两个配置都叫
+  “Local profile”。
 - 用户真机上的 GUI 验收。
 
 ### 2026-10-23：开放事项（需要用户决定或外部条件）

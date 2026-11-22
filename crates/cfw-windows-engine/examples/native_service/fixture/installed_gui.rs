@@ -4,6 +4,7 @@ use super::*;
 use std::os::windows::io::AsHandle;
 
 mod input_desktop;
+mod lan;
 mod leak_protection;
 mod network;
 mod shortcut;
@@ -27,29 +28,59 @@ fn validation_context() -> Result<(String, PathBuf)> {
     Ok((source, receipts))
 }
 
-pub(super) fn network_probe(operation: &str, port: &str) -> Result<()> {
-    network::probe(operation, port)
+/// One native probe of a running installed GUI session, named by the
+/// launcher's arguments after its own path. `None` when they name no probe.
+/// A network or tunnel probe that a session repeats takes a label, which
+/// names that receipt instead of the operation.
+pub(super) fn probe(arguments: &[String]) -> Option<Result<()>> {
+    let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
+    Some(match arguments.as_slice() {
+        ["--installed-gui-network-probe", operation, port] => network::probe(operation, port, None),
+        ["--installed-gui-network-probe", operation, port, label] => {
+            network::probe(operation, port, Some(*label))
+        }
+        ["--installed-gui-tunnel-probe", operation, installation] => {
+            network::tunnel_probe(operation, installation, None)
+        }
+        [
+            "--installed-gui-tunnel-probe",
+            operation,
+            installation,
+            label,
+        ] => network::tunnel_probe(operation, installation, Some(*label)),
+        ["--installed-gui-combined-probe", installation, port] => {
+            network::combined_probe(installation, port)
+        }
+        [
+            "--installed-gui-leak-protection-probe",
+            operation,
+            installation,
+            resolver,
+            stun_server,
+        ] => leak_protection::probe(operation, installation, resolver, stun_server),
+        ["--installed-gui-shortcut-probe", operation] => shortcut::probe(operation),
+        ["--installed-gui-lan-probe", operation, interface, port] => {
+            lan::probe(operation, interface, port)
+        }
+        _ => return None,
+    })
 }
 
-pub(super) fn tunnel_probe(operation: &str, installation: &str) -> Result<()> {
-    network::tunnel_probe(operation, installation)
-}
-
-pub(super) fn combined_probe(installation: &str, port: &str) -> Result<()> {
-    network::combined_probe(installation, port)
-}
-
-pub(super) fn leak_protection_probe(
-    operation: &str,
-    installation: &str,
-    resolver: &str,
-    stun_server: &str,
-) -> Result<()> {
-    leak_protection::probe(operation, installation, resolver, stun_server)
-}
-
-pub(super) fn shortcut_probe(operation: &str) -> Result<()> {
-    shortcut::probe(operation)
+/// The name of a probe's receipt: its operation, or the label of a repeated
+/// one. The name becomes part of file names in the receipt directory.
+fn receipt_name<'a>(operation: &'a str, label: Option<&'a str>) -> Result<&'a str> {
+    let Some(label) = label else {
+        return Ok(operation);
+    };
+    if label.is_empty()
+        || label.len() > 40
+        || !label
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return Err("invalid GUI probe receipt label".into());
+    }
+    Ok(label)
 }
 
 pub(super) fn run() -> Result<()> {

@@ -26,7 +26,7 @@ use std::{
 mod child;
 mod credentials;
 mod desktop_runtime;
-mod lan;
+pub(super) mod lan;
 mod progress;
 pub(super) mod restart;
 mod start_request;

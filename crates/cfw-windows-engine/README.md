@@ -245,6 +245,14 @@ The installed GUI session turns both switches on and off while TUN Mode runs and
 checks the rules table, a DNS over TLS connection, a STUN request and HTTP
 through the tunnel.
 
+The runtime settings session of the installed GUI changes the local port, LAN
+sharing, the log level and the TUN MTU through the Network settings and the
+General page. It reads each MTU back from the adapter's IPv4 interface, and
+sends one request to the LAN listener from the only trusted source and one
+from the loopback address. Whether another device reaches that listener is
+decided by the Windows firewall, for which the product writes no rule; no
+check observes it.
+
 The installed product cannot be made to lose its lease between the offer and
 the confirmation: they are two consecutive calls of its UserAgent.
 `native-service-fixture --installed-unconfirmed-endpoint-validation` covers that

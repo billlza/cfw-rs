@@ -129,13 +129,30 @@ export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, 
       return false;
     }
   }
+  // The settings read for one action of the user: opening the dialog, the
+  // Allow LAN switch, the log level. Unlike `load`, a background refresh that
+  // starts meanwhile takes nothing from this read: the action goes on with
+  // exactly the snapshot it read, and the backend enforces that snapshot's
+  // revision on a write. Reads that were already on their way no longer count.
+  async function loadForAction() {
+    ++request;
+    try {
+      const snapshot = await invoke("read_runtime_settings_snapshot");
+      accept(snapshot);
+      return snapshot;
+    } catch (error) {
+      state.runtimeSettingsError = errorText(error);
+      return null;
+    }
+  }
   async function open(enableLAN = false) {
     if (state.engineMutationBusy || state.migrationHandoff) return;
-    if (!await load()) { renderPage(); return; }
+    const snapshot = await loadForAction();
+    if (!snapshot) { renderPage(); return; }
     dismissOtherDialogs();
-    const draft = runtimeDraft(state.runtimeSettings.settings, state.runtimeSettings.effective);
+    const draft = runtimeDraft(snapshot.settings, snapshot.effective);
     if (enableLAN) draft.allow = true;
-    state.runtimeSettingsDialog = { draft, mtuLimits: { ...state.runtimeSettings.tunnel_mtu_limits }, revision: state.runtimeSettings.revision, saving: false, error: null };
+    state.runtimeSettingsDialog = { draft, mtuLimits: { ...snapshot.tunnel_mtu_limits }, revision: snapshot.revision, saving: false, error: null };
     renderPage();
   }
   function close() {
@@ -173,8 +190,9 @@ export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, 
   }
   async function toggleLAN(enabled) {
     if (enabled) { await open(true); return false; }
-    if (!await load()) throw new Error(state.runtimeSettingsError);
-    return save({ ...state.runtimeSettings.settings, allow_lan: false }, state.runtimeSettings.revision);
+    const snapshot = await loadForAction();
+    if (!snapshot) throw new Error(state.runtimeSettingsError);
+    return save({ ...snapshot.settings, allow_lan: false }, snapshot.revision);
   }
   // One switch of the stored preferences. A background refresh cannot cancel
   // a user's choice: the write is bound to the exact snapshot read for this
@@ -254,8 +272,9 @@ export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, 
       const level = input.value;
       if (!RUNTIME_LOG_LEVELS.includes(level)) return;
       try {
-        if (!await load()) throw new Error(state.runtimeSettingsError);
-        await save({ ...state.runtimeSettings.settings, log_level: level }, state.runtimeSettings.revision);
+        const snapshot = await loadForAction();
+        if (!snapshot) throw new Error(state.runtimeSettingsError);
+        await save({ ...snapshot.settings, log_level: level }, snapshot.revision);
       } catch (error) { appendLog("error", "settings", errorText(error)); renderPage(); }
     }));
   }

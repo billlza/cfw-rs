@@ -8,18 +8,9 @@ pub(super) struct Fixture {
 }
 impl Fixture {
     pub(super) fn new() -> Result<Self> {
-        // Route selection sends no datagram. Only this runner's private IPv4
-        // address is admitted as a source; loopback is deliberately excluded.
-        let route = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).map_err(|e| e.to_string())?;
-        route
-            .connect((Ipv4Addr::new(192, 0, 2, 1), 9))
-            .map_err(|e| e.to_string())?;
-        let IpAddr::V4(interface) = route.local_addr().map_err(|e| e.to_string())?.ip() else {
-            return Err("LAN fixture requires an IPv4 interface".into());
-        };
-        if !interface.is_private() {
-            return Err("LAN fixture requires a private interface".into());
-        }
+        // Only this runner's private IPv4 address is admitted as a source;
+        // loopback is deliberately excluded.
+        let interface = private_interface()?;
         let reservation =
             TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).map_err(|e| e.to_string())?;
         let port = reservation.local_addr().map_err(|e| e.to_string())?.port();
@@ -56,6 +47,22 @@ impl Fixture {
     }
 }
 
+/// This machine's private IPv4 address on its default route. Route selection
+/// sends no datagram.
+pub(in super::super) fn private_interface() -> Result<Ipv4Addr> {
+    let route = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).map_err(|e| e.to_string())?;
+    route
+        .connect((Ipv4Addr::new(192, 0, 2, 1), 9))
+        .map_err(|e| e.to_string())?;
+    let IpAddr::V4(interface) = route.local_addr().map_err(|e| e.to_string())?.ip() else {
+        return Err("LAN fixture requires an IPv4 interface".into());
+    };
+    if !interface.is_private() {
+        return Err("LAN fixture requires a private interface".into());
+    }
+    Ok(interface)
+}
+
 fn closed(error: &io::Error) -> bool {
     matches!(
         error.kind(),
@@ -67,7 +74,8 @@ fn closed(error: &io::Error) -> bool {
 fn rejection_response(bytes: &[u8]) -> bool {
     bytes.is_empty() || bytes.len() <= 8192 && bytes.starts_with(b"HTTP/1.1 502 ")
 }
-fn require_rejected(proxy: SocketAddr) -> Result<()> {
+/// A request through `proxy` is refused and never reaches its origin.
+pub(in super::super) fn require_rejected(proxy: SocketAddr) -> Result<()> {
     let origin = reserve()?;
     origin.set_nonblocking(true).map_err(|e| e.to_string())?;
     let destination = origin.local_addr().map_err(|e| e.to_string())?;

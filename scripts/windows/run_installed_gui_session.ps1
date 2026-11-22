@@ -2,7 +2,7 @@ param(
     [Parameter(Mandatory)][string]$Launcher,
     [Parameter(Mandatory)][string]$Source,
     [Parameter(Mandatory)][string]$Output,
-    [Parameter(Mandatory)][ValidateSet('fresh-off', 'local-proxy', 'node-choice', 'automation', 'subscription', 'runtime-settings', 'tunnel', 'system-proxy-quit')][string]$Scenario,
+    [Parameter(Mandatory)][ValidateSet('fresh-off', 'local-proxy', 'node-choice', 'automation', 'subscription', 'runtime-settings', 'port-conflict', 'tunnel', 'system-proxy-quit')][string]$Scenario,
     [Parameter(Mandatory)][ref]$SessionResult
 )
 Set-StrictMode -Version Latest
@@ -15,7 +15,7 @@ if ($Source -cnotmatch '^[0-9a-f]{40}$' -or (git rev-parse HEAD) -cne $Source -o
 }
 # What the GUI steps of a session are told. The subscription session imports
 # documents that GitHub serves from the commit under test over public HTTPS;
-# the runtime settings session sets its own plan before its first step.
+# the runtime settings and port conflict sessions set their own plans.
 $sessionInput = $null
 if ($Scenario -ceq 'subscription') {
     if ($env:GITHUB_REPOSITORY -cnotmatch '^[A-Za-z0-9-]+/[A-Za-z0-9_.-]+$') { throw 'The repository of the subscription documents is unknown' }
@@ -45,7 +45,8 @@ $receipt = [ordered]@{
     startup_registration_exercised=$false; settings_controls_exercised=$false; actual_sign_in_exercised=$false
     node_choice_exercised=$false; profile_deleted=$false; connection_diagnostics_exercised=$false
     automation_exercised=$false; subscription_exercised=$false; runtime_settings_exercised=$false
-    physical_display_exercised=$false; network_mode_exercised=$false; release_accepted=$false
+    port_conflict_exercised=$false; physical_display_exercised=$false; network_mode_exercised=$false
+    release_accepted=$false
 }
 $SessionResult.Value = $receipt
 $controller = $null
@@ -82,14 +83,16 @@ function Invoke-Playwright([string]$Name, [string[]]$Arguments) {
         return ($result -join "`n")
     } finally { Pop-Location }
 }
-function Invoke-GuiScenario([ValidateSet('startup-off', 'startup-registration', 'settings-controls', 'node-choice-offline', 'node-choice-online', 'profile-delete', 'network-start', 'connection-diagnostics', 'network-stop', 'tunnel-start', 'tunnel-stop', 'combined-start', 'combined-stop', 'leak-protection-on', 'leak-protection-off', 'automation-rule', 'automation-shortcut-stop', 'automation-shortcut-start', 'automation-shortcut-removed', 'subscription-import', 'subscription-update', 'subscription-delete', 'runtime-settings-apply', 'runtime-settings-refused', 'runtime-settings-general', 'runtime-settings-mtu', 'runtime-settings-live-mtu', 'runtime-settings-defaults', 'system-proxy-start', 'quit')][string]$Name) {
+function Invoke-GuiScenario([ValidateSet('startup-off', 'startup-registration', 'settings-controls', 'node-choice-offline', 'node-choice-online', 'profile-delete', 'network-start', 'connection-diagnostics', 'network-stop', 'tunnel-start', 'tunnel-stop', 'combined-start', 'combined-stop', 'leak-protection-on', 'leak-protection-off', 'automation-rule', 'automation-shortcut-stop', 'automation-shortcut-start', 'automation-shortcut-removed', 'subscription-import', 'subscription-update', 'subscription-delete', 'runtime-settings-apply', 'runtime-settings-refused', 'runtime-settings-general', 'runtime-settings-mtu', 'runtime-settings-live-mtu', 'runtime-settings-defaults', 'port-conflict-ports', 'port-conflict-start', 'port-conflict-settings', 'port-conflict-configured', 'system-proxy-start', 'quit')][string]$Name) {
     $observer = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'gui/observe.js'))
     # The leak protection steps run one script, which is told its step; so do
-    # the steps that follow a press of the global shortcut and the runtime
-    # settings steps. Every step is told what its session set aside for it.
+    # the steps that follow a press of the global shortcut, the runtime
+    # settings steps and the port conflict steps. Every step is told what its
+    # session set aside for it.
     $scenarioFile = if ($Name -ceq 'quit') { 'quit-with-state' } elseif ($Name -clike 'leak-protection-*') { 'leak-protection' }
         elseif ($Name -clike 'automation-shortcut-*') { 'automation-shortcut' }
-        elseif ($Name -clike 'runtime-settings-*') { 'runtime-settings' } else { $Name }
+        elseif ($Name -clike 'runtime-settings-*') { 'runtime-settings' }
+        elseif ($Name -clike 'port-conflict-*') { 'port-conflict' } else { $Name }
     $scenarioCode = [IO.File]::ReadAllText((Join-Path $PSScriptRoot "gui/$scenarioFile.js"))
     $quitInput = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'gui/quit.js'))
     $controllerObserver = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'gui/controller.js'))

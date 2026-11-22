@@ -141,7 +141,13 @@ fn run() -> Result<(), String> {
             std::ffi::OsStr::new(runtime_host::SERVICE_NAME),
         ]
     {
-        return runtime_host::run_agent(installation, images, started).map_err(|e| e.to_string());
+        // The exit code tells the Desktop whether the engine refused the
+        // start because another program holds one of its endpoints.
+        if let Err(error) = runtime_host::run_agent(installation, images, started) {
+            eprintln!("{error}");
+            std::process::exit(runtime_host::agent_exit_code(&error));
+        }
+        return Ok(());
     }
     Err(
         "expected SCM, --check-installation [manifest-sha256], --inspect-update, installed --user-agent, SYSTEM --prepare-maintenance/--rollback-maintenance with a transaction UUID, or SYSTEM --prepare-update/--commit-update with a transaction UUID and target manifest SHA-256"

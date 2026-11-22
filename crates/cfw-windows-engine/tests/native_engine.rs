@@ -271,30 +271,43 @@ fn rust_owner_runs_real_projected_http_then_closes_and_releases_listeners() {
 }
 
 #[test]
-fn startup_conflict_fails_and_cleans_partial_runtime_without_stopped_receipt() {
-    let temporary = tempfile::tempdir().unwrap();
-    let occupied = reserve();
-    let controller = reserve();
-    let config = PreparedConfig::local_proxy(
-        &projected(
-            occupied.local_addr().unwrap().port(),
-            controller.local_addr().unwrap().port(),
-        ),
-        [],
-    )
-    .unwrap();
-    let controller_address = controller.local_addr().unwrap();
-    drop(controller);
-    let mut child =
-        EngineProcess::spawn(executable(), &temporary.path().join("runtime"), TIMEOUT).unwrap();
-    let handle = process_handle(child.process_id());
-    assert!(matches!(
-        child.start(&config, TIMEOUT),
-        Err(Error::Rejected("start_failed"))
-    ));
-    exited(&handle);
-    assert!(child.observe(TIMEOUT).is_err());
-    let _released = TcpListener::bind(controller_address).unwrap();
+fn startup_conflict_names_the_held_endpoint_and_cleans_partial_runtime() {
+    // Another program keeps the proxy port, then the controller port. The
+    // proxy listener is bound before the controller, so the second case also
+    // releases a listener the refused start had opened.
+    for (proxy_held, code) in [
+        (true, "mixed_endpoint_in_use"),
+        (false, "controller_endpoint_in_use"),
+    ] {
+        let temporary = tempfile::tempdir().unwrap();
+        let mixed = reserve();
+        let controller = reserve();
+        let config = PreparedConfig::local_proxy(
+            &projected(
+                mixed.local_addr().unwrap().port(),
+                controller.local_addr().unwrap().port(),
+            ),
+            [],
+        )
+        .unwrap();
+        let (_occupied, free) = if proxy_held {
+            (mixed, controller)
+        } else {
+            (controller, mixed)
+        };
+        let free_address = free.local_addr().unwrap();
+        drop(free);
+        let mut child =
+            EngineProcess::spawn(executable(), &temporary.path().join("runtime"), TIMEOUT).unwrap();
+        let handle = process_handle(child.process_id());
+        assert!(matches!(
+            child.start(&config, TIMEOUT),
+            Err(Error::Rejected(actual)) if actual == code
+        ));
+        exited(&handle);
+        assert!(child.observe(TIMEOUT).is_err());
+        let _released = TcpListener::bind(free_address).unwrap();
+    }
 }
 
 #[test]

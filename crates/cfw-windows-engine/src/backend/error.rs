@@ -3,7 +3,7 @@ use crate::{
     ServiceTransportError,
     authority::wire::{Rejection, WireError},
     credential_lifecycle::CredentialLifecycleError,
-    user_agent::{launch_channel::LaunchChannelError, launcher::LaunchError},
+    user_agent::{EndpointConflict, launch_channel::LaunchChannelError, launcher::LaunchError},
 };
 
 pub(super) fn desktop_error(error: DesktopError) -> BackendError {
@@ -50,6 +50,10 @@ fn desktop_kind(error: &DesktopError) -> Kind {
         },
         DesktopError::Proxy(error) => proxy_kind(error),
         DesktopError::Observation(error) => desktop_kind(error),
+        DesktopError::EndpointConflict(EndpointConflict::Mixed) => Kind::MixedEndpointInUse,
+        DesktopError::EndpointConflict(EndpointConflict::Controller) => {
+            Kind::ControllerEndpointInUse
+        }
         DesktopError::Cleanup { .. } | DesktopError::CleanupScope(_) => Kind::CleanupUnproven,
         DesktopError::Context => Kind::IdentityRejected,
         DesktopError::Response | DesktopError::Handoff(_) => Kind::InvalidMessage,
@@ -185,5 +189,26 @@ fn wire_kind(error: &WireError) -> Kind {
         WireError::Handoff(_) => Kind::IdentityRejected,
         WireError::Version => Kind::GlobalAuthorityProtocolMismatch,
         WireError::Correlation | WireError::Length | WireError::Malformed => Kind::InvalidMessage,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_reported_refusal_names_the_held_endpoint() {
+        for (conflict, kind) in [
+            (EndpointConflict::Mixed, Kind::MixedEndpointInUse),
+            (EndpointConflict::Controller, Kind::ControllerEndpointInUse),
+        ] {
+            let error = desktop_error(DesktopError::EndpointConflict(conflict));
+            assert_eq!(error.kind, kind);
+            assert!(super::super::endpoint_conflict(&error));
+        }
+        // An exit the Desktop's run did not read as a refusal stays unknown.
+        let exit = desktop_error(DesktopError::Launch(LaunchError::Exit(0xCF31)));
+        assert_eq!(exit.kind, Kind::OwnerUnresponsive);
+        assert!(!super::super::endpoint_conflict(&exit));
     }
 }

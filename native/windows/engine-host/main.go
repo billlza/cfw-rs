@@ -249,7 +249,7 @@ func run(input io.Reader, output io.Writer) int {
 				break
 			}
 			if err = instance.Start(); err != nil {
-				errorCode = "start_failed"
+				errorCode = startFailure(err, options)
 				break
 			}
 			if packets != nil && packets.Failure() != nil {

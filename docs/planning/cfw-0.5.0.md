@@ -3895,7 +3895,7 @@ stderr，不读上一次留下的回执；驱动脚本调用的探针与模块�
   到旧核心。Windows 后端不产生这两种错误，UserAgent 绑定之后的启动失败被归为 `CleanupUnproven`，要求显式
   对账。按代码推断，自动端口 7890 被别的程序占用时不会换到下一个端口；把端口改成一个被占用的端口，结果会是
   `ProfileChangeRecoveryRequired`，而不是 Mac 上的回滚。应先在托管 Windows 上复现，再决定修法；建议作为下
-  一批对齐。
+  一批对齐（复现与修复见 2026-11-22 一节）。
 
 仍未验证：
 
@@ -3908,6 +3908,114 @@ stderr，不读上一次留下的回执；驱动脚本调用的探针与模块�
 - 后端拒绝时的原话以 `unsupported credential-free policy shape at $.runtime_settings:` 开头，对用户并不
   好懂（共享行为，这一批没有改）。
 - 用户真机上的 GUI 验收。
+
+### 2026-11-22：另一程序占用的本地端口（托管 Windows 已复现；修复的托管结果待定）
+
+功能对齐的下一批（用户选定“端口冲突”）。另一程序占用本地端口时，macOS 的原生桥报告 `MixedEndpointInUse`／
+`ControllerEndpointInUse`，协调器清理并证明 Off 后返回 `StartEndpointConflictAfterOff`，此后全是共享代码：
+自动端口在 500 ms 后用同一端口再试一次，再换同一类的下一个端口；运行中的设置改动回滚到旧核心
+（`ProfileChangeRolledBack`）；在已配置且被占用的端口上启动，以 `ConfiguredPortUnavailable` 结束，核心关闭，
+期望模式保留。Windows 缺的只是后端产生这两种错误。
+
+根因（读代码得到，与 2026-11-21 一节的推断一致；下述托管复现证实了自动端口这一种的整条链）：
+
+- 引擎宿主把 `instance.Start()` 的任何失败都报告为 `start_failed`，随后以 2 退出。
+- UserAgent 的 `run_agent` 把“readiness 没有送达”与工作线程自己的错误合成 `HostError::Cleanup`，以 1 退出；
+  工作线程在清理成功时本来只返回启动的错误。
+- Desktop 撤销租约的停止于是观察到退出码 1，`run_inner` 把两份失败合成 `DesktopError::Cleanup`；后端
+  `start()` 再与“Ready 没有送达”合成 `CleanupUnproven`，协调器隔离，要求显式对账。
+- 结果：自动端口被占用时不换端口。按代码，运行中改成被占用的端口，结果是 `ProfileChangeRecoveryRequired` 而不是
+  回滚；在被占用的已配置端口上启动，结果是 `CleanupUnproven` 而不是 `ConfiguredPortUnavailable`。
+
+复现（提交 `2141c1f3`，草稿 [PR #111](https://github.com/billlza/cfw-rs/pull/111)，先于修复）：第九个安装版
+GUI 会话 `port-conflict`，排在 runtime-settings 与 tunnel 之间，步骤在 `scripts/windows/gui/port-conflict.js`，
+会话在 `scripts/windows/sessions/port-conflict.ps1`。九个会话的 GUI 步骤上限 36 → 40 分钟，作业 62 → 66 分钟。
+
+- 会话自己的监听占住自动代理端口与控制器端口，然后 Start core：核心在每一类的下一个端口上运行，控制器在那里
+  应答，会话的监听仍占着原来的端口。
+- 核心运行时，在 Network settings 里填入一个被占用的端口：改动被拒绝，原话是协调器对“已恢复旧核心”的说法
+  （`native start start_local_proxy encountered MixedEndpointInUse; … the previous runtime was restored`）；
+  运行的是代次更高、设置不变的核心；什么都没有保存。
+- 核心关闭时保存同一个端口；Start core 以 `the configured local proxy port <端口> is already reserved; …`
+  结束，核心关闭，期望模式仍是 local_proxy。
+- 会话结束时恢复自动端口，核心关闭，会话的监听已关闭。
+
+[CI 44975936971](https://github.com/billlza/cfw-rs/actions/runs/44975936971) 的桌面作业在启动核心的一步
+（`port-conflict-start`）失败，此后的会话（tunnel 起）没有运行。核心状态为 failed，原话与根因逐项吻合：
+`native operation start_local_proxy failed: CleanupUnproven: OwnerUnresponsive: runtime Ready was not
+delivered: channel is empty and sending half is closed; cleanup: CleanupUnproven: Windows Desktop operation
+failed (Windows Desktop authority: Windows authority command was rejected: Identity); cleanup failed (Windows
+Desktop launcher: Windows UserAgent exited unsuccessfully (0x1))`。UserAgent 自己的日志是 `Windows runtime
+failed (Windows runtime state: installed Agent readiness was not delivered); cleanup failed (Windows runtime
+Agent: Windows user-agent native child: Windows engine rejected operation: start_failed)`。原话里没有
+`finish_global_stop` 的错误，也就是全局 Off 已经证明，错的只是类别；撤销租约的停止也已观察到 UserAgent 的
+退出，修复正是从这里接上。
+
+修复（服务端、Authority 线协议与日志 schema 均不变）：
+
+- 引擎宿主（`native/windows/engine-host/endpoint_conflict*.go`）：`instance.Start()` 的失败里，只有地址正被使用
+  的 listen 错误（`*net.OpError` 且操作为 listen；Windows 上是 `WSAEADDRINUSE`，以及 Hyper-V／WinNAT 保留端口
+  范围给出的 `WSAEACCES`；其他系统是 `EADDRINUSE`），并且失败的地址（IPv4 映射地址先还原）恰好是投影里
+  `cfw-system-proxy` 入站的端点或 Clash API 的 `external_controller`，才报告 `mixed_endpoint_in_use` 或
+  `controller_endpoint_in_use`。LAN 监听与其他一切失败仍是 `start_failed`；宿主仍以 2 退出，Close 照旧释放
+  已经打开的监听。
+- 协议：拒绝码移到 `protocol/rejection.rs` 并加入这两个码，仍只有定义过的码能成为错误（`protocol.rs`
+  932 → 912 行）。
+- UserAgent：Ready 之前结束的运行以它自己的错误为结果，不再与“readiness 没有送达”合成。只有这个错误恰好是
+  引擎的这两种拒绝（本地清理与 Authority 的 Stopped 确认都已成功）时，退出码是 0xCF31（代理监听）或 0xCF32
+  （控制器），其余失败仍是 1。不用 3、4 这样的小码：3 也是 C 运行时 `abort()` 与一些强制结束留下的退出码。
+- Desktop：撤销租约的停止观察到这两个退出码之一时，结果是 `DesktopError::EndpointConflict`，否则照旧是
+  `Cleanup`；`run_owned` 随后照旧用 `finish_global_stop` 证明全局 Off，证明失败仍合成 `CleanupUnproven`。
+  `DesktopError` 移到 `user_agent/desktop/error.rs`（`desktop.rs` 828 → 799 行）。
+- 后端：`start()` 遇到这两种错误时再观察一次 Authority，确认 Off 属于这次运行后退役它（`backend/retirement.rs`
+  的 `refused_start`；`stop()` 与 `query()` 共用新的 `State::retire_active`，`backend.rs` 755 → 739 行），
+  返回 `MixedEndpointInUse`／`ControllerEndpointInUse`。确认不了时仍是 `CleanupUnproven`，运行保留。协调器
+  随后的停止找到已退役的运行，Off 证明成立，得到 `StartEndpointConflictAfterOff`；此后是 macOS 已有的共享处理。
+
+托管检查：
+
+- `native_engine` 的启动冲突测试改为两例：先占住代理端口，再占住控制器端口，分别要求
+  `mixed_endpoint_in_use` 与 `controller_endpoint_in_use`、宿主退出、另一个端口可以再绑定。代理监听先于
+  控制器打开，所以第二例也证明被拒绝的启动释放了自己打开的监听。
+- 安装版宿主夹具里 SystemProxy 与组合模式各有一个占住代理端口的失败启动（见 2026-11-15 与组合模式两节）。
+  它们不检查错误类别：启动现在返回 `MixedEndpointInUse` 并已退役运行，随后的状态查询直接读到 Off（按代码，
+  以前第一次查询先交回启动的 `CleanupUnproven`）。其余要求不变（这一代次的 Off、至少四条记录、代理设置不变、
+  适配器曾经存在、一切恢复、重复同一次停止成功），所以下一轮也经后端（不经协调器）检验修复在这两种模式上的
+  路径。复现提交上的 shared-contracts 运行（[44975936895](https://github.com/billlza/cfw-rs/actions/runs/44975936895)）
+  里，它们与旧的 `native_engine` 冲突测试照旧通过。
+- `port-conflict` 会话经协调器与界面检验 LocalProxy 的全部三种结果。
+
+本机验证：
+
+- Go（darwin；固定模块缓存的 APFS 克隆，不下载）：gofmt、vet 与宿主包的全部测试通过。
+  `TestStartFailureNamesOnlyAHeldProjectedEndpoint` 用真实的第二次 listen 错误覆盖八例：代理监听、IPv4 映射
+  地址、控制器、LAN 监听、别的地址、别的操作、别的 listen 失败、没有 listen 失败。
+  `TestHeldEndpointsAreNamedInTheStartReply` 经 `run()` 要求退出码 2、回复的错误就是这个码、状态 idle、摘要
+  为空、不回显控制器密钥，并且控制器失败之前已绑定的代理端口被释放。七种变异（改回 `main.go`，去掉标签检查、
+  代理地址比较、控制器地址比较、listen 操作检查、映射还原或 errno 检查）各自被测试发现。
+- Go（Windows）：macOS 的模块缓存里没有 Windows 专用模块，又不下载，完整交叉构建做不了；只含新文件的替身包
+  对 GOOS=windows 的 vet 与测试编译通过。`TestExcludedPortRangeNamesTheEndpoint`（合成的 `WSAEACCES`／
+  `WSAEADDRINUSE`、别的 errno、别的端口）只在 Windows 上运行。
+- Rust：`cargo test -p cfw-windows-engine --lib` 在 macOS 上 182 项通过；Windows 目标的 clippy（`-D warnings`，
+  CI 的特性集全部目标，以及 lib 与测试）无警告。只能在 Windows 上运行的单元测试（UserAgent 的退出码、Desktop
+  的冲突判定、后端的错误类别）由托管的 shared-contracts 作业运行。五种变异各自让测试失败：校验时丢掉新码、
+  代理冲突码未定义、代理冲突以 1 退出、清理失败仍算冲突、代理冲突的退出码改回 3。
+- `scripts/windows/tests` 全部 11 项通过。本地门禁无警告：`rust-fmt`、`rust-clippy`、`rust-test`（1961 项）、
+  `ci-no-masking`、`version-contract`、`build-script-boundary`、`evidence-manifest-lane`、`release-tool-tests`
+  （3862 项，跳过 2 项）。
+
+仍未验证：
+
+- 托管 Windows 上修复的结果。
+- 经协调器的 SystemProxy 与组合模式冲突：托管会话只有 LocalProxy，夹具只经后端。SystemProxy 的冲突走既有的
+  `finish_global_stop` 与恢复记录。
+- `WSAEACCES`（保留端口范围）只用合成错误测过。
+- 其他启动失败（例如 LAN 端口被占用，仍是 `start_failed`）在 Windows 上仍以 `CleanupUnproven` 结束；macOS
+  把 LAN 冲突也归为 Mixed。可作后续。
+- 冲突时 Desktop 只保留冲突，丢弃启动本身的错误；安全仍由 Off 证明保证。
+- 退出码通道：别的程序以 0xCF31／0xCF32 结束 UserAgent，也会被读成冲突。Off 证明仍然成立，后果是错误的提示与
+  跳过一个端口。
+- 共享行为，这一批没有改：端口改动时控制器的游标重置；回滚的原话偏技术化。
 
 ### 2026-10-23：开放事项（需要用户决定或外部条件）
 

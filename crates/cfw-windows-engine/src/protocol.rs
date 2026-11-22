@@ -12,6 +12,7 @@ use crate::{
     Error, ResolvedProbe, ResolvedProjection,
     configuration::{ProbeOptions, serialize_bounded},
 };
+pub(crate) mod rejection;
 
 const PROTOCOL: u32 = 1;
 const MAX_REQUEST: usize = cfw_singbox_config::MAX_ENGINE_CONFIG_BYTES + 4096;
@@ -339,29 +340,8 @@ impl Response {
         }
         if !self.error.is_empty() {
             // Never surface untrusted free-form engine output or config text.
-            return Err(Error::Rejected(match self.error.as_str() {
-                "invalid_request" => "invalid_request",
-                "invalid_start" => "invalid_start",
-                "invalid_check" => "invalid_check",
-                "invalid_config" => "invalid_config",
-                "invalid_log_output" => "invalid_log_output",
-                "construct_failed" => "construct_failed",
-                "start_failed" => "start_failed",
-                "invalid_observation" => "invalid_observation",
-                "invalid_stop" => "invalid_stop",
-                "close_failed" => "close_failed",
-                "invalid_operation" => "invalid_operation",
-                "invalid_probe" => "invalid_probe",
-                "probe_failed" => "probe_failed",
-                "probe_cleanup_failed" => "probe_cleanup_failed",
-                "probe_response_invalid" => "probe_response_invalid",
-                "invalid_packet_capability" => "invalid_packet_capability",
-                "invalid_packet_operation" => "invalid_packet_operation",
-                "invalid_packet_config" => "invalid_packet_config",
-                "packet_capability_required" => "packet_capability_required",
-                "packet_io_failed" => "packet_io_failed",
-                _ => return Err(Error::Protocol("unknown rejection code")),
-            }));
+            return Err(rejection::known(&self.error)
+                .map_or(Error::Protocol("unknown rejection code"), Error::Rejected));
         }
         if self.state != state || self.digest != digest {
             return Err(Error::Protocol("response state"));

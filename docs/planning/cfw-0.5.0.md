@@ -3913,7 +3913,7 @@ stderr，不读上一次留下的回执；驱动脚本调用的探针与模块�
   好懂（共享行为，这一批没有改）。
 - 用户真机上的 GUI 验收。
 
-### 2026-11-22：另一程序占用的本地端口（托管 Windows 已复现；修复的第一轮暴露一个竞态，已修复，托管结果待定）
+### 2026-11-22：另一程序占用的本地端口（托管 Windows 已复现；修复的第一轮暴露一个竞态，已修复；托管 Windows 通过）
 
 功能对齐的下一批（用户选定“端口冲突”）。另一程序占用本地端口时，macOS 的原生桥报告 `MixedEndpointInUse`／
 `ControllerEndpointInUse`，协调器清理并证明 Off 后返回 `StartEndpointConflictAfterOff`，此后全是共享代码：
@@ -4041,9 +4041,19 @@ OwnedLease 却被 `Identity` 拒绝。撤销失败时 `stop()` 按设计关闭 A
 观察、Stopping 不算带租约）各自被测试发现。Desktop 对拒绝的判定（只有 Authority 的 `Identity`）另有只在
 Windows 上运行的单元测试。Windows 目标的 clippy 无警告。
 
+托管结果：
+
+- 第三轮（提交 `d8a7cf27`）：[桌面作业 45049021146](https://github.com/billlza/cfw-rs/actions/runs/45049021146) 通过（21 分 33 秒），九个会话都过了，
+  `port-conflict` 检验的三种结果都成立；引擎、shared-contracts、SCM、Wintun、目录与更新检查的作业也通过。两个供应链
+  作业因 RUSTSEC-2026-0592（`url` 2.5.8 的 `Url::origin()` 遇到嵌套的 `blob:` 时递归）失败，与这一批无关，由
+  [PR #113](https://github.com/billlza/cfw-rs/pull/113) 升级到 2.5.9 解决。
+- 第四轮（合入 #113 之后的 `460c54b0`）：[CI 45065304170](https://github.com/billlza/cfw-rs/actions/runs/45065304170)、
+  [shared-contracts 45065304247](https://github.com/billlza/cfw-rs/actions/runs/45065304247) 与 [桌面作业 45065304196](https://github.com/billlza/cfw-rs/actions/runs/45065304196) 等十一项
+  检查全部通过。2026-11-23 先合并 #113（main `d8783055`），再合并 #111（main `9bcd3b8f`，树与 `460c54b0` 相同）。
+
 仍未验证：
 
-- 托管 Windows 上这次修复的结果；竞态取决于时序，一轮通过不能证明它不再出现，单元测试才是证明。
+- 竞态取决于时序：托管第三、四轮都通过，但两轮通过不能证明它不再出现，单元测试才是证明。
 - 经协调器的 SystemProxy 与组合模式冲突：托管会话只有 LocalProxy，夹具只经后端。SystemProxy 的冲突走既有的
   `finish_global_stop` 与恢复记录。
 - `WSAEACCES`（保留端口范围）只用合成错误测过。
@@ -4056,7 +4066,7 @@ Windows 上运行的单元测试。Windows 目标的 clippy 无警告。
   跳过一个端口。
 - 共享行为，这一批没有改：端口改动时控制器的游标重置；回滚的原话偏技术化。
 
-### 2026-11-22：另一程序占用的 LAN 端口（与 macOS 对齐；托管结果待定）
+### 2026-11-22：另一程序占用的 LAN 端口（与 macOS 对齐；托管 Windows 通过）
 
 上一节留下的一条（用户：“接着对齐”）。LAN 共享所用的端口被另一程序占用时，macOS 的结果是普通的引擎
 启动失败（读源码）：libbox 补丁 `sing-box-v1.14.4-endpoint-conflict.patch` 的 `classifyMixedListenError` 对任何
@@ -4108,16 +4118,30 @@ not start; the previous runtime was restored`）、代次更高的旧设置核�
   Windows 目标的 clippy（CI 特性集全部目标；lib 与测试）无警告，故意破坏一处 Windows 专属代码会被报出。只能在
   Windows 上运行的测试（退出码、Desktop 的判读、后端的类别与按模式命名）由托管的 shared-contracts 作业运行。
 
+托管结果：
+
+- 第一轮（`9afde93c`）：shared-contracts 通过，其中有只能在 Windows 上运行的退出码、Desktop 判读与后端类别
+  的测试；两个供应链作业因同一条 `url` 公告失败；随后合入 #111 新头的推送取消了其余仍在运行的作业。
+- 第二轮（合入 #111 新头之后的 `e2c441a6`）：[CI 45065434120](https://github.com/billlza/cfw-rs/actions/runs/45065434120)、
+  [shared-contracts 45065434101](https://github.com/billlza/cfw-rs/actions/runs/45065434101) 与 [桌面作业 45065434111](https://github.com/billlza/cfw-rs/actions/runs/45065434111) 等十一项
+  检查全部通过，`port-conflict-lan` 在安装版里通过。2026-11-23 在 #111 之后合并（main `f06e41a9`，树与
+  `e2c441a6` 相同）。
+- 时间余量，从这次桌面作业的产物 `cfw-desktop-development-windows-x64` 量得。启动器从恢复 GUI 主线程起最多等
+  180 秒让它退出（`crates/cfw-windows-engine/examples/native_service/fixture/installed_gui.rs`）。回执里没有
+  时间戳，时间取自三处：`launch.json` 的进程创建时间、Playwright 快照文件名里的 UTC 时间、`desktop-output.log`
+  里 GUI 关闭时 Chromium 写的一行；从进程创建算起，所以剩余时间只会多不会少。
+  - 加了 LAN 一步的 `port-conflict` 会话在 87.1 秒关闭 GUI，下一个会话的进程在 88.9 秒创建，至少还剩约 91 秒。
+  - 最长的是 runtime-settings（105.0 秒）与 tunnel（105.5 秒），各剩约 75 秒；其余五个会话 21–67 秒。
+  - 同名会话与 #111 第二轮（[44980871510](https://github.com/billlza/cfw-rs/actions/runs/44980871510)）相差不到 1.2 秒。
+  - 安装版 GUI 一步：#113（没有 `port-conflict` 会话）6 分 5 秒，#111 9 分 2 秒，#112 9 分 43 秒。
+
 仍未验证：
 
-- 托管 Windows 上的结果。
 - 隧道模式与 System Proxy 模式下被占的 LAN 端口：会话只有 LocalProxy；隧道模式的 `Unavailable` 只有单元测试。
 - 引擎读不了的配置（`invalid_config`）与其他拒绝仍以 `CleanupUnproven` 结束；macOS 对读不了的配置报
   `SystemProxyConfigurationFailed`。启动前的检查本应先拒绝这些配置。
 - 别的程序以 0xCF30 结束 UserAgent，也会被读成引擎拒绝；Off 证明仍然成立，后果是错误的提示。
-- 会话的时间余量：托管日志没有逐步时间。上一轮从这个会话的进程启动到第五步的失败被报告约 182 秒，其中包括
-  失败后的收尾（按代码可能等满了 180 秒的退出期限），所以第五步之前用了多久不知道；加这一步后的完整时长只有
-  托管结果能给出。
+- 每一步的时间：产物里没有逐步时间，LAN 这一步本身用了多久不知道；期限约束的是会话的总时长（见上）。
 
 ### 2026-10-23：开放事项（需要用户决定或外部条件）
 

@@ -3,7 +3,7 @@
 //! turn local child retirement into independent machine cleanup.
 use super::{
     StopReason,
-    handoff::{HandoffError, UserAgentLaunch},
+    handoff::UserAgentLaunch,
     launcher::{
         AdmittedAgent, AgentExit, LaunchError, UserAgentChild, UserAgentInvocation, medium_process,
     },
@@ -14,7 +14,7 @@ use crate::{
         AuthorityChannel, AuthoritySnapshot, LeaseContext,
         wire::{Command, Rejection, Request, Response, RuntimeReference, StopRequest, WireError},
     },
-    credential_lifecycle::{CredentialLifecycleError, WindowsCredentialLifecycle},
+    credential_lifecycle::WindowsCredentialLifecycle,
     service_transport::check_deadline,
 };
 use cfw_engine_api::{
@@ -30,6 +30,9 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+mod error;
+mod owner_reads;
+pub use error::{DesktopError, Result};
 
 const COMMAND_LIMIT: Duration = Duration::from_secs(5);
 /// The spawned Agent admits its own installed images and private storage
@@ -48,42 +51,6 @@ const STOP_LIMIT: Duration = Duration::from_secs(15);
 pub(crate) const START_BUDGET: Duration = Duration::from_secs(
     ADMISSION_LIMIT.as_secs() + COMMAND_LIMIT.as_secs() + START_LIMIT.as_secs(),
 );
-
-#[derive(Debug, thiserror::Error)]
-pub enum DesktopError {
-    #[error("Windows Desktop configuration: {0}")]
-    Configuration(#[from] crate::Error),
-    #[error("Windows Desktop credential lifecycle: {0}")]
-    Credentials(#[from] CredentialLifecycleError),
-    #[error("Windows Desktop authority: {0}")]
-    Authority(#[from] WireError),
-    #[error("Windows Desktop transport: {0}")]
-    Transport(#[from] ServiceTransportError),
-    #[error("Windows Desktop handoff: {0}")]
-    Handoff(#[from] HandoffError),
-    #[error("Windows Desktop launcher: {0}")]
-    Launch(#[from] LaunchError),
-    #[error("Windows Desktop proxy restoration: {0}")]
-    Proxy(#[from] crate::ProxyError),
-    #[error("Windows Desktop cleanup scope: {0}")]
-    CleanupScope(#[from] crate::authority::AuthorityError),
-    #[error("Windows Desktop operation state: {0}")]
-    State(&'static str),
-    #[error("Windows Desktop authority context changed")]
-    Context,
-    #[error("Windows Desktop authority returned an unrelated response")]
-    Response,
-    #[error("Windows Desktop readiness receiver is unavailable")]
-    ReadyReceiver,
-    #[error("Windows Desktop status request: {0}")]
-    Observation(Arc<Self>),
-    #[error("Windows Desktop operation failed ({operation}); cleanup failed ({cleanup})")]
-    Cleanup {
-        operation: Box<Self>,
-        cleanup: Box<Self>,
-    },
-}
-pub type Result<T> = std::result::Result<T, DesktopError>;
 
 #[derive(Debug, Clone)]
 pub struct DesktopLive {
@@ -320,9 +287,14 @@ impl DesktopUserAgent {
         match (operated, stopped) {
             (Ok(reason), Ok(stopped)) => Ok(DesktopCompleted { reason, stopped }),
             (Err(error), Ok(_)) | (Ok(_), Err(error)) => Err(error),
-            (Err(operation), Err(cleanup)) => Err(DesktopError::Cleanup {
-                operation: Box::new(operation),
-                cleanup: Box::new(cleanup),
+            // The Agent ended the run itself: its engine could not bind an
+            // endpoint another program holds, and it cleaned up first.
+            (Err(operation), Err(cleanup)) => Err(match cleanup.reported_conflict() {
+                Some(conflict) => DesktopError::EndpointConflict(conflict),
+                None => DesktopError::Cleanup {
+                    operation: Box::new(operation),
+                    cleanup: Box::new(cleanup),
+                },
             }),
         }
     }
@@ -508,24 +480,6 @@ impl DesktopUserAgent {
             return Err(DesktopError::Context);
         }
         self.last_authority = Some(snapshot.clone());
-        Ok(snapshot)
-    }
-    fn observe_owned(&mut self, deadline: Instant) -> Result<AuthoritySnapshot> {
-        let snapshot = self.observe(deadline)?;
-        if matches!(
-            snapshot.state,
-            AuthorityState::Preparing
-                | AuthorityState::Starting
-                | AuthorityState::Active
-                | AuthorityState::Stopping
-        ) {
-            let Response::Lease(context) = self.command(Command::OwnedLease, deadline)? else {
-                return Err(DesktopError::Response);
-            };
-            if context != self.context {
-                return Err(DesktopError::Context);
-            }
-        }
         Ok(snapshot)
     }
     fn command(&mut self, command: Command, deadline: Instant) -> Result<Response> {

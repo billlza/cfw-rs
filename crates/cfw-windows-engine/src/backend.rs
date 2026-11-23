@@ -28,7 +28,9 @@ use tokio::{runtime::Handle, sync::Semaphore, task::AbortHandle};
 use zeroize::Zeroize;
 mod error;
 mod profile;
+mod retirement;
 use error::{desktop_error, host_error};
+use retirement::{cleanup_failed, endpoint_conflict, refused_start};
 
 type Result<T> = std::result::Result<T, BackendError>;
 const LIMIT: Duration = Duration::from_secs(60);
@@ -366,6 +368,9 @@ impl WindowsEngineBackend {
                     return match active.finish(deadline) {
                         Ok(()) => Err(original),
                         Err(rejection) if active.owner_prepared == Some(false) => Err(rejection),
+                        Err(refusal) if endpoint_conflict(&refusal) => {
+                            Err(refused_start(shared, state, refusal, deadline))
+                        }
                         Err(cleanup) => Err(combined(original, cleanup)),
                     };
                 }
@@ -436,19 +441,10 @@ impl WindowsEngineBackend {
                 {
                     // A failed lifecycle result remains observable even after
                     // later independent global cleanup succeeds.
-                    if let Err(retirement) = active.retire_until(deadline) {
-                        return match finished {
-                            Ok(()) => Err(retirement),
-                            Err(operation) => Err(combined(operation, retirement)),
-                        };
+                    match state.retire_active(deadline) {
+                        Ok(()) => finished,
+                        Err(retirement) => Err(cleanup_failed(finished, retirement)),
                     }
-                    state.retired = Some(Retired {
-                        context,
-                        mode,
-                        prepared: active.owner_prepared != Some(false),
-                    });
-                    state.active.take();
-                    finished
                 }
                 observation => {
                     let error = match observation {
@@ -458,10 +454,7 @@ impl WindowsEngineBackend {
                             "Authority has not verified global Off",
                         ),
                     };
-                    match finished {
-                        Ok(()) => Err(error),
-                        Err(operation) => Err(combined(operation, error)),
-                    }
+                    Err(cleanup_failed(finished, error))
                 }
             }
         }))
@@ -561,18 +554,9 @@ fn query(shared: &Shared, state: &mut State, deadline: Instant) -> Result<Native
                     "Off belongs to another runtime",
                 ));
             }
-            if let Err(retirement) = active.retire_until(deadline) {
-                return match result {
-                    Ok(()) => Err(retirement),
-                    Err(operation) => Err(combined(operation, retirement)),
-                };
+            if let Err(retirement) = state.retire_active(deadline) {
+                return Err(cleanup_failed(result, retirement));
             }
-            state.retired = Some(Retired {
-                context: active.context.clone(),
-                mode: active.mode,
-                prepared: active.owner_prepared != Some(false),
-            });
-            state.active.take();
             result?;
         }
         return Ok(NativeEngineStatus::Off);

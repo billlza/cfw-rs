@@ -112,7 +112,12 @@ revoke through Authority and retain the child until cleanup/exit is established.
 `DesktopUserAgent` owns one LocalProxy/SystemProxy operation on a dedicated
 native thread. It validates the shared request before preparation, retains the
 original authenticated Authority connection, and only reports Ready after an
-Active observation, the exact owned lease and a live held child agree. It polls
+Active observation, the exact owned lease and a live held child agree. The
+Authority answers the observation and the owned-lease request one at a time, and
+when the Agent ends its run itself SYSTEM can commit Off and release the lease
+between them; the Authority then refuses the lease with `Identity`. Only then is
+the run observed once more: a run past every leased state is read as that
+observation, and any other answer keeps the refusal. It polls
 independently of UI refresh. Stop revokes on that same connection/context, then
 observes agent exit and launch-worker retirement. Only a typed stale-revision
 rejection of BeginStop permits another attempt, at most three in total; a new
@@ -121,6 +126,23 @@ with partial process ownership retained for recovery. Returned Authority state
 may still be Stopping/Recovering/Quarantined; no local observation creates Off.
 Installed entrypoints, application-wide lifecycle integration and independent
 global cleanup remain unassembled.
+
+A start the engine refuses because another program holds the address of the
+loopback proxy listener or the controller ends as it does on macOS. The engine
+host answers `mixed_endpoint_in_use` or `controller_endpoint_in_use` only for a
+listen that failed because its address is in use (on Windows also `WSAEACCES`,
+which excluded port ranges give) at exactly the projected `cfw-system-proxy`
+endpoint or the controller; a LAN listener and every other start failure stay
+`start_failed`. The UserAgent exits with 0xCF31 or 0xCF32 only when that
+refusal is its whole result, after its local cleanup and the Authority's
+Stopped acknowledgement; any other failure exits with 1. Small codes are not
+used, because 3 is also what the C runtime's `abort()` leaves. When the stop
+that revoked the lease observes one of these exits, the Desktop reports the
+conflict and still proves global Off. The backend then observes Off for that
+run once more, retires it and returns `MixedEndpointInUse` or
+`ControllerEndpointInUse`, from which the shared coordinator retries, moves an
+automatic port or restores the previous core. A start whose Off is not proven
+remains `CleanupUnproven`, and its owner stays retained.
 
 `SystemProxyAuthorization` is a shared application contract. The Apple adapter
 delegates to its existing native rights request without changing restoration

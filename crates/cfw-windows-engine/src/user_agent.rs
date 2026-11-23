@@ -1,6 +1,9 @@
 //! Current-user runtime ownership under an authenticated Windows Authority
 //! lease. Per-instance cleanup never certifies that the whole machine is Off.
+mod endpoint_conflict;
+mod owner_observation;
 mod plan;
+pub use endpoint_conflict::EndpointConflict;
 pub use plan::UserAgentPlan;
 #[cfg(windows)]
 pub(crate) use plan::hex;

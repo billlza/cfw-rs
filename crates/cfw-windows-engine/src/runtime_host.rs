@@ -18,7 +18,7 @@ pub(crate) use wintun::image_pin as wintun_image_pin;
 #[cfg(windows)]
 mod service;
 #[cfg(windows)]
-pub use agent::run_agent;
+pub use agent::{agent_exit_code, run_agent};
 #[cfg(windows)]
 pub use desktop::InstalledDesktop;
 #[cfg(windows)]

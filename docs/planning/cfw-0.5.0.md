@@ -4143,6 +4143,86 @@ not start; the previous runtime was restored`）、代次更高的旧设置核�
 - 别的程序以 0xCF30 结束 UserAgent，也会被读成引擎拒绝；Off 证明仍然成立，后果是错误的提示。
 - 每一步的时间：产物里没有逐步时间，LAN 这一步本身用了多久不知道；期限约束的是会话的总时长（见上）。
 
+### 2026-11-23：代理与规则提供者进入安装版 GUI 验证（托管结果待定）
+
+功能对齐的下一批（用户：“Providers 这一批可以开始”）。Providers 在 Windows 上早已实现，而且全是共享代码：Clash
+文档里的 `proxy-providers`（inline 与 http）、`rule-providers` 和引用它们的组在导入边界转换成应用自己的目录
+（`providers`），远程文档在提交之前下载，核心只收到校验过的节点与内联的规则。每个提供者的状态（更新时间、
+更新错误、健康）以内容加地址的指纹为键，内容不变就保留。健康检查在核心关闭时由临时的探测引擎运行，核心运行
+时经核心的控制器（`commands/controller/probes.rs`）。但这些从未在安装的应用里运行过。
+
+- 被检查的节点：这一批第一次需要一个真的会应答的节点。引擎拒绝回环、链路本地、组播、文档与 198.18/15 等地址
+  上的远程节点，所以会话用固定的 Node 运行 `scripts/windows/provider_stand_in.mjs`，监听本机默认路由上唯一的
+  IPv4 地址，端口由系统选；这个地址落在被拒绝的范围里时，会话开始就失败。替身只应答配置声明的健康检查：先是
+  `CONNECT 192.0.2.1:80`，再是隧道里的 `HEAD` 或 `GET /generate_204`（`Host` 必须是这个地址），回 204；其余
+  一律以 4xx 拒绝或直接关闭，每个连接都记入回执（JSON 行）。它不拨号；请求头上限 8 KiB，空闲 10 秒，最多 16
+  个并发、256 个连接，900 秒后自行退出。`192.0.2.1` 是文档地址，检查到替身就结束，从不被拨号。
+- 两份文档 `scripts/windows/gui/providers/nodes.yaml`（一个 HTTP 节点 `unresolved`，地址
+  `provider-node.invalid`，永远解析不了）与 `rules.yaml`（两个域名），像订阅会话一样按被测提交从 GitHub 下载。
+- 新增 `providers` 会话，排在 subscription 与 runtime-settings 之间，开始与结束时都只有 local-proxy 的配置、
+  核心关闭。全部改动通过可见控件，IPC 只读。各步收到会话交代的文档地址、替身的地址与端口和检查的 URL。
+  - `providers-import`：在 Profiles 页粘贴配置正文并导入：inline 提供者 `checked`（替身一个节点，健康检查超时
+    5000 ms、间隔 600 秒），http 提供者 `downloaded`（nodes.yaml），规则提供者 `listed`（rules.yaml，domain），
+    选择组 `provider-nodes` 使用两个提供者，规则 `RULE-SET,listed,provider-nodes`。新配置被选中，凭据对话框
+    显示 “This profile references no credentials.”；读回的目录、成员、出站与健康检查就是声明的；
+    `providers_snapshot` 列出 Inline（不可更新、还没有健康）、HTTP（可更新）与两条规则；Providers 页上 inline
+    的 Update 禁用。核心仍关闭，替身还没有应答过。
+  - `providers-offline`（核心关闭）：`checked` 的 Health Check 显示 `1/1 reachable`，由探测引擎完成；`listed`
+    的 Update 完成；Logs 页先后记下 “checked health check completed” 与 “listed update completed”。核心仍关闭，
+    替身至少应答了一次。
+  - `providers-online`：Start core，核心进入 `local_proxy_active`；控制器里 `provider-nodes` 是 Selector，两个
+    选项。Health Check All 经核心完成：`checked` 1/1，`downloaded` 0/1（节点解析不了），Logs 页记下
+    “Health Check All: 1/2 succeeded, 1 failed (downloaded: 0/1 reachable)”。随后 Update All：两份文档没有变，
+    运行中的核心不被替换（代次与运行身份都不变），健康保留，记下 “Update All: 2/2 succeeded”。替身的应答次数
+    增加。
+  - 会话随后关闭替身的标准输入：替身必须以 0 退出，回执最后一行 `closed` 里没有拒绝，也就是它见到的每个连接
+    都是声明的检查。
+  - `providers-unreachable`：再检查 `checked`：0/1，记下 “checked health check failed: checked: 0/1 reachable”，
+    核心仍是同一个。
+  - 复用 `network-stop` 停止这个核心。
+  - `providers-delete`：重新选中 local-proxy 的配置，通过右键菜单删除 providers 配置；只剩 local-proxy 的配置
+    且被选中，`providers_snapshot` 为空，Providers 页显示两个空状态，核心仍关闭。
+  - 驱动脚本逐步核对替身的回执与运行身份的衔接。验证脚本在会话结束后立即核对（正常退出、核心已停、配置已删、
+    用户代理未变、保留的是 local-proxy 的配置、同一安装、进程不同于前五个会话）；runtime-settings、
+    port-conflict 与 tunnel 会话的“进程不同”检查加入本会话；汇总回执包含它。
+- 替身的六项单元测试（`scripts/windows/tests/test_provider_stand_in.py`）在桌面作业构建引擎之前运行。工作流
+  注释改为十个会话；GUI 步骤上限 40 → 44 分钟，作业 66 → 70 分钟。
+
+本机验证：
+
+- 替身的单元测试经真实套接字：经隧道的 HEAD、`Host` 带端口的 GET、与 CONNECT 一起发来的检查各被应答并记录；
+  八种别的请求各被拒绝；不完整的请求 10 秒后关闭；第 257 个连接未读即关闭；期限到时以 3 退出；14 种无效参数
+  以 2 退出且不留回执。17 种变异各自让测试失败。
+- 演练（构建的界面加替身宿主；替身为这一批建模了提供者：目录的存法、快照的形状、状态按内容保留、核心关闭与
+  运行时两条检查路径、只有内容变了才替换核心、日志的原话）：五个新步骤、`network-stop` 与退出整条通过，约
+  4 秒，没有点不中的控件。十种注入故障中九种在预期的步骤被拒绝：内容不变的 Update All 替换了核心、更新丢掉了
+  健康、核心运行时的检查没有到达替身、核心关闭时的检查启动了核心、快照仍是旧的键名、inline 提供者可以更新、
+  替身停止后检查仍通过、Update All 失败、删除没有删掉配置；检查要 3 秒的那种照样通过。旧键名一例起初以含糊的
+  TypeError 失败，脚本因此先核对快照的形状，现在报 “The providers snapshot has another shape”。
+- 读回的字段名对照了 `cfw-singbox-config` 的类型：`ProxyProvider` 的 `members` 与 `health_check`，
+  `ProviderHealthCheck` 的 `url`、`timeout_ms`、`interval_seconds`，HTTP 出站的 `server` 与 `server_port`。
+- 会话文件与验证脚本对该会话的检查，在严格模式下以演练各步的真实结果执行（PowerShell 7.6.4；驱动脚本的回执
+  初值、`Invoke-GuiScenario` 与点源语句取自它的语法树）。替身是真的 Node 进程，监听 127.0.0.1（只在一份副本
+  里放开回环的拒绝），健康检查由测试代替引擎发出。调用顺序正确，回执没有多出键，验证脚本接受；33 种会话
+  故障（默认路由与地址的各种情形、十个被拒绝的地址、替身无法监听、各步回执的改动、导入结束前的检查、别的
+  请求到达替身）与 16 种验证器故障各自以预期的原话被拒绝。这些工具不在仓库里。
+- `scripts/windows/tests` 全部 17 项通过；`ci-no-masking`、`version-contract` 与 `build-script-boundary` 的检查
+  直接运行通过。封装门禁的脚本要求当前 Cargo.lock 的已验证依赖目录，#113 之后本机还没有准备，所以
+  `evidence-manifest-lane` 与 `release-tool-tests` 留给托管 CI；这一批没有改 Rust 与界面代码。
+
+仍未验证：
+
+- 托管 Windows 上的结果，包括：引擎能否连到本机地址上的替身（11-21 的 LAN 探针从本机私有地址连到引擎的
+  监听，走的是同一条本机路径）；核心关闭时经探测引擎的检查第一次在安装版里运行；会话的时长（估计 60–90 秒，
+  期限 180 秒）。
+- 规则提供者在运行中的核心里的分流效果：会话只检查规则集被下载与列出，没有让流量经过 `RULE-SET`。
+- 自动刷新：核心运行时，后台每 30 秒查一次到期的远程提供者（inline 的不算）；会话里最短的间隔是
+  `downloaded` 的 3600 秒，不会到期。#111 第二轮（[44980871510](https://github.com/billlza/cfw-rs/actions/runs/44980871510)）
+  的 runtime-settings 与 port-conflict 会话的 `desktop-output.log` 各有一行 `provider refresh failed: profile
+  repository remained busy for 3 seconds; another process still owns its transaction lock`：后台刷新读取所选
+  配置时等锁超时，只写日志、不改状态。持锁的是哪个进程没有追查；会话自己的读取也可能遇到同一把锁。
+- 用户真机上的 GUI 验收。
+
 ### 2026-10-23：开放事项（需要用户决定或外部条件）
 
 以下事项不能由托管 CI 单独完成，或会改变发布身份、持久化契约与产品方向，保持开放：

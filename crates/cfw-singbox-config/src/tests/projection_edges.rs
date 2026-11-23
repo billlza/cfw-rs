@@ -107,7 +107,15 @@ fn authenticated_dns_pools_admit_only_reachable_ipv6_endpoints() {
         rejected(&settings(false, "2606:4700:4700::1111"))
             .contains("is unavailable while IPv6 is disabled")
     );
-    for address in ["::", "::1", "fe80::1", "ff02::1", "2001:db8::53"] {
+    for address in [
+        "::",
+        "::1",
+        "fe80::1",
+        "ff02::1",
+        "2001:db8::53",
+        "::ffff:127.0.0.1",
+        "::ffff:192.0.2.53",
+    ] {
         assert!(
             rejected(&settings(true, address)).contains("has an unusable address"),
             "{address}"

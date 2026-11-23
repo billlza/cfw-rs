@@ -104,8 +104,10 @@ pub(super) fn validate_tailscale_control_server(
     Ok(())
 }
 
+/// Judged by the address that is dialled: an IPv4-mapped IPv6 literal such
+/// as `::ffff:127.0.0.1` reaches its IPv4 address.
 pub(crate) fn remote_endpoint_ip_is_unusable(address: IpAddr) -> bool {
-    match address {
+    match address.to_canonical() {
         IpAddr::V4(address) => {
             let octets = address.octets();
             address.is_unspecified()

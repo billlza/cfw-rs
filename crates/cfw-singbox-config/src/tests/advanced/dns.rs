@@ -111,6 +111,8 @@ fn selected_dns_transports_keep_authentication_and_stay_on_the_selected_route() 
         invalid = value.clone();
         invalid["dns"]["servers"][0]["server"] = json!("127.0.0.1");
         assert!(ValidatedSingBoxProfile::parse(&invalid.to_string()).is_err());
+        invalid["dns"]["servers"][0]["server"] = json!("::ffff:127.0.0.1");
+        assert!(ValidatedSingBoxProfile::parse(&invalid.to_string()).is_err());
         invalid = value;
         invalid["dns"]["servers"] = json!([server.clone(), server]);
         assert!(ValidatedSingBoxProfile::parse(&invalid.to_string()).is_err());

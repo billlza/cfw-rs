@@ -55,6 +55,7 @@ fn wireguard_rejects_invalid_keys_addresses_and_credential_kinds() {
         ("peer_public_key", json!("invalid")),
         ("local_addresses", json!([])),
         ("local_addresses", json!(["127.0.0.1/32"])),
+        ("local_addresses", json!(["::ffff:127.0.0.1/128"])),
         ("local_addresses", json!(["10.0.0.1/33"])),
         ("local_addresses", json!(["10.0.0.1/32", "10.0.0.2/32"])),
         ("mtu", json!(1279)),

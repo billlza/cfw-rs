@@ -2,7 +2,7 @@ param(
     [Parameter(Mandatory)][string]$Launcher,
     [Parameter(Mandatory)][string]$Source,
     [Parameter(Mandatory)][string]$Output,
-    [Parameter(Mandatory)][ValidateSet('fresh-off', 'local-proxy', 'node-choice', 'automation', 'subscription', 'runtime-settings', 'port-conflict', 'tunnel', 'system-proxy-quit')][string]$Scenario,
+    [Parameter(Mandatory)][ValidateSet('fresh-off', 'local-proxy', 'node-choice', 'automation', 'subscription', 'providers', 'runtime-settings', 'port-conflict', 'tunnel', 'system-proxy-quit')][string]$Scenario,
     [Parameter(Mandatory)][ref]$SessionResult
 )
 Set-StrictMode -Version Latest
@@ -13,13 +13,15 @@ if (-not $IsWindows -or $env:GITHUB_ACTIONS -cne 'true' -or $env:CFW_NATIVE_SERV
 if ($Source -cnotmatch '^[0-9a-f]{40}$' -or (git rev-parse HEAD) -cne $Source -or $LASTEXITCODE -ne 0) {
     throw 'Installed GUI session source identity mismatch'
 }
-# What the GUI steps of a session are told. The subscription session imports
-# documents that GitHub serves from the commit under test over public HTTPS;
-# the runtime settings and port conflict sessions set their own plans.
+# What the GUI steps of a session are told. The subscription and providers
+# sessions import documents that GitHub serves from the commit under test over
+# public HTTPS; the providers, runtime settings and port conflict sessions add
+# their own plans.
 $sessionInput = $null
-if ($Scenario -ceq 'subscription') {
-    if ($env:GITHUB_REPOSITORY -cnotmatch '^[A-Za-z0-9-]+/[A-Za-z0-9_.-]+$') { throw 'The repository of the subscription documents is unknown' }
-    $sessionInput = "https://raw.githubusercontent.com/$env:GITHUB_REPOSITORY/$Source/scripts/windows/gui/subscriptions"
+if ($Scenario -cin 'subscription', 'providers') {
+    if ($env:GITHUB_REPOSITORY -cnotmatch '^[A-Za-z0-9-]+/[A-Za-z0-9_.-]+$') { throw 'The repository of the session documents is unknown' }
+    $documents = if ($Scenario -ceq 'subscription') { 'subscriptions' } else { 'providers' }
+    $sessionInput = "https://raw.githubusercontent.com/$env:GITHUB_REPOSITORY/$Source/scripts/windows/gui/$documents"
 }
 $outputRoot = (Resolve-Path -LiteralPath $Output).Path
 $userState = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Clash for Windows'
@@ -44,7 +46,7 @@ $receipt = [ordered]@{
     tunnel_adapter_retired=$false; core_preserved_after_tunnel=$false
     startup_registration_exercised=$false; settings_controls_exercised=$false; actual_sign_in_exercised=$false
     node_choice_exercised=$false; profile_deleted=$false; connection_diagnostics_exercised=$false
-    automation_exercised=$false; subscription_exercised=$false; runtime_settings_exercised=$false
+    automation_exercised=$false; subscription_exercised=$false; providers_exercised=$false; runtime_settings_exercised=$false
     port_conflict_exercised=$false; physical_display_exercised=$false; network_mode_exercised=$false
     release_accepted=$false
 }
@@ -83,16 +85,17 @@ function Invoke-Playwright([string]$Name, [string[]]$Arguments) {
         return ($result -join "`n")
     } finally { Pop-Location }
 }
-function Invoke-GuiScenario([ValidateSet('startup-off', 'startup-registration', 'settings-controls', 'node-choice-offline', 'node-choice-online', 'profile-delete', 'network-start', 'connection-diagnostics', 'network-stop', 'tunnel-start', 'tunnel-stop', 'combined-start', 'combined-stop', 'leak-protection-on', 'leak-protection-off', 'automation-rule', 'automation-shortcut-stop', 'automation-shortcut-start', 'automation-shortcut-removed', 'subscription-import', 'subscription-update', 'subscription-delete', 'runtime-settings-apply', 'runtime-settings-refused', 'runtime-settings-general', 'runtime-settings-mtu', 'runtime-settings-live-mtu', 'runtime-settings-defaults', 'port-conflict-ports', 'port-conflict-start', 'port-conflict-settings', 'port-conflict-lan', 'port-conflict-configured', 'system-proxy-start', 'quit')][string]$Name) {
+function Invoke-GuiScenario([ValidateSet('startup-off', 'startup-registration', 'settings-controls', 'node-choice-offline', 'node-choice-online', 'profile-delete', 'network-start', 'connection-diagnostics', 'network-stop', 'tunnel-start', 'tunnel-stop', 'combined-start', 'combined-stop', 'leak-protection-on', 'leak-protection-off', 'automation-rule', 'automation-shortcut-stop', 'automation-shortcut-start', 'automation-shortcut-removed', 'subscription-import', 'subscription-update', 'subscription-delete', 'providers-import', 'providers-offline', 'providers-online', 'providers-unreachable', 'providers-delete', 'runtime-settings-apply', 'runtime-settings-refused', 'runtime-settings-general', 'runtime-settings-mtu', 'runtime-settings-live-mtu', 'runtime-settings-defaults', 'port-conflict-ports', 'port-conflict-start', 'port-conflict-settings', 'port-conflict-lan', 'port-conflict-configured', 'system-proxy-start', 'quit')][string]$Name) {
     $observer = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'gui/observe.js'))
     # The leak protection steps run one script, which is told its step; so do
-    # the steps that follow a press of the global shortcut, the runtime
-    # settings steps and the port conflict steps. Every step is told what its
-    # session set aside for it.
+    # the steps that follow a press of the global shortcut, the providers
+    # steps, the runtime settings steps and the port conflict steps. Every step
+    # is told what its session set aside for it.
     $scenarioFile = if ($Name -ceq 'quit') { 'quit-with-state' } elseif ($Name -clike 'leak-protection-*') { 'leak-protection' }
         elseif ($Name -clike 'automation-shortcut-*') { 'automation-shortcut' }
         elseif ($Name -clike 'runtime-settings-*') { 'runtime-settings' }
-        elseif ($Name -clike 'port-conflict-*') { 'port-conflict' } else { $Name }
+        elseif ($Name -clike 'port-conflict-*') { 'port-conflict' }
+        elseif ($Name -clike 'providers-*') { 'providers' } else { $Name }
     $scenarioCode = [IO.File]::ReadAllText((Join-Path $PSScriptRoot "gui/$scenarioFile.js"))
     $quitInput = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'gui/quit.js'))
     $controllerObserver = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'gui/controller.js'))

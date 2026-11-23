@@ -31,7 +31,8 @@ $receipt = [ordered]@{
     source=$Source; package_sha256=$package.package_sha256; installed=$null; uninstalled=$null
     engine_notices_installed=$false; wintun_payload_installed=$false
     fresh_off_session=$null; node_choice_session=$null; local_proxy_session=$null; automation_session=$null
-    subscription_session=$null; runtime_settings_session=$null; port_conflict_session=$null; tunnel_session=$null
+    subscription_session=$null; providers_session=$null; runtime_settings_session=$null; port_conflict_session=$null
+    tunnel_session=$null
     system_proxy_quit_session=$null
     native_gui_exercised=$false; ordinary_user=$false; page_count=0; graceful_exit_observed=$false
     startup_registration_exercised=$false; settings_controls_exercised=$false; actual_sign_in_exercised=$false
@@ -41,6 +42,7 @@ $fresh = $null
 $nodeChoice = $null
 $automation = $null
 $subscription = $null
+$providers = $null
 $runtimeSettings = $null
 $portConflict = $null
 $network = $null
@@ -158,6 +160,23 @@ try {
         ($automation.process_id -eq $subscription.process_id -and $automation.process_creation_time -eq $subscription.process_creation_time)) {
         throw 'The separate GUI subscription lifecycle did not pass'
     }
+    # With the LocalProxy profile alone again: proxy and rule providers checked
+    # and updated with the core off and on, and the profile deleted.
+    $providersRoot = Join-Path $outputRoot 'providers'
+    New-Item -ItemType Directory -Path $providersRoot -ErrorAction Stop | Out-Null
+    & $sessionScript -Launcher $Launcher -Source $Source -Output $providersRoot -Scenario 'providers' -SessionResult ([ref]$providers)
+    if (-not $providers.graceful_exit_observed -or -not $providers.network_mode_exercised -or
+        -not $providers.providers_exercised -or -not $providers.engine_stopped -or -not $providers.profile_deleted -or
+        -not $providers.user_proxy_unchanged -or
+        $providers.kept_profile_id -cne $network.imported_profile_id -or
+        $providers.active_runtime.context.installation_id -cne $network.active_runtime.context.installation_id -or
+        ($fresh.process_id -eq $providers.process_id -and $fresh.process_creation_time -eq $providers.process_creation_time) -or
+        ($network.process_id -eq $providers.process_id -and $network.process_creation_time -eq $providers.process_creation_time) -or
+        ($nodeChoice.process_id -eq $providers.process_id -and $nodeChoice.process_creation_time -eq $providers.process_creation_time) -or
+        ($automation.process_id -eq $providers.process_id -and $automation.process_creation_time -eq $providers.process_creation_time) -or
+        ($subscription.process_id -eq $providers.process_id -and $subscription.process_creation_time -eq $providers.process_creation_time)) {
+        throw 'The separate GUI providers lifecycle did not pass'
+    }
     # With the LocalProxy profile alone again: the port, LAN sharing, the log
     # level and the TUN MTU are changed and put back.
     $runtimeSettingsRoot = Join-Path $outputRoot 'runtime-settings'
@@ -175,7 +194,8 @@ try {
         ($network.process_id -eq $runtimeSettings.process_id -and $network.process_creation_time -eq $runtimeSettings.process_creation_time) -or
         ($nodeChoice.process_id -eq $runtimeSettings.process_id -and $nodeChoice.process_creation_time -eq $runtimeSettings.process_creation_time) -or
         ($automation.process_id -eq $runtimeSettings.process_id -and $automation.process_creation_time -eq $runtimeSettings.process_creation_time) -or
-        ($subscription.process_id -eq $runtimeSettings.process_id -and $subscription.process_creation_time -eq $runtimeSettings.process_creation_time)) {
+        ($subscription.process_id -eq $runtimeSettings.process_id -and $subscription.process_creation_time -eq $runtimeSettings.process_creation_time) -or
+        ($providers.process_id -eq $runtimeSettings.process_id -and $providers.process_creation_time -eq $runtimeSettings.process_creation_time)) {
         throw 'The separate GUI runtime settings lifecycle did not pass'
     }
     # With the LocalProxy profile alone again: ports another program holds
@@ -194,6 +214,7 @@ try {
         ($nodeChoice.process_id -eq $portConflict.process_id -and $nodeChoice.process_creation_time -eq $portConflict.process_creation_time) -or
         ($automation.process_id -eq $portConflict.process_id -and $automation.process_creation_time -eq $portConflict.process_creation_time) -or
         ($subscription.process_id -eq $portConflict.process_id -and $subscription.process_creation_time -eq $portConflict.process_creation_time) -or
+        ($providers.process_id -eq $portConflict.process_id -and $providers.process_creation_time -eq $portConflict.process_creation_time) -or
         ($runtimeSettings.process_id -eq $portConflict.process_id -and $runtimeSettings.process_creation_time -eq $portConflict.process_creation_time)) {
         throw 'The separate GUI port conflict lifecycle did not pass'
     }
@@ -213,6 +234,7 @@ try {
         ($tunnel.process_id -eq $nodeChoice.process_id -and $tunnel.process_creation_time -eq $nodeChoice.process_creation_time) -or
         ($tunnel.process_id -eq $automation.process_id -and $tunnel.process_creation_time -eq $automation.process_creation_time) -or
         ($tunnel.process_id -eq $subscription.process_id -and $tunnel.process_creation_time -eq $subscription.process_creation_time) -or
+        ($tunnel.process_id -eq $providers.process_id -and $tunnel.process_creation_time -eq $providers.process_creation_time) -or
         ($tunnel.process_id -eq $runtimeSettings.process_id -and $tunnel.process_creation_time -eq $runtimeSettings.process_creation_time) -or
         ($tunnel.process_id -eq $portConflict.process_id -and $tunnel.process_creation_time -eq $portConflict.process_creation_time)) {
         throw 'The separate GUI TUN lifecycle did not pass'
@@ -260,6 +282,7 @@ try {
     $receipt.local_proxy_session = $network
     $receipt.automation_session = $automation
     $receipt.subscription_session = $subscription
+    $receipt.providers_session = $providers
     $receipt.runtime_settings_session = $runtimeSettings
     $receipt.port_conflict_session = $portConflict
     $receipt.tunnel_session = $tunnel
@@ -271,18 +294,18 @@ try {
         $receipt.settings_controls_exercised = $fresh.settings_controls_exercised
     }
     if ($null -ne $fresh -and $null -ne $nodeChoice -and $null -ne $network -and $null -ne $automation -and
-        $null -ne $subscription -and $null -ne $runtimeSettings -and $null -ne $portConflict -and $null -ne $tunnel -and
-        $null -ne $systemProxy) {
+        $null -ne $subscription -and $null -ne $providers -and $null -ne $runtimeSettings -and $null -ne $portConflict -and
+        $null -ne $tunnel -and $null -ne $systemProxy) {
         $receipt.ordinary_user = $fresh.ordinary_user -and $nodeChoice.ordinary_user -and $network.ordinary_user -and
-            $automation.ordinary_user -and $subscription.ordinary_user -and $runtimeSettings.ordinary_user -and
-            $portConflict.ordinary_user -and $tunnel.ordinary_user -and $systemProxy.ordinary_user
+            $automation.ordinary_user -and $subscription.ordinary_user -and $providers.ordinary_user -and
+            $runtimeSettings.ordinary_user -and $portConflict.ordinary_user -and $tunnel.ordinary_user -and $systemProxy.ordinary_user
         $receipt.graceful_exit_observed = $fresh.graceful_exit_observed -and $nodeChoice.graceful_exit_observed -and
             $network.graceful_exit_observed -and $automation.graceful_exit_observed -and $subscription.graceful_exit_observed -and
-            $runtimeSettings.graceful_exit_observed -and $portConflict.graceful_exit_observed -and
+            $providers.graceful_exit_observed -and $runtimeSettings.graceful_exit_observed -and $portConflict.graceful_exit_observed -and
             $tunnel.graceful_exit_observed -and $systemProxy.graceful_exit_observed
         $receipt.network_mode_exercised = $nodeChoice.network_mode_exercised -and $network.network_mode_exercised -and
             $automation.network_mode_exercised -and $subscription.network_mode_exercised -and
-            $runtimeSettings.network_mode_exercised -and $portConflict.network_mode_exercised -and
+            $providers.network_mode_exercised -and $runtimeSettings.network_mode_exercised -and $portConflict.network_mode_exercised -and
             $tunnel.network_mode_exercised -and $systemProxy.network_mode_exercised
     }
     $receipt | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'receipt.json') -Encoding utf8NoBOM

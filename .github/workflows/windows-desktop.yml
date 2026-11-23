@@ -17,7 +17,7 @@ jobs:
   desktop:
     name: Windows x64 shared desktop application
     runs-on: windows-2025
-    timeout-minutes: 66
+    timeout-minutes: 70
     defaults:
       run:
         shell: pwsh
@@ -62,6 +62,11 @@ jobs:
           python -m unittest discover -s scripts/windows/tests -p test_installed_gui_probes.py -v 2>&1 |
             Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/installed-gui-probe-tests.log')
           if ($LASTEXITCODE -ne 0) { throw 'Installed GUI probe receipt tests failed' }
+      - name: Verify the providers session's health-check stand-in
+        run: |
+          python -m unittest discover -s scripts/windows/tests -p test_provider_stand_in.py -v 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence/provider-stand-in-tests.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Provider stand-in tests failed' }
       - name: Build the pinned native engine for the installed desktop
         run: |
           $evidence = Join-Path $env:RUNNER_TEMP 'cfw-desktop-evidence'
@@ -280,9 +285,9 @@ jobs:
             -DesktopDirectory $evidence -EngineDirectory (Join-Path $evidence 'engine') `
             -Source (git rev-parse HEAD) -Output (Join-Path $evidence 'msi')
       - name: Install and exercise the actual ordinary-user desktop
-        # Nine separately retained GUI sessions (each bounded at 200 seconds)
+        # Ten separately retained GUI sessions (each bounded at 200 seconds)
         # plus bounded MSI work.
-        timeout-minutes: 40
+        timeout-minutes: 44
         env:
           CFW_NATIVE_SERVICE_MUTATION_TESTS: '1'
         run: |

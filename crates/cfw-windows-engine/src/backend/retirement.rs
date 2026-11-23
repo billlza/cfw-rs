@@ -1,5 +1,5 @@
 //! Retiring a run once global Off has been observed for it, including a
-//! start the engine refused because another program holds an endpoint.
+//! start the engine refused.
 use super::*;
 
 impl State {
@@ -29,13 +29,28 @@ pub(super) fn cleanup_failed(result: Result<()>, cleanup: BackendError) -> Backe
     }
 }
 
-/// Whether the engine refused a start because another program holds one of
-/// its endpoints. Its owner has then proven global Off for the run.
-pub(super) fn endpoint_conflict(error: &BackendError) -> bool {
+/// Whether the Desktop reported that the engine refused a start, which its
+/// Agent ended after its cleanup and Stopped acknowledgement: another program
+/// holds an endpoint, or the engine could not start. No other failure of this
+/// backend has these kinds. The owner has then proven global Off for the run.
+pub(super) fn reported_refusal(error: &BackendError) -> bool {
     matches!(
         error.kind,
-        Kind::MixedEndpointInUse | Kind::ControllerEndpointInUse
+        Kind::MixedEndpointInUse | Kind::ControllerEndpointInUse | Kind::SystemProxyRuntimeFailed
     )
+}
+
+/// A refused start in the kind macOS gives it in `mode`: an engine its
+/// ProxyAgent could not start is `SystemProxyRuntimeFailed`, one its Packet
+/// Tunnel, which runs both tunnel modes, could not start is `Unavailable`.
+fn in_mode(refusal: BackendError, mode: ProjectionMode) -> BackendError {
+    match refusal.kind {
+        Kind::SystemProxyRuntimeFailed if mode.has_tunnel() => BackendError {
+            kind: Kind::Unavailable,
+            ..refusal
+        },
+        _ => refusal,
+    }
 }
 
 /// Observe Off for the refused run once more and retire it, so that the
@@ -46,6 +61,7 @@ pub(super) fn refused_start(
     shared: &Shared,
     state: &mut State,
     refusal: BackendError,
+    mode: ProjectionMode,
     deadline: Instant,
 ) -> BackendError {
     let off = state
@@ -68,7 +84,31 @@ pub(super) fn refused_start(
             }
         });
     match off.and_then(|()| state.retire_active(deadline)) {
-        Ok(()) => refusal,
+        Ok(()) => in_mode(refusal, mode),
         Err(error) => combined(refusal, error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_engine_that_could_not_start_is_named_as_macos_names_it_in_each_mode() {
+        let refusal = |kind| fail(kind, "Windows Desktop start: refused");
+        for (mode, kind) in [
+            (ProjectionMode::LocalProxy, Kind::SystemProxyRuntimeFailed),
+            (ProjectionMode::SystemProxy, Kind::SystemProxyRuntimeFailed),
+            (ProjectionMode::Tunnel, Kind::Unavailable),
+            (ProjectionMode::TunnelSystemProxy, Kind::Unavailable),
+        ] {
+            let reported = in_mode(refusal(Kind::SystemProxyRuntimeFailed), mode);
+            assert_eq!(reported.kind, kind, "{mode:?}");
+            assert_eq!(reported.message, "Windows Desktop start: refused");
+            // A held endpoint keeps its kind in every mode.
+            for held in [Kind::MixedEndpointInUse, Kind::ControllerEndpointInUse] {
+                assert_eq!(in_mode(refusal(held), mode).kind, held, "{mode:?}");
+            }
+        }
     }
 }

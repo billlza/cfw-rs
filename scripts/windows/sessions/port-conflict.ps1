@@ -6,9 +6,12 @@
 # starts: the core starts on the next port of each kind, and the session's
 # listeners keep theirs. A third port the session holds, entered in the Network
 # settings while the core runs, cannot be bound: the application restores the
-# core it ran and saves nothing. Configured with the core off, the same port
-# makes a start end with the application's reason and the core off. The session
-# ends with the automatic port, the core off and its own ports released.
+# core it ran and saves nothing. LAN sharing on a fourth port the session holds
+# on every address is no endpoint the application moves: the engine cannot
+# start, and the application restores the core it ran, as macOS does.
+# Configured with the core off, the third port makes a start end with the
+# application's reason and the core off. The session ends with the automatic
+# port, the core off and its own ports released.
 
 $ports = (Invoke-GuiScenario 'port-conflict-ports') | ConvertFrom-Json
 $ports | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'port-conflict-ports.json') -Encoding utf8NoBOM
@@ -44,16 +47,22 @@ function Test-SessionHeldPort([Net.Sockets.TcpListener]$Holder, [int]$HeldPort) 
 }
 
 # The session's listeners, on the loopback address as another program would
-# hold them; the third port is the one it configures.
+# hold them; the third port is the one it configures. The fourth, for LAN
+# sharing, listens on every address.
 $holders = [ordered]@{}
 try {
-    $wanted = [ordered]@{ mixed=$heldMixed; controller=$heldController; configured=0 }
+    $wanted = [ordered]@{ mixed=$heldMixed; controller=$heldController; configured=0; lan=0 }
     foreach ($name in $wanted.Keys) {
-        $holders[$name] = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, [int]$wanted[$name])
+        $address = if ($name -ceq 'lan') { [Net.IPAddress]::Any } else { [Net.IPAddress]::Loopback }
+        $holders[$name] = [Net.Sockets.TcpListener]::new($address, [int]$wanted[$name])
         $holders[$name].Start()
     }
     $heldConfigured = ([Net.IPEndPoint]$holders.configured.LocalEndpoint).Port
-    $sessionInput = [ordered]@{ mixed=$heldMixed; controller=$heldController; configured=$heldConfigured }
+    $heldLan = ([Net.IPEndPoint]$holders.lan.LocalEndpoint).Port
+    if ($heldLan -in ($heldMixed + 1), ($heldController + 1)) {
+        throw 'The LAN port the session holds is a port the core moved to'
+    }
+    $sessionInput = [ordered]@{ mixed=$heldMixed; controller=$heldController; configured=$heldConfigured; lan=$heldLan }
 
     $conflictStart = (Invoke-GuiScenario 'port-conflict-start') | ConvertFrom-Json
     $conflictStart | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'port-conflict-start.json') -Encoding utf8NoBOM
@@ -84,9 +93,19 @@ try {
     # The restored core forwards on the port it ran on before the change.
     Invoke-NativeNetworkProbe 'http' $movedPort $launch 'restored-http' | Out-Null
 
+    $lanChange = (Invoke-GuiScenario 'port-conflict-lan') | ConvertFrom-Json
+    $lanChange | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'port-conflict-lan.json') -Encoding utf8NoBOM
+    $settingsIdentity = $settingsChange.restored.engine.snapshot.state.runtime | ConvertTo-Json -Depth 20 -Compress
+    $lanIdentity = $lanChange.before.engine.snapshot.state.runtime | ConvertTo-Json -Depth 20 -Compress
+    if ($settingsIdentity -cne $lanIdentity -or $lanChange.release_accepted) {
+        throw 'The refused LAN change did not begin from the core the refused port change restored'
+    }
+    Invoke-NativeNetworkProbe 'http' $movedPort $launch 'lan-restored-http' | Out-Null
+    if (-not (Test-SessionHeldPort $holders.lan $heldLan)) { throw 'The core took the LAN port the session holds' }
+
     $conflictStopped = (Invoke-GuiScenario 'network-stop') | ConvertFrom-Json
     $conflictStopped | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'network-stop.json') -Encoding utf8NoBOM
-    $restoredIdentity = $settingsChange.restored.engine.snapshot.state.runtime | ConvertTo-Json -Depth 20 -Compress
+    $restoredIdentity = $lanChange.restored.engine.snapshot.state.runtime | ConvertTo-Json -Depth 20 -Compress
     $retiredIdentity = $conflictStopped.before.snapshot.state.runtime | ConvertTo-Json -Depth 20 -Compress
     if ($restoredIdentity -cne $retiredIdentity -or $conflictStopped.stopped.snapshot.state.state -cne 'off' -or
         $conflictStopped.stopped.snapshot.desired_mode -cne 'off') {

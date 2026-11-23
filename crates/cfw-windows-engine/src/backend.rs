@@ -30,7 +30,7 @@ mod error;
 mod profile;
 mod retirement;
 use error::{desktop_error, host_error};
-use retirement::{cleanup_failed, endpoint_conflict, refused_start};
+use retirement::{cleanup_failed, refused_start, reported_refusal};
 
 type Result<T> = std::result::Result<T, BackendError>;
 const LIMIT: Duration = Duration::from_secs(60);
@@ -368,8 +368,8 @@ impl WindowsEngineBackend {
                     return match active.finish(deadline) {
                         Ok(()) => Err(original),
                         Err(rejection) if active.owner_prepared == Some(false) => Err(rejection),
-                        Err(refusal) if endpoint_conflict(&refusal) => {
-                            Err(refused_start(shared, state, refusal, deadline))
+                        Err(refusal) if reported_refusal(&refusal) => {
+                            Err(refused_start(shared, state, refusal, mode, deadline))
                         }
                         Err(cleanup) => Err(combined(original, cleanup)),
                     };

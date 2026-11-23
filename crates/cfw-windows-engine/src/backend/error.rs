@@ -3,7 +3,7 @@ use crate::{
     ServiceTransportError,
     authority::wire::{Rejection, WireError},
     credential_lifecycle::CredentialLifecycleError,
-    user_agent::{EndpointConflict, launch_channel::LaunchChannelError, launcher::LaunchError},
+    user_agent::{StartRefusal, launch_channel::LaunchChannelError, launcher::LaunchError},
 };
 
 pub(super) fn desktop_error(error: DesktopError) -> BackendError {
@@ -50,10 +50,12 @@ fn desktop_kind(error: &DesktopError) -> Kind {
         },
         DesktopError::Proxy(error) => proxy_kind(error),
         DesktopError::Observation(error) => desktop_kind(error),
-        DesktopError::EndpointConflict(EndpointConflict::Mixed) => Kind::MixedEndpointInUse,
-        DesktopError::EndpointConflict(EndpointConflict::Controller) => {
-            Kind::ControllerEndpointInUse
-        }
+        DesktopError::StartRefused(refusal) => match refusal {
+            // In the kind of its mode; see `retirement::in_mode`.
+            StartRefusal::Engine => Kind::SystemProxyRuntimeFailed,
+            StartRefusal::MixedEndpoint => Kind::MixedEndpointInUse,
+            StartRefusal::ControllerEndpoint => Kind::ControllerEndpointInUse,
+        },
         DesktopError::Cleanup { .. } | DesktopError::CleanupScope(_) => Kind::CleanupUnproven,
         DesktopError::Context => Kind::IdentityRejected,
         DesktopError::Response | DesktopError::Handoff(_) => Kind::InvalidMessage,
@@ -197,18 +199,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_a_reported_refusal_names_the_held_endpoint() {
-        for (conflict, kind) in [
-            (EndpointConflict::Mixed, Kind::MixedEndpointInUse),
-            (EndpointConflict::Controller, Kind::ControllerEndpointInUse),
+    fn only_a_reported_refusal_is_a_refused_start() {
+        for (refusal, kind) in [
+            (StartRefusal::Engine, Kind::SystemProxyRuntimeFailed),
+            (StartRefusal::MixedEndpoint, Kind::MixedEndpointInUse),
+            (
+                StartRefusal::ControllerEndpoint,
+                Kind::ControllerEndpointInUse,
+            ),
         ] {
-            let error = desktop_error(DesktopError::EndpointConflict(conflict));
+            let error = desktop_error(DesktopError::StartRefused(refusal));
             assert_eq!(error.kind, kind);
-            assert!(super::super::endpoint_conflict(&error));
+            assert!(super::super::reported_refusal(&error));
         }
-        // An exit the Desktop's run did not read as a refusal stays unknown.
-        let exit = desktop_error(DesktopError::Launch(LaunchError::Exit(0xCF31)));
-        assert_eq!(exit.kind, Kind::OwnerUnresponsive);
-        assert!(!super::super::endpoint_conflict(&exit));
+        // An exit the Desktop's run did not read as a refusal stays unknown,
+        // and no other failure of the backend has a refusal's kind.
+        for code in [0xCF30, 0xCF31] {
+            let exit = desktop_error(DesktopError::Launch(LaunchError::Exit(code)));
+            assert_eq!(exit.kind, Kind::OwnerUnresponsive);
+            assert!(!super::super::reported_refusal(&exit));
+        }
+        for error in [
+            desktop_error(DesktopError::Launch(LaunchError::Io(
+                std::io::Error::other("io"),
+            ))),
+            desktop_error(DesktopError::Authority(WireError::Rejected(
+                Rejection::Tunnel,
+            ))),
+            host_error(HostError::Executable(crate::Error::Rejected(
+                "probe_failed",
+            ))),
+            host_error(HostError::Executable(crate::Error::Rejected(
+                "start_failed",
+            ))),
+        ] {
+            assert!(!super::super::reported_refusal(&error), "{error}");
+        }
     }
 }

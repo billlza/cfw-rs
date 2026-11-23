@@ -127,22 +127,29 @@ may still be Stopping/Recovering/Quarantined; no local observation creates Off.
 Installed entrypoints, application-wide lifecycle integration and independent
 global cleanup remain unassembled.
 
-A start the engine refuses because another program holds the address of the
-loopback proxy listener or the controller ends as it does on macOS. The engine
-host answers `mixed_endpoint_in_use` or `controller_endpoint_in_use` only for a
-listen that failed because its address is in use (on Windows also `WSAEACCES`,
-which excluded port ranges give) at exactly the projected `cfw-system-proxy`
-endpoint or the controller; a LAN listener and every other start failure stay
-`start_failed`. The UserAgent exits with 0xCF31 or 0xCF32 only when that
-refusal is its whole result, after its local cleanup and the Authority's
-Stopped acknowledgement; any other failure exits with 1. Small codes are not
-used, because 3 is also what the C runtime's `abort()` leaves. When the stop
-that revoked the lease observes one of these exits, the Desktop reports the
-conflict and still proves global Off. The backend then observes Off for that
-run once more, retires it and returns `MixedEndpointInUse` or
-`ControllerEndpointInUse`, from which the shared coordinator retries, moves an
-automatic port or restores the previous core. A start whose Off is not proven
-remains `CleanupUnproven`, and its owner stays retained.
+A start the engine refuses ends as it does on macOS. The engine host answers
+`mixed_endpoint_in_use` or `controller_endpoint_in_use` only for a listen that
+failed because its address is in use (on Windows also `WSAEACCES`, which
+excluded port ranges give) at exactly the projected `cfw-system-proxy` endpoint
+or the controller; a LAN listener another program holds and every other failure
+to start a configuration the engine built stay `start_failed`. The UserAgent
+exits with 0xCF31 or 0xCF32 for those two endpoints and with 0xCF30 for
+`start_failed` or `construct_failed` (a configuration the engine could not
+build), only when that refusal is its whole result, after its local cleanup and
+the Authority's Stopped acknowledgement; any other failure exits with 1. Small
+codes are not used, because 3 is also what the C runtime's `abort()` leaves.
+When the stop that revoked the lease observes one of these exits, the Desktop
+reports the refusal and still proves global Off. The backend then observes Off
+for that run once more and retires it. A held endpoint is returned as
+`MixedEndpointInUse` or `ControllerEndpointInUse`, from which the shared
+coordinator retries, moves an automatic port or restores the previous core. An
+engine that could not build or start the configuration is returned as
+`SystemProxyRuntimeFailed` in the proxy modes and `Unavailable` in the tunnel
+modes, the kinds macOS gives an engine its ProxyAgent or Packet Tunnel could
+not create or start; the coordinator reports the failed start with Off proven
+and nothing quarantined, or restores the previous core after a settings change.
+A start whose Off is not proven remains `CleanupUnproven`, and its owner stays
+retained.
 
 `SystemProxyAuthorization` is a shared application contract. The Apple adapter
 delegates to its existing native rights request without changing restoration

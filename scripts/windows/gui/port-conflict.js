@@ -4,7 +4,8 @@
 // a changed setting asks for a port it cannot bind, and says so when a start
 // cannot bind the port the user configured. IPC only observes. The driver
 // names the step and, after the first one, passes the ports the session holds:
-// the automatic proxy and controller ports and a third one to configure.
+// the automatic proxy and controller ports, a third one to configure and a
+// fourth one on every address, for LAN sharing.
 (async (page, observeNative, _scenario, _quitInput, observeController, step, plan) => {
   // Two values are the same when they hold the same data, whatever the order
   // of their keys.
@@ -80,11 +81,11 @@
     }, undefined, { name, timeoutMs: 75000 });
   };
   const held = () => {
-    const values = [plan?.mixed, plan?.controller, plan?.configured];
-    if (!values.every(value => Number.isInteger(value) && value >= 1024 && value <= 65535) || new Set(values).size !== 3) {
+    const values = [plan?.mixed, plan?.controller, plan?.configured, plan?.lan];
+    if (!values.every(value => Number.isInteger(value) && value >= 1024 && value <= 65535) || new Set(values).size !== 4) {
       throw new Error(`The ports the session holds are invalid: ${JSON.stringify(plan)}`);
     }
-    return { mixed: plan.mixed, controller: plan.controller, configured: plan.configured };
+    return { mixed: plan.mixed, controller: plan.controller, configured: plan.configured, lan: plan.lan };
   };
 
   if (step === 'port-conflict-ports') {
@@ -157,6 +158,40 @@
     await dialog.locator('button[data-runtime-dismiss]:enabled').click();
     await dialog.waitFor({ state: 'hidden' });
     return { before, outcome, restored, mutations: ['runtime-settings:port'], release_accepted: false };
+  }
+
+  if (step === 'port-conflict-lan') {
+    const { mixed, controller, lan } = held();
+    await general();
+    const before = await read();
+    if (!runningLocal(before) || !atPorts(before, mixed + 1, controller + 1) || before.settings.settings.allow_lan !== false ||
+        before.settings.effective.lan_proxy !== null || lan === mixed + 1 || lan === controller + 1) {
+      throw fail('The core does not run on the ports it moved to without LAN sharing', before);
+    }
+    // LAN sharing on every address, on the port the session holds there: the
+    // engine cannot start, which is no endpoint the application moves, and the
+    // application restores the core it ran.
+    await row(`127.0.0.1:${mixed + 1}`).click();
+    await dialog.waitFor();
+    await field('allow').check();
+    if (await field('lanAddress').inputValue() !== '0.0.0.0') throw new Error('The dialog does not offer every address');
+    await field('lanPort').fill(String(lan));
+    await field('lanSources').fill('10.0.0.0/8');
+    const outcome = await apply('LAN sharing on a port another program holds', true);
+    if (outcome.refusal !== 'native operation start_local_proxy failed: SystemProxyRuntimeFailed: Windows Desktop ' +
+        'start: the engine could not start; the previous runtime was restored') {
+      throw fail('The application did not restore the previous core for the held LAN port', outcome);
+    }
+    const restored = await read();
+    // A new engine of the previous configuration: LAN sharing was not saved.
+    if (!runningLocal(restored) || restored.engine.snapshot.generation <= before.engine.snapshot.generation ||
+        !atPorts(restored, mixed + 1, controller + 1) || !same(restored.settings, before.settings) ||
+        (restored.config.inbounds ?? []).some(entry => entry.tag === 'cfw-lan-proxy')) {
+      throw fail('The previous core was not restored with the settings it ran', restored);
+    }
+    await dialog.locator('button[data-runtime-dismiss]:enabled').click();
+    await dialog.waitFor({ state: 'hidden' });
+    return { before, outcome, restored, mutations: ['runtime-settings:lan'], release_accepted: false };
   }
 
   if (step === 'port-conflict-configured') {

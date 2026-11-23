@@ -110,6 +110,14 @@
   through serde_with, in Cargo.lock without building it, and the target audit
   failed on `RUSTSEC-2026-0543` (chrono is unmaintained) although neither
   program includes chrono.
+- Update `url` to 2.5.9, with `form_urlencoded` 1.2.3, which it requires,
+  for RUSTSEC-2026-0592. In `url` 2.5.8 and earlier, `Url::origin()` called
+  itself once for every `blob:` prefix of a URL, so a URL with thousands of
+  them could overflow the stack and abort the process. Neither program calls
+  `Url::origin()`, directly or through a dependency, but the audits of both
+  programs fail on the advisory. `url` 2.5.9 also writes a `^` in a path as
+  `%5E`, as the URL Standard asks, and no longer takes quadratic time to
+  parse a path of many `..` segments.
 
 ## 0.5.1 — 2026-11-11
 

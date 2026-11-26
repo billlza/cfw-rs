@@ -152,6 +152,13 @@
   programs fail on the advisory. `url` 2.5.9 also writes a `^` in a path as
   `%5E`, as the URL Standard asks, and no longer takes quadratic time to
   parse a path of many `..` segments.
+- Update `cookie` to 0.18.3 for RUSTSEC-2026-0594. `cookie` 0.18.2 took the
+  nonce of a private (encrypted) cookie from a random generator that a
+  forked process continues from the same buffered bytes, so the first
+  private cookies of a parent and of its child could repeat a nonce, which
+  breaks their encryption. Neither program builds that code: Tauri and wry
+  use `cookie` for its cookie types, without the `private` feature. The
+  audits of both programs fail on the advisory all the same.
 
 ## 0.5.1 — 2026-11-11
 

@@ -18,7 +18,7 @@ $receipt.startup_registration_exercised = $true
 $controls = (Invoke-GuiScenario 'settings-controls') | ConvertFrom-Json
 $controls | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $outputRoot 'settings-controls.json') -Encoding utf8NoBOM
 if (-not $controls.settings_controls_exercised -or $controls.languages.Count -ne 3 -or
-    $controls.engine.Count -ne 2 -or $controls.scroll.Count -ne 10 -or $controls.release_accepted) {
-    throw 'The installed GUI did not keep its display language, update interval, leak protection switches and scroll position'
+    $controls.engine.Count -ne 3 -or $controls.scroll.Count -ne 12 -or $controls.release_accepted) {
+    throw 'The installed GUI did not keep its display language, update interval, engine switches and scroll position'
 }
 $receipt.settings_controls_exercised = $true

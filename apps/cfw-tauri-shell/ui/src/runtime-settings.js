@@ -29,6 +29,8 @@ export function runtimeDraft(settings, effective = null) {
     mainlandChinaDirect: settings.mainland_china_direct === true,
     dnsLeakProtection: settings.dns_leak_protection === true,
     webrtcLeakProtection: settings.webrtc_leak_protection === true,
+    // On unless the stored settings say otherwise.
+    tcpConcurrency: settings.tcp_concurrency !== false,
   };
 }
 
@@ -46,7 +48,7 @@ export function preferencesFromRuntimeDraft(draft, mtuLimits) {
   if (!RUNTIME_LOG_LEVELS.includes(draft.level)) throw new Error(t("Choose a supported log level"));
   if (typeof draft.ipv6DNS !== "boolean") throw new Error(t("Choose whether to enable IPv6 DNS"));
   if (typeof draft.mainlandChinaDirect !== "boolean" || typeof draft.dnsLeakProtection !== "boolean"
-    || typeof draft.webrtcLeakProtection !== "boolean") {
+    || typeof draft.webrtcLeakProtection !== "boolean" || typeof draft.tcpConcurrency !== "boolean") {
     throw new TypeError("Runtime settings draft is invalid");
   }
   const sources = draft.lanSources.split(/[\n,]/u).map((value) => value.trim()).filter(Boolean);
@@ -72,6 +74,8 @@ export function preferencesFromRuntimeDraft(draft, mtuLimits) {
     ...(draft.mainlandChinaDirect ? { mainland_china_direct: true } : {}),
     ...(draft.dnsLeakProtection ? { dns_leak_protection: true } : {}),
     ...(draft.webrtcLeakProtection ? { webrtc_leak_protection: true } : {}),
+    // Absent means on here, for the same reason.
+    ...(draft.tcpConcurrency ? {} : { tcp_concurrency: false }),
   };
 }
 
@@ -101,6 +105,8 @@ export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, 
       || typeof snapshot.effective.dns_leak_protection !== "boolean"
       || (snapshot.settings.webrtc_leak_protection !== undefined && typeof snapshot.settings.webrtc_leak_protection !== "boolean")
       || typeof snapshot.effective.webrtc_leak_protection !== "boolean"
+      || (snapshot.settings.tcp_concurrency !== undefined && typeof snapshot.settings.tcp_concurrency !== "boolean")
+      || typeof snapshot.effective.tcp_concurrency !== "boolean"
       || !(snapshot.revision === null || typeof snapshot.revision === "string")) {
       throw new TypeError("Runtime settings response is invalid");
     }
@@ -115,6 +121,7 @@ export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, 
     state.toggles.mainlandChinaDirect = snapshot.effective.mainland_china_direct;
     state.toggles.dnsLeakProtection = snapshot.effective.dns_leak_protection;
     state.toggles.webrtcLeakProtection = snapshot.effective.webrtc_leak_protection;
+    state.toggles.tcpConcurrency = snapshot.effective.tcp_concurrency;
     state.logLevel = snapshot.effective.log_level;
   }
   async function load() {
@@ -208,6 +215,7 @@ export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, 
   const toggleMainlandChinaDirect = (enabled) => toggleSwitch("mainland_china_direct", enabled);
   const toggleDnsLeakProtection = (enabled) => toggleSwitch("dns_leak_protection", enabled);
   const toggleWebRtcLeakProtection = (enabled) => toggleSwitch("webrtc_leak_protection", enabled);
+  const toggleTcpConcurrency = (enabled) => toggleSwitch("tcp_concurrency", enabled);
   function renderDialog() {
     const dialog = state.runtimeSettingsDialog;
     if (!dialog) { nativeDialog?.sync(null); return ""; }
@@ -278,5 +286,5 @@ export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, 
       } catch (error) { appendLog("error", "settings", errorText(error)); renderPage(); }
     }));
   }
-  return { load, open, close, save, toggleLAN, toggleIPv6DNS, toggleMainlandChinaDirect, toggleDnsLeakProtection, toggleWebRtcLeakProtection, renderDialog, bindDialog, bindPage };
+  return { load, open, close, save, toggleLAN, toggleIPv6DNS, toggleMainlandChinaDirect, toggleDnsLeakProtection, toggleWebRtcLeakProtection, toggleTcpConcurrency, renderDialog, bindDialog, bindPage };
 }

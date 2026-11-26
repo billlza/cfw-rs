@@ -1,9 +1,11 @@
-//! Byte-identity goldens for representative projections with the default
-//! settings. They were captured from the 0.5 line before GEOSITE rules and the
-//! mainland China direct switch existed, so every later change to routing, DNS
-//! or dataset resources must leave these bytes unchanged while the switches
-//! are off; the ones captured with a leak protection switch on bind that
-//! switch's rules. A mismatch writes the actual output to
+//! Byte-identity goldens for representative projections with the settings
+//! of the 0.5 line. They were captured before GEOSITE rules, the mainland
+//! China direct switch and TCP concurrency existed, so every later change to
+//! routing, DNS or dataset resources must leave these bytes unchanged while
+//! the switches are off; the ones captured with a leak protection switch on
+//! bind that switch's rules. TCP concurrency is on by default, so it is turned
+//! off here, and `tcp_concurrency.rs` binds what it adds to each of these
+//! projections. A mismatch writes the actual output to
 //! `target/tmp/projection-goldens/` and fails; the goldens are never rewritten
 //! automatically.
 
@@ -16,11 +18,20 @@ use crate::{EngineSettings, LanProxySettings, ProjectionMode, ValidatedSingBoxPr
 const PROFILE_ID: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const SECRET_PLACEHOLDER: &str = "<CLASH-API-SECRET>";
 
-struct Case {
-    name: &'static str,
+pub(super) struct Case {
+    pub(super) name: &'static str,
     profile: ValidatedSingBoxProfile,
     mode: ProjectionMode,
-    settings: EngineSettings,
+    pub(super) settings: EngineSettings,
+}
+
+/// The settings the goldens were captured with: the defaults, with TCP
+/// concurrency, which is newer than the goldens, off.
+fn captured_settings() -> EngineSettings {
+    EngineSettings {
+        tcp_concurrency: false,
+        ..EngineSettings::default()
+    }
 }
 
 fn parse(value: &Value) -> ValidatedSingBoxProfile {
@@ -137,12 +148,12 @@ fn lan_settings() -> EngineSettings {
             port: 8891,
             allowed_source_cidrs: vec!["192.168.0.0/16".into()],
         }),
-        ..EngineSettings::default()
+        ..captured_settings()
     }
 }
 
-fn cases() -> Vec<Case> {
-    let default = EngineSettings::default;
+pub(super) fn cases() -> Vec<Case> {
+    let default = captured_settings;
     let case = |name, profile: &Value, mode, settings| Case {
         name,
         profile: parse(profile),
@@ -278,7 +289,7 @@ fn cases() -> Vec<Case> {
     cases
 }
 
-fn golden_directory() -> PathBuf {
+pub(super) fn golden_directory() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/goldens")
 }
 
@@ -289,7 +300,7 @@ fn actual_directory() -> PathBuf {
 /// The projection with its per-process controller secret replaced, in the
 /// canonical serialisation, together with the parts of the identity that are
 /// not in the JSON.
-fn snapshot(case: &Case) -> String {
+pub(super) fn snapshot(case: &Case) -> String {
     let projected = case
         .profile
         .project(PROFILE_ID, case.mode, &case.settings)

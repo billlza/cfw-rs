@@ -45,6 +45,24 @@
   open, and the switch and the log level went back to what they were, with
   `null` as the only message in the log.
 
+### Network
+
+- Add Settings › Engine › TCP concurrency, on by default. When a name has
+  several addresses, the core connects to them at once and keeps the first
+  connection that opens. It used to try one address after another and move
+  on only when an address had failed, which for an address that never
+  answers took the whole connection timeout. It applies to the TCP
+  connections the core opens itself, in every mode, such as those to a proxy
+  server named by a domain and to a destination that goes direct. IPv4 and
+  IPv6 still start one after the other, at most eight addresses of a family
+  are dialled at a time, the attempts that lose are cancelled and a
+  connection one of them still completes is closed. A connection carried
+  through a proxy, UDP and the latency test are unchanged, and a Clash
+  profile's own `tcp-concurrent` key is not read. Release evidence
+  projections carry the switch like any other projection. Earlier builds
+  refuse a settings file saved with the switch off, so turn it on again
+  before installing one.
+
 ### Profiles
 
 - Add Settings › Background controls › Automatic subscription updates, off by

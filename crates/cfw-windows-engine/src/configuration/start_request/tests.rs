@@ -354,12 +354,15 @@ fn tunnel_data_plane_admits_only_the_exact_packet_fed_projection() {
         (2, 9000, true, false, true, false, true, MAINLAND_SOURCE),
         (3, 1500, true, true, true, true, true, fake_ip.as_str()),
     ] {
+        // TCP concurrency is on unless a case turns it off.
+        let race = case != 2;
         let settings = EngineSettings {
             tunnel_mtu: mtu,
             enable_ipv6: ipv6,
             mainland_china_direct: mainland,
             dns_leak_protection: leak,
             webrtc_leak_protection: stun,
+            tcp_concurrency: race,
             lan_proxy: lan.then(|| LanProxySettings {
                 listen: Ipv4Addr::UNSPECIFIED,
                 port: 8081,
@@ -394,6 +397,13 @@ fn tunnel_data_plane_admits_only_the_exact_packet_fed_projection() {
                 .unwrap()
                 .contains(&serde_json::json!({"protocol":"stun","action":"reject"})),
             stun,
+            "case {case}"
+        );
+        // TCP concurrency is a route option beside the outbound binding the
+        // data plane requires, and is absent while the switch is off.
+        assert_eq!(
+            document["route"].get("tcp_concurrent"),
+            race.then_some(&Value::Bool(true)),
             "case {case}"
         );
         let prepared = CheckedStartConfiguration::new(request)

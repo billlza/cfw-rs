@@ -115,6 +115,14 @@ pub(super) fn switch_free_projections()
             cases.push((label, profile.clone(), mode));
         }
     }
+    cases.extend(release_evidence_projections());
+    cases
+}
+
+/// Every release evidence projection, which no Tunnel-only switch may change.
+pub(super) fn release_evidence_projections()
+-> Vec<(&'static str, ValidatedSingBoxProfile, ProjectionMode)> {
+    let mut cases = Vec::new();
     for case in [
         ReleaseDnsEvidenceCase::PrimaryIpv4,
         ReleaseDnsEvidenceCase::PrimaryIpv6,

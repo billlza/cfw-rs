@@ -13,6 +13,7 @@ mod providers;
 mod routing;
 mod runtime_settings;
 mod socks5;
+mod tcp_concurrency;
 mod tunnel_stack;
 mod tunnel_switches;
 mod validation;

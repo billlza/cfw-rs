@@ -274,6 +274,11 @@ The installed GUI session turns both switches on and off while TUN Mode runs and
 checks the rules table, a DNS over TLS connection, a STUN request and HTTP
 through the tunnel.
 
+TCP concurrency is the shared projection's `route.tcp_concurrent`, as on
+macOS: the engine host is built from the same patched source, and no check of
+the start request depends on the option. The installed GUI session turns the
+switch off and on again in Settings.
+
 The runtime settings session of the installed GUI changes the local port, LAN
 sharing, the log level and the TUN MTU through the Network settings and the
 General page. It reads each MTU back from the adapter's IPv4 interface, and

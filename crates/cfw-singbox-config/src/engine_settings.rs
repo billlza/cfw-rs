@@ -80,6 +80,27 @@ pub struct EngineSettings {
     /// existed keep their bytes.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub webrtc_leak_protection: bool,
+    /// TCP concurrency. When the core itself connects to a name with several
+    /// addresses, such as a proxy server's or a DIRECT destination's, it
+    /// dials the addresses of a family at once, at most eight at a time, and
+    /// keeps the first that answers, instead of trying them in turn. IPv4
+    /// and IPv6 still start one after the other. It holds in every mode and
+    /// in a release evidence projection, which is taken with the dialing the
+    /// release ships, and never changes a connection carried through a
+    /// proxy, UDP, or the latency test; absent means on, so files written
+    /// before the switch existed keep their bytes.
+    #[serde(default = "enabled", skip_serializing_if = "is_enabled")]
+    pub tcp_concurrency: bool,
+}
+
+/// The value of a switch that is on unless its file says otherwise.
+const fn enabled() -> bool {
+    true
+}
+
+/// Such a switch is written only when it is off.
+const fn is_enabled(value: &bool) -> bool {
+    *value
 }
 
 impl Default for EngineSettings {
@@ -113,6 +134,7 @@ impl Default for EngineSettings {
             mainland_china_direct: false,
             dns_leak_protection: false,
             webrtc_leak_protection: false,
+            tcp_concurrency: true,
         }
     }
 }
@@ -232,6 +254,9 @@ pub struct RuntimePreferences {
     /// See [`EngineSettings::webrtc_leak_protection`]. Absent means off.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub webrtc_leak_protection: bool,
+    /// See [`EngineSettings::tcp_concurrency`]. Absent means on.
+    #[serde(default = "enabled", skip_serializing_if = "is_enabled")]
+    pub tcp_concurrency: bool,
 }
 
 impl Default for RuntimePreferences {
@@ -246,6 +271,7 @@ impl Default for RuntimePreferences {
             mainland_china_direct: false,
             dns_leak_protection: false,
             webrtc_leak_protection: false,
+            tcp_concurrency: true,
         }
     }
 }
@@ -283,6 +309,7 @@ impl RuntimePreferences {
         settings.mainland_china_direct = self.mainland_china_direct;
         settings.dns_leak_protection = self.dns_leak_protection;
         settings.webrtc_leak_protection = self.webrtc_leak_protection;
+        settings.tcp_concurrency = self.tcp_concurrency;
         settings.validate_listener_settings()?;
         // The endpoint allocator chooses a distinct controller after applying
         // a user-selected mixed port; projection validates the final tuple.

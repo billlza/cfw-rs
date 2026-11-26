@@ -337,6 +337,9 @@ const RUNTIME_SWITCHES = [
     reason: "every connection to port 853 is refused" },
   { key: "webrtc_leak_protection", toggle: "webrtcLeakProtection", label: "WebRTC leak protection",
     reason: "STUN is refused, so a web page cannot ask a STUN server" },
+  // The one switch that is on until the user turns it off.
+  { key: "tcp_concurrency", toggle: "tcpConcurrency", label: "TCP concurrency", resting: true,
+    reason: "the core connects to them at once and keeps the first connection that opens" },
 ];
 
 for (const sw of RUNTIME_SWITCHES) {
@@ -348,16 +351,18 @@ for (const sw of RUNTIME_SWITCHES) {
     const toggle = (html) => html.match(new RegExp(`<input type="checkbox" data-toggle="${sw.toggle}"([^>]*)\\/>`, "u"))?.[1];
     try {
       let html = await renderPage("settings");
-      const order = ["allowLan", "mainlandChinaDirect", "dnsLeakProtection", "webrtcLeakProtection", "mixin"].map((key) => html.indexOf(`data-toggle="${key}"`));
+      const order = ["allowLan", "mainlandChinaDirect", "dnsLeakProtection", "webrtcLeakProtection", "tcpConcurrency", "mixin"].map((key) => html.indexOf(`data-toggle="${key}"`));
       assert.ok(order.every((position, index) => position >= 0 && (index === 0 || order[index - 1] < position)), `row order ${order}`);
       assert.ok(html.includes(`<b>${sw.label}</b>`));
       assert.ok(html.includes(sw.reason));
-      assert.doesNotMatch(toggle(html), /checked|disabled/u);
+      const resting = sw.resting === true;
+      assert.equal(/checked/u.test(toggle(html)), resting, "the switch shows its resting state");
+      assert.doesNotMatch(toggle(html), /disabled/u);
 
       let written = null;
       responses.write_runtime_settings_snapshot = (args) => {
         written = args;
-        responses.read_runtime_settings_snapshot = { ...original, settings: args.settings, revision: "on",
+        responses.read_runtime_settings_snapshot = { ...original, settings: args.settings, revision: "changed",
           effective: { ...original.effective, [sw.key]: args.settings[sw.key] } };
         return structuredClone(responses.read_runtime_settings_snapshot);
       };
@@ -366,16 +371,16 @@ for (const sw of RUNTIME_SWITCHES) {
       querySelectorAllElements.set("[data-toggle]", [input]);
       await renderPage("settings");
       invocationDetails.length = 0;
-      input.checked = true;
+      input.checked = !resting;
       await input.trigger("change");
       const commands = invocationDetails.map((entry) => entry.command);
       assert.deepEqual(commands.filter((command) => command.startsWith("write_")), ["write_runtime_settings_snapshot"]);
       assert.ok(commands.indexOf("read_runtime_settings_snapshot") < commands.indexOf("write_runtime_settings_snapshot"),
         "the write is bound to a fresh read");
-      assert.deepEqual(written, { settings: { ...original.settings, [sw.key]: true }, revision: null });
-      assert.equal(state.toggles[sw.toggle], true);
+      assert.deepEqual(written, { settings: { ...original.settings, [sw.key]: !resting }, revision: null });
+      assert.equal(state.toggles[sw.toggle], !resting);
       html = await renderPage("settings");
-      assert.match(toggle(html), /checked/u);
+      assert.equal(/checked/u.test(toggle(html)), !resting, "the switch shows the saved change");
 
       // While the runtime settings are unknown the switch is disabled with the reason.
       state.runtimeSettingsError = "runtime settings unavailable";

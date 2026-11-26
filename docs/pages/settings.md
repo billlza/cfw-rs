@@ -195,6 +195,58 @@ What it does not cover:
 - an earlier build refuses a settings file saved with the switch on and does
   not start the core; turn the switch off before installing one.
 
+## Engine › TCP concurrency
+
+On by default. It is a runtime setting, saved and applied like WebRTC leak
+protection: through the network settings transaction, with the same rollback
+when a candidate core fails to start. It is the one switch that rests on:
+`cfw-runtime-settings.json` names it only while it is off.
+
+A name often has several addresses. Without the switch the core dials them
+one after another, and moves to the next address only when the one before it
+has failed; an address that never answers costs the whole connection timeout
+first. With the switch the core dials the addresses at once and keeps the
+first connection that opens. It cancels the other attempts and closes a
+connection that one of them still completes.
+
+It applies to the TCP connections the core opens itself, in every mode:
+
+- to a proxy server named by a domain;
+- to a destination that goes direct: in Direct mode, by a rule, or through a
+  group set to DIRECT. A System Proxy or Local Proxy connection names its
+  destination, which the core resolves. A Tunnel connection carries the one
+  address its app chose, unless the profile uses fake-IP, so there is nothing
+  to race;
+- to a DNS server of the profile that is named by a domain and reached
+  directly.
+
+What it leaves as it was:
+
+- the order of the address families. The family of the first address
+  starts, and the other follows when the first has failed or after 300 ms.
+  The switch races the addresses within a family, at most eight at a time;
+  a further address starts when one of the eight has failed;
+- a connection carried through a proxy, which the proxy server opens, and
+  the connection to a node that is reached through another node;
+- UDP;
+- a DNS server reached through the selected route or the route rules, and
+  the app's own DNS servers, which are dialled by address;
+- the latency test and a provider's health check, which try a server's
+  addresses in turn;
+- a name with one address.
+
+What it costs: a server with several addresses sees an attempt on each of
+them where it saw one, and every attempt but one is dropped at once.
+
+Notes:
+
+- a Clash profile's own `tcp-concurrent` key is not read, like the other
+  top-level keys of the document that tune a client. The switch decides;
+- release evidence projections carry the switch like any other projection,
+  so release evidence is taken with the dialing the release ships;
+- an earlier build refuses a settings file saved with the switch off and
+  does not start the core; turn the switch on again before installing one.
+
 ## Background controls › Automatic subscription updates
 
 Off by default. The interval (every 6 or 12 hours, every day, every week) is

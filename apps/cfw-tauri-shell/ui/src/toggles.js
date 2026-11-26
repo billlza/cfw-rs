@@ -37,6 +37,7 @@ export function createToggles({ renderPage, runtimeSettingsUI, applyEngineStatus
     if (key === "mainlandChinaDirect") return runtimeSettingsUI.toggleMainlandChinaDirect(checked);
     if (key === "dnsLeakProtection") return runtimeSettingsUI.toggleDnsLeakProtection(checked);
     if (key === "webrtcLeakProtection") return runtimeSettingsUI.toggleWebRtcLeakProtection(checked);
+    if (key === "tcpConcurrency") return runtimeSettingsUI.toggleTcpConcurrency(checked);
     const isEngineMutation = key === "coreRunning" || key === "systemProxy" || key === "tunMode";
     if (PERSISTED_TOGGLES.has(key) && state.settingsUnavailableReason) {
       throw new Error(state.settingsUnavailableReason);

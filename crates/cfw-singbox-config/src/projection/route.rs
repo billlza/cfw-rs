@@ -60,6 +60,13 @@ impl ValidatedSingBoxProfile {
                 rule_sets.push(resource);
             }
         }
+        // TCP concurrency is how the core dials, not a rule: it holds in
+        // every mode, whatever the selected route, and in a release evidence
+        // projection as in any other, so evidence is taken with the dialing
+        // the release ships.
+        if settings.tcp_concurrency {
+            route.insert("tcp_concurrent".into(), Value::Bool(true));
+        }
         // The leak protection switches apply to every ordinary Tunnel
         // projection, whatever the selected route, and never to release
         // evidence.

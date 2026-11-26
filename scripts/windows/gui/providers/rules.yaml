@@ -1,0 +1,6 @@
+# The rule provider the installed-GUI providers session downloads on hosted
+# Windows, from the commit under test: two exact domains that no traffic of
+# the session asks for.
+payload:
+  - provider-check.example
+  - rules.provider-check.example

@@ -1,0 +1,9 @@
+# The proxy provider the installed-GUI providers session downloads on hosted
+# Windows. GitHub serves it from the commit under test over public HTTPS. Its
+# one node names a host under .invalid, which never resolves, so a health
+# check of it fails before anything is dialled.
+proxies:
+  - name: unresolved
+    type: http
+    server: provider-node.invalid
+    port: 8080

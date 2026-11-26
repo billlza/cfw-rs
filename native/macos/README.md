@@ -355,7 +355,9 @@ fixed order, each at the path and digest its `SING_BOX_*_PATCH_PATH` and
    endpoint-conflict patch's `StartWithExternalCleanup`, which leaves a failed
    start's close to the caller. A probe's `route` may name the default
    domain resolver and `tcp_concurrent`, which decide how the core reaches a
-   node, and nothing else. It adds `CheckConfigClosingInstance`, which
+   node, and the inline rule sets its DNS rules name, and nothing else: no
+   rule set a probe would have to read from a file or fetch. It adds
+   `CheckConfigClosingInstance`, which
    checks a configuration as `CheckConfig` does but reports a failed close of
    the instance it built apart from a rejection, which `CheckConfig` drops; the
    platform stub's interface monitor, which a check never starts, closes

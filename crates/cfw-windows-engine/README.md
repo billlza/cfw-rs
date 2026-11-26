@@ -278,8 +278,11 @@ TCP concurrency is the shared projection's `route.tcp_concurrent`, as on
 macOS: the engine host is built from the same patched source, and no check of
 the start request depends on the option. The profile probe's admission takes
 the option, written as `true`, beside the default resolver, so a latency test
-of a stopped core dials as the running core does. The installed GUI session
-turns the switch off and on again in Settings.
+of a stopped core dials as the running core does. It also takes the inline
+rule sets the probe's DNS rules name, which the shared projection declares for
+a profile whose DNS policy names a rule provider, and refuses a set the probe
+would have to read or fetch. The installed GUI session turns the switch off
+and on again in Settings.
 
 The runtime settings session of the installed GUI changes the local port, LAN
 sharing, the log level and the TUN MTU through the Network settings and the

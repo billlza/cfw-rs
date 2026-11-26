@@ -92,6 +92,13 @@
   value.
 - Read a block scalar without content lines (`key: |`) as the empty string
   instead of a line break.
+- Let a latency test of a stopped core run on a profile whose DNS policy
+  names a rule provider, as `rule-set:` does in a Clash `nameserver-policy`.
+  Since 0.5.1 the test declares the provider's rules as an inline rule set,
+  but the test's engine admitted no rule-set declaration, so every node of
+  such a profile still failed its test, on macOS and on Windows. The engine
+  now admits the inline sets a test declares and still refuses a set it would
+  have to read from a file or fetch.
 
 ### Security
 

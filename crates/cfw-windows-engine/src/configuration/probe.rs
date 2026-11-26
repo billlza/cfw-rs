@@ -125,11 +125,15 @@ impl CheckedProbeConfiguration {
                 .as_object()
                 .ok_or(Error::Configuration("invalid probe resolver"))?;
             // The resolver and the dialing option of the running core, which
-            // the projection writes only as `true`. Neither routes a
-            // connection.
+            // the projection writes only as `true`, and the inline rule sets
+            // the probe's DNS rules name: a probe reads no file and fetches
+            // nothing. None of the three routes a connection.
             if route.iter().any(|(key, value)| match key.as_str() {
                 "default_domain_resolver" => false,
                 "tcp_concurrent" => value != &serde_json::Value::Bool(true),
+                "rule_set" => !value
+                    .as_array()
+                    .is_some_and(|sets| sets.iter().all(|set| set["type"] == "inline")),
                 _ => true,
             }) {
                 return Err(Error::Configuration("probe cannot configure routes"));

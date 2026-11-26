@@ -331,7 +331,15 @@ fixed order, each at the path and digest its `SING_BOX_*_PATCH_PATH` and
    validates MTU/routing/GSO constraints, transfers descriptor ownership, and
    presents headerless IP datagrams to sing-tun.
 3. The DNS failover patch (`SING_BOX_DNS_FAILOVER_PATCH_PATH`) implements the bounded primary/fallback
-   resolver contract required by the closed product projection.
+   resolver contract required by the closed product projection. It also adds
+   `route.tcp_concurrent`, off unless a configuration sets it: a dialer that
+   opens its TCP connections itself, without a detour and without TCP Fast
+   Open, then dials the addresses of a name at once, at most eight at a time,
+   keeps the first connection that opens, cancels the other attempts and
+   closes a connection one of them still completes. The addresses are split
+   by family first, so the fallback delay between IPv4 and IPv6 holds; UDP
+   and a dial through another outbound are unchanged. The option lives in
+   this patch because it changes dialer files this patch already owns.
 4. The endpoint-conflict patch (`SING_BOX_ENDPOINT_CONFLICT_PATCH_PATH`) reports only exact mixed-listener
    and controller `EADDRINUSE` failures as structured conflicts while preserving
    ordinary startup and cleanup failures. On macOS it marks loopback TCP

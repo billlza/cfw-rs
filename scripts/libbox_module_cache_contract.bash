@@ -21,6 +21,7 @@ LIBBOX_RACE_TEST_PACKAGES=(
   "./dns"
   "./dns/transport/hosts"
   "./option"
+  "./common/dialer"
 )
 
 LIBBOX_TEST_PACKAGES=(

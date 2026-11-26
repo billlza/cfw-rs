@@ -48,10 +48,10 @@ index 3027f1eb12d026a0ed4d4344170b9fd7b526a75c..5dbbb5f365eea4fecff9ba6611317cd8
 +		return c.DNSResponseAddressOverride
 +	}
 diff --git a/adapter/network.go b/adapter/network.go
-index 2ef2c5d2dca05605e6f1aabad665a30a393a6f37..9f886e7038dff470a46850d46a73543895e73efc 100644
+index 2ef2c5d2dca05605e6f1aabad665a30a393a6f37..1818da0f526a154992c99292902ff79cd3425e47 100644
 --- a/adapter/network.go
 +++ b/adapter/network.go
-@@ -42,8 +42,9 @@ type NetworkOptions struct {
+@@ -42,8 +42,10 @@ type NetworkOptions struct {
 -	BindInterface        string
 -	RoutingMark          uint32
 -	DomainResolver       string
@@ -69,6 +69,7 @@ index 2ef2c5d2dca05605e6f1aabad665a30a393a6f37..9f886e7038dff470a46850d46a735438
 +	NetworkType             []C.InterfaceType
 +	FallbackNetworkType     []C.InterfaceType
 +	FallbackDelay           time.Duration
++	TCPConcurrent           bool
 diff --git a/adapter/router.go b/adapter/router.go
 index be6267419103562890843c7f792453f5d0a165e8..4ea6d819541698108994af64d733bc3af47ec16a 100644
 --- a/adapter/router.go
@@ -80,6 +81,890 @@ index be6267419103562890843c7f792453f5d0a165e8..4ea6d819541698108994af64d733bc3a
 +	DialDNSConnection(context.Context, string, M.Socksaddr, string) (net.Conn, error)
 +	ListenDNSPacket(context.Context, M.Socksaddr, string) (net.PacketConn, error)
 +}
+diff --git a/common/dialer/concurrent.go b/common/dialer/concurrent.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..d5db0781c67668df43822cad2ccbe794d952e94d
+--- /dev/null
++++ b/common/dialer/concurrent.go
+@@ -0,0 +1,113 @@
++package dialer
++
++import (
++	"context"
++	"net"
++	"net/netip"
++
++	E "github.com/sagernet/sing/common/exceptions"
++	M "github.com/sagernet/sing/common/metadata"
++	N "github.com/sagernet/sing/common/network"
++)
++
++// maxConcurrentDials bounds the connections one destination has in flight, so
++// a name with many addresses cannot fan out without limit.
++const maxConcurrentDials = 8
++
++// tcpConcurrentDialer is a dialer that says whether its TCP dials to a
++// destination with several addresses race them (`route.tcp_concurrent`).
++// Only dialers that open the connection themselves implement it, so a dial
++// through another outbound never races.
++type tcpConcurrentDialer interface {
++	TCPConcurrent() bool
++}
++
++func (d *DefaultDialer) TCPConcurrent() bool {
++	return d.tcpConcurrent
++}
++
++func (d *resolveParallelNetworkDialer) TCPConcurrent() bool {
++	concurrentDialer, isConcurrent := d.dialer.(tcpConcurrentDialer)
++	return isConcurrent && concurrentDialer.TCPConcurrent()
++}
++
++func dialsTCPConcurrently(dialer N.Dialer, network string) bool {
++	concurrentDialer, isConcurrent := dialer.(tcpConcurrentDialer)
++	return isConcurrent && N.NetworkName(network) == N.NetworkTCP && concurrentDialer.TCPConcurrent()
++}
++
++// racingDialer returns the dialer for sing's address list helpers: the dialer
++// itself, or one that races the addresses of the list it is handed. The
++// helpers still split the addresses by family, so the fallback delay between
++// IPv4 and IPv6 holds.
++func racingDialer(dialer N.Dialer, network string) N.Dialer {
++	if !dialsTCPConcurrently(dialer, network) {
++		return dialer
++	}
++	return concurrentDialer{dialer}
++}
++
++type concurrentDialer struct {
++	N.Dialer
++}
++
++func (d concurrentDialer) DialParallel(ctx context.Context, network string, destination M.Socksaddr, destinationAddresses []netip.Addr) (net.Conn, error) {
++	return dialConcurrent(ctx, destinationAddresses, func(ctx context.Context, address netip.Addr) (net.Conn, error) {
++		return d.DialContext(ctx, network, M.SocksaddrFrom(address, destination.Port))
++	})
++}
++
++// dialConcurrent dials the addresses at once, at most maxConcurrentDials at a
++// time, and returns the first connection established. The other attempts are
++// cancelled, and a connection one of them still completes is closed. When
++// every attempt fails, the failures are reported in address order.
++func dialConcurrent(ctx context.Context, addresses []netip.Addr, dial func(ctx context.Context, address netip.Addr) (net.Conn, error)) (net.Conn, error) {
++	switch len(addresses) {
++	case 0:
++		return nil, E.New("no address to dial")
++	case 1:
++		return dial(ctx, addresses[0])
++	}
++	ctx, cancel := context.WithCancel(ctx)
++	defer cancel()
++	type dialResult struct {
++		conn  net.Conn
++		err   error
++		index int
++	}
++	results := make(chan dialResult) // unbuffered
++	returned := make(chan struct{})
++	defer close(returned)
++	var started, inFlight int
++	start := func() {
++		index := started
++		started++
++		inFlight++
++		go func() {
++			conn, err := dial(ctx, addresses[index])
++			select {
++			case results <- dialResult{conn, err, index}:
++			case <-returned:
++				if conn != nil {
++					conn.Close()
++				}
++			}
++		}()
++	}
++	for started < len(addresses) && started < maxConcurrentDials {
++		start()
++	}
++	failures := make([]error, len(addresses))
++	for inFlight > 0 {
++		result := <-results
++		inFlight--
++		if result.err == nil {
++			return result.conn, nil
++		}
++		failures[result.index] = result.err
++		if started < len(addresses) && ctx.Err() == nil {
++			start()
++		}
++	}
++	return nil, E.Errors(failures...)
++}
+diff --git a/common/dialer/concurrent_route_test.go b/common/dialer/concurrent_route_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..31ecf75277b76917af1f3ce0005bde37fcb73bb5
+--- /dev/null
++++ b/common/dialer/concurrent_route_test.go
+@@ -0,0 +1,149 @@
++package dialer_test
++
++import (
++	"context"
++	"encoding/json"
++	"io"
++	"net"
++	"net/netip"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	box "github.com/sagernet/sing-box"
++	"github.com/sagernet/sing-box/common/dialer"
++	"github.com/sagernet/sing-box/include"
++	"github.com/sagernet/sing-box/option"
++	SJSON "github.com/sagernet/sing/common/json"
++	M "github.com/sagernet/sing/common/metadata"
++	N "github.com/sagernet/sing/common/network"
++	"github.com/sagernet/sing/service"
++)
++
++// routeContext builds an instance from the route options and returns the
++// context its dialers are made in. The instance is never started.
++func routeContext(t *testing.T, route map[string]any) context.Context {
++	t.Helper()
++	ctx := service.ContextWithDefaultRegistry(include.Context(context.Background()))
++	data, err := json.Marshal(map[string]any{
++		"log":       map[string]any{"disabled": true},
++		"outbounds": []any{map[string]any{"type": "direct", "tag": "direct"}},
++		"route":     route,
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	var options option.Options
++	if err = SJSON.UnmarshalContext(ctx, data, &options); err != nil {
++		t.Fatal(err)
++	}
++	instance, err := box.New(box.Options{Options: options, Context: ctx})
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() {
++		if err := instance.Close(); err != nil {
++			t.Error(err)
++		}
++	})
++	return ctx
++}
++
++func racesTCP(built N.Dialer) bool {
++	concurrent, reports := built.(interface{ TCPConcurrent() bool })
++	return reports && concurrent.TCPConcurrent()
++}
++
++func TestRouteOptionMakesPhysicalTCPDialsConcurrent(t *testing.T) {
++	for _, test := range []struct {
++		name     string
++		route    map[string]any
++		dial     option.DialerOptions
++		domain   bool
++		resolver bool
++		want     bool
++	}{
++		{name: "a server named by domain", route: map[string]any{"tcp_concurrent": true}, domain: true, want: true},
++		{name: "a server named by address", route: map[string]any{"tcp_concurrent": true}, want: true},
++		// A DNS server dialled directly resolves its own name through its bootstrap resolver.
++		{name: "a DNS server named by domain", route: map[string]any{"tcp_concurrent": true}, dial: option.DialerOptions{DomainResolver: &option.DomainResolveOptions{Server: "bootstrap"}}, domain: true, resolver: true, want: true},
++		{name: "the option is absent", route: map[string]any{}, domain: true},
++		{name: "the option is off", route: map[string]any{"tcp_concurrent": false}, domain: true},
++		{name: "a fast-open dial has no handshake to race", route: map[string]any{"tcp_concurrent": true}, dial: option.DialerOptions{TCPFastOpen: true}, domain: true},
++		{name: "a dial through another outbound", route: map[string]any{"tcp_concurrent": true}, dial: option.DialerOptions{Detour: "direct"}, domain: true},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			built, err := dialer.NewWithOptions(dialer.Options{
++				Context:        routeContext(t, test.route),
++				Options:        test.dial,
++				RemoteIsDomain: test.domain,
++				DirectResolver: test.resolver,
++			})
++			if err != nil {
++				t.Fatal(err)
++			}
++			if races := racesTCP(built); races != test.want {
++				t.Fatalf("races addresses: %v, want %v", races, test.want)
++			}
++		})
++	}
++}
++
++// The connection that won a race over real sockets still works once the race
++// is over and the other attempts are cancelled, and none of theirs stays open.
++func TestConcurrentDialOverLoopbackLeavesOneWorkingConnection(t *testing.T) {
++	listener, err := net.Listen("tcp4", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer listener.Close()
++	// Every accepted connection echoes until the dialer closes its end.
++	var accepted, closedByDialer atomic.Int32
++	go func() {
++		for {
++			conn, err := listener.Accept()
++			if err != nil {
++				return
++			}
++			accepted.Add(1)
++			go func() {
++				defer conn.Close()
++				io.Copy(conn, conn)
++				closedByDialer.Add(1)
++			}()
++		}
++	}()
++	loopback := netip.AddrFrom4([4]byte{127, 0, 0, 1})
++	destination := M.SocksaddrFromNet(listener.Addr())
++	built, err := dialer.NewWithOptions(dialer.Options{Context: routeContext(t, map[string]any{"tcp_concurrent": true})})
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
++	defer cancel()
++	conn, err := dialer.DialSerialNetwork(ctx, built, N.NetworkTCP, destination, []netip.Addr{loopback, loopback, loopback, loopback}, nil, nil, nil, 0)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err = conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
++		t.Fatal(err)
++	}
++	const greeting = "still open"
++	if _, err = conn.Write([]byte(greeting)); err != nil {
++		t.Fatalf("write on the winning connection: %v", err)
++	}
++	echoed := make([]byte, len(greeting))
++	if _, err = io.ReadFull(conn, echoed); err != nil || string(echoed) != greeting {
++		t.Fatalf("echo on the winning connection: %q %v", echoed, err)
++	}
++	// With the winner closed as well, the dialer has closed every connection
++	// the listener accepted.
++	if err = conn.Close(); err != nil {
++		t.Fatal(err)
++	}
++	for deadline := time.Now().Add(5 * time.Second); accepted.Load() == 0 || closedByDialer.Load() != accepted.Load(); time.Sleep(10 * time.Millisecond) {
++		if time.Now().After(deadline) {
++			t.Fatalf("the dialer closed %d of the %d connections it opened", closedByDialer.Load(), accepted.Load())
++		}
++	}
++}
+diff --git a/common/dialer/concurrent_test.go b/common/dialer/concurrent_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..337e8c9141ced5fa2fc3f1d5d8acbf1a946072b4
+--- /dev/null
++++ b/common/dialer/concurrent_test.go
+@@ -0,0 +1,583 @@
++package dialer
++
++import (
++	"context"
++	"errors"
++	"net"
++	"net/netip"
++	"slices"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/sagernet/sing-box/adapter"
++	C "github.com/sagernet/sing-box/constant"
++	M "github.com/sagernet/sing/common/metadata"
++	N "github.com/sagernet/sing/common/network"
++)
++
++// A correct race settles in microseconds. The limit only turns a dial that
++// waits on an address it should have raced into a failure instead of a hang.
++const raceTestLimit = 5 * time.Second
++
++// No attempt can start while this passes, so waiting it out cannot fail a
++// correct race; a race that starts one too many does so at once.
++const raceTestQuiet = 100 * time.Millisecond
++
++func raceTestContext(t *testing.T) context.Context {
++	t.Helper()
++	ctx, cancel := context.WithTimeout(context.Background(), raceTestLimit)
++	t.Cleanup(cancel)
++	return ctx
++}
++
++// Documentation addresses; the tests never open a socket.
++func raceTestAddresses(count int) []netip.Addr {
++	addresses := make([]netip.Addr, count)
++	for index := range addresses {
++		addresses[index] = netip.AddrFrom4([4]byte{192, 0, 2, byte(index + 1)})
++	}
++	return addresses
++}
++
++// raceTestConn records that it was closed.
++type raceTestConn struct {
++	net.Conn
++	address   netip.Addr
++	closed    chan struct{}
++	closeOnce sync.Once
++}
++
++func newRaceTestConn(address netip.Addr) *raceTestConn {
++	return &raceTestConn{address: address, closed: make(chan struct{})}
++}
++
++func (c *raceTestConn) Close() error {
++	c.closeOnce.Do(func() { close(c.closed) })
++	return nil
++}
++
++func (c *raceTestConn) isClosed() bool {
++	select {
++	case <-c.closed:
++		return true
++	default:
++		return false
++	}
++}
++
++func requireRaceWinner(t *testing.T, conn net.Conn, err error, want netip.Addr) *raceTestConn {
++	t.Helper()
++	if err != nil {
++		t.Fatalf("dial: %v", err)
++	}
++	winner, isTestConn := conn.(*raceTestConn)
++	if !isTestConn || winner.address != want {
++		t.Fatalf("connection to %v, want one to %s", conn, want)
++	}
++	if winner.isClosed() {
++		t.Fatal("the returned connection is closed")
++	}
++	return winner
++}
++
++func refusedBy(address netip.Addr) error {
++	return errors.New("refused by " + address.String())
++}
++
++func TestConcurrentDialReturnsTheFirstConnectionAndCancelsTheRest(t *testing.T) {
++	addresses := raceTestAddresses(3)
++	type stopped struct {
++		address netip.Addr
++		reason  error
++	}
++	stops := make(chan stopped, len(addresses))
++	conn, err := dialConcurrent(raceTestContext(t), addresses, func(ctx context.Context, address netip.Addr) (net.Conn, error) {
++		if address == addresses[2] {
++			if err := ctx.Err(); err != nil {
++				return nil, err
++			}
++			return newRaceTestConn(address), nil
++		}
++		<-ctx.Done()
++		stops <- stopped{address, ctx.Err()}
++		return nil, ctx.Err()
++	})
++	requireRaceWinner(t, conn, err, addresses[2])
++	var cancelled []netip.Addr
++	for range 2 {
++		select {
++		case stop := <-stops:
++			// The race cancels them; the limit of this test would expire instead.
++			if stop.reason != context.Canceled {
++				t.Fatalf("the attempt to %s stopped with %v, want the race to cancel it", stop.address, stop.reason)
++			}
++			cancelled = append(cancelled, stop.address)
++		case <-time.After(2 * raceTestLimit):
++			t.Fatalf("attempts cancelled: %v, want the two that lost", cancelled)
++		}
++	}
++	if !slices.Contains(cancelled, addresses[0]) || !slices.Contains(cancelled, addresses[1]) {
++		t.Fatalf("attempts cancelled: %v, want the two that lost", cancelled)
++	}
++}
++
++func TestConcurrentDialClosesAConnectionCompletedAfterTheRaceIsWon(t *testing.T) {
++	addresses := raceTestAddresses(2)
++	late := newRaceTestConn(addresses[1])
++	conn, err := dialConcurrent(raceTestContext(t), addresses, func(ctx context.Context, address netip.Addr) (net.Conn, error) {
++		if address == addresses[0] {
++			return newRaceTestConn(address), nil
++		}
++		// This handshake completes although the attempt was cancelled.
++		<-ctx.Done()
++		return late, nil
++	})
++	winner := requireRaceWinner(t, conn, err, addresses[0])
++	select {
++	case <-late.closed:
++	case <-time.After(raceTestLimit):
++		t.Fatal("the connection that lost the race stayed open")
++	}
++	if winner.isClosed() {
++		t.Fatal("the returned connection was closed with the loser")
++	}
++}
++
++func TestConcurrentDialKeepsOneOfTwoConnectionsCompletedTogether(t *testing.T) {
++	addresses := raceTestAddresses(2)
++	conns := []*raceTestConn{newRaceTestConn(addresses[0]), newRaceTestConn(addresses[1])}
++	conn, err := dialConcurrent(raceTestContext(t), addresses, func(ctx context.Context, address netip.Addr) (net.Conn, error) {
++		return conns[slices.Index(addresses, address)], nil
++	})
++	if err != nil {
++		t.Fatalf("dial: %v", err)
++	}
++	winner, isTestConn := conn.(*raceTestConn)
++	if !isTestConn {
++		t.Fatalf("unexpected connection: %v", conn)
++	}
++	loser := conns[1-slices.Index(conns, winner)]
++	select {
++	case <-loser.closed:
++	case <-time.After(raceTestLimit):
++		t.Fatal("the connection that lost the race stayed open")
++	}
++	if winner.isClosed() {
++		t.Fatal("the returned connection was closed with the loser")
++	}
++}
++
++func TestConcurrentDialReportsEveryFailureInAddressOrder(t *testing.T) {
++	addresses := raceTestAddresses(3)
++	// The last address fails first, then the one before it.
++	release := []chan struct{}{make(chan struct{}), make(chan struct{}), make(chan struct{})}
++	close(release[2])
++	conn, err := dialConcurrent(raceTestContext(t), addresses, func(ctx context.Context, address netip.Addr) (net.Conn, error) {
++		index := slices.Index(addresses, address)
++		select {
++		case <-release[index]:
++		case <-ctx.Done():
++			return nil, ctx.Err()
++		}
++		if index > 0 {
++			close(release[index-1])
++		}
++		return nil, refusedBy(address)
++	})
++	const want = "(refused by 192.0.2.1 | refused by 192.0.2.2 | refused by 192.0.2.3)"
++	if conn != nil || err == nil || err.Error() != want {
++		t.Fatalf("conn=%v err=%v, want no connection and %s", conn, err, want)
++	}
++}
++
++func TestConcurrentDialKeepsAtMostEightAttemptsInFlight(t *testing.T) {
++	const bound = 8
++	addresses := raceTestAddresses(bound + 4)
++	started := make(chan netip.Addr, len(addresses))
++	fail := make(chan struct{})
++	var inFlight, mostInFlight atomic.Int32
++	finished := make(chan error, 1)
++	ctx := raceTestContext(t)
++	go func() {
++		_, err := dialConcurrent(ctx, addresses, func(ctx context.Context, address netip.Addr) (net.Conn, error) {
++			now := inFlight.Add(1)
++			for most := mostInFlight.Load(); now > most && !mostInFlight.CompareAndSwap(most, now); most = mostInFlight.Load() {
++			}
++			started <- address
++			select {
++			case <-fail:
++			case <-ctx.Done():
++				return nil, ctx.Err()
++			}
++			inFlight.Add(-1)
++			return nil, refusedBy(address)
++		})
++		finished <- err
++	}()
++	var first []netip.Addr
++	for range bound {
++		select {
++		case address := <-started:
++			first = append(first, address)
++		case <-time.After(raceTestLimit):
++			t.Fatalf("%d attempts started at once, want %d", len(first), bound)
++		}
++	}
++	slices.SortFunc(first, netip.Addr.Compare)
++	if !slices.Equal(first, addresses[:bound]) {
++		t.Fatalf("first attempts: %v, want the first %d addresses", first, bound)
++	}
++	select {
++	case address := <-started:
++		t.Fatalf("an attempt to %s started while %d were in flight", address, bound)
++	case <-time.After(raceTestQuiet):
++	}
++	// Each failure makes room for one of the remaining addresses.
++	close(fail)
++	var err error
++	select {
++	case err = <-finished:
++	case <-time.After(raceTestLimit):
++		t.Fatal("the dial did not finish after every attempt failed")
++	}
++	if most := mostInFlight.Load(); most != bound {
++		t.Fatalf("%d attempts in flight at once, want %d", most, bound)
++	}
++	var failures []error
++	if joined, isJoined := err.(interface{ Unwrap() []error }); isJoined {
++		failures = joined.Unwrap()
++	}
++	if len(failures) != len(addresses) {
++		t.Fatalf("failures: %v, want one for each of the %d addresses", err, len(addresses))
++	}
++	for index, address := range addresses {
++		if failures[index].Error() != refusedBy(address).Error() {
++			t.Fatalf("failure %d: %v, want the one of %s", index, failures[index], address)
++		}
++	}
++}
++
++func TestConcurrentDialStartsNoAttemptOnceCancelled(t *testing.T) {
++	const bound = 8
++	addresses := raceTestAddresses(bound + 4)
++	ctx, cancel := context.WithCancel(raceTestContext(t))
++	defer cancel()
++	var attempts atomic.Int32
++	started := make(chan struct{}, len(addresses))
++	finished := make(chan error, 1)
++	go func() {
++		_, err := dialConcurrent(ctx, addresses, func(ctx context.Context, address netip.Addr) (net.Conn, error) {
++			attempts.Add(1)
++			started <- struct{}{}
++			<-ctx.Done()
++			return nil, ctx.Err()
++		})
++		finished <- err
++	}()
++	for range bound {
++		select {
++		case <-started:
++		case <-time.After(raceTestLimit):
++			t.Fatalf("fewer than %d attempts started", bound)
++		}
++	}
++	cancel()
++	select {
++	case err := <-finished:
++		if !errors.Is(err, context.Canceled) {
++			t.Fatalf("err=%v, want the cancellation", err)
++		}
++	case <-time.After(raceTestLimit):
++		t.Fatal("the cancelled dial did not return")
++	}
++	if count := attempts.Load(); count != bound {
++		t.Fatalf("%d attempts, want only the %d in flight when the dial was cancelled", count, bound)
++	}
++}
++
++func TestConcurrentDialOfOneAddressIsThePlainDial(t *testing.T) {
++	// A plain dial runs under the caller's own context, which outlives the call.
++	ctx := raceTestContext(t)
++	addresses := raceTestAddresses(1)
++	refused := refusedBy(addresses[0])
++	var dialled []netip.Addr
++	conn, err := dialConcurrent(ctx, addresses, func(dialCtx context.Context, address netip.Addr) (net.Conn, error) {
++		if dialCtx != ctx {
++			t.Error("the only address was dialled under a context of the race")
++		}
++		dialled = append(dialled, address)
++		return nil, refused
++	})
++	if conn != nil || err != refused || !slices.Equal(dialled, addresses) {
++		t.Fatalf("conn=%v err=%v dialled=%v, want the dial's own failure for %v", conn, err, dialled, addresses)
++	}
++}
++
++func TestConcurrentDialOfNoAddressFails(t *testing.T) {
++	conn, err := dialConcurrent(raceTestContext(t), nil, func(ctx context.Context, address netip.Addr) (net.Conn, error) {
++		t.Errorf("dialled %s", address)
++		return nil, refusedBy(address)
++	})
++	if conn != nil || err == nil {
++		t.Fatalf("conn=%v err=%v, want a failure and no connection", conn, err)
++	}
++}
++
++// scriptedDialer is a physical dialer whose dials the test decides.
++type scriptedDialer struct {
++	concurrent bool
++	dial       func(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error)
++	access     sync.Mutex
++	networks   []string
++	interfaces []scriptedInterfaceChoice
++}
++
++type scriptedInterfaceChoice struct {
++	strategy              *C.NetworkStrategy
++	interfaceType         []C.InterfaceType
++	fallbackInterfaceType []C.InterfaceType
++	fallbackDelay         time.Duration
++}
++
++func (d *scriptedDialer) TCPConcurrent() bool {
++	return d.concurrent
++}
++
++func (d *scriptedDialer) interfaceChoices() []scriptedInterfaceChoice {
++	d.access.Lock()
++	defer d.access.Unlock()
++	return slices.Clone(d.interfaces)
++}
++
++// requireNetwork fails unless every address was dialled, each on the network.
++func (d *scriptedDialer) requireNetwork(t *testing.T, network string, attempts int) {
++	t.Helper()
++	d.access.Lock()
++	defer d.access.Unlock()
++	if len(d.networks) != attempts || slices.ContainsFunc(d.networks, func(dialled string) bool { return dialled != network }) {
++		t.Fatalf("dialled on %v, want %d attempts on %s", d.networks, attempts, network)
++	}
++}
++
++func (d *scriptedDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
++	d.access.Lock()
++	d.networks = append(d.networks, network)
++	d.access.Unlock()
++	return d.dial(ctx, network, destination)
++}
++
++func (d *scriptedDialer) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
++	return nil, errors.New("no packet connection in this test")
++}
++
++func (d *scriptedDialer) DialParallelInterface(ctx context.Context, network string, destination M.Socksaddr, strategy *C.NetworkStrategy, interfaceType []C.InterfaceType, fallbackInterfaceType []C.InterfaceType, fallbackDelay time.Duration) (net.Conn, error) {
++	d.access.Lock()
++	d.networks = append(d.networks, network)
++	d.interfaces = append(d.interfaces, scriptedInterfaceChoice{strategy, interfaceType, fallbackInterfaceType, fallbackDelay})
++	d.access.Unlock()
++	return d.dial(ctx, network, destination)
++}
++
++func (d *scriptedDialer) ListenSerialInterfacePacket(ctx context.Context, destination M.Socksaddr, strategy *C.NetworkStrategy, interfaceType []C.InterfaceType, fallbackInterfaceType []C.InterfaceType, fallbackDelay time.Duration) (net.PacketConn, error) {
++	return nil, errors.New("no packet connection in this test")
++}
++
++// stalledThenOpen dials like a destination whose first address never answers
++// and whose second answers once the first is in flight: a dial that tries
++// them in turn never gets there.
++func stalledThenOpen(addresses []netip.Addr, port uint16) func(context.Context, string, M.Socksaddr) (net.Conn, error) {
++	stalled := make(chan struct{})
++	var stallOnce sync.Once
++	return func(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
++		switch destination {
++		case M.SocksaddrFrom(addresses[0], port):
++			stallOnce.Do(func() { close(stalled) })
++			<-ctx.Done()
++			return nil, ctx.Err()
++		case M.SocksaddrFrom(addresses[1], port):
++			if err := ctx.Err(); err != nil {
++				return nil, err
++			}
++			select {
++			case <-stalled:
++			case <-ctx.Done():
++				return nil, ctx.Err()
++			}
++			return newRaceTestConn(addresses[1]), nil
++		default:
++			return nil, errors.New("unexpected destination " + destination.String())
++		}
++	}
++}
++
++// refusedThenOpen dials like a destination whose first address refuses and
++// whose second answers, and reports whether the second was dialled while the
++// first was still in flight.
++func refusedThenOpen(addresses []netip.Addr, port uint16, raced *atomic.Bool) func(context.Context, string, M.Socksaddr) (net.Conn, error) {
++	secondStarted := make(chan struct{})
++	return func(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
++		switch destination {
++		case M.SocksaddrFrom(addresses[0], port):
++			select {
++			case <-secondStarted:
++				raced.Store(true)
++			case <-time.After(raceTestQuiet):
++			}
++			return nil, refusedBy(addresses[0])
++		case M.SocksaddrFrom(addresses[1], port):
++			close(secondStarted)
++			return newRaceTestConn(addresses[1]), nil
++		default:
++			return nil, errors.New("unexpected destination " + destination.String())
++		}
++	}
++}
++
++func TestSerialNetworkDialRacesTheAddressesOfAConcurrentDialer(t *testing.T) {
++	addresses := raceTestAddresses(2)
++	destination := M.ParseSocksaddrHostPort("race.example", 443)
++	strategy := C.NetworkStrategyHybrid
++	interfaceType := []C.InterfaceType{C.InterfaceTypeWIFI}
++	fallbackInterfaceType := []C.InterfaceType{C.InterfaceTypeCellular}
++	dialer := &scriptedDialer{concurrent: true, dial: stalledThenOpen(addresses, destination.Port)}
++	conn, err := DialSerialNetwork(raceTestContext(t), dialer, "tcp4", destination, addresses, &strategy, interfaceType, fallbackInterfaceType, time.Second)
++	requireRaceWinner(t, conn, err, addresses[1])
++	dialer.requireNetwork(t, "tcp4", len(addresses))
++	choices := dialer.interfaceChoices()
++	if len(choices) != len(addresses) {
++		t.Fatalf("%d attempts, want one for each address", len(choices))
++	}
++	for _, choice := range choices {
++		if choice.strategy != &strategy || !slices.Equal(choice.interfaceType, interfaceType) || !slices.Equal(choice.fallbackInterfaceType, fallbackInterfaceType) || choice.fallbackDelay != time.Second {
++			t.Fatalf("an attempt lost the caller's interface choice: %+v", choice)
++		}
++	}
++}
++
++func TestSerialNetworkDialTriesAddressesInTurnOtherwise(t *testing.T) {
++	for _, test := range []struct {
++		name       string
++		concurrent bool
++		network    string
++	}{
++		{name: "a dialer that does not race", concurrent: false, network: N.NetworkTCP},
++		{name: "UDP", concurrent: true, network: N.NetworkUDP},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			addresses := raceTestAddresses(2)
++			destination := M.ParseSocksaddrHostPort("race.example", 443)
++			var raced atomic.Bool
++			dialer := &scriptedDialer{concurrent: test.concurrent, dial: refusedThenOpen(addresses, destination.Port, &raced)}
++			conn, err := DialSerialNetwork(raceTestContext(t), dialer, test.network, destination, addresses, nil, nil, nil, 0)
++			requireRaceWinner(t, conn, err, addresses[1])
++			if raced.Load() {
++				t.Fatal("the second address was dialled before the first had failed")
++			}
++		})
++	}
++}
++
++// answeringRouter resolves every name to the addresses of the test.
++type answeringRouter struct {
++	adapter.DNSRouter
++	addresses []netip.Addr
++}
++
++func (r answeringRouter) Lookup(ctx context.Context, domain string, options adapter.DNSQueryOptions) ([]netip.Addr, error) {
++	return r.addresses, nil
++}
++
++func TestResolvedDialRacesTheAddressesOfAConcurrentDialer(t *testing.T) {
++	addresses := raceTestAddresses(2)
++	destination := M.ParseSocksaddrHostPort("race.example", 443)
++	dialer := &scriptedDialer{concurrent: true, dial: stalledThenOpen(addresses, destination.Port)}
++	resolved := NewResolveDialer(context.Background(), dialer, true, "", nil, adapter.DNSQueryOptions{}, 0).(*resolveParallelNetworkDialer)
++	resolved.router = answeringRouter{addresses: addresses}
++	conn, err := resolved.DialContext(raceTestContext(t), "tcp4", destination)
++	requireRaceWinner(t, conn, err, addresses[1])
++	dialer.requireNetwork(t, "tcp4", len(addresses))
++}
++
++func TestResolvedDialStillWaitsBeforeTheOtherAddressFamily(t *testing.T) {
++	const fallbackDelay = 300 * time.Millisecond
++	ipv4 := raceTestAddresses(2)
++	ipv6 := netip.MustParseAddr("2001:db8::1")
++	destination := M.ParseSocksaddrHostPort("race.example", 443)
++	var begun time.Time
++	preferred := make(chan struct{}, len(ipv4))
++	waited := make(chan time.Duration, 1)
++	dialer := &scriptedDialer{concurrent: true, dial: func(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
++		if destination.Addr != ipv6 {
++			preferred <- struct{}{}
++			<-ctx.Done()
++			return nil, ctx.Err()
++		}
++		waited <- time.Since(begun)
++		// Every address of the preferred family is in flight by now.
++		for range ipv4 {
++			select {
++			case <-preferred:
++			case <-ctx.Done():
++				return nil, errors.New("the preferred family was not raced")
++			}
++		}
++		return newRaceTestConn(ipv6), nil
++	}}
++	resolved := NewResolveDialer(context.Background(), dialer, true, "", nil, adapter.DNSQueryOptions{}, fallbackDelay).(*resolveParallelNetworkDialer)
++	resolved.router = answeringRouter{addresses: []netip.Addr{ipv4[0], ipv6, ipv4[1]}}
++	begun = time.Now()
++	conn, err := resolved.DialContext(raceTestContext(t), N.NetworkTCP, destination)
++	requireRaceWinner(t, conn, err, ipv6)
++	if delay := <-waited; delay < fallbackDelay {
++		t.Fatalf("the other address family was dialled after %s, want the fallback delay of %s", delay, fallbackDelay)
++	}
++}
++
++func TestRacingDialerLeavesEveryOtherDialAlone(t *testing.T) {
++	racing := &scriptedDialer{concurrent: true}
++	for _, network := range []string{N.NetworkTCP, "tcp4", "tcp6"} {
++		if _, races := racingDialer(racing, network).(N.ParallelDialer); !races {
++			t.Errorf("a %s dial of a concurrent dialer must race the addresses", network)
++		}
++	}
++	serial := &scriptedDialer{}
++	// A dial through another outbound says nothing about concurrency.
++	detour := struct{ N.Dialer }{racing}
++	for _, test := range []struct {
++		name    string
++		dialer  N.Dialer
++		network string
++	}{
++		{name: "UDP", dialer: racing, network: N.NetworkUDP},
++		{name: "a dialer that does not race", dialer: serial, network: N.NetworkTCP},
++		{name: "a dial through another outbound", dialer: detour, network: N.NetworkTCP},
++	} {
++		if racingDialer(test.dialer, test.network) != test.dialer {
++			t.Errorf("%s: the dial must stay as it is", test.name)
++		}
++	}
++}
++
++func TestResolvingDialerRacesWhenItsPhysicalDialerDoes(t *testing.T) {
++	racing := &scriptedDialer{concurrent: true}
++	serial := &scriptedDialer{}
++	// A physical dialer of another kind says nothing about concurrency.
++	silent := struct{ ParallelInterfaceDialer }{racing}
++	for _, test := range []struct {
++		name   string
++		dialer ParallelInterfaceDialer
++		want   bool
++	}{
++		{name: "a dialer that races", dialer: racing, want: true},
++		{name: "a dialer that does not race", dialer: serial, want: false},
++		{name: "a dialer of another kind", dialer: silent, want: false},
++	} {
++		resolved := NewResolveDialer(context.Background(), test.dialer, true, "", nil, adapter.DNSQueryOptions{}, 0)
++		concurrent, reports := resolved.(tcpConcurrentDialer)
++		if !reports || concurrent.TCPConcurrent() != test.want {
++			t.Errorf("%s: reports=%v, want concurrency %v", test.name, reports, test.want)
++		}
++	}
++}
+diff --git a/common/dialer/default.go b/common/dialer/default.go
+index 75fac2f3d3d73530c2a075dcb38be5be355cb8fb..040049849709d0b97e141f2665b2c9a781ace4fd 100644
+--- a/common/dialer/default.go
++++ b/common/dialer/default.go
+@@ -53,0 +54 @@ type DefaultDialer struct {
++	tcpConcurrent          bool
+@@ -230,0 +232,2 @@ func NewDefault(ctx context.Context, options option.DialerOptions) (*DefaultDial
++	// A fast-open connection is made by its first write, so it has no handshake to race.
++	tcpConcurrent := networkManager != nil && networkManager.DefaultOptions().TCPConcurrent && !options.TCPFastOpen
+@@ -250,0 +254 @@ func NewDefault(ctx context.Context, options option.DialerOptions) (*DefaultDial
++		tcpConcurrent:          tcpConcurrent,
+diff --git a/common/dialer/default_parallel_network.go b/common/dialer/default_parallel_network.go
+index 006e57475940687edfe819bb6621c19767c0ad6d..c4636101fed4d752c5e362e63a6356a7b4f79863 100644
+--- a/common/dialer/default_parallel_network.go
++++ b/common/dialer/default_parallel_network.go
+@@ -27,0 +28,5 @@ func DialSerialNetwork(ctx context.Context, dialer N.Dialer, network string, des
++		if dialsTCPConcurrently(dialer, network) {
++			return dialConcurrent(ctx, destinationAddresses, func(ctx context.Context, address netip.Addr) (net.Conn, error) {
++				return parallelDialer.DialParallelInterface(ctx, network, M.SocksaddrFrom(address, destination.Port), strategy, interfaceType, fallbackInterfaceType, fallbackDelay)
++			})
++		}
 diff --git a/common/dialer/dialer.go b/common/dialer/dialer.go
 index 7c0b9b5ab0b7287c162623e969b15fe23938121a..d6439bd606aa7803382257321cf17f8b361b066e 100644
 --- a/common/dialer/dialer.go
@@ -140,7 +1025,7 @@ index 7c0b9b5ab0b7287c162623e969b15fe23938121a..d6439bd606aa7803382257321cf17f8b
 @@ -136,0 +173 @@ func domainResolveQueryOptions(domainResolver *option.DomainResolveOptions) adap
 +		Policy:                 domainResolver.Policy,
 diff --git a/common/dialer/resolve.go b/common/dialer/resolve.go
-index 8fa48f6b3e764c85a22d9ca7b27837ec32d05fcf..82e1a53c1b81fb935052dddd025ace7e4be4fb57 100644
+index 8fa48f6b3e764c85a22d9ca7b27837ec32d05fcf..1edc8da7929be6e2de0c315c344e73d7b1fb33c2 100644
 --- a/common/dialer/resolve.go
 +++ b/common/dialer/resolve.go
 @@ -35,9 +35,10 @@ type resolveDialer struct {
@@ -200,6 +1085,9 @@ index 8fa48f6b3e764c85a22d9ca7b27837ec32d05fcf..82e1a53c1b81fb935052dddd025ace7e
 +		fallbackDelay:   fallbackDelay,
 @@ -91,0 +95 @@ func (d *resolveDialer) initServer() {
 +	d.queryOptions.FallbackTransports, d.initErr = adapter.ResolveDNSFallbacks(d.transport, d.fallbackServers)
+@@ -108 +112 @@ func (d *resolveDialer) DialContext(ctx context.Context, network string, destina
+-		return N.DialParallel(ctx, d.dialer, network, destination, addresses, addresses[0].Is6(), d.fallbackDelay)
++		return N.DialParallel(ctx, racingDialer(d.dialer, network), network, destination, addresses, addresses[0].Is6(), d.fallbackDelay)
 diff --git a/dns/client.go b/dns/client.go
 index 51cedd60c85422f0308d7052599c462a57ffafdd..82890ead7b9144b092f18883db404d44b2a663ad 100644
 --- a/dns/client.go
@@ -4594,6 +5482,12 @@ index 5780929aa65b7e7e11c91ee108b8726eba25677d..c12351c9c134ef18e07fde35ba7e5c23
 +		}
 +		seen[server] = true
 +	}
+diff --git a/option/route.go b/option/route.go
+index 39f3cfb9d9a1d63abe33cd78b2ca5010ff312007..d314c7fa8733b4eb793417c515e0eab27247f9c5 100644
+--- a/option/route.go
++++ b/option/route.go
+@@ -23,0 +24 @@ type RouteOptions struct {
++	TCPConcurrent              bool                              `json:"tcp_concurrent,omitempty"`
 diff --git a/option/rule_action.go b/option/rule_action.go
 index 33ddd2bdc823d8a3ea9a1954e9e51f723ae6447b..b096924fc8005926d7cd10e85843d4208a6c2474 100644
 --- a/option/rule_action.go
@@ -4730,7 +5624,7 @@ index 0000000000000000000000000000000000000000..5c773c40b077c17c696b90784aade964
 +	return outbound.ListenPacket(ctx, destination)
 +}
 diff --git a/route/network.go b/route/network.go
-index 1ff6e49e185e4e260746fac8f29b0e14968096a5..3c66d2dbc4ea2cd3664fa5134cc3542ba81ff08b 100644
+index 1ff6e49e185e4e260746fac8f29b0e14968096a5..3faf390cc67cbe7a778cef880ffa7f5e973981e6 100644
 --- a/route/network.go
 +++ b/route/network.go
 @@ -88,3 +88,4 @@ func NewNetworkManager(ctx context.Context, logger logger.ContextLogger, options
@@ -4743,6 +5637,8 @@ index 1ff6e49e185e4e260746fac8f29b0e14968096a5..3c66d2dbc4ea2cd3664fa5134cc3542b
 +			DomainResolverFallbacks: defaultDomainResolver.FallbackTags(),
 @@ -91,0 +93 @@ func NewNetworkManager(ctx context.Context, logger logger.ContextLogger, options
 +				Policy:                 defaultDomainResolver.Policy,
+@@ -102,0 +105 @@ func NewNetworkManager(ctx context.Context, logger logger.ContextLogger, options
++			TCPConcurrent:       options.TCPConcurrent,
 diff --git a/route/route.go b/route/route.go
 index bf25baeee0d7441dd8bb01e34b24f140c8554202..bc431df1dad18e948abd2bbe2affe14152bff2a3 100644
 --- a/route/route.go

@@ -230,7 +230,8 @@ What it leaves as it was:
 - the order of the address families. The family of the first address
   starts, and the other follows when the first has failed or after 300 ms.
   The switch races the addresses within a family, at most eight at a time;
-  a further address starts when one of the eight has failed;
+  a further address starts when one of the eight has failed. An address
+  that an answer or a hosts file names more than once is dialled once;
 - a connection carried through a proxy, which the proxy server opens, and
   the connection to a node that is reached through another node;
 - UDP;

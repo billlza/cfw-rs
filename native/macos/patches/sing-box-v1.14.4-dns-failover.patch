@@ -83,10 +83,10 @@ index be6267419103562890843c7f792453f5d0a165e8..4ea6d819541698108994af64d733bc3a
 +}
 diff --git a/common/dialer/concurrent.go b/common/dialer/concurrent.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..d5db0781c67668df43822cad2ccbe794d952e94d
+index 0000000000000000000000000000000000000000..34a814afd4da18ccdb3c2910fb5a46793a42feaa
 --- /dev/null
 +++ b/common/dialer/concurrent.go
-@@ -0,0 +1,113 @@
+@@ -0,0 +1,128 @@
 +package dialer
 +
 +import (
@@ -94,6 +94,7 @@ index 0000000000000000000000000000000000000000..d5db0781c67668df43822cad2ccbe794
 +	"net"
 +	"net/netip"
 +
++	"github.com/sagernet/sing/common"
 +	E "github.com/sagernet/sing/common/exceptions"
 +	M "github.com/sagernet/sing/common/metadata"
 +	N "github.com/sagernet/sing/common/network"
@@ -147,10 +148,19 @@ index 0000000000000000000000000000000000000000..d5db0781c67668df43822cad2ccbe794
 +}
 +
 +// dialConcurrent dials the addresses at once, at most maxConcurrentDials at a
-+// time, and returns the first connection established. The other attempts are
-+// cancelled, and a connection one of them still completes is closed. When
-+// every attempt fails, the failures are reported in address order.
++// time, and returns the first connection established. An address the list
++// repeats is dialled once, and so is an IPv4 address the list also names in
++// its IPv4-mapped form. The other attempts are cancelled, and a connection
++// one of them still completes is closed. When every attempt fails, the
++// failures are reported in address order, followed by the context's error
++// when it ended before every address was tried.
 +func dialConcurrent(ctx context.Context, addresses []netip.Addr, dial func(ctx context.Context, address netip.Addr) (net.Conn, error)) (net.Conn, error) {
++	if len(addresses) > 1 {
++		// A repeat is no other path; it would only hold a place of the race.
++		// Nor is the IPv4-mapped form of an IPv4 address: both reach the same
++		// endpoint, and the split by family puts both into the IPv4 list.
++		addresses = common.UniqBy(addresses, netip.Addr.Unmap)
++	}
 +	switch len(addresses) {
 +	case 0:
 +		return nil, E.New("no address to dial")
@@ -198,19 +208,219 @@ index 0000000000000000000000000000000000000000..d5db0781c67668df43822cad2ccbe794
 +			start()
 +		}
 +	}
++	if started < len(addresses) {
++		// Only an ended context leaves addresses without an attempt. Its error
++		// takes the place of the first of them, after every failure.
++		failures[started] = ctx.Err()
++	}
 +	return nil, E.Errors(failures...)
++}
+diff --git a/common/dialer/concurrent_addresses_test.go b/common/dialer/concurrent_addresses_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..b18102debd2f560ba5e433cfea4f8fbe3b378551
+--- /dev/null
++++ b/common/dialer/concurrent_addresses_test.go
+@@ -0,0 +1,188 @@
++package dialer
++
++import (
++	"context"
++	"errors"
++	"net"
++	"net/netip"
++	"slices"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++)
++
++// An answer or a hosts file can name an address more than once. It is still
++// one path: it is dialled once and reported once, in the place it first has.
++func TestConcurrentDialDialsARepeatedAddressOnce(t *testing.T) {
++	distinct := raceTestAddresses(3)
++	addresses := []netip.Addr{distinct[2], distinct[0], distinct[2], distinct[1], distinct[0], distinct[2]}
++	given := slices.Clone(addresses)
++	var access sync.Mutex
++	var dialled []netip.Addr
++	conn, err := dialConcurrent(raceTestContext(t), addresses, func(ctx context.Context, address netip.Addr) (net.Conn, error) {
++		access.Lock()
++		dialled = append(dialled, address)
++		access.Unlock()
++		return nil, refusedBy(address)
++	})
++	const want = "(refused by 192.0.2.3 | refused by 192.0.2.1 | refused by 192.0.2.2)"
++	if conn != nil || err == nil || err.Error() != want {
++		t.Fatalf("conn=%v err=%v, want no connection and %s", conn, err, want)
++	}
++	access.Lock()
++	defer access.Unlock()
++	slices.SortFunc(dialled, netip.Addr.Compare)
++	if !slices.Equal(dialled, distinct) {
++		t.Fatalf("dialled %v, want each of %v once", dialled, distinct)
++	}
++	// The list is the caller's, who may read it again.
++	if !slices.Equal(addresses, given) {
++		t.Fatalf("the dial changed its caller's list to %v", addresses)
++	}
++}
++
++func TestConcurrentDialGivesARepeatedAddressOnePlaceInTheRace(t *testing.T) {
++	distinct := raceTestAddresses(2)
++	// As many copies of an address that never answers as the race has
++	// places, then an address that does.
++	addresses := append(slices.Repeat(distinct[:1], maxConcurrentDials), distinct[1])
++	conn, err := dialConcurrent(raceTestContext(t), addresses, func(ctx context.Context, address netip.Addr) (net.Conn, error) {
++		if address == distinct[1] {
++			return newRaceTestConn(address), nil
++		}
++		<-ctx.Done()
++		return nil, ctx.Err()
++	})
++	requireRaceWinner(t, conn, err, distinct[1])
++}
++
++// An IPv4 address and its IPv4-mapped IPv6 form reach one endpoint, and the
++// split by family puts both into the IPv4 list. They are one path as well,
++// dialled once, in the form the list names first.
++func TestConcurrentDialTakesAnIPv4AddressAndItsMappedFormForOne(t *testing.T) {
++	native := raceTestAddresses(2)
++	mapped := []netip.Addr{netip.AddrFrom16(native[0].As16()), netip.AddrFrom16(native[1].As16())}
++	for _, test := range []struct {
++		name      string
++		addresses []netip.Addr
++		dialled   []netip.Addr
++		report    string
++	}{
++		{
++			name:      "the native form first",
++			addresses: []netip.Addr{native[0], mapped[0], native[1]},
++			dialled:   []netip.Addr{native[0], native[1]},
++			report:    "(refused by 192.0.2.1 | refused by 192.0.2.2)",
++		},
++		{
++			name:      "the mapped form first",
++			addresses: []netip.Addr{mapped[0], native[1], native[0], mapped[1]},
++			dialled:   []netip.Addr{native[1], mapped[0]},
++			report:    "(refused by ::ffff:192.0.2.1 | refused by 192.0.2.2)",
++		},
++		// What comes down to one address is the plain dial of the form named first.
++		{name: "nothing but the two forms", addresses: []netip.Addr{mapped[1], native[1]}, dialled: mapped[1:], report: "refused by ::ffff:192.0.2.2"},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			var access sync.Mutex
++			var dialled []netip.Addr
++			conn, err := dialConcurrent(raceTestContext(t), test.addresses, func(ctx context.Context, address netip.Addr) (net.Conn, error) {
++				access.Lock()
++				dialled = append(dialled, address)
++				access.Unlock()
++				return nil, refusedBy(address)
++			})
++			if conn != nil || err == nil || err.Error() != test.report {
++				t.Fatalf("conn=%v err=%v, want no connection and %s", conn, err, test.report)
++			}
++			access.Lock()
++			defer access.Unlock()
++			slices.SortFunc(dialled, netip.Addr.Compare)
++			if !slices.Equal(dialled, test.dialled) {
++				t.Fatalf("dialled %v, want each of %v once", dialled, test.dialled)
++			}
++		})
++	}
++}
++
++// The failures of the attempts that were made do not say that the dial ran
++// out of time, or was called off, before it had tried every address. A caller
++// that tells a timeout from a refusal needs it said; when every address had
++// its attempt, the failures are the whole account.
++func TestConcurrentDialReportsTheContextThatLeftAddressesUntried(t *testing.T) {
++	withDeadline := func(parent context.Context) (context.Context, context.CancelFunc) {
++		return context.WithTimeout(parent, raceTestQuiet)
++	}
++	for _, test := range []struct {
++		name      string
++		context   func(context.Context) (context.Context, context.CancelFunc)
++		addresses int
++		want      error
++	}{
++		{name: "the deadline passes with addresses left", context: withDeadline, addresses: maxConcurrentDials + 2, want: context.DeadlineExceeded},
++		{name: "the dial is cancelled with addresses left", context: context.WithCancel, addresses: maxConcurrentDials + 2, want: context.Canceled},
++		{name: "the dial is cancelled with every address tried", context: context.WithCancel, addresses: maxConcurrentDials},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			addresses := raceTestAddresses(test.addresses)
++			ctx, cancel := test.context(raceTestContext(t))
++			defer cancel()
++			var attempts atomic.Int32
++			started := make(chan struct{}, len(addresses))
++			finished := make(chan error, 1)
++			go func() {
++				_, err := dialConcurrent(ctx, addresses, func(ctx context.Context, address netip.Addr) (net.Conn, error) {
++					attempts.Add(1)
++					started <- struct{}{}
++					// The attempt fails for a reason of its own once the context has ended.
++					<-ctx.Done()
++					return nil, refusedBy(address)
++				})
++				finished <- err
++			}()
++			for range maxConcurrentDials {
++				select {
++				case <-started:
++				case <-time.After(raceTestLimit):
++					t.Fatalf("fewer than %d attempts started", maxConcurrentDials)
++				}
++			}
++			// A deadline ends the context by itself.
++			if test.want != context.DeadlineExceeded {
++				cancel()
++			}
++			var err error
++			select {
++			case err = <-finished:
++			case <-time.After(raceTestLimit):
++				t.Fatal("the dial did not return once its context had ended")
++			}
++			if count := attempts.Load(); count != maxConcurrentDials {
++				t.Fatalf("%d attempts, want only the %d in flight when the context ended", count, maxConcurrentDials)
++			}
++			var failures []error
++			if joined, isJoined := err.(interface{ Unwrap() []error }); isJoined {
++				failures = joined.Unwrap()
++			}
++			if len(failures) < maxConcurrentDials {
++				t.Fatalf("failures: %v, want one for each of the %d attempts", err, maxConcurrentDials)
++			}
++			for index, address := range addresses[:maxConcurrentDials] {
++				if failures[index].Error() != refusedBy(address).Error() {
++					t.Fatalf("failure %d: %v, want the one of %s", index, failures[index], address)
++				}
++			}
++			reported := failures[maxConcurrentDials:]
++			if test.want == nil {
++				if len(reported) != 0 {
++					t.Fatalf("every address was tried, and the dial still reported %v", reported)
++				}
++				return
++			}
++			if len(reported) != 1 || !errors.Is(reported[0], test.want) || !errors.Is(err, test.want) {
++				t.Fatalf("after the failures the dial reported %v, want %v", reported, test.want)
++			}
++		})
++	}
 +}
 diff --git a/common/dialer/concurrent_route_test.go b/common/dialer/concurrent_route_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..31ecf75277b76917af1f3ce0005bde37fcb73bb5
+index 0000000000000000000000000000000000000000..46505a84bf19fc601adc96f111c97cdd0d9f4338
 --- /dev/null
 +++ b/common/dialer/concurrent_route_test.go
-@@ -0,0 +1,149 @@
+@@ -0,0 +1,272 @@
 +package dialer_test
 +
 +import (
 +	"context"
 +	"encoding/json"
++	"fmt"
 +	"io"
 +	"net"
 +	"net/netip"
@@ -220,6 +430,7 @@ index 0000000000000000000000000000000000000000..31ecf75277b76917af1f3ce0005bde37
 +
 +	box "github.com/sagernet/sing-box"
 +	"github.com/sagernet/sing-box/common/dialer"
++	C "github.com/sagernet/sing-box/constant"
 +	"github.com/sagernet/sing-box/include"
 +	"github.com/sagernet/sing-box/option"
 +	SJSON "github.com/sagernet/sing/common/json"
@@ -297,43 +508,162 @@ index 0000000000000000000000000000000000000000..31ecf75277b76917af1f3ce0005bde37
 +	}
 +}
 +
-+// The connection that won a race over real sockets still works once the race
-+// is over and the other attempts are cancelled, and none of theirs stays open.
-+func TestConcurrentDialOverLoopbackLeavesOneWorkingConnection(t *testing.T) {
-+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
-+	if err != nil {
-+		t.Fatal(err)
++// A step over loopback takes microseconds; the limit only ends a hang.
++const loopbackLimit = 5 * time.Second
++
++// heldDialer stands between the race and the dialer under test. Each address
++// of the race stands for a listener on loopback: an attempt on the address is
++// made on that listener, by the dialer under test, and answers only once
++// every listener has a connection. The connections of a race then all exist
++// before any of them can win, so each one that loses does so with its socket
++// open.
++type heldDialer struct {
++	dialer.ParallelInterfaceDialer
++	// port is the port the race is asked to dial on every address.
++	port uint16
++	// stands gives the listener each address of the race stands for.
++	stands map[netip.Addr]M.Socksaddr
++	// attempts counts the dials made, connected those that succeeded.
++	attempts, connected atomic.Int32
++	// all is closed once as many attempts have connected as there are listeners.
++	all chan struct{}
++	// alone is set by an attempt that waited in vain for the others.
++	alone atomic.Bool
++}
++
++// TCPConcurrent is the answer of the dialer under test: the hold changes
++// where and when an attempt answers, not whether the addresses are raced.
++func (d *heldDialer) TCPConcurrent() bool {
++	return racesTCP(d.ParallelInterfaceDialer)
++}
++
++func (d *heldDialer) DialParallelInterface(ctx context.Context, network string, destination M.Socksaddr, strategy *C.NetworkStrategy, interfaceType []C.InterfaceType, fallbackInterfaceType []C.InterfaceType, fallbackDelay time.Duration) (net.Conn, error) {
++	d.attempts.Add(1)
++	listener, stands := d.stands[destination.Addr]
++	if !stands || destination.Port != d.port {
++		return nil, fmt.Errorf("the race dialled %s, which is none of its addresses on port %d", destination, d.port)
 +	}
-+	defer listener.Close()
-+	// Every accepted connection echoes until the dialer closes its end.
-+	var accepted, closedByDialer atomic.Int32
-+	go func() {
-+		for {
-+			conn, err := listener.Accept()
-+			if err != nil {
-+				return
-+			}
-+			accepted.Add(1)
-+			go func() {
-+				defer conn.Close()
-+				io.Copy(conn, conn)
-+				closedByDialer.Add(1)
-+			}()
++	conn, err := d.ParallelInterfaceDialer.DialParallelInterface(ctx, network, listener, strategy, interfaceType, fallbackInterfaceType, fallbackDelay)
++	if err != nil {
++		return nil, err
++	}
++	if int(d.connected.Add(1)) == len(d.stands) {
++		close(d.all)
++	}
++	select {
++	case <-d.all:
++	case <-time.After(loopbackLimit):
++		// No other attempt connected meanwhile. The test fails on this.
++		d.alone.Store(true)
++	}
++	return conn, nil
++}
++
++// echoPeer is the accepted end of a connection to an echo listener.
++type echoPeer struct {
++	// local is the address of the listener, remote the dialer's end.
++	local, remote string
++	// closed once the dialer has closed its end.
++	closed chan struct{}
++}
++
++// serveEcho reports every connection the listener accepts, in that order, and
++// echoes on it until the dialer closes its end.
++func serveEcho(listener net.Listener, accepted chan<- *echoPeer) {
++	for {
++		conn, err := listener.Accept()
++		if err != nil {
++			return
 +		}
-+	}()
-+	loopback := netip.AddrFrom4([4]byte{127, 0, 0, 1})
-+	destination := M.SocksaddrFromNet(listener.Addr())
++		peer := &echoPeer{local: listener.Addr().String(), remote: conn.RemoteAddr().String(), closed: make(chan struct{})}
++		accepted <- peer
++		go func() {
++			defer conn.Close()
++			io.Copy(conn, conn)
++			close(peer.closed)
++		}()
++	}
++}
++
++// A race over real sockets leaves one working connection. Each address gets
++// one connection, and both exist before either attempt answers, so one of
++// them always loses: it is closed, and the one that won still works until the
++// caller closes it.
++func TestConcurrentDialOverLoopbackLeavesOneWorkingConnection(t *testing.T) {
++	// Two addresses of one family that are never dialled themselves. Each
++	// stands for a listener on 127.0.0.1, so the test needs neither IPv6 nor
++	// a second loopback address.
++	addresses := []netip.Addr{netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("192.0.2.2")}
++	const port = 443
 +	built, err := dialer.NewWithOptions(dialer.Options{Context: routeContext(t, map[string]any{"tcp_concurrent": true})})
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
++	physical, opensConnections := built.(dialer.ParallelInterfaceDialer)
++	if !opensConnections {
++		t.Fatalf("%T does not open its connections itself", built)
++	}
++	held := &heldDialer{ParallelInterfaceDialer: physical, port: port, stands: make(map[netip.Addr]M.Socksaddr), all: make(chan struct{})}
++	// Room for more connections than the test makes: no listener waits on it.
++	accepted := make(chan *echoPeer, 16)
++	for _, address := range addresses {
++		listener, err := net.Listen("tcp4", "127.0.0.1:0")
++		if err != nil {
++			t.Fatal(err)
++		}
++		t.Cleanup(func() { listener.Close() })
++		go serveEcho(listener, accepted)
++		held.stands[address] = M.SocksaddrFromNet(listener.Addr())
++	}
++	// Longer than an attempt is held alone, so a dial that does not race still
++	// answers and fails on that below.
++	ctx, cancel := context.WithTimeout(context.Background(), 2*loopbackLimit)
 +	defer cancel()
-+	conn, err := dialer.DialSerialNetwork(ctx, built, N.NetworkTCP, destination, []netip.Addr{loopback, loopback, loopback, loopback}, nil, nil, nil, 0)
++	conn, err := dialer.DialSerialNetwork(ctx, held, N.NetworkTCP, M.SocksaddrFrom(addresses[0], port), addresses, nil, nil, nil, 0)
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	if err = conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
++	// For a failure below. The test closes the connection itself at its end.
++	defer conn.Close()
++	if held.alone.Load() {
++		t.Fatalf("an attempt waited %s for the other and answered alone: the addresses were not raced", loopbackLimit)
++	}
++	if connected := int(held.connected.Load()); connected != len(addresses) {
++		t.Fatalf("%d of %d attempts had connected when the dial answered: the addresses were not raced", connected, len(addresses))
++	}
++	// Each listener accepts the one connection made to its address.
++	reached := make(map[string]*echoPeer, len(addresses))
++	for range addresses {
++		select {
++		case peer := <-accepted:
++			if reached[peer.local] != nil {
++				t.Fatalf("%s accepted a second connection of the race", peer.local)
++			}
++			reached[peer.local] = peer
++		case <-time.After(loopbackLimit):
++			t.Fatalf("%d of %d listeners accepted a connection", len(reached), len(addresses))
++		}
++	}
++	// The dial returned the connection to one of the listeners, which names
++	// it by both of its ends. The dialer's end alone would not tell the two
++	// connections apart where the system gives one port to both.
++	won := reached[conn.RemoteAddr().String()]
++	if won == nil || won.remote != conn.LocalAddr().String() {
++		t.Fatalf("no listener accepted the connection from %s to %s that the dial returned", conn.LocalAddr(), conn.RemoteAddr())
++	}
++	// Every other connection lost the race: it is closed.
++	for _, peer := range reached {
++		if peer == won {
++			continue
++		}
++		select {
++		case <-peer.closed:
++		case <-time.After(loopbackLimit):
++			t.Fatalf("the connection to %s lost the race and stayed open", peer.local)
++		}
++	}
++	// The winner was not closed with it.
++	if err = conn.SetDeadline(time.Now().Add(loopbackLimit)); err != nil {
 +		t.Fatal(err)
 +	}
 +	const greeting = "still open"
@@ -344,23 +674,25 @@ index 0000000000000000000000000000000000000000..31ecf75277b76917af1f3ce0005bde37
 +	if _, err = io.ReadFull(conn, echoed); err != nil || string(echoed) != greeting {
 +		t.Fatalf("echo on the winning connection: %q %v", echoed, err)
 +	}
-+	// With the winner closed as well, the dialer has closed every connection
-+	// the listener accepted.
-+	if err = conn.Close(); err != nil {
-+		t.Fatal(err)
++	if attempts := int(held.attempts.Load()); attempts != len(addresses) {
++		t.Fatalf("the race made %d attempts for %d addresses", attempts, len(addresses))
 +	}
-+	for deadline := time.Now().Add(5 * time.Second); accepted.Load() == 0 || closedByDialer.Load() != accepted.Load(); time.Sleep(10 * time.Millisecond) {
-+		if time.Now().After(deadline) {
-+			t.Fatalf("the dialer closed %d of the %d connections it opened", closedByDialer.Load(), accepted.Load())
-+		}
++	// Closing the winner releases its socket: the listener sees its end close.
++	if err = conn.Close(); err != nil {
++		t.Fatalf("close the winning connection: %v", err)
++	}
++	select {
++	case <-won.closed:
++	case <-time.After(loopbackLimit):
++		t.Fatalf("the winning connection to %s stayed open after it was closed", won.local)
 +	}
 +}
 diff --git a/common/dialer/concurrent_test.go b/common/dialer/concurrent_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..337e8c9141ced5fa2fc3f1d5d8acbf1a946072b4
+index 0000000000000000000000000000000000000000..5bb156df2c7721398547c2a8f44cce31abe07971
 --- /dev/null
 +++ b/common/dialer/concurrent_test.go
-@@ -0,0 +1,583 @@
+@@ -0,0 +1,599 @@
 +package dialer
 +
 +import (
@@ -661,20 +993,30 @@ index 0000000000000000000000000000000000000000..337e8c9141ced5fa2fc3f1d5d8acbf1a
 +}
 +
 +func TestConcurrentDialOfOneAddressIsThePlainDial(t *testing.T) {
-+	// A plain dial runs under the caller's own context, which outlives the call.
-+	ctx := raceTestContext(t)
-+	addresses := raceTestAddresses(1)
-+	refused := refusedBy(addresses[0])
-+	var dialled []netip.Addr
-+	conn, err := dialConcurrent(ctx, addresses, func(dialCtx context.Context, address netip.Addr) (net.Conn, error) {
-+		if dialCtx != ctx {
-+			t.Error("the only address was dialled under a context of the race")
-+		}
-+		dialled = append(dialled, address)
-+		return nil, refused
-+	})
-+	if conn != nil || err != refused || !slices.Equal(dialled, addresses) {
-+		t.Fatalf("conn=%v err=%v dialled=%v, want the dial's own failure for %v", conn, err, dialled, addresses)
++	only := raceTestAddresses(1)
++	for _, test := range []struct {
++		name      string
++		addresses []netip.Addr
++	}{
++		{name: "listed once", addresses: only},
++		{name: "listed twice", addresses: slices.Repeat(only, 2)},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			// A plain dial runs under the caller's own context, which outlives the call.
++			ctx := raceTestContext(t)
++			refused := refusedBy(only[0])
++			var attempts atomic.Int32
++			conn, err := dialConcurrent(ctx, test.addresses, func(dialCtx context.Context, address netip.Addr) (net.Conn, error) {
++				if dialCtx != ctx || address != only[0] {
++					t.Errorf("dialled %s (under the caller's context: %v), want %s under it", address, dialCtx == ctx, only[0])
++				}
++				attempts.Add(1)
++				return nil, refused
++			})
++			if conn != nil || err != refused || attempts.Load() != 1 {
++				t.Fatalf("conn=%v err=%v attempts=%d, want one attempt and its own failure", conn, err, attempts.Load())
++			}
++		})
 +	}
 +}
 +
@@ -776,21 +1118,27 @@ index 0000000000000000000000000000000000000000..337e8c9141ced5fa2fc3f1d5d8acbf1a
 +}
 +
 +// refusedThenOpen dials like a destination whose first address refuses and
-+// whose second answers, and reports whether the second was dialled while the
-+// first was still in flight.
++// whose second answers. The second attempt records, before it answers,
++// whether the first was still in flight: the dial cannot return ahead of it.
 +func refusedThenOpen(addresses []netip.Addr, port uint16, raced *atomic.Bool) func(context.Context, string, M.Socksaddr) (net.Conn, error) {
-+	secondStarted := make(chan struct{})
++	firstFailed := make(chan struct{})
++	var failOnce sync.Once
 +	return func(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 +		switch destination {
 +		case M.SocksaddrFrom(addresses[0], port):
++			// Long enough for a dial that races to start the second attempt.
 +			select {
-+			case <-secondStarted:
-+				raced.Store(true)
++			case <-ctx.Done():
 +			case <-time.After(raceTestQuiet):
 +			}
++			failOnce.Do(func() { close(firstFailed) })
 +			return nil, refusedBy(addresses[0])
 +		case M.SocksaddrFrom(addresses[1], port):
-+			close(secondStarted)
++			select {
++			case <-firstFailed:
++			default:
++				raced.Store(true)
++			}
 +			return newRaceTestConn(addresses[1]), nil
 +		default:
 +			return nil, errors.New("unexpected destination " + destination.String())

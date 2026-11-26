@@ -57,8 +57,9 @@
   IPv6 still start one after the other, at most eight addresses of a family
   are dialled at a time, the attempts that lose are cancelled and a
   connection one of them still completes is closed. A connection carried
-  through a proxy, UDP and the latency test are unchanged, and a Clash
-  profile's own `tcp-concurrent` key is not read. Release evidence
+  through a proxy and UDP are unchanged, and a Clash profile's own
+  `tcp-concurrent` key is not read. A latency test connects to a server as a
+  connection does, whether the core runs or not. Release evidence
   projections carry the switch like any other projection. Earlier builds
   refuse a settings file saved with the switch off, so turn it on again
   before installing one.

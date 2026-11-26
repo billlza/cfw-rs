@@ -220,6 +220,11 @@ It applies to the TCP connections the core opens itself, in every mode:
 - to a DNS server of the profile that is named by a domain and reached
   directly.
 
+A latency test, and the health check of an automatic group or of a provider,
+connect to a proxy server the same way, so they measure what a connection
+gets. That holds while the core is off as well: the test then runs in a
+separate engine, which takes the switch with the profile.
+
 What it leaves as it was:
 
 - the order of the address families. The family of the first address
@@ -231,8 +236,6 @@ What it leaves as it was:
 - UDP;
 - a DNS server reached through the selected route or the route rules, and
   the app's own DNS servers, which are dialled by address;
-- the latency test and a provider's health check, which try a server's
-  addresses in turn;
 - a name with one address.
 
 What it costs: a server with several addresses sees an attempt on each of

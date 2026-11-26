@@ -669,10 +669,10 @@ index 0000000000000000000000000000000000000000..613441621141f7b23deb99d56633acf6
 +}
 diff --git a/experimental/libbox/profile_probe.go b/experimental/libbox/profile_probe.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..da081a36b10db17137e86fb5577a6afad42beb2d
+index 0000000000000000000000000000000000000000..cf89911e9ba6b838a44b24f2b781296f2109c672
 --- /dev/null
 +++ b/experimental/libbox/profile_probe.go
-@@ -0,0 +1,185 @@
+@@ -0,0 +1,187 @@
 +package libbox
 +
 +import (
@@ -777,8 +777,10 @@ index 0000000000000000000000000000000000000000..da081a36b10db17137e86fb5577a6afa
 +		if err := json.Unmarshal(data, &route); err != nil {
 +			return option.Options{}, errors.New("invalid profile probe resolver")
 +		}
++		// The resolver and the dialing option are how the running core reaches
++		// a node, so a probe measures with them. Neither routes a connection.
 +		for key := range route {
-+			if key != "default_domain_resolver" {
++			if key != "default_domain_resolver" && key != "tcp_concurrent" {
 +				return option.Options{}, errors.New("profile probe cannot configure routes")
 +			}
 +		}
@@ -860,10 +862,10 @@ index 0000000000000000000000000000000000000000..da081a36b10db17137e86fb5577a6afa
 +}
 diff --git a/experimental/libbox/profile_probe_test.go b/experimental/libbox/profile_probe_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..d2fe3654aa1e2501adb6b3c842e1220bf8bd258e
+index 0000000000000000000000000000000000000000..57dfd3325ab74bedb145ce975c912216910be3ad
 --- /dev/null
 +++ b/experimental/libbox/profile_probe_test.go
-@@ -0,0 +1,267 @@
+@@ -0,0 +1,303 @@
 +package libbox
 +
 +import (
@@ -948,6 +950,42 @@ index 0000000000000000000000000000000000000000..d2fe3654aa1e2501adb6b3c842e1220b
 +		}
 +		if _, err := profileProbeOptions(ctx, configuration); err == nil {
 +			t.Fatal("profile probe admitted an outbound that starts OS integration or a local process")
++		}
++	}
++}
++
++// A probe reaches a node as the running core does: it takes the core's
++// dialing option beside the resolver, and still no route.
++func TestProfileProbeTakesTheDialingOptionOfTheCore(t *testing.T) {
++	ctx := profileProbeContext()
++	document := func(route string) string {
++		return `{"outbounds":[{"type":"direct","tag":"node"}],"dns":{"servers":[{"type":"local","tag":"local"}]},"route":` + route + `}`
++	}
++	for _, test := range []struct {
++		route string
++		races bool
++	}{
++		{route: `{"default_domain_resolver":{"server":"local"},"tcp_concurrent":true}`, races: true},
++		{route: `{"default_domain_resolver":{"server":"local"}}`},
++		{route: `{"tcp_concurrent":true}`, races: true},
++		{route: `{"tcp_concurrent":false}`},
++		{route: `{}`},
++	} {
++		options, err := profileProbeOptions(ctx, document(test.route))
++		if err != nil {
++			t.Fatalf("route %s: %v", test.route, err)
++		}
++		if options.Route == nil || options.Route.TCPConcurrent != test.races {
++			t.Fatalf("route %s: the probe's options race addresses: %v", test.route, options.Route != nil && options.Route.TCPConcurrent)
++		}
++	}
++	for _, route := range []string{
++		`{"default_domain_resolver":{"server":"local"},"tcp_concurrent":true,"final":"node"}`,
++		`{"tcp_concurrent":true,"rules":[]}`,
++		`{"tcp_concurrent":"yes"}`,
++	} {
++		if _, err := profileProbeOptions(ctx, document(route)); err == nil {
++			t.Fatalf("route %s: the probe admitted more than the dialing option", route)
 +		}
 +	}
 +}

@@ -124,7 +124,14 @@ impl CheckedProbeConfiguration {
             let route = route
                 .as_object()
                 .ok_or(Error::Configuration("invalid probe resolver"))?;
-            if route.keys().any(|key| key != "default_domain_resolver") {
+            // The resolver and the dialing option of the running core, which
+            // the projection writes only as `true`. Neither routes a
+            // connection.
+            if route.iter().any(|(key, value)| match key.as_str() {
+                "default_domain_resolver" => false,
+                "tcp_concurrent" => value != &serde_json::Value::Bool(true),
+                _ => true,
+            }) {
                 return Err(Error::Configuration("probe cannot configure routes"));
             }
         }

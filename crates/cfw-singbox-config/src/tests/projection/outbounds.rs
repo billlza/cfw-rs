@@ -27,7 +27,16 @@ fn profile_probes_preserve_protocol_dns_and_credential_slots_without_network_int
         probe["outbounds"][1]["outbounds"],
         serde_json::json!(["remote"])
     );
-    assert_eq!(probe["route"].as_object().expect("resolver").len(), 1);
+    // The route keeps how the core reaches a node, its resolver and its
+    // dialing option, and nothing that routes a connection.
+    let route = probe["route"].as_object().expect("probe route");
+    assert_eq!(
+        route.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["default_domain_resolver", "tcp_concurrent"]
+    );
+    for (key, value) in route {
+        assert_eq!(value, &runtime["route"][key], "{key}");
+    }
     for key in ["inbounds", "experimental", "log", "services", "ntp"] {
         assert!(probe.get(key).is_none(), "probe must not contain {key}");
     }

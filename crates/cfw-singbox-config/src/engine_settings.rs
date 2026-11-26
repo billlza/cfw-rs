@@ -84,11 +84,12 @@ pub struct EngineSettings {
     /// addresses, such as a proxy server's or a DIRECT destination's, it
     /// dials the addresses of a family at once, at most eight at a time, and
     /// keeps the first that answers, instead of trying them in turn. IPv4
-    /// and IPv6 still start one after the other. It holds in every mode and
-    /// in a release evidence projection, which is taken with the dialing the
-    /// release ships, and never changes a connection carried through a
-    /// proxy, UDP, or the latency test; absent means on, so files written
-    /// before the switch existed keep their bytes.
+    /// and IPv6 still start one after the other. It holds in every mode, in
+    /// a release evidence projection, which is taken with the dialing the
+    /// release ships, and in the latency probe, which measures what a
+    /// connection gets. It never changes a connection carried through a
+    /// proxy, or UDP. Absent means on, so files written before the switch
+    /// existed keep their bytes.
     #[serde(default = "enabled", skip_serializing_if = "is_enabled")]
     pub tcp_concurrency: bool,
 }

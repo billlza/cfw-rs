@@ -353,7 +353,9 @@ fixed order, each at the path and digest its `SING_BOX_*_PATCH_PATH` and
    and the probe instance is closed once before it replies, its close failure
    reported even after a failed start: the probe starts it with the
    endpoint-conflict patch's `StartWithExternalCleanup`, which leaves a failed
-   start's close to the caller. It adds `CheckConfigClosingInstance`, which
+   start's close to the caller. A probe's `route` may name the default
+   domain resolver and `tcp_concurrent`, which decide how the core reaches a
+   node, and nothing else. It adds `CheckConfigClosingInstance`, which
    checks a configuration as `CheckConfig` does but reports a failed close of
    the instance it built apart from a rejection, which `CheckConfig` drops; the
    platform stub's interface monitor, which a check never starts, closes

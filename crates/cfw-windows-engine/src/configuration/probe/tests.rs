@@ -3,12 +3,16 @@ use cfw_singbox_config::{EngineSettings, ProjectionMode, ValidatedSingBoxProfile
 use serde_json::json;
 
 pub(crate) fn request() -> ProfileDelayTestRequest {
+    request_with(&EngineSettings::default())
+}
+
+fn request_with(settings: &EngineSettings) -> ProfileDelayTestRequest {
     let profile = ValidatedSingBoxProfile::direct();
     let probe = profile
         .project_proxy_probe(
             "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             ProjectionMode::LocalProxy,
-            &EngineSettings::default(),
+            settings,
         )
         .unwrap();
     ProfileDelayTestRequest {
@@ -60,6 +64,9 @@ fn probe_admission_rejects_runtime_effects_before_credential_resolution() {
         ("services", json!([])),
         ("log", json!({"output":"private-file"})),
         ("route", json!({"auto_detect_interface":true})),
+        ("route", json!({"tcp_concurrent":true,"final":"direct"})),
+        ("route", json!({"tcp_concurrent":false})),
+        ("route", json!({"tcp_concurrent":"true"})),
     ] {
         let mut value = request();
         let mut root: serde_json::Value = serde_json::from_str(&value.config_json).unwrap();
@@ -67,6 +74,27 @@ fn probe_admission_rejects_runtime_effects_before_credential_resolution() {
         value.config_json = serde_json::to_string(&canonicalize_configuration_value(root)).unwrap();
         assert!(CheckedProbeConfiguration::new(value).is_err());
     }
+}
+
+/// A probe reaches a node as the running core does: the shared projection
+/// hands it the core's dialing option, the admission takes it, and the digest
+/// binds it.
+#[test]
+fn probe_admission_takes_the_dialing_option_of_the_core() {
+    let route = |value: &ProfileDelayTestRequest| {
+        serde_json::from_str::<serde_json::Value>(&value.config_json).unwrap()["route"].clone()
+    };
+    let racing = request();
+    let serial = request_with(&EngineSettings {
+        tcp_concurrency: false,
+        ..EngineSettings::default()
+    });
+    assert_eq!(route(&racing)["tcp_concurrent"], true);
+    assert!(route(&serial).get("tcp_concurrent").is_none());
+    assert_ne!(
+        CheckedProbeConfiguration::new(racing).unwrap().digest,
+        CheckedProbeConfiguration::new(serial).unwrap().digest
+    );
 }
 
 #[test]

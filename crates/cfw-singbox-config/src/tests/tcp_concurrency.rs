@@ -71,8 +71,8 @@ fn the_packet_endpoint_stack_carries_it_as_well() {
 }
 
 /// The goldens bind the projections with the switch off. With it on, each of
-/// them gains the route option and nothing else: not in the configuration,
-/// not in its credential slots, and not in the latency probe.
+/// them gains the route option, in the configuration and in the latency
+/// probe, and nothing else.
 #[test]
 fn it_adds_only_the_route_option_to_each_golden_projection() {
     for mut case in cases() {
@@ -82,28 +82,44 @@ fn it_adds_only_the_route_option_to_each_golden_projection() {
             serde_json::from_str(&std::fs::read_to_string(&path).expect("golden"))
                 .expect("golden JSON");
         expected["config"]["route"]["tcp_concurrent"] = json!(true);
+        expected["probe"]["route"]["tcp_concurrent"] = json!(true);
         case.settings.tcp_concurrency = true;
         let actual: Value = serde_json::from_str(&snapshot(&case)).expect("snapshot JSON");
         assert_eq!(actual, expected, "{}", case.name);
     }
 }
 
-/// The engine refuses a probe whose route carries anything but the default
-/// resolver, so the option must never reach the latency probe.
+/// A latency test of a stopped core measures what a connection gets: the
+/// probe takes the dialing option of the projection it comes from, and the
+/// engine admits nothing else in a probe's route but the resolver.
 #[test]
-fn the_latency_probe_never_carries_it() {
+fn the_latency_probe_dials_as_the_core_does() {
     for (label, profile) in profiles() {
         for mode in MODES {
-            let projected = profile
-                .project(PROFILE_ID, mode, &EngineSettings::default())
-                .expect("projection");
-            let probe: Value =
+            let probe = |settings: &EngineSettings| -> Value {
+                let projected = profile
+                    .project(PROFILE_ID, mode, settings)
+                    .expect("projection");
                 serde_json::from_str(&projected.proxy_probe_template().expect("probe").json)
-                    .expect("probe JSON");
+                    .expect("probe JSON")
+            };
+            let racing = probe(&EngineSettings::default());
+            let route = racing["route"].as_object().expect("probe route");
+            assert_eq!(route["tcp_concurrent"], json!(true), "{label} {mode:?}");
             assert!(
-                probe["route"].get("tcp_concurrent").is_none(),
-                "{label} {mode:?}"
+                route
+                    .keys()
+                    .all(|key| key == "default_domain_resolver" || key == "tcp_concurrent"),
+                "{label} {mode:?}: {route:?}"
             );
+            // The switch decides that one key and nothing else of the probe.
+            let mut without = racing;
+            let route = without["route"].as_object_mut().expect("probe route");
+            route.remove("tcp_concurrent");
+            if route.is_empty() {
+                without.as_object_mut().expect("probe").remove("route");
+            }
+            assert_eq!(without, probe(&off()), "{label} {mode:?}");
         }
     }
 }

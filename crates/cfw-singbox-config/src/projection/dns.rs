@@ -233,8 +233,9 @@ fn is_valid_tls_dns_name(name: &str) -> bool {
         })
 }
 
+/// Judged by the address that is dialled, as for remote endpoints.
 fn dns_address_is_unusable(address: IpAddr) -> bool {
-    match address {
+    match address.to_canonical() {
         IpAddr::V4(address) => {
             let octets = address.octets();
             address.is_unspecified()

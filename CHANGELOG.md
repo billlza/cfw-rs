@@ -91,6 +91,14 @@
   as the expected refusal, and one that finds an exit as STUN that left
   outside TUN. Earlier builds refuse a settings file saved with it on, so
   turn it off before installing one.
+- Refuse a node, a DNS server or a WireGuard address written as an
+  IPv4-mapped IPv6 address, such as `::ffff:127.0.0.1`, when the IPv4
+  address it carries is one the app already refuses: loopback, link-local,
+  multicast, broadcast, a documentation range or the range the tunnel
+  reserves. The core dials such an address as that IPv4 address, so a
+  profile could still point a node at this Mac's loopback. A mapped public
+  address is admitted as before. A stored profile with such an address is
+  now listed as invalid, and can only be deleted.
 
 ### Supply chain
 

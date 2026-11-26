@@ -66,9 +66,11 @@ pub(super) fn validate_wireguard_local_addresses(
         let prefix = prefix
             .parse::<u8>()
             .map_err(|_| unsupported_shape(path, "WireGuard prefix is invalid"))?;
-        if host.is_unspecified()
-            || host.is_multicast()
-            || host.is_loopback()
+        // An IPv4-mapped IPv6 address is classified as its IPv4 address.
+        let class = host.to_canonical();
+        if class.is_unspecified()
+            || class.is_multicast()
+            || class.is_loopback()
             || prefix > if host.is_ipv4() { 32 } else { 128 }
             || !families.insert(host.is_ipv4())
             || format!("{host}/{prefix}") != *address

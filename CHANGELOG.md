@@ -60,6 +60,11 @@
   too. Reload From Disk now reads the network settings again as well as the
   preferences, so controls that a failed read holds can be tried again
   without reloading the dashboard.
+- Show Allow LAN as it is saved while the core is off. The switch on the
+  General and Settings pages went back to off whenever the page found the
+  core stopped or could not read its controller, although LAN sharing stayed
+  saved and the General page named its address beside the switch. A click
+  on it then opened the dialog that turns LAN sharing on, not off.
 
 ### Network
 

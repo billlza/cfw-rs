@@ -365,6 +365,36 @@ test("Stop shows a node chosen on the running core as the profile's saved choice
   }
 });
 
+test("Engine Off shows Allow LAN as it is saved", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalSettings = responses.read_runtime_settings_snapshot;
+  const lan = { listen: "0.0.0.0", port: 7898, allowed_source_cidrs: ["192.168.1.0/24"] };
+  const allowLan = (html) => html.match(/<input type="checkbox" data-toggle="allowLan"([^>]*)\/>/u)?.[1];
+  try {
+    responses.read_runtime_settings_snapshot = {
+      ...originalSettings,
+      settings: { ...originalSettings.settings, allow_lan: true, lan_proxy: lan },
+      effective: { ...originalSettings.effective, lan_proxy: lan },
+    };
+    // A reload with the core off reads the settings and then finds no controller.
+    await setEngine(OFF_ENGINE);
+    await reloadButton.click();
+    assert.equal(state.engine.active, false);
+    assert.equal(state.runtimeSettings.settings.allow_lan, true);
+    for (const name of ["general", "settings"]) {
+      const attributes = allowLan(await renderPage(name));
+      assert.match(attributes, /checked/u, `${name}: Allow LAN is on while the core is off`);
+      assert.doesNotMatch(attributes, /disabled/u, name);
+    }
+    // The row of the General page agrees with its switch.
+    assert.match(await renderPage("general"), /Bind: 0\.0\.0\.0:7898/u);
+  } finally {
+    responses.read_runtime_settings_snapshot = originalSettings;
+    await setEngine(originalEngine);
+    await reloadButton.click();
+  }
+});
+
 // A switch of the General page that does not know its setting is drawn off.
 // What the row says beside it follows: the bind address and how far the proxy
 // is shared, and whether IPv6 DNS is on.

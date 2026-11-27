@@ -46,6 +46,7 @@ fn controller_access_is_bound_to_the_exact_active_generation_and_digest() {
         controller: EngineControllerAccess::resolve(settings.clone()).expect("controller"),
         cursor: EndpointCandidateCursor::from_persisted(settings).expect("cursor"),
         active: None,
+        preference_writes: 0,
     });
     assert!(read_active_controller_access(&endpoints, 7, "digest-a").is_err());
 
@@ -82,6 +83,7 @@ fn controller_access_is_bound_to_the_exact_active_generation_and_digest() {
         cursor: EndpointCandidateCursor::from_persisted(replacement_settings)
             .expect("replacement cursor"),
         active: None,
+        preference_writes: 0,
     };
     let staged = StagedEndpointRebind {
         expected: expected.clone(),
@@ -115,6 +117,7 @@ fn invalid_active_snapshot_cannot_bind_controller_access() {
             generation: 1,
             config_digest: "prior".into(),
         }),
+        preference_writes: 0,
     });
     let invalid = EngineSnapshot {
         desired_mode: EngineMode::SystemProxy,

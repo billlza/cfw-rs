@@ -17,7 +17,11 @@ pub(crate) use preparation::{
     prepare_managed_engine,
 };
 pub(crate) use runtime_access::{ready_runtime, start_engine_event_forwarder};
-pub(crate) use runtime_settings::change_runtime_preferences;
+pub(crate) use runtime_settings::{
+    PreferencesBasis, RegisteredChange, RequestedChange, SAVED_PREFERENCES_NOT_IN_FORCE,
+    SavedRuntimePreferences, admit_runtime_preferences_change, change_runtime_preferences,
+    ipv6_dns_enabled_of,
+};
 #[cfg(feature = "physical-release-evidence")]
 pub mod packet_evidence;
 

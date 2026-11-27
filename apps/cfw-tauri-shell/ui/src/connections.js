@@ -1,4 +1,5 @@
 import { t } from "./i18n.js";
+import { askForDialog } from "./dialog-requests.js";
 // Connection presentation owns incremental row reconciliation and row events.
 // Engine identity and close commands remain in the shared controller pipeline.
 export function createConnectionsView({
@@ -266,6 +267,9 @@ function renderConnectionDetail(connection) {
 function bindConnectionRowEvents(scope) {
   scope.querySelectorAll("[data-connection-detail]").forEach((button) => {
     button.addEventListener("click", (event) => {
+      // Connection Info is a dialog of the app: one that is still reading
+      // opens nothing over it.
+      askForDialog(state);
       state.connectionDetailId = event.currentTarget.dataset.connectionDetail;
       renderPage();
     });

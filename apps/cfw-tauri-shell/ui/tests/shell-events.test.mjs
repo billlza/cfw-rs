@@ -135,7 +135,7 @@ function hostEvents(overrides = {}) {
   const d = {
     renderPage: spy(), scheduleRender: spy(), updateStatusBar: spy(), applyPersistedSettings: spy(),
     loadSettingsSnapshot: spy(async () => undefined), resetPersistedSettingsToSafeState: spy(),
-    loadEngineStatus: spy(async () => true), loadRuntimeProjection: spy(async () => true), applyUpdateInfo: spy(),
+    loadEngineStatus: spy(async () => true), loadRuntimeProjection: spy(async () => true), takeAnnouncedUpdate: spy(),
     openProductAboutDialog: spy(), updateInstall: { onProgress: spy() }, scheduleConnectionsPatch: spy(),
     scheduleLogStreamPatch: spy(), importProfileFromPath: spy(async () => undefined), ...overrides,
   };
@@ -172,11 +172,15 @@ test("update events refresh the About dialog and only the pages that show update
   assert.equal(d.renderPage.count(), 0);
   assert.equal(d.openProductAboutDialog.count(), 0);
   state.glassDialog = { kind: "product-about" };
+  const drawn = [];
   for (const page of ["general", "settings", "feedback"]) {
     state.activePage = page;
+    const before = d.renderPage.count();
     events.onUpdateAvailable({ payload: { available: true, version: "0.5.2" } });
+    if (d.renderPage.count() > before) drawn.push(page);
   }
-  assert.equal(d.renderPage.count(), 3);
+  assert.deepEqual(drawn, ["general", "feedback"], "General and the About page, and not Settings, which shows no update");
+  assert.deepEqual(d.takeAnnouncedUpdate.calls[0], [{ available: true, version: "0.5.2" }], "each announced update is taken");
   assert.deepEqual(d.openProductAboutDialog.calls[0], [{ autoCheck: true, phase: "idle", result: { available: true, version: "0.5.2" } }]);
   events.onUpdateProgress({ payload: { downloaded: 1 } });
   assert.deepEqual(d.updateInstall.onProgress.calls, [[{ downloaded: 1 }]]);
@@ -372,8 +376,8 @@ test("checking for updates shows the result or the failure in the About dialog",
   assert.equal(state.updateInfo.available, false, "a failed check withdraws the earlier offer");
   assert.equal(state.glassDialog.payload.update.error, "rate limited");
   assert.equal(d.renderPage.count(), 2);
-  controller.applyUpdateInfo(null);
-  assert.equal(state.updateInfo.error, "rate limited", "an empty payload changes nothing");
+  controller.takeAnnouncedUpdate(null);
+  assert.equal(state.updateInfo.error, "rate limited", "an empty announcement changes nothing");
 });
 
 test("the About dialog states checking, available, current and failed updates", () => {
@@ -491,6 +495,7 @@ test("the diagnostics dialogs render the configuration, the network services and
 
 test("a DNS query needs a running engine and shows the answer or the failure of that engine", async () => {
   const { d, dialogs } = diagnostics();
+  await dialogs.actions["dns-query"]();
   const query = element("button");
   dom.setAll("[data-glass-dns-confirm]", [query]);
   dom.set("[data-glass-dns-name]", element("input", { value: " example.test " }));
@@ -541,7 +546,7 @@ test("diagnostics actions open their dialogs or report why they cannot", async (
   assert.equal(refused.d.renderPage.count(), 0);
   await dialogs.actions["dns-query"]();
   assert.deepEqual(state.glassDialog, { kind: "dns-query", payload: { name: "www.gstatic.com", type: "A", result: "" } });
-  assert.equal(d.renderPage.count(), 2);
+  assert.equal(d.renderPage.count(), 0, "General says neither failure; the log does");
 });
 
 test("switch rows state why a switch is unavailable and keep an on switch removable", () => {

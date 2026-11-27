@@ -979,6 +979,8 @@
   "Configured nodes": "已設定的節點",
   "Finish migration before changing network settings": "請先完成移轉，再變更網路設定",
   "Network settings are loading": "正在載入網路設定",
+  "The saved network settings are not the ones in use. Reload From Disk in Settings shows them, and Apply puts them in use.": "已儲存的網路設定不是目前生效的設定。在「設定」中點選「從磁碟重新載入」可檢視，點選「套用」後生效。",
+  "These saved settings are not in use. Apply puts them in use; switches not shown here stay as they are. Connections may reconnect.": "這些已儲存的設定尚未生效。點選「套用」後生效，此處未顯示的開關維持不變，現有連線可能重新連線。",
   "The signed maintenance session is starting. This dashboard closes after the new window is ready and the current CFM engine is safely Off.": "已簽署的維護工作階段正在啟動。新視窗就緒且目前的 CFM 核心安全關閉後，此介面將關閉。",
   "Review and resume the previous legacy CFM operation in its signed maintenance session.": "請在已簽署的維護工作階段中檢視並繼續上次的舊版 CFM 作業。",
   "Import and select a replacement profile on Profiles before retiring older CFM components. Normal networking uses the System Proxy and TUN switches.": "停用舊 CFM 元件前，請先在設定檔頁面匯入並選取替代的設定檔。日常連線請使用系統代理和 TUN 開關。",

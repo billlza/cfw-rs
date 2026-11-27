@@ -11,10 +11,11 @@ import { loadControllerSnapshotWithRetry } from "./controller-reads.js";
 import { startLiveStreams } from "./live-streams.js";
 import { isProfileSourcePath } from "./profile-import.js";
 import { loadBootPayload, loadRetirementStatus, markHandoffStatusUnverifiable } from "./migration-session.js";
+import { showsUpdateOffer } from "./update-controller.js";
 
 export function createHostEvents({
   renderPage, scheduleRender, updateStatusBar, applyPersistedSettings, loadSettingsSnapshot,
-  resetPersistedSettingsToSafeState, loadEngineStatus, loadRuntimeProjection, applyUpdateInfo, openProductAboutDialog,
+  resetPersistedSettingsToSafeState, loadEngineStatus, loadRuntimeProjection, takeAnnouncedUpdate, openProductAboutDialog,
   updateInstall, scheduleConnectionsPatch, scheduleLogStreamPatch, importProfileFromPath,
 }) {
   const onPage = (event) => {
@@ -42,7 +43,7 @@ export function createHostEvents({
   };
 
   const onUpdateAvailable = (event) => {
-    applyUpdateInfo(event.payload);
+    takeAnnouncedUpdate(event.payload);
     if (state.glassDialog?.kind === "product-about") {
       openProductAboutDialog({
         autoCheck: true,
@@ -50,9 +51,7 @@ export function createHostEvents({
         result: event.payload,
       });
     }
-    if (state.activePage === "general" || state.activePage === "settings" || state.activePage === "feedback") {
-      renderPage();
-    }
+    if (showsUpdateOffer(state.activePage)) renderPage();
   };
 
   const onUpdateProgress = (event) => updateInstall.onProgress(event.payload);

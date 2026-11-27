@@ -1,12 +1,20 @@
 import { t, getLocale } from "./i18n.js";
 
+/// What the form says above its fields. On saved settings that are not in
+/// force it says that they are those, and what its Apply does with them.
+export function runtimeDialogDescription(dialog) {
+  return dialog.basis.in_force
+    ? t("Changes apply to the current core. Existing connections may reconnect.")
+    : t("These saved settings are not in use. Apply puts them in use; switches not shown here stay as they are. Connections may reconnect.");
+}
+
 export function runtimeDialogFrame(dialog) {
   const draft = dialog.draft;
   return {
     locale: getLocale(), appearance: document.documentElement.dataset.theme,
     labels: {
       title: t("Network settings"),
-      description: t("Changes apply to the current core. Existing connections may reconnect."),
+      description: runtimeDialogDescription(dialog),
       port: t("Local proxy port"), automatic: t("Automatic"), level: t("Log level"), mtu: `TUN MTU (${dialog.mtuLimits.minimum}–${dialog.mtuLimits.maximum})`,
       ipv6DNS: t("Enable IPv6 DNS"),
       ipv6Note: t("Turn off for a proxy server with a broken IPv6 exit. TUN still captures IPv6 traffic."),

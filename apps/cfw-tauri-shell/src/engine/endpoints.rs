@@ -50,23 +50,31 @@ pub(super) struct EndpointCandidateCursor {
     fixed_mixed_port: Option<u16>,
 }
 
+/// The endpoints of a start with `settings` and the port preference
+/// `preferred_port`, selected clear of the LAN listener and of the ports that
+/// `reserved` observes as taken.
 pub(super) fn select_configured_engine_settings(
     settings: EngineSettings,
     preferred_port: Option<u16>,
+    reserved: impl FnOnce() -> Result<BTreeSet<u16>, EndpointSelectionError>,
 ) -> Result<(EngineSettings, EndpointCandidateCursor), EndpointSelectionError> {
-    EndpointCandidateCursor::configured(settings, preferred_port, &observe_reserved_ports()?)
+    EndpointCandidateCursor::configured(settings, preferred_port, &reserved()?)
 }
 
+/// The local ports that the proxies of other applications take, which the
+/// endpoints of the engine are selected clear of.
 #[cfg(target_os = "macos")]
-fn observe_reserved_ports() -> Result<BTreeSet<u16>, EndpointSelectionError> {
+pub(super) fn observe_reserved_ports() -> Result<BTreeSet<u16>, EndpointSelectionError> {
     let services = MacOsPlatformService
         .observe_network_services()
         .map_err(|error| EndpointSelectionError::Observation(error.to_string()))?;
     reserved_external_proxy_ports(&services)
 }
 
+/// The local ports that the proxies of other applications take, which the
+/// endpoints of the engine are selected clear of.
 #[cfg(windows)]
-fn observe_reserved_ports() -> Result<BTreeSet<u16>, EndpointSelectionError> {
+pub(super) fn observe_reserved_ports() -> Result<BTreeSet<u16>, EndpointSelectionError> {
     cfw_windows_engine::observe_lan_proxy_ports()
         .map_err(|error| EndpointSelectionError::Observation(error.to_string()))
 }
@@ -119,10 +127,24 @@ impl EndpointCandidateCursor {
         })
     }
 
+    /// Whether this is the port preference the cursor was given: the port it
+    /// keeps although the engine cannot bind it, or none for a port it moves
+    /// to the next candidate then.
+    pub(super) fn has_port_preference(&self, preferred_port: Option<u16>) -> bool {
+        preferred_port == self.fixed_mixed_port
+    }
+
+    /// The endpoints of `settings` for a change to the port preference
+    /// `preferred_port`: those of this cursor where the change keeps the
+    /// preference or names the port the engine listens on, and otherwise
+    /// endpoints selected again, clear of the LAN listener and of the ports
+    /// that `reserved` observes as taken. Nothing is observed for endpoints
+    /// that are kept.
     pub(super) fn with_runtime_preferences(
         &self,
         settings: EngineSettings,
         preferred_port: Option<u16>,
+        reserved: impl FnOnce() -> Result<BTreeSet<u16>, EndpointSelectionError>,
     ) -> Result<(EngineSettings, Self), EndpointSelectionError> {
         if settings.mixed_port == self.settings.mixed_port && preferred_port.is_some()
             || preferred_port == self.fixed_mixed_port
@@ -132,7 +154,7 @@ impl EndpointCandidateCursor {
             next.fixed_mixed_port = preferred_port;
             return Ok((next.settings.clone(), next));
         }
-        Self::configured(settings, preferred_port, &observe_reserved_ports()?)
+        Self::configured(settings, preferred_port, &reserved()?)
     }
 
     fn configured(

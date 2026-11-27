@@ -20,10 +20,20 @@ export async function readRuntimeSettings(original, { allowLan = false, ipv6Dns 
   const stored = Object.fromEntries(Object.entries(values).filter(([field, value]) => value !== RESTING[field]));
   const others = Object.fromEntries(Object.entries(original.settings).filter(([field]) => !(field in RESTING)));
   responses.read_runtime_settings_snapshot = {
-    ...original,
+    ...original, saved_ipv6_dns_enabled: ipv6Dns,
     settings: { ...others, ipv6_dns_enabled: ipv6Dns, allow_lan: allowLan, lan_proxy: lan, ...stored },
     effective: { ...original.effective, ipv6_dns_enabled: ipv6Dns, lan_proxy: lan, ...values },
   };
+  await emit("cfw://settings-changed", responses.read_settings_snapshot);
+  assert.equal(state.runtimeSettings, responses.read_runtime_settings_snapshot);
+  assert.equal(state.runtimeSettingsError, null);
+}
+
+/// The same read after something else than the app changed the settings file:
+/// the host reports `saved` as the saved settings and says that they are not
+/// in force, and what the engine runs with stays as `running` has it.
+export async function readRuntimeSettingsNotInForce(running, saved, revision) {
+  responses.read_runtime_settings_snapshot = { ...running, settings: saved, revision, in_force: false };
   await emit("cfw://settings-changed", responses.read_settings_snapshot);
   assert.equal(state.runtimeSettings, responses.read_runtime_settings_snapshot);
   assert.equal(state.runtimeSettingsError, null);

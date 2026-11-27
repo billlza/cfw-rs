@@ -196,7 +196,7 @@ test("connections are closed after a proxy change only for the engine that chang
 
 test("a controller snapshot keeps measured delays and in-flight results while a delay test runs", () => {
   applyControllerSnapshot(null);
-  state.runtimeSettings = { settings: { allow_lan: true } };
+  state.runtimeSettings = { effective: { lan_proxy: { listen: "0.0.0.0", port: 7898, allowed_source_cidrs: ["192.168.1.0/24"] } } };
   applyControllerSnapshot({ config: { mode: "GLOBAL", log_level: "debug" }, proxies: { groups: [] } });
   assert.equal(state.mode, "Global");
   assert.equal(state.logLevel, "debug");

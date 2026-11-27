@@ -139,9 +139,13 @@ export function createSettingsController({ windowGlass, renderPage, renderGlassO
   // takes any other, and the log gets the failure of this very read. The
   // reason the page holds the controls for is not that: it may be an older
   // failure, which a read that is still under way has yet to end.
+  //
+  // It is also where saved settings start to come into force that the engine
+  // does not run with, after something else changed the file: the form opens
+  // on them, and the page holds their controls until its Apply.
   async function reloadNetworkSettings() {
     try {
-      await runtimeSettingsUI.loadForAction();
+      await runtimeSettingsUI.reload();
     } catch (error) {
       appendLog("error", "settings", t("{action} failed: {error}", { action: t("Network settings"), error: errorText(error) }));
     }

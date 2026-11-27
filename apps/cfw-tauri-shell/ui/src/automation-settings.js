@@ -1,6 +1,7 @@
 import { t } from "./i18n.js";
 import { escapeHtml, errorText } from "./text-format.js";
 import { platformPresentation } from "./platform-presentation.js";
+import { askForDialog } from "./dialog-requests.js";
 
 export const SHORTCUT_ACTIONS = Object.freeze([
   ["show_dashboard", "Show dashboard"], ["toggle_core", "Start / stop core"],
@@ -30,17 +31,20 @@ export function preferencesFromAutomationDraft(draft) {
 }
 
 export function createAutomationSettingsUI({ state, invoke, renderPage, appendLog, dismissOtherDialogs }) {
-  let opening = 0;
+  // The form opens when its read ends, unless another dialog was asked for
+  // meanwhile, which opens in its place, or one that opened meanwhile is
+  // open. Dismissing the overlays meanwhile ends nothing of it: the form is
+  // not open yet, and what is dismissed is another dialog.
   async function open() {
     if (state.migrationHandoff) return;
-    const epoch = ++opening;
+    const latest = askForDialog(state);
     const snapshot = await invoke("read_automation_settings");
-    if (epoch !== opening) return;
+    if (!latest()) return;
     dismissOtherDialogs();
     state.automationDialog = { snapshot, draft: automationDraft(snapshot.settings), saving: false, error: null };
     renderPage();
   }
-  function close() { if (state.automationDialog?.saving) return; ++opening; state.automationDialog = null; }
+  function close() { if (state.automationDialog?.saving) return; state.automationDialog = null; }
   async function save() {
     const dialog = state.automationDialog;
     if (!dialog || dialog.saving) return;

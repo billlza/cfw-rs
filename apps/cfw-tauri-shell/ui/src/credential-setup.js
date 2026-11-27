@@ -16,17 +16,38 @@ import {
 } from "./credentials.js";
 import { engineIsOff } from "./engine-identity.js";
 import { REASONS } from "./reasons.js";
+import { askForDialog } from "./dialog-requests.js";
 
 export function createCredentialSetup({ renderPage, renderGlassOverlays, closeGlassOverlays }) {
-  /// Asks the vault which of a profile's immutable credential references are still
-  /// missing, then opens the entry dialog. Nothing is assumed present or missing
-  /// when the vault cannot answer.
+  // The secrets typed in the dialog of credentials that is open, each for the
+  // reference it was typed for. The page draws a dialog again from its state,
+  // as every render of the page does while it is open, and a secret is kept
+  // out of the state and of the markup: it is put back into the field of its
+  // reference as the dialog is drawn for its profile, and let go once the
+  // overlays are drawn without that dialog, dismissed or replaced, and once
+  // the vault has had it.
+  let typing = null;
+
+  /// The secrets typed in `dialog` while it is the dialog of credentials that
+  /// is open. Those of any other dialog are let go.
+  function secretsTypedIn(dialog) {
+    if (typing?.dialog !== dialog) typing = dialog?.kind === "credentials" ? { dialog, secrets: new Map() } : null;
+    return typing?.secrets ?? null;
+  }
+
+  /// Opens the entry dialog of a profile's credentials and asks the vault which
+  /// of its immutable references are still missing. Nothing is assumed present
+  /// or missing when the vault cannot answer. The answer is shown in that
+  /// dialog while it is open, and in no other: once it was closed, the dialog of
+  /// another profile may be open, whose secrets would be stored for this one.
   async function openCredentialSetup(id) {
     const profile = state.profiles.find((item) => item.id === id);
     if (!profile) throw new Error(t("profile not found: {id}", { id: id }));
     state.credentialSetup = null;
-    state.glassDialog = { kind: "credentials", id };
+    const dialog = { kind: "credentials", id };
+    state.glassDialog = dialog;
     renderGlassOverlays();
+    let setup;
     try {
       const requirements = normalizeCredentialReferences(
         await invoke("profile_credential_requirements", { id }),
@@ -41,7 +62,7 @@ export function createCredentialSetup({ renderPage, renderGlassOverlays, closeGl
         missing = presence.filter(({ present }) => !present).map(({ reference }) => reference);
         presentCount = requirements.length - missing.length;
       }
-      state.credentialSetup = {
+      setup = {
         profileId: id,
         profileName: profile.name,
         requiredCount: requirements.length,
@@ -52,7 +73,7 @@ export function createCredentialSetup({ renderPage, renderGlassOverlays, closeGl
       };
     } catch (error) {
       const message = errorText(error);
-      state.credentialSetup = {
+      setup = {
         profileId: id,
         profileName: profile.name,
         requiredCount: null,
@@ -63,7 +84,9 @@ export function createCredentialSetup({ renderPage, renderGlassOverlays, closeGl
       };
       appendLog("error", "credentials", t("Could not verify credentials for {name}: {message}", { name: profile.name, message: message }));
     }
-    if (state.glassDialog?.kind === "credentials") renderGlassOverlays();
+    if (state.glassDialog !== dialog) return;
+    state.credentialSetup = setup;
+    renderGlassOverlays();
   }
 
   function renderCredentialsDialog() {
@@ -127,6 +150,16 @@ export function createCredentialSetup({ renderPage, renderGlassOverlays, closeGl
   }
 
   function bind() {
+    const typedIn = state.glassDialog;
+    const typed = secretsTypedIn(typedIn);
+    const shown = state.credentialSetup;
+    if (typed && shown?.profileId === typedIn.id) {
+      document.querySelectorAll("[data-credential-secret]").forEach((field) => {
+        const { id } = shown.missing[Number(field.dataset.credentialIndex)];
+        field.value = typed.get(id) ?? "";
+        field.addEventListener("input", () => { typed.set(id, field.value); });
+      });
+    }
     document.querySelectorAll("[data-glass-credentials-confirm]").forEach((button) => {
       button.addEventListener("click", async (event) => {
         const profileId = event.currentTarget.dataset.glassCredentialsConfirm;
@@ -152,6 +185,7 @@ export function createCredentialSetup({ renderPage, renderGlassOverlays, closeGl
           // The secrets leave this renderer as soon as the vault has them.
           for (const entry of batch) entry.secret = "";
           for (const input of inputs) input.value = "";
+          if (typing?.dialog === typedIn) typing = null;
         }
         renderPage();
       });
@@ -181,13 +215,7 @@ export function createCredentialSetup({ renderPage, renderGlassOverlays, closeGl
         const preview = state.credentialGcPreview;
         state.credentialGcPreview = null;
         closeGlassOverlays();
-        if (preview) {
-          try {
-            await invoke("cancel_credential_gc", { previewId: preview.previewId });
-          } catch (error) {
-            appendLog("error", "credentials", errorText(error));
-          }
-        }
+        if (preview) await cancelCleanup(preview.previewId);
         renderPage();
       });
     });
@@ -201,18 +229,51 @@ export function createCredentialSetup({ renderPage, renderGlassOverlays, closeGl
     }
   }
 
+  /// Cancels the cleanup that the host keeps for the preview `previewId`. A
+  /// failure is logged.
+  async function cancelCleanup(previewId) {
+    try {
+      await invoke("cancel_credential_gc", { previewId });
+    } catch (error) {
+      appendLog("error", "credentials", errorText(error));
+    }
+  }
+
+  // The read of a review under way, and how many presses wait for it.
+  let previewing = null;
   const actions = {
+    // The review reads before it opens, so it is asked for at the press and
+    // opens only while it is the dialog that was asked for last. The host
+    // reads one review at a time and refuses another meanwhile, so a press
+    // while the read of an earlier one is under way joins that read: as the
+    // dialog asked for last, it would show its own refusal in place of the
+    // preview that was read. The host keeps the cleanup of a preview until it
+    // is cancelled or another preview replaces it. The presses that joined a
+    // read have its answer in the order they were made, the one asked for
+    // last among them last, so the last of them cancels a cleanup that none
+    // of them shows.
     "preview-credential-gc": async () => {
+      const latest = askForDialog(state);
+      const joined = previewing !== null;
       try {
-        const preview = normalizeCredentialGcPreview(await invoke("preview_credential_gc"));
-        state.credentialGcPreview = preview.orphanCount ? preview : null;
-        state.glassDialog = { kind: "credential-cleanup" };
-        renderGlassOverlays();
+        previewing ??= { read: invoke("preview_credential_gc").finally(() => { previewing = null; }), waiting: 0 };
+        const review = previewing;
+        review.waiting += 1;
+        const preview = normalizeCredentialGcPreview(await review.read);
+        review.waiting -= 1;
+        if (latest()) {
+          state.credentialGcPreview = preview.orphanCount ? preview : null;
+          state.glassDialog = { kind: "credential-cleanup" };
+          renderGlassOverlays();
+        } else if (review.waiting === 0 && preview.orphanCount) {
+          await cancelCleanup(preview.previewId);
+        }
         return;
       } catch (error) {
         // A refusal, such as invalid profiles still listed, says what to do
         // next; it is shown where the cleanup was asked for, not only logged.
-        appendLog("error", "credentials", errorText(error));
+        if (!joined) appendLog("error", "credentials", errorText(error));
+        if (!latest()) return;
         state.glassDialog = {
           kind: "info",
           payload: { title: t("Unused credentials"), body: t("Credential cleanup is unavailable: {error}", { error: errorText(error) }) },

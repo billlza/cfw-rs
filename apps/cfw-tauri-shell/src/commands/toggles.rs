@@ -282,19 +282,8 @@ pub(crate) async fn set_bind_address(
     profiles: State<'_, ManagedProfiles>,
     address: String,
 ) -> Result<super::runtime_settings::RuntimeSettingsView, String> {
-    let address = address
-        .trim()
-        .parse::<std::net::Ipv4Addr>()
-        .map_err(|_| "LAN listener address must be a numeric IPv4 address")?;
-    super::runtime_settings::update(&engine, &retirement, &profiles, move |settings| {
-        let lan = settings
-            .lan_proxy
-            .as_mut()
-            .ok_or("configure LAN sharing and trusted source ranges first")?;
-        lan.listen = address;
-        settings.validate().map_err(|error| error.to_string())
-    })
-    .await
+    let change = super::runtime_settings::bind_address_change(address);
+    super::runtime_settings::update(&engine, &retirement, &profiles, change).await
 }
 
 #[tauri::command]
@@ -304,12 +293,8 @@ pub(crate) async fn set_log_level(
     profiles: State<'_, ManagedProfiles>,
     level: String,
 ) -> Result<super::runtime_settings::RuntimeSettingsView, String> {
-    let level = super::runtime_settings::log_level(&level)?;
-    super::runtime_settings::update(&engine, &retirement, &profiles, move |settings| {
-        settings.log_level = level;
-        Ok(())
-    })
-    .await
+    let change = super::runtime_settings::log_level_change(level);
+    super::runtime_settings::update(&engine, &retirement, &profiles, change).await
 }
 
 /// Profile mixin. Merging arbitrary user documents into the engine

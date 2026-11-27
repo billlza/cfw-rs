@@ -467,13 +467,13 @@ private final class IntegrationHost: NSObject, NSApplicationDelegate, NSWindowDe
       runtimeRevision += 1
       snapshot["revision"] = "fixture-runtime-\(runtimeRevision)"
       snapshot["settings"] = settings
+      snapshot["saved_ipv6_dns_enabled"] = settings["ipv6_dns_enabled"] ?? true
       snapshot["effective"] = [
-        "mixed_port": settings["preferred_mixed_port"] as? Int ?? 7890,
-        "log_level": settings["log_level"] ?? "info", "tunnel_mtu": settings["tunnel_mtu"] ?? 1500,
+        "mixed_port": settings["preferred_mixed_port"] as? Int ?? 7890, "log_level": settings["log_level"] ?? "info",
+        "tunnel_mtu": settings["tunnel_mtu"] ?? 1500, "dns_leak_protection": settings["dns_leak_protection"] ?? false,
         "ipv6_dns_enabled": settings["ipv6_dns_enabled"] ?? true, "tcp_concurrency": settings["tcp_concurrency"] ?? true,
-        "lan_proxy": settings["lan_proxy"] ?? NSNull(),
+        "lan_proxy": (settings["allow_lan"] as? Bool == true ? settings["lan_proxy"] : nil) ?? NSNull(),
         "mainland_china_direct": settings["mainland_china_direct"] ?? false,
-        "dns_leak_protection": settings["dns_leak_protection"] ?? false,
         "webrtc_leak_protection": settings["webrtc_leak_protection"] ?? false,
       ]
       fixtures["read_runtime_settings_snapshot"] = snapshot

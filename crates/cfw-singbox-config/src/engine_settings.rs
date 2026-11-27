@@ -149,13 +149,13 @@ impl EngineSettings {
         ClashApiEndpoint::resolve(self.controller_port, self.mixed_port)
     }
 
-    pub(crate) fn validate_listener_settings(&self) -> Result<(), ConfigError> {
+    /// Checks the LAN listener of these settings, and that it shares no port
+    /// with their endpoints, the local proxy and the controller.
+    pub fn validate_listener_settings(&self) -> Result<(), ConfigError> {
         if let Some(lan) = &self.lan_proxy {
             lan.validate()?;
             if lan.port == self.mixed_port || lan.port == self.controller_port {
-                return Err(invalid_settings(
-                    "LAN, local proxy and controller ports must be distinct",
-                ));
+                return Err(listener_shares_an_endpoint());
             }
         }
         Ok(())
@@ -298,7 +298,40 @@ impl RuntimePreferences {
         Ok(())
     }
 
-    pub fn apply_to(&self, mut settings: EngineSettings) -> Result<EngineSettings, ConfigError> {
+    /// Applies these preferences to `settings`, whose endpoints are kept: the
+    /// LAN listener shares no port with them.
+    pub fn apply_to(&self, settings: EngineSettings) -> Result<EngineSettings, ConfigError> {
+        let settings = self.assigned_to(settings)?;
+        settings.validate_listener_settings()?;
+        // The endpoint allocator chooses a distinct controller after applying
+        // a user-selected mixed port; projection validates the final tuple.
+        Ok(settings)
+    }
+
+    /// Applies these preferences to `settings`, whose endpoints are selected
+    /// next, clear of the LAN listener: the selection keeps a port the
+    /// preferences name and selects the others, the port of the controller
+    /// among them, which `settings` keep until then. The listener is checked
+    /// here only against a port the preferences name, and against the
+    /// endpoints once they are selected.
+    pub fn apply_before_endpoint_selection(
+        &self,
+        settings: EngineSettings,
+    ) -> Result<EngineSettings, ConfigError> {
+        let settings = self.assigned_to(settings)?;
+        let named_port_shared = self.preferred_mixed_port.is_some_and(|port| {
+            settings
+                .lan_proxy
+                .as_ref()
+                .is_some_and(|lan| lan.port == port)
+        });
+        if named_port_shared {
+            return Err(listener_shares_an_endpoint());
+        }
+        Ok(settings)
+    }
+
+    fn assigned_to(&self, mut settings: EngineSettings) -> Result<EngineSettings, ConfigError> {
         self.validate()?;
         if let Some(port) = self.preferred_mixed_port {
             settings.mixed_port = port;
@@ -311,11 +344,14 @@ impl RuntimePreferences {
         settings.dns_leak_protection = self.dns_leak_protection;
         settings.webrtc_leak_protection = self.webrtc_leak_protection;
         settings.tcp_concurrency = self.tcp_concurrency;
-        settings.validate_listener_settings()?;
-        // The endpoint allocator chooses a distinct controller after applying
-        // a user-selected mixed port; projection validates the final tuple.
         Ok(settings)
     }
+}
+
+/// The LAN listener has a port of an endpoint of the engine: the local proxy
+/// or the controller.
+fn listener_shares_an_endpoint() -> ConfigError {
+    invalid_settings("LAN, local proxy and controller ports must be distinct")
 }
 
 fn invalid_settings(reason: &str) -> ConfigError {

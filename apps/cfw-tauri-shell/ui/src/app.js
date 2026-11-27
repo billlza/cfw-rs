@@ -132,6 +132,8 @@ const automationSettingsUI = createAutomationSettingsUI({ state, invoke, renderP
 const runtimeSettingsUI = createRuntimeSettingsUI({ state, invoke, appendLog, renderPage,
   nativeDialog: nativeRuntimeSettings,
   dismissOtherDialogs: () => { dismissNativeProfileMenu(); automationSettingsUI.close(); state.glassDialog = null; state.profileContextMenu = null; },
+  // Asked while the form itself is closed, so an overlay that is open is another one.
+  otherDialogOpen: overlayOpen,
   refreshRuntime: async () => {
     await loadEngineStatus();
     await loadRuntimeProjection();
@@ -165,8 +167,8 @@ const {
   refreshStartupLoginItemStatus,
 } = settings;
 const { applyUiToggle, applyToggle } = createToggles({
-  renderPage, runtimeSettingsUI, applyEngineStatus, loadEngineStatus, loadRuntimeProjection,
-  applyPersistedSettings, persistedSettingsFromUi, loadSettingsSnapshot,
+  renderPage, scheduleLogStreamPatch, runtimeSettingsUI, applyEngineStatus, loadEngineStatus,
+  loadRuntimeProjection, applyPersistedSettings, persistedSettingsFromUi, loadSettingsSnapshot,
 });
 const nativeGeneralSwitches = createNativeGeneralSwitches({
   enabled: () => state.payload?.native_ui?.general_switches === true && !state.migrationHandoff,
@@ -193,7 +195,7 @@ const profileMenu = createProfileMenu({
 });
 const { dismissNativeProfileMenu, openProfileContextMenu, runProfileMenuAction } = profileMenu;
 const updates = createUpdateController({ renderPage, renderGlassOverlays, overlayOpen, closeGlassOverlays });
-const { applyUpdateInfo, invalidateUpdateAuthorization, openProductAboutDialog, updateInstall } = updates;
+const { takeAnnouncedUpdate, openProductAboutDialog, updateInstall } = updates;
 const profileDialogs = createProfileDialogs({
   renderPage, renderGlassOverlays, closeGlassOverlays, closeGlassDialog, loadProfilesSnapshot, invokeProfileChange, forgetProfileSource,
 });
@@ -292,7 +294,7 @@ const {
   onEngineSnapshot, onEngineEvent, onLogLines, onStreamError, onDragDrop,
 } = createHostEvents({
   renderPage, scheduleRender, updateStatusBar, applyPersistedSettings, loadSettingsSnapshot,
-  resetPersistedSettingsToSafeState, loadEngineStatus, loadRuntimeProjection, applyUpdateInfo, openProductAboutDialog,
+  resetPersistedSettingsToSafeState, loadEngineStatus, loadRuntimeProjection, takeAnnouncedUpdate, openProductAboutDialog,
   updateInstall, scheduleConnectionsPatch, scheduleLogStreamPatch, importProfileFromPath,
 });
 
@@ -494,14 +496,8 @@ async function bootstrap() {
 
   // Register every listener before the automatic check. The setup-time check
   // used to race this subscription and could lose the only availability event.
-  if (state.toggles.checkForUpdates) {
-    try {
-      applyUpdateInfo(await invoke("check_for_updates"));
-    } catch (error) {
-      appendLog("error", "updater", t("Automatic update check failed: {error}", { error: errorText(error) }));
-      invalidateUpdateAuthorization(error);
-    }
-  }
+  // A check asked for meanwhile joins it.
+  if (state.toggles.checkForUpdates) await updates.checkAtStartup();
 
   await startLiveStreams();
 

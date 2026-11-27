@@ -39,6 +39,12 @@ pub(super) struct EngineEndpointBinding {
     pub(super) controller: EngineControllerAccess,
     pub(super) cursor: EndpointCandidateCursor,
     pub(super) active: Option<ActiveControllerBinding>,
+    /// How many times this process has set out to replace the saved runtime
+    /// preferences. A write that succeeds replaces the settings file and the
+    /// settings held here together, and one that fails may have been the
+    /// file for a moment, so whoever reads the file takes this count before
+    /// and after it and knows whether the file belongs to these settings.
+    pub(super) preference_writes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,8 +72,14 @@ pub(crate) struct PreparedEngine {
     pub(crate) task: cfw_application::CoordinatorTask,
 }
 
+/// The engine settings and endpoints of a start: those of a cutover journal
+/// that governs it, or those the saved preferences make of the defaults, with
+/// endpoints selected clear of the LAN listener and of the ports that
+/// `reserved` observes as taken.
 pub(super) fn configured_engine_settings(
     store: &cfw_core::SettingsStore,
+    reserved: impl FnOnce()
+        -> Result<std::collections::BTreeSet<u16>, endpoints::EndpointSelectionError>,
 ) -> Result<(EngineSettings, EndpointCandidateCursor), String> {
     #[cfg(target_os = "macos")]
     if let Some(settings) = load_replacement_engine_settings(&store.paths().app_home)? {
@@ -79,11 +91,18 @@ pub(super) fn configured_engine_settings(
         .runtime_settings::<cfw_singbox_config::RuntimePreferences>()
         .map_err(|error| error.to_string())?
         .settings;
+    // The endpoints are selected away from the LAN listener: a port the
+    // preferences leave to the engine, and the port of the controller. Only a
+    // port they name is checked against the listener first.
     let settings = preferences
-        .apply_to(EngineSettings::default())
+        .apply_before_endpoint_selection(EngineSettings::default())
         .map_err(|error| error.to_string())?;
-    endpoints::select_configured_engine_settings(settings, preferences.preferred_mixed_port)
-        .map_err(|error| format!("engine loopback endpoints are unavailable: {error}"))
+    endpoints::select_configured_engine_settings(
+        settings,
+        preferences.preferred_mixed_port,
+        reserved,
+    )
+    .map_err(|error| format!("engine loopback endpoints are unavailable: {error}"))
 }
 
 pub(crate) fn prepare_managed_engine(
@@ -91,7 +110,7 @@ pub(crate) fn prepare_managed_engine(
 ) -> Result<PreparedEngine, String> {
     let store = settings_store()?;
     store.ensure_layout().map_err(|error| error.to_string())?;
-    let (settings, cursor) = configured_engine_settings(&store)?;
+    let (settings, cursor) = configured_engine_settings(&store, endpoints::observe_reserved_ports)?;
     let controller = EngineControllerAccess::resolve(settings)
         .map_err(|error| format!("engine settings are unusable: {error}"))?;
     let crate::platform_runtime::PreparedRuntime {
@@ -127,6 +146,7 @@ pub(crate) fn prepare_managed_engine(
             controller,
             cursor,
             active: None,
+            preference_writes: 0,
         })),
     };
     Ok(PreparedEngine { engine, task })

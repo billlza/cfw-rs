@@ -9,9 +9,17 @@ import { createUpdateInstall, installAfterCheck, updateInstallView } from "./upd
 import { platformPresentation } from "./platform-presentation.js";
 import { renderCatLogo } from "./controls.js";
 
+/// Whether `page` shows the update the app offers: General with its badge,
+/// and Feedback, the About page.
+export function showsUpdateOffer(page) {
+  return page === "general" || page === "feedback";
+}
+
 export function createUpdateController({ renderPage, renderGlassOverlays, overlayOpen, closeGlassOverlays }) {
+  /// Takes what a check found as what the app offers. Answers whether
+  /// `payload` says that: anything else changes nothing.
   function applyUpdateInfo(payload) {
-    if (!payload || typeof payload !== "object") return;
+    if (!payload || typeof payload !== "object") return false;
     state.updateInfo = {
       available: Boolean(payload.available),
       current: payload.current ?? state.payload?.product?.version,
@@ -22,10 +30,13 @@ export function createUpdateController({ renderPage, renderGlassOverlays, overla
       install: payload.install ?? null,
     };
     state.updateInstall = installAfterCheck(state.updateInstall, state.updateInfo);
+    return true;
   }
 
-  function invalidateUpdateAuthorization(error) {
-    const result = {
+  /// What is known of updates once the offer of one was withdrawn: none is
+  /// available, for the failure `error` if one says why.
+  function withdrawnUpdate(error) {
+    return {
       available: false,
       current: state.payload?.product?.version ?? null,
       version: null,
@@ -33,19 +44,94 @@ export function createUpdateController({ renderPage, renderGlassOverlays, overla
       date: null,
       error: error ? errorText(error) : null,
     };
+  }
+
+  /// Draws the page again where it shows the update the app offers.
+  function drawUpdateOffer() {
+    if (showsUpdateOffer(state.activePage)) renderPage();
+  }
+
+  function invalidateUpdateAuthorization(error) {
+    const result = withdrawnUpdate(error);
     applyUpdateInfo(result);
     return result;
   }
 
-  async function promptAvailableUpdate(result) {
-    applyUpdateInfo(result);
-    openProductAboutDialog({
-      autoCheck: true,
-      phase: "idle",
-      result,
-    });
+  // The update the app offers is what the check that ended last found. The
+  // host makes one check, or recheck of an update before its download page
+  // opens, at a time and refuses another meanwhile, so a check asked for while
+  // one is under way joins it, and each dialog that asked for it shows what it
+  // found. An opening of the download page takes the update from the host and
+  // withdraws the offer as it ends, unless a check or another opening began
+  // since, which says what is offered then. The host announces what each check
+  // found as the check ends, that of the app menu among them, which the page
+  // learns of only then: an opening may have taken an update announced while
+  // it was under way, if the check that found it ended before the host
+  // rechecked the update opened, or not, if it ended while the download page
+  // opened. The page cannot tell which, so an opening that ends once the host
+  // announced an update, and nothing else began since, checks again, and that
+  // check says what is offered. The checks, the openings and the announcements
+  // are counted in the order they began.
+  let begun = 0;
+  let asked = 0;
+  let sharedCheck = null;
+
+  /// Begins a check or an opening of the download page. Answers what began
+  /// since: "nothing", "announcements" where the host announced updates and
+  /// nothing else began, or "operations".
+  function beginUpdateOperation() {
+    begun += 1;
+    asked += 1;
+    const operation = begun;
+    const own = asked;
+    return () => {
+      if (operation === begun) return "nothing";
+      return own === asked ? "announcements" : "operations";
+    };
   }
 
+  async function runCheck() {
+    // An opening of the download page that ends after this began takes
+    // nothing from what it finds.
+    beginUpdateOperation();
+    try {
+      const result = await invoke("check_for_updates");
+      applyUpdateInfo(result);
+      return result;
+    } catch (error) {
+      invalidateUpdateAuthorization(error);
+      throw error;
+    }
+  }
+
+  /// The check for updates under way, or a new one. It answers what the host
+  /// found, which the app offers then, or fails once the offer was withdrawn
+  /// for its failure.
+  function checkForUpdates() {
+    sharedCheck ??= runCheck().finally(() => { sharedCheck = null; });
+    return sharedCheck;
+  }
+
+  /// The automatic check at startup, which a check asked for meanwhile joins.
+  /// A failure is logged, and no update is offered then.
+  async function checkAtStartup() {
+    try {
+      await checkForUpdates();
+    } catch (error) {
+      appendLog("error", "updater", t("Automatic update check failed: {error}", { error: errorText(error) }));
+    }
+  }
+
+  /// Takes the update the host announces as a check ends, which it does for
+  /// every check, that of the app menu among them. An opening of the download
+  /// page that ends after it checks again.
+  function takeAnnouncedUpdate(payload) {
+    if (applyUpdateInfo(payload)) begun += 1;
+  }
+
+  /// Opens the About dialog with what `options` say, or shows it in the one
+  /// that is open, which keeps its place among the open dialogs. Answers the
+  /// dialog.
   function openProductAboutDialog(options = {}) {
     const product = state.payload.product;
     const update = options.result
@@ -61,16 +147,36 @@ export function createUpdateController({ renderPage, renderGlassOverlays, overla
       : state.updateInfo;
     const phase = options.phase
       ?? (options.checking ? "checking" : "idle");
-    state.glassDialog = {
-      kind: "product-about",
-      payload: {
-        phase,
-        checking: phase === "checking",
-        autoCheck: Boolean(options.autoCheck),
-        update,
-      },
-    };
+    const payload = { phase, checking: phase === "checking", autoCheck: Boolean(options.autoCheck), update };
+    if (state.glassDialog?.kind === "product-about") state.glassDialog.payload = payload;
+    else state.glassDialog = { kind: "product-about", payload };
     renderGlassOverlays();
+    return state.glassDialog;
+  }
+
+  /// Shows what a check of `dialog` came to while `dialog` is open. Once it was
+  /// closed, or another dialog took its place, it opens nothing: it would open
+  /// again over what the user opened since.
+  function showInProductAboutDialog(dialog, options) {
+    if (state.glassDialog === dialog) openProductAboutDialog(options);
+  }
+
+  /// Checks for updates for the About dialog `dialog`, which shows what the
+  /// check came to while it is open, and logs it. The host announces what a
+  /// check found, which draws the pages that show it; a failure withdraws the
+  /// offer and is announced by nobody, so it draws them here.
+  async function checkIn(dialog) {
+    try {
+      const result = await checkForUpdates();
+      appendLog("info", "updater", result?.available
+        ? t("Update {version} available", { version: result.version })
+        : t("Already up to date ({value1})", { value1: result?.current ?? t("current") }));
+      showInProductAboutDialog(dialog, { autoCheck: true, phase: "idle", result });
+    } catch (error) {
+      appendLog("error", "updater", t("Update check failed: {error}", { error: errorText(error) }));
+      showInProductAboutDialog(dialog, { autoCheck: true, phase: "idle", result: withdrawnUpdate(error) });
+      drawUpdateOffer();
+    }
   }
 
   /// Shows what the user must be told about an earlier update installation,
@@ -104,18 +210,13 @@ export function createUpdateController({ renderPage, renderGlassOverlays, overla
 
   const actions = {
     "check-for-updates": async () => {
+      const dialog = openProductAboutDialog({ autoCheck: true, phase: "checking" });
       try {
-        openProductAboutDialog({ autoCheck: true, phase: "checking" });
-        const result = await invoke("check_for_updates");
-        await promptAvailableUpdate(result);
+        const result = await checkForUpdates();
+        showInProductAboutDialog(dialog, { autoCheck: true, phase: "idle", result });
       } catch (error) {
         appendLog("error", "updater", t("Update check failed: {error}", { error: errorText(error) }));
-        const result = invalidateUpdateAuthorization(error);
-        openProductAboutDialog({
-          autoCheck: true,
-          phase: "idle",
-          result,
-        });
+        showInProductAboutDialog(dialog, { autoCheck: true, phase: "idle", result: withdrawnUpdate(error) });
       }
       renderPage();
     },
@@ -166,29 +267,7 @@ export function createUpdateController({ renderPage, renderGlassOverlays, overla
 
   function bindProductAboutDialog() {
     document.querySelectorAll("[data-glass-check-update]").forEach((button) => {
-      button.addEventListener("click", async () => {
-        openProductAboutDialog({ autoCheck: true, phase: "checking", result: state.updateInfo });
-        try {
-          const result = await invoke("check_for_updates");
-          applyUpdateInfo(result);
-          appendLog(
-            result?.available ? "info" : "info",
-            "updater",
-            result?.available
-              ? t("Update {version} available", { version: result.version })
-              : t("Already up to date ({value1})", { value1: result?.current ?? t("current") }),
-          );
-          openProductAboutDialog({ autoCheck: true, phase: "idle", result });
-        } catch (error) {
-          appendLog("error", "updater", t("Update check failed: {error}", { error: errorText(error) }));
-          const result = invalidateUpdateAuthorization(error);
-          openProductAboutDialog({
-            autoCheck: true,
-            phase: "idle",
-            result,
-          });
-        }
-      });
+      button.addEventListener("click", () => checkIn(openProductAboutDialog({ autoCheck: true, phase: "checking", result: state.updateInfo })));
     });
 
     for (const [selector, action] of [
@@ -203,29 +282,40 @@ export function createUpdateController({ renderPage, renderGlassOverlays, overla
 
     document.querySelectorAll("[data-glass-open-update]").forEach((button) => {
       button.addEventListener("click", async () => {
+        const dialog = state.glassDialog;
         const targetVersion = state.updateInfo?.version;
+        const since = beginUpdateOperation();
+        let opened = false;
+        let failure;
         try {
           if (!targetVersion) throw new Error("No validated update is available");
           appendLog("info", "updater", t("Opening the official v{targetVersion} download page…", { targetVersion: targetVersion }));
           await invoke("open_available_update", { expectedVersion: targetVersion });
+          opened = true;
           appendLog("info", "updater", t("Official v{targetVersion} download page opened", { targetVersion: targetVersion }));
-          invalidateUpdateAuthorization();
-          closeGlassOverlays();
         } catch (error) {
+          failure = error;
           appendLog("error", "updater", t("Could not open update: {error}", { error: errorText(error) }));
-          const result = invalidateUpdateAuthorization(error);
-          openProductAboutDialog({
-            autoCheck: true,
-            phase: "idle",
-            result,
-          });
+        }
+        const later = since();
+        if (opened) {
+          // The host has taken the update it opened. A check begun since offers
+          // what it found, which stays.
+          if (later === "nothing") invalidateUpdateAuthorization();
+          closeGlassOverlays();
+        } else if (later === "nothing") {
+          showInProductAboutDialog(dialog, { autoCheck: true, phase: "idle", result: invalidateUpdateAuthorization(failure) });
+        }
+        if (later === "announcements") {
+          showInProductAboutDialog(dialog, { autoCheck: true, phase: "checking", result: state.updateInfo });
+          await checkIn(dialog);
         }
       });
     });
   }
 
   return {
-    applyUpdateInfo, invalidateUpdateAuthorization, openProductAboutDialog, updateInstall,
+    takeAnnouncedUpdate, openProductAboutDialog, updateInstall, checkAtStartup,
     dialogs: { kinds: ["product-about"], render: renderProductAboutDialog, bind: bindProductAboutDialog },
     actions,
   };

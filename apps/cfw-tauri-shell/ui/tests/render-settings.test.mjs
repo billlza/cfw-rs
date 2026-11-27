@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { getLocale } from "../src/i18n.js";
 import { networkSettingsKnown, networkSettingsReason } from "../src/reasons.js";
+import { savedSettingsNotInForce } from "../src/runtime-settings.js";
 import {
   RUNNING_ENGINE, WINDOWS_PLATFORM_DESIGN, appModule, documentListeners, documentStub, element,
   emit, glassRoot, interactiveElement, invocationDetails, invoked, page, querySelectorAllElements,
@@ -379,7 +380,7 @@ for (const sw of RUNTIME_SWITCHES) {
       assert.deepEqual(commands.filter((command) => command.startsWith("write_")), ["write_runtime_settings_snapshot"]);
       assert.ok(commands.indexOf("read_runtime_settings_snapshot") < commands.indexOf("write_runtime_settings_snapshot"),
         "the write is bound to a fresh read");
-      assert.deepEqual(written, { settings: { ...original.settings, [sw.key]: !resting }, revision: null });
+      assert.deepEqual(written, { settings: { ...original.settings, [sw.key]: !resting }, revision: null, basis: { in_force: true, saved_ipv6_dns_enabled: true } });
       assert.equal(state.toggles[sw.toggle], !resting);
       html = await renderPage("settings");
       assert.equal(/checked/u.test(toggle(html)), !resting, "the switch shows the saved change");
@@ -406,7 +407,7 @@ for (const sw of RUNTIME_SWITCHES) {
 test("the availability of the runtime network settings follows the state it is asked about", () => {
   const migrating = "Finish migration before changing network settings";
   const asked = (changes) => ({
-    migrationHandoff: false, migrationHandoffStatus: { state: "idle" }, runtimeSettings: {}, runtimeSettingsError: null, ...changes,
+    migrationHandoff: false, migrationHandoffStatus: { state: "idle" }, runtimeSettings: { in_force: true }, runtimeSettingsError: null, ...changes,
   });
   // The state asked about, the reason that holds the controls, and whether a
   // switch may show its value. Nothing is taken from the dashboard's own state.
@@ -421,6 +422,12 @@ test("the availability of the runtime network settings follows the state it is a
     [{ migrationHandoff: true, runtimeSettings: null }, "Network settings are loading", false],
     [{ migrationHandoff: true, runtimeSettingsError: "reload failed" }, "reload failed", false],
     [{ migrationHandoff: true, runtimeSettings: null, runtimeSettingsError: "read failed" }, "read failed", false],
+    // Settings that are saved but not the ones the engine runs with are known
+    // and held. A migration's window and a failed read are said before that.
+    [{ runtimeSettings: { in_force: false } }, savedSettingsNotInForce(), true],
+    [{ runtimeSettings: {} }, savedSettingsNotInForce(), true],
+    [{ migrationHandoff: true, runtimeSettings: { in_force: false } }, migrating, true],
+    [{ runtimeSettings: { in_force: false }, runtimeSettingsError: "reload failed" }, "reload failed", false],
     // The window that starts a migration is left as it was: it closes when
     // the migration's window is ready.
     [{ migrationHandoffStatus: { state: "in_progress" } }, null, true],

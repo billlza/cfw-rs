@@ -5,6 +5,14 @@ import { escapeHtml, errorText } from "./text-format.js";
 import { invoke } from "./ipc.js";
 import { t } from "./i18n.js";
 import { appendLog } from "./app-log.js";
+import { askForDialog } from "./dialog-requests.js";
+
+// The fields of a dialog whose text is kept in the dialog as it is typed, by
+// the kind of the dialog, and the key that keeps each.
+const TYPED_FIELDS = new Map([
+  ["copy", [["[data-glass-copy-name]", "name"]]],
+  ["settings", [["[data-glass-settings-name]", "name"], ["[data-glass-settings-url]", "url"]]],
+]);
 
 export function createProfileDialogs({
   renderPage, renderGlassOverlays, closeGlassOverlays, closeGlassDialog, loadProfilesSnapshot, invokeProfileChange, forgetProfileSource,
@@ -33,12 +41,16 @@ export function createProfileDialogs({
 
   /// The invalid subscription workaround imports its URL again. The URL is read
   /// on request and shown in a dialog whose Copy button writes the clipboard
-  /// within its own click; it never reaches the list or the log.
+  /// within its own click; it never reaches the list or the log. The dialog
+  /// is asked for before the read and opens only while it is the one that
+  /// was asked for last: a URL that is overtaken is shown nowhere.
   async function showInvalidProfileSource(id) {
     const profile = state.invalidProfiles.find((item) => item.id === id);
     if (!profile) throw new Error(t("profile not found: {id}", { id: id }));
+    const latest = askForDialog(state);
     const url = await invoke("read_profile_source_url", { id });
     if (typeof url !== "string") throw new Error(t("{name} has no subscription URL", { name: profile.name }));
+    if (!latest()) return;
     state.glassDialog = { kind: "invalid-profile-source", id, payload: url };
     renderGlassOverlays();
   }
@@ -69,12 +81,12 @@ export function createProfileDialogs({
     return null;
   }
 
-  function renderCopyDialog(profile) {
+  function renderCopyDialog(dialog, profile) {
     return (`
         <div class="glass-dialog-backdrop" data-glass-dismiss></div>
         <div class="glass-dialog" role="dialog" aria-label="${escapeHtml(t("Copy profile"))}">
           <h3>${escapeHtml(t("Copy profile"))}</h3>
-          <label>${escapeHtml(t("Name"))}<input data-glass-copy-name value="${escapeHtml(t("{name} copy", { name: profile.name }))}" /></label>
+          <label>${escapeHtml(t("Name"))}<input data-glass-copy-name value="${escapeHtml(dialog.name ?? t("{name} copy", { name: profile.name }))}" /></label>
           <div class="glass-dialog-actions">
             <button type="button" class="glass-btn ghost" data-glass-dismiss>${escapeHtml(t("Cancel"))}</button>
             <button type="button" class="glass-btn" data-glass-copy-confirm="${escapeHtml(profile.id)}">${escapeHtml(t("Copy"))}</button>
@@ -83,13 +95,13 @@ export function createProfileDialogs({
       `);
   }
 
-  function renderSettingsDialog(profile) {
+  function renderSettingsDialog(dialog, profile) {
     return (`
         <div class="glass-dialog-backdrop" data-glass-dismiss></div>
         <div class="glass-dialog" role="dialog" aria-label="${escapeHtml(t("Edit profile information"))}">
           <h3>${escapeHtml(t("Edit profile information"))}</h3>
-          <label>${escapeHtml(t("Name"))}<input data-glass-settings-name value="${escapeHtml(profile.name)}" /></label>
-          <label>URL<input data-glass-settings-url value="${escapeHtml(profile.sourceUrl ?? "")}" placeholder="https://..." /></label>
+          <label>${escapeHtml(t("Name"))}<input data-glass-settings-name value="${escapeHtml(dialog.name ?? profile.name)}" /></label>
+          <label>URL<input data-glass-settings-url value="${escapeHtml(dialog.url ?? profile.sourceUrl ?? "")}" placeholder="https://..." /></label>
           <div class="glass-dialog-actions">
             <button type="button" class="glass-btn ghost" data-glass-dismiss>${escapeHtml(t("Cancel"))}</button>
             <button type="button" class="glass-btn" data-glass-settings-confirm="${escapeHtml(profile.id)}">${escapeHtml(t("Save"))}</button>
@@ -131,8 +143,8 @@ export function createProfileDialogs({
   function render(dialog, profile, prompt) {
     if (!profile) return "";
     switch (dialog.kind) {
-      case "copy": return renderCopyDialog(profile);
-      case "settings": return renderSettingsDialog(profile);
+      case "copy": return renderCopyDialog(dialog, profile);
+      case "settings": return renderSettingsDialog(dialog, profile);
       case "delete":
       case "delete-invalid": return renderDeleteDialog(profile, prompt);
       case "invalid-profile-source": return renderInvalidSourceDialog(dialog, profile);
@@ -141,6 +153,14 @@ export function createProfileDialogs({
   }
 
   function bind() {
+    // What is typed is kept in the dialog: the page draws it again from its
+    // state, as every render of the page does while it is open.
+    const typedIn = state.glassDialog;
+    for (const [selector, key] of TYPED_FIELDS.get(typedIn?.kind) ?? []) {
+      document.querySelectorAll(selector).forEach((field) => {
+        field.addEventListener("input", () => { typedIn[key] = field.value; });
+      });
+    }
     document.querySelectorAll("[data-glass-copy-confirm]").forEach((button) => {
       button.addEventListener("click", async (event) => {
         const id = event.currentTarget.dataset.glassCopyConfirm;

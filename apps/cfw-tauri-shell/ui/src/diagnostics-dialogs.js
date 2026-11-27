@@ -7,8 +7,18 @@ import { t } from "./i18n.js";
 import { appendLog } from "./app-log.js";
 import { captureEngineIdentityToken, controllerActionAllowed, engineIdentityTokenIsCurrent } from "./engine-identity.js";
 import { networkDiagnosticsView, serviceProxyLabel } from "./network-diagnostics.js";
+import { askForDialog } from "./dialog-requests.js";
+import { readNetworkDiagnostics } from "./system-info.js";
 
 export function createDiagnosticsDialogs({ renderPage, renderGlassOverlays, runtimeProjectionActionAllowed }) {
+  // A read draws again only a page that shows what it came to: Settings the
+  // network settings that were observed or could not be read, and Logs the
+  // line a failure adds. Another page shows nothing of it and is not drawn
+  // again: it holds what the user entered there and has not saved, a profile
+  // in its editor for one.
+  const settingsShown = () => state.activePage === "settings";
+  const logsShown = () => state.activePage === "logs";
+
   function renderConfigPreview(dialog) {
     return (`
         <div class="glass-dialog-backdrop" data-glass-dismiss></div>
@@ -66,60 +76,83 @@ export function createDiagnosticsDialogs({ renderPage, renderGlassOverlays, runt
   }
 
   function bind() {
+    const query = state.glassDialog;
+    if (query?.kind !== "dns-query") return;
+    // What is typed in the query is kept in it: the page draws the dialog
+    // again from its state, as every render of the page does while it is open.
+    for (const [selector, key] of [["[data-glass-dns-name]", "name"], ["[data-glass-dns-type]", "type"]]) {
+      document.querySelectorAll(selector).forEach((field) => {
+        field.addEventListener("input", () => { query.payload[key] = field.value; });
+      });
+    }
+    // Its answer is shown in it while it is open, where it keeps its place.
+    // Once it was closed, or another dialog took its place, the answer opens
+    // nothing: it would open the query again over what the user opened since.
+    const answer = (name, type, result) => {
+      if (state.glassDialog !== query) return;
+      query.payload = { name, type, result };
+      renderGlassOverlays();
+    };
     document.querySelectorAll("[data-glass-dns-confirm]").forEach((button) => {
       button.addEventListener("click", async () => {
         const name = document.querySelector("[data-glass-dns-name]")?.value?.trim() ?? "";
         const type = document.querySelector("[data-glass-dns-type]")?.value?.trim() || "A";
         if (!controllerActionAllowed(t("DNS query"), "dns")) {
-          state.glassDialog = { kind: "dns-query", payload: { name, type, result: t("Engine is Off; start the engine before querying DNS.") } };
-          renderGlassOverlays();
+          answer(name, type, t("Engine is Off; start the engine before querying DNS."));
           return;
         }
         const token = captureEngineIdentityToken();
         try {
           const result = await invoke("dns_query", { name, record_type: type, recordType: type });
           if (!engineIdentityTokenIsCurrent(token)) return;
-          state.glassDialog = { kind: "dns-query", payload: { name, type, result: JSON.stringify(result, null, 2) } };
-          renderGlassOverlays();
+          answer(name, type, JSON.stringify(result, null, 2));
         } catch (error) {
           if (!engineIdentityTokenIsCurrent(token)) return;
           const message = errorText(error);
           appendLog("error", "dns", t("DNS query failed: {message}", { message: message }));
-          state.glassDialog = { kind: "dns-query", payload: { name, type, result: message } };
-          renderGlassOverlays();
+          answer(name, type, message);
         }
       });
     });
   }
 
+  // These two read before they open, so each is asked for at the press and
+  // opens only while it is the dialog that was asked for last.
   const actions = {
     "show-network-interfaces": async () => {
+      const latest = askForDialog(state);
+      let opened = false;
       try {
-        const diagnostics = await invoke("network_diagnostics");
-        networkDiagnosticsView(diagnostics, serviceProxyLabel);
-        state.networkDiagnostics = diagnostics;
-        state.glassDialog = {
-          kind: "network-services",
-          payload: diagnostics,
-        };
-        renderGlassOverlays();
-        return;
+        const diagnostics = await readNetworkDiagnostics();
+        if (latest()) {
+          state.glassDialog = {
+            kind: "network-services",
+            payload: diagnostics,
+          };
+          opened = true;
+        }
       } catch (error) {
         appendLog("error", "network", errorText(error));
+        if (settingsShown() || logsShown()) renderPage();
+        return;
       }
-      renderPage();
+      // Settings shows what was observed, whoever asked for it.
+      if (settingsShown()) renderPage();
+      else if (opened) renderGlassOverlays();
     },
     "preview-runtime-config": async () => {
       if (!runtimeProjectionActionAllowed(t("Configuration preview"))) return;
+      const latest = askForDialog(state);
       try {
         const body = await invoke("read_runtime_config_text");
+        if (!latest()) return;
         state.glassDialog = { kind: "preview-config", payload: body };
         renderGlassOverlays();
         return;
       } catch (error) {
         appendLog("error", "engine", t("Configuration preview failed: {error}", { error: errorText(error) }));
+        if (logsShown()) renderPage();
       }
-      renderPage();
     },
     "dns-query": async () => {
       state.glassDialog = { kind: "dns-query", payload: { name: "www.gstatic.com", type: "A", result: "" } };

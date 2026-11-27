@@ -310,3 +310,286 @@ async fn shutdown_maintenance_survives_caller_cancellation_and_blocks_all_modes(
     .await
     .expect("completed shutdown task releases its dropped response guard");
 }
+
+/// A change of the runtime preferences is counted among the mode changes from
+/// its press, before what it asks is read: maintenance waits for it, the bound
+/// of the queue refuses it, and its press moves the revision on, so what is
+/// observed after it is later. Given up before its turn it was no intent: it
+/// supersedes no retry and no expectation.
+#[tokio::test]
+async fn a_reapplication_is_counted_from_its_press_and_is_no_intent_before_its_turn() {
+    let gate = EngineMaintenanceGate::default();
+    let observed = gate.intent_revision().expect("the revision");
+    let pressed = gate.register_reapply().expect("the press");
+    assert!(
+        gate.intent_revision()
+            .expect("the revision after the press")
+            > observed,
+        "the press moves the revision on"
+    );
+    let maintenance = gate.reserve_if_idle().err();
+    drop(pressed);
+    assert_eq!(maintenance, Some(EngineMaintenanceError::ModeChangeActive));
+    let start = gate
+        .begin_mode_change(EngineModeChangeIntent::Set(EngineMode::SystemProxy))
+        .await
+        .expect("a start");
+    let retry = start.retry_guard();
+    let observed = gate.intent_revision().expect("the revision the start gave");
+    drop(gate.register_reapply().expect("a press given up"));
+    assert_eq!(
+        retry(),
+        Ok(()),
+        "a change given up before its turn supersedes no retry"
+    );
+    drop(start);
+    assert_eq!(
+        gate.begin_mode_change_if_current(
+            EngineModeChangeIntent::Set(EngineMode::Tunnel),
+            Some(observed)
+        )
+        .await
+        .map(drop),
+        Ok(()),
+        "and no expectation"
+    );
+    let maintenance = gate.reserve_if_idle().expect("the press gave up its place");
+    assert!(matches!(
+        gate.register_reapply(),
+        Err(EngineMaintenanceError::AlreadyActive)
+    ));
+    drop(maintenance);
+    let presses = (0..MAX_PENDING_MODE_CHANGES)
+        .map(|_| gate.register_reapply().expect("a press"))
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        gate.register_reapply(),
+        Err(EngineMaintenanceError::QueueFull)
+    ));
+    assert!(matches!(
+        gate.begin_mode_change(EngineModeChangeIntent::Set(EngineMode::Off))
+            .await,
+        Err(EngineMaintenanceError::QueueFull)
+    ));
+    drop(presses);
+    let maintenance = gate
+        .reserve_if_idle()
+        .expect("the presses gave up their places");
+    drop(maintenance);
+}
+
+/// The turn of a change of the runtime preferences is a new intent asked for
+/// at its press. One pressed before a start leaves the start its retry, as the
+/// start was asked for later; one pressed after the start supersedes it, as
+/// any later operation does. An automatic request observed before either is
+/// stale.
+#[tokio::test]
+async fn a_reapplication_supersedes_only_what_was_registered_before_its_press() {
+    let gate = EngineMaintenanceGate::default();
+    let earlier = gate.register_reapply().expect("the earlier press");
+    let start = gate
+        .begin_mode_change(EngineModeChangeIntent::Set(EngineMode::SystemProxy))
+        .await
+        .expect("the start");
+    let retry = start.retry_guard();
+    let observed = gate.intent_revision().expect("the revision");
+    let later = gate.register_reapply().expect("the later press");
+    let earlier_turn = earlier.begin();
+    tokio::pin!(earlier_turn);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), &mut earlier_turn)
+            .await
+            .is_err(),
+        "the earlier change waits for the start"
+    );
+    assert_eq!(
+        retry(),
+        Ok(()),
+        "a change pressed before the start leaves it its retry"
+    );
+    let later_turn = later.begin();
+    tokio::pin!(later_turn);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), &mut later_turn)
+            .await
+            .is_err(),
+        "the later change waits for the earlier one"
+    );
+    assert_eq!(
+        retry(),
+        Err(EngineMaintenanceError::StaleIntent),
+        "one pressed after the start supersedes it"
+    );
+    drop(start);
+    let earlier_lease = tokio::time::timeout(Duration::from_secs(1), &mut earlier_turn)
+        .await
+        .expect("the earlier turn")
+        .expect("the earlier change");
+    drop(earlier_lease);
+    let later_lease = tokio::time::timeout(Duration::from_secs(1), &mut later_turn)
+        .await
+        .expect("the later turn")
+        .expect("the later change");
+    drop(later_lease);
+    assert!(
+        matches!(
+            gate.begin_mode_change_if_current(
+                EngineModeChangeIntent::Set(EngineMode::Tunnel),
+                Some(observed)
+            )
+            .await,
+            Err(EngineMaintenanceError::StaleIntent)
+        ),
+        "an automatic request observed before them is stale"
+    );
+}
+
+/// An automatic request that waits for its turn is stale once an intent asked
+/// for after it has been registered: a change of the runtime preferences
+/// pressed after it supersedes it, and one pressed before it does not, as it
+/// would not end its retries.
+#[tokio::test]
+async fn an_automatic_request_is_superseded_only_by_a_change_pressed_after_it() {
+    let gate = EngineMaintenanceGate::default();
+    for pressed_after in [false, true] {
+        let holder = gate
+            .begin_mode_change(EngineModeChangeIntent::Set(EngineMode::LocalProxy))
+            .await
+            .expect("the holder");
+        let before = (!pressed_after).then(|| gate.register_reapply().expect("the press"));
+        let automatic = gate.begin_mode_change_if_current(
+            EngineModeChangeIntent::Set(EngineMode::Tunnel),
+            Some(gate.intent_revision().expect("the revision")),
+        );
+        tokio::pin!(automatic);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), &mut automatic)
+                .await
+                .is_err(),
+            "the automatic request waits for the holder"
+        );
+        let pressed = before.unwrap_or_else(|| gate.register_reapply().expect("the press"));
+        let turn = pressed.begin();
+        tokio::pin!(turn);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), &mut turn)
+                .await
+                .is_err(),
+            "the change waits for the automatic request"
+        );
+        drop(holder);
+        let outcome = tokio::time::timeout(Duration::from_secs(1), &mut automatic)
+            .await
+            .expect("the automatic request's turn")
+            .map(drop);
+        let expected = if pressed_after {
+            Err(EngineMaintenanceError::StaleIntent)
+        } else {
+            Ok(())
+        };
+        assert_eq!(
+            outcome, expected,
+            "pressed after the request: {pressed_after}"
+        );
+        drop(
+            tokio::time::timeout(Duration::from_secs(1), &mut turn)
+                .await
+                .expect("the change's turn")
+                .expect("the change"),
+        );
+    }
+}
+
+/// An automatic request that expects a revision is stale once an intent asked
+/// for at that revision or after has been registered: a change of the runtime
+/// preferences pressed before the revision was given leaves the expectation
+/// current, and one pressed at it does not.
+#[tokio::test]
+async fn an_expectation_is_superseded_only_by_a_change_pressed_at_it_or_after() {
+    for pressed_at_it in [false, true] {
+        let gate = EngineMaintenanceGate::default();
+        let before = (!pressed_at_it).then(|| gate.register_reapply().expect("the press"));
+        drop(
+            gate.begin_mode_change(EngineModeChangeIntent::Set(EngineMode::LocalProxy))
+                .await
+                .expect("the start"),
+        );
+        let observed = gate.intent_revision().expect("the revision the start gave");
+        let pressed = before.unwrap_or_else(|| gate.register_reapply().expect("the press"));
+        drop(pressed.begin().await.expect("the change"));
+        let outcome = gate
+            .begin_mode_change_if_current(
+                EngineModeChangeIntent::Set(EngineMode::Tunnel),
+                Some(observed),
+            )
+            .await
+            .map(drop);
+        let expected = if pressed_at_it {
+            Err(EngineMaintenanceError::StaleIntent)
+        } else {
+            Ok(())
+        };
+        assert_eq!(
+            outcome, expected,
+            "pressed at the revision: {pressed_at_it}"
+        );
+    }
+}
+
+/// A change of the runtime preferences pressed before two starts leaves the
+/// later its retry, and does not give the earlier, which the later superseded,
+/// its retry back.
+#[tokio::test]
+async fn a_change_pressed_before_two_starts_gives_no_superseded_retry_back() {
+    let gate = EngineMaintenanceGate::default();
+    let pressed = gate.register_reapply().expect("the press");
+    let first = gate
+        .begin_mode_change(EngineModeChangeIntent::Set(EngineMode::SystemProxy))
+        .await
+        .expect("the first start");
+    let first_retry = first.retry_guard();
+    let second_start = gate.begin_mode_change(EngineModeChangeIntent::Set(EngineMode::Tunnel));
+    tokio::pin!(second_start);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), &mut second_start)
+            .await
+            .is_err(),
+        "the second start waits for the first"
+    );
+    assert_eq!(
+        first_retry(),
+        Err(EngineMaintenanceError::StaleIntent),
+        "the second start supersedes the first"
+    );
+    drop(first);
+    let second = tokio::time::timeout(Duration::from_secs(1), &mut second_start)
+        .await
+        .expect("the second start's turn")
+        .expect("the second start");
+    let second_retry = second.retry_guard();
+    let turn = pressed.begin();
+    tokio::pin!(turn);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), &mut turn)
+            .await
+            .is_err(),
+        "the change waits for the second start"
+    );
+    assert_eq!(
+        second_retry(),
+        Ok(()),
+        "the change pressed before the second start leaves it its retry"
+    );
+    assert_eq!(
+        first_retry(),
+        Err(EngineMaintenanceError::StaleIntent),
+        "and gives the first no retry back"
+    );
+    drop(second);
+    drop(
+        tokio::time::timeout(Duration::from_secs(1), &mut turn)
+            .await
+            .expect("the change's turn")
+            .expect("the change"),
+    );
+}

@@ -29,6 +29,199 @@ window of a maintenance session as well. The General page holds its controls
 of the same settings in the same way. The window that starts a maintenance
 session is not held: it closes once the session's window is ready.
 
+## Engine › saved settings that are not in force
+
+A change made on these pages saves the network settings and applies them in
+one transaction, so the saved settings are the ones the core runs with, or
+would start with. They stop being so once anything else changes
+`cfw-runtime-settings.json` while the app runs, a file that is restored or
+removed for one: the core keeps the settings it was given. The app tells the
+two apart by asking whether a change to the saved settings would change
+anything, of the settings it holds or of the port it was told to keep. An
+automatic proxy port and IPv6 DNS that follows the profile are in force
+whatever they came to, and so is a LAN listener that is saved while sharing
+is off, which the core runs the same with. A proxy port the file names by
+number is in force only once the app keeps that port. The core may listen on
+the very port by its own choice, and would then move to the next one when it
+cannot bind it, where the file says to refuse. A core that an unfinished
+migration started takes its port from that migration and keeps one only
+outside 7890-7897, so a port in that range that the file names comes into
+force with the next start.
+
+While the saved settings are not in force, the Settings and General pages show
+what the core runs with, Allow LAN and its address included, and hold the
+controls of these settings with the reason. General names no policy for the
+port of the core then, neither an automatic nor a configured one: the file no
+longer says which of the two the core's is. It names none either while the
+settings are not known, before they are read and after a read that failed. A
+change of one setting writes all of the saved ones back, so it would bring
+every other difference of the file into force with it, unasked: a page could
+show DNS leak protection on, and turning on Mainland China direct would turn
+the protection off. A click made before the page has read the changed file is
+refused for the same reason and writes nothing. A click whose own read ends
+after the page has read the changed file, or after a read the page asked for
+later has failed, is refused with the reason the page holds the controls for,
+whatever its own read found: it writes nothing, and the network settings form
+does not open for it. Every write also says whether it was built on settings
+in force, and the transaction refuses one that was once they are not, the
+app's commands that change one setting included. The revision of the file does
+not say that: it is the same again after a file is removed that did not exist
+before, or is put back as it was. A change is settled on what is known of it
+before it takes its place among the changes of the network mode, and once more
+there, by the same steps both times: what it was built on, the TUN MTU, which
+this platform takes in a narrower range than the file may hold, the settings
+it gives the core, and the ports the core is to listen on, none of which a LAN
+listener may have. A change that leaves the port to the core where the file
+named one selects the port again, clear of the LAN listener, as a start that
+leaves it to the core selects it: the LAN listener may have the port that is
+given up, and not one that the core keeps or that the change names. A start,
+and a change that selects the ports again, select the port of the controller
+clear of the LAN listener as well, so the listener may have the port the
+controller would take first. One that is refused only there
+would have ended the retry of a start that is under way, for nothing. The
+selected profile is read for every change once everything else is settled, since
+the view of the settings after a change derives effective DNS from the selected
+document: a selected profile that cannot be read, one that fails validation
+among them, refuses the change there as it does in its turn. While an update
+holds the profiles for longer than that read waits, the change is not refused
+for that: it takes its turn after the update and is asked of the profile then.
+In its turn the profiles are held until the commit, and they are taken only once
+nothing that is known without them
+refuses the change: one built on a revision that changed while it waited is
+refused for that, and keeps no other change of the network mode waiting for
+profiles that an update holds. A change counts among the changes of the network
+mode from the moment it is asked for, before anything is read for it:
+maintenance waits for it while it is read, a full queue of those changes refuses
+it before that read, and a mode request made meanwhile, by the user or by a
+network rule, is not superseded when the change takes its turn after it, so a
+start keeps its retries; nor is a switch that a network rule asks for once the
+change has taken its turn, on a network it observed after the change was asked
+for. A click on a switch, on the log level or to turn sharing off asks for its
+change once its own read has ended: a start asked for during that read is
+registered before the change and loses its retries when the change takes its
+turn.
+The commands that set the log level or the
+address of the LAN listener read the text they are given as part of the
+change, so a pending cleanup and saved settings that are not in force are said
+before a value they cannot read.
+
+Reload From Disk shows the saved settings in the network settings form, which
+says that they are not in use. Its Apply puts in use what the form shows,
+through the same transaction as any other change, and Cancel leaves the core
+and the file as they are. The switches that are no fields of the form,
+Mainland China direct, the two leak protections and TCP concurrency, stay as
+the core runs them, and the file gets those values: a saved switch that keeps
+the core from starting could not be corrected in the form, and the page holds
+the switch that could. The transaction takes them from the core when the
+change is made, so a form that stayed open while a switch was changed
+elsewhere turns none of them back. IPv6 DNS is shown as the saved settings
+give it, which is the choice of the profile where they leave it open, and not
+as the core runs it by an earlier choice. The profile may be another one by
+the time of the Apply, an updated subscription for one, and no revision of the
+settings says so. The write therefore says what the form showed, and an Apply
+that leaves IPv6 DNS to the profile is refused once the profile gives
+something else: opened again, the form shows that. Settings that cannot be
+applied as they are saved, a TUN MTU beyond what this platform takes for one,
+are corrected there first. A LAN listener that is saved while sharing is off
+may have the number of the proxy port, as the core opens none for it; sharing
+that is turned on needs a port of its own. A file that was removed is the
+default settings. Saved settings that are in force are only read. A reload
+that is pressed again while it reads opens the form once, for the last press,
+and none opens it over a dialog that is open by then, this form or another,
+whose entries would be gone. The form shows the saved settings the page knows
+when that read ends: those it read, unless the page has taken newer ones
+meanwhile, by a read of its own or with a change it saved, and none while the
+page holds its controls for a later read that failed. A refresh that is only
+under way takes nothing from it, and no form opens once the user has left
+Settings, also when that was as it was pressed, with Settings still drawn, or
+the user is back there by the time the read ends. While a legacy cleanup is
+pending no network setting can change, this way or any other. A write is
+refused for that before anything else it would be refused for, the Apply of
+the form and a command that changes one setting alike, and the settings that
+are read say it too. Saved settings that are not in force then hold the
+controls with that reason in place of the advice to reload and apply, which
+could not be followed, and Reload From Disk reads them and offers no form.
+Settings in force keep their controls, and a change of them is refused with
+that reason. The pages have it from their last read of the settings, so it
+stands until they are read again once the cleanup is complete, which Reload
+From Disk does.
+
+This form and the dialog of the shortcuts and network rules read before they
+open, and each closes the other dialogs as it opens. Five more show what they
+have read: the review of unused credentials, the network interfaces, the
+configuration preview, the migration of a legacy profile and the subscription
+URL of an invalid profile. Each of the seven is asked for at its press. Of
+several that are asked for while one still reads, the one that was asked for
+last opens, and an answer that arrives late replaces no dialog the user works
+in and opens beside none. One that is overtaken opens nothing, also when the
+later one fails, and keeps nothing of what it read for its dialog; a read of
+its own that failed is still logged. A review of unused credentials that no
+press shows cancels the cleanup it prepared. A dialog that opens at once, a
+confirmation, the menu of a profile or the DNS query, is not counted, and
+neither is what an open dialog reads later for itself. That is shown in the
+dialog it was read for while that one is open, which keeps its place, and
+nowhere once it was closed or another took its place: the answer of a DNS
+query, a check for updates in the About dialog, the failure of a migration of
+a legacy profile, and the credentials that the vault says a profile is
+missing. The app makes one check for updates at a time: a check asked for on
+the page while one is under way, from the About dialog, a button of a page or
+the automatic check at startup, joins it, and each dialog that asked shows
+what it found. A check of the app menu is made apart from those, and one asked
+for on the page while it is under way is refused as one already in progress,
+as it is the other way round. The update the app offers is what the check that
+ended last found. General, with its badge, and the About page show it, and are
+drawn again as the app hears what a check found and as a check in the About
+dialog or a button of a page cannot reach the releases and withdraws the offer,
+which nothing announces; Settings shows nothing of it. An opening of its
+download page takes it from the app, and withdraws the offer as it ends unless a
+check or another opening began since:
+one that ends late takes nothing from what a later check found. The app hears
+of a check of the app menu only as it ends, and that check may have found the
+update before the app took the opening up or after: an opening that ends once
+such a check has ended, and nothing began since, checks again, which the About
+dialog shows while it is open, and the app offers what that check finds.
+None of the seven opens over one of those that opened while it read,
+and one that was closed again by then takes nothing from it, also when Escape
+or its backdrop dismissed it, which close the forms as well. What is typed in
+a dialog that opens at once stays when the page is drawn again while it is
+open, as it is when a read ends that opens nothing: the DNS query and the copy
+and the information of a profile keep it, and the dialog of credentials puts
+each secret typed in it back into the field of the reference it was typed for,
+only while the dialog shows the profile it was typed for, keeping them out of
+the state of the page, until the vault has had them or the dialog is closed or
+another takes its place: they are kept for the dialog of credentials that is
+open, and for no other. Connection Info opens at
+once and is counted all the same, and while the Connections page shows it,
+also again after another page or the diagnostics of connections were shown, a
+read that ends looks for it as for the dialogs that open at once: none of these
+dialogs opens over it. A second press of the
+review of unused credentials while it reads joins that read. The app reads one
+review at a time and refuses another meanwhile, and that refusal, as the
+dialog asked for last, would take the place of the review. The network
+interfaces pressed while the app observes the network settings open on its
+next observation. The app makes one at a time. Every read asked for while one
+is under way, by the dialog or by the page, shares the next, which begins as
+that one ends, so each shows what was observed after it was asked for. An
+observation answers within five seconds; one that runs out of time goes on in
+the app, and the next waits for it to end, five seconds at most, before it
+begins. Settings shows what the last observation found, and that the network
+settings could not be read when it failed. A change of System Proxy that the
+host has made, also one whose later reads fail, asks for one once it has ended
+and does not wait for it: the switches of the modes are free meanwhile, the
+native switches of General on macOS among them, which take no other click
+until the change has ended. What it found draws Settings but no other page;
+a failure of it is logged, and the Logs page shows it while it is open.
+The network interfaces draw
+Settings as they open. Another page shows nothing of what they observed: there
+they draw only their dialog, and nothing when they were overtaken. A read of
+the network interfaces that fails draws Settings, which then says that the
+network settings could not be read, and Logs, which shows the line it adds,
+and one of the configuration preview that fails draws only Logs. Each leaves
+what is entered on another page and not yet saved, a profile in its editor for
+one, as it is. A reload asks for the form only once its read finds saved
+settings to show: until then it takes the place of no dialog that is under
+way, and it opens nothing when another was asked for after its press.
+
 ## Engine › Mainland China direct
 
 Off by default. It is a runtime setting, saved in `cfw-runtime-settings.json`

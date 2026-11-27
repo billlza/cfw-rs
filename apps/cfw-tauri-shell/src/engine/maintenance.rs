@@ -27,6 +27,56 @@ struct EngineMaintenanceInner {
     active_mode_changes: usize,
     maintenance_active: bool,
     intent_revision: u64,
+    /// The latest revision at which a registered intent was asked for, none
+    /// until one is. That intent supersedes the leases of that revision or an
+    /// earlier one, whose automatic retries end, and an automatic request
+    /// that expects such a revision, which is stale. An intent is asked for
+    /// as it is registered, and a change of the runtime preferences at its
+    /// press, before what it asks is read. Each moves the revision on as it is
+    /// asked for, so a revision observed after that is later than the intent.
+    superseded_through: Option<u64>,
+}
+
+impl EngineMaintenanceInner {
+    /// Whether one more change may be counted among the pending ones.
+    fn admits_another(&self) -> Result<(), EngineMaintenanceError> {
+        if self.maintenance_active {
+            return Err(EngineMaintenanceError::AlreadyActive);
+        }
+        if self.active_mode_changes >= MAX_PENDING_MODE_CHANGES {
+            return Err(EngineMaintenanceError::QueueFull);
+        }
+        Ok(())
+    }
+
+    /// Moves the revision on for what is asked for now, and answers the
+    /// revision it was asked for at: one observed after this is later.
+    fn ask(&mut self) -> Result<u64, EngineMaintenanceError> {
+        let asked_at = self.intent_revision;
+        self.intent_revision = asked_at
+            .checked_add(1)
+            .ok_or(EngineMaintenanceError::StateLock)?;
+        Ok(asked_at)
+    }
+
+    /// Registers a new intent that was asked for at revision `asked_at`: it
+    /// supersedes every intent registered by then. The registration moves the
+    /// revision on, and its lease takes the revision it moved to.
+    fn register_intent(&mut self, asked_at: u64) -> Result<(), EngineMaintenanceError> {
+        self.ask()?;
+        self.superseded_through = Some(
+            self.superseded_through
+                .map_or(asked_at, |through| through.max(asked_at)),
+        );
+        Ok(())
+    }
+
+    /// Whether an intent asked for at `revision` or after it was registered:
+    /// a lease of that revision, or an expectation of it, is superseded.
+    fn superseded(&self, revision: u64) -> bool {
+        self.superseded_through
+            .is_some_and(|through| through >= revision)
+    }
 }
 
 pub(crate) struct EngineModeChangeLease {
@@ -45,6 +95,16 @@ struct EngineModeChangeRegistration {
 
 pub(crate) struct EngineMaintenanceLease {
     inner: Arc<Mutex<EngineMaintenanceInner>>,
+}
+
+/// A change of the runtime preferences counted among the mode changes from
+/// its press ([`EngineMaintenanceGate::register_reapply`]), which takes its
+/// turn once what it asks has been read. Dropped before then, it gives up its
+/// place and was no intent.
+pub(super) struct PendingReapply {
+    pressed: u64,
+    serial: Arc<AsyncMutex<()>>,
+    registration: EngineModeChangeRegistration,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -95,20 +155,13 @@ impl EngineMaintenanceGate {
                 .inner
                 .lock()
                 .map_err(|_| EngineMaintenanceError::StateLock)?;
-            if inner.maintenance_active {
-                return Err(EngineMaintenanceError::AlreadyActive);
-            }
-            if inner.active_mode_changes >= MAX_PENDING_MODE_CHANGES {
-                return Err(EngineMaintenanceError::QueueFull);
-            }
-            if expected.is_some_and(|revision| revision != inner.intent_revision) {
+            inner.admits_another()?;
+            if expected.is_some_and(|revision| inner.superseded(revision)) {
                 return Err(EngineMaintenanceError::StaleIntent);
             }
             if intent != EngineModeChangeIntent::KeepRuntime {
-                inner.intent_revision = inner
-                    .intent_revision
-                    .checked_add(1)
-                    .ok_or(EngineMaintenanceError::StateLock)?;
+                let asked_at = inner.intent_revision;
+                inner.register_intent(asked_at)?;
             }
             inner.active_mode_changes += 1;
             (
@@ -124,7 +177,16 @@ impl EngineMaintenanceGate {
         // If this future is cancelled while waiting, `registration` drops and
         // removes the pending count instead of leaking a permanent busy state.
         let serial = self.mode_serial.clone().lock_owned().await;
-        if expected.is_some() && self.intent_revision()? != revision {
+        // An intent asked for after this automatic request supersedes it while
+        // it waits, as it would end its retries; a change of the runtime
+        // preferences pressed before it does not.
+        if expected.is_some()
+            && self
+                .inner
+                .lock()
+                .map_err(|_| EngineMaintenanceError::StateLock)?
+                .superseded(revision)
+        {
             return Err(EngineMaintenanceError::StaleIntent);
         }
         Ok(EngineModeChangeLease {
@@ -132,6 +194,30 @@ impl EngineMaintenanceGate {
             revision,
             _serial: serial,
             _registration: registration,
+        })
+    }
+
+    /// Counts a change of the runtime preferences among the mode changes from
+    /// its press, while what it asks is read before its turn: the bound of
+    /// the queue refuses it before that read, and maintenance waits for it.
+    /// The press moves the revision on, so a revision observed after it, by a
+    /// network rule while the change is read for one, is later than the change
+    /// and stays current. It is a new intent only once it takes its turn, so
+    /// one refused before then is none ([`PendingReapply`]).
+    pub(super) fn register_reapply(&self) -> Result<PendingReapply, EngineMaintenanceError> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| EngineMaintenanceError::StateLock)?;
+        inner.admits_another()?;
+        let pressed = inner.ask()?;
+        inner.active_mode_changes += 1;
+        Ok(PendingReapply {
+            pressed,
+            serial: self.mode_serial.clone(),
+            registration: EngineModeChangeRegistration {
+                inner: self.inner.clone(),
+            },
         })
     }
 
@@ -153,9 +239,37 @@ impl EngineMaintenanceGate {
     }
 }
 
+impl PendingReapply {
+    /// Takes the turn of the change as a reapplication of the current mode, a
+    /// new intent asked for at its press: it supersedes the intents registered,
+    /// and the revisions given, before the press, and not an intent asked for
+    /// while the change was read, whose automatic retries go on, nor a revision
+    /// given since the press.
+    pub(super) async fn begin(self) -> Result<EngineModeChangeLease, EngineMaintenanceError> {
+        let revision = {
+            let mut inner = self
+                .registration
+                .inner
+                .lock()
+                .map_err(|_| EngineMaintenanceError::StateLock)?;
+            inner.register_intent(self.pressed)?;
+            inner.intent_revision
+        };
+        let serial = self.serial.lock_owned().await;
+        Ok(EngineModeChangeLease {
+            _intent: EngineModeChangeIntent::ReapplyCurrent,
+            revision,
+            _serial: serial,
+            _registration: self.registration,
+        })
+    }
+}
+
 impl EngineModeChangeLease {
-    /// A queued user operation supersedes an automatic retry even though it
-    /// cannot take the serial permit until this accepted attempt has settled.
+    /// A user operation asked for after this one was registered supersedes
+    /// its automatic retry even though it cannot take the serial permit until
+    /// this accepted attempt has settled. One asked for before, and registered
+    /// only once what it asks was read, does not.
     pub(super) fn retry_guard(
         &self,
     ) -> impl Fn() -> Result<(), EngineMaintenanceError> + Send + 'static {
@@ -165,7 +279,7 @@ impl EngineModeChangeLease {
             let current = inner
                 .lock()
                 .map_err(|_| EngineMaintenanceError::StateLock)?;
-            if current.intent_revision != revision {
+            if current.superseded(revision) {
                 return Err(EngineMaintenanceError::StaleIntent);
             }
             Ok(())

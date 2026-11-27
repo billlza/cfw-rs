@@ -5,6 +5,7 @@ import { state } from "./state.js";
 import { formatBytes } from "./text-format.js";
 import { latestDelay } from "./proxy-delay.js";
 import { isManualProxyGroup } from "./proxies.js";
+import { sharesLan } from "./runtime-settings.js";
 
 export function applyControllerSnapshot(snapshot) {
   if (!snapshot) return;
@@ -14,7 +15,7 @@ export function applyControllerSnapshot(snapshot) {
   state.mode = ["Global", "Rule", "Direct"].includes(mode) ? mode : null;
   // Clash API describes the loopback inbound. LAN sharing has its own listener
   // and source policy, whose state comes from the runtime settings transaction.
-  state.toggles.allowLan = state.runtimeSettings?.settings.allow_lan ?? false;
+  state.toggles.allowLan = state.runtimeSettings ? sharesLan(state.runtimeSettings) : false;
   state.logLevel = config["log-level"] ?? config.log_level ?? null;
 
   const proxyNodes = new Map((snapshot.proxies?.proxies ?? []).map((node) => [node.name, node]));

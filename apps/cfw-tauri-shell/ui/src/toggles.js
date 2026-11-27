@@ -21,7 +21,7 @@ const PERSISTED_TOGGLES = new Set([
   "retainWindowBounds",
 ]);
 
-export function createToggles({ renderPage, runtimeSettingsUI, applyEngineStatus, loadEngineStatus, loadRuntimeProjection, applyPersistedSettings, persistedSettingsFromUi, loadSettingsSnapshot }) {
+export function createToggles({ renderPage, scheduleLogStreamPatch, runtimeSettingsUI, applyEngineStatus, loadEngineStatus, loadRuntimeProjection, applyPersistedSettings, persistedSettingsFromUi, loadSettingsSnapshot }) {
   async function applyUiToggle(key, checked) {
     try {
       await applyToggle(key, checked, "ui");
@@ -58,6 +58,9 @@ export function createToggles({ renderPage, runtimeSettingsUI, applyEngineStatus
       state.engineMutationError = null;
       renderPage();
     }
+    // Set once the host has changed the system proxy, and so the network
+    // settings: they are observed again once the change has ended.
+    let proxyChanged = false;
     try {
       if (key === "coreRunning") {
         const status = await invoke("set_core_enabled", { enabled: checked });
@@ -67,9 +70,9 @@ export function createToggles({ renderPage, runtimeSettingsUI, applyEngineStatus
         if (state.engine.active) await loadControllerSnapshotWithRetry(6, 500);
       } else if (key === "systemProxy") {
         const status = await invoke("set_system_proxy_enabled", { enabled: checked });
+        proxyChanged = true;
         if (engineRequestId === runtime.engineStatusRequestId) applyEngineStatus(status);
         else await loadEngineStatus();
-        await loadNetworkDiagnostics();
         await loadRuntimeProjection();
         if (state.engine.active) await loadControllerSnapshotWithRetry(6, 500);
       } else if (key === "tunMode") {
@@ -118,7 +121,22 @@ export function createToggles({ renderPage, runtimeSettingsUI, applyEngineStatus
         state.engineMutationBusy = false;
         renderPage();
       }
+      if (proxyChanged) void observeNetworkSettings();
     }
+  }
+
+  /// Observes the network settings again after a change of the system proxy,
+  /// and draws Settings, which shows them. A read asked for while an
+  /// observation is under way waits for the next one, so the change ends
+  /// without waiting for it: the switches of the modes are free meanwhile,
+  /// and so are those of General that are native, which take no other click
+  /// until the press of one has ended. A failure of the read is logged there,
+  /// after the change drew the page, so the Logs page is drawn for it while it
+  /// is open.
+  async function observeNetworkSettings() {
+    const observed = await loadNetworkDiagnostics();
+    if (state.activePage === "settings") renderPage();
+    else if (!observed && state.activePage === "logs") scheduleLogStreamPatch();
   }
 
   return { applyUiToggle, applyToggle };

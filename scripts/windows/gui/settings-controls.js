@@ -1,9 +1,9 @@
 // Settings that arrived after the first Windows build, driven through their
 // visible controls on the installed application: the display language, the
-// automatic subscription update interval, and the two leak protection switches
-// of the engine. Each change redraws the page, so the same steps show that a
-// scrolled Settings page stays where it was. IPC only observes, and every
-// preference returns to its first value.
+// automatic subscription update interval, and the engine's leak protection and
+// TCP concurrency switches. Each change redraws the page, so the same steps
+// show that a scrolled Settings page stays where it was. IPC only observes,
+// and every preference returns to its first value.
 (async (page, observeNative) => {
   const tunnel = 'Wintun adapter created and routed by the Windows authority service';
   const languageControl = 'select[data-language-setting]';
@@ -104,6 +104,10 @@
     return { seen, scroll: kept(name, placed, seen) };
   };
 
+  // Each engine switch with the state it rests in: TCP concurrency is on
+  // until the user turns it off.
+  const switches = [['dnsLeakProtection', 'dns_leak_protection', false],
+    ['webrtcLeakProtection', 'webrtc_leak_protection', false], ['tcpConcurrency', 'tcp_concurrency', true]];
   const first = await page.evaluate(async () => {
     const invoke = window.__TAURI_INTERNALS__.invoke;
     return { settings: await invoke('read_settings_snapshot'), updates: await invoke('subscription_updates'),
@@ -114,8 +118,8 @@
       english.windows[0].label !== 'Architecture' || english.windows[4].label !== 'Tunnel' ||
       english.windows[4].value !== tunnel || first.updates.interval !== 'off' ||
       !Array.isArray(first.updates.profiles) || first.updates.profiles.length !== 0 ||
-      first.runtime.effective.dns_leak_protection !== false || first.runtime.effective.webrtc_leak_protection !== false) {
-    throw new Error(`Settings did not begin in English with the newer options off: ${JSON.stringify({ english, first })}`);
+      switches.some(([, field, resting]) => first.runtime.effective[field] !== resting)) {
+    throw new Error(`Settings did not begin in English with the newer options at rest: ${JSON.stringify({ english, first })}`);
   }
   const scroll = [];
   const languages = [];
@@ -143,14 +147,15 @@
   const off = await chooseInterval('off');
   scroll.push(daily.scroll, off.scroll);
   const engine = [];
-  for (const [toggle, field] of [['dnsLeakProtection', 'dns_leak_protection'], ['webrtcLeakProtection', 'webrtc_leak_protection']]) {
-    const on = await flip(toggle, field, true);
-    const other = field === 'dns_leak_protection' ? 'webrtc_leak_protection' : 'dns_leak_protection';
-    if (on.seen.effective[other] !== false) throw new Error(`${toggle} also changed ${other}`);
-    await page.screenshot({ path: `settings-${toggle}-on.png` });
-    const back = await flip(toggle, field, false);
-    scroll.push(on.scroll, back.scroll);
-    engine.push({ toggle, on: on.seen.effective, off: back.seen.effective });
+  for (const [toggle, field, resting] of switches) {
+    const changed = await flip(toggle, field, !resting);
+    const moved = switches.find(([, other, rest]) => other !== field && changed.seen.effective[other] !== rest);
+    if (moved) throw new Error(`${toggle} also changed ${moved[1]}`);
+    await page.screenshot({ path: `settings-${toggle}-${resting ? 'off' : 'on'}.png` });
+    const back = await flip(toggle, field, resting);
+    scroll.push(changed.scroll, back.scroll);
+    const [on, off] = resting ? [back, changed] : [changed, back];
+    engine.push({ toggle, on: on.seen.effective, off: off.seen.effective });
   }
   const last = await page.evaluate(() => window.__TAURI_INTERNALS__.invoke('read_runtime_settings_snapshot'));
   if (JSON.stringify(last.effective) !== JSON.stringify(first.runtime.effective)) {
@@ -160,6 +165,6 @@
     snapshot: await page.locator('body').ariaSnapshot(),
     mutations: ['language:zh-Hans', 'language:zh-Hant', 'language:ja', `language:${first.settings.settings.language}`,
       'subscriptionUpdates:daily', 'subscriptionUpdates:off', 'dnsLeakProtection:on', 'dnsLeakProtection:off',
-      'webrtcLeakProtection:on', 'webrtcLeakProtection:off'],
+      'webrtcLeakProtection:on', 'webrtcLeakProtection:off', 'tcpConcurrency:off', 'tcpConcurrency:on'],
     settings_controls_exercised: true, release_accepted: false };
 })

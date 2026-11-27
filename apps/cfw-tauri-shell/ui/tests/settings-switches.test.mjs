@@ -17,7 +17,7 @@ function toggleDeps(overrides = {}) {
     runtimeSettingsUI: {
       toggleLAN: spy(async () => "lan"), toggleIPv6DNS: spy(async () => "ipv6"),
       toggleMainlandChinaDirect: spy(async () => "cn"), toggleDnsLeakProtection: spy(async () => "dns"),
-      toggleWebRtcLeakProtection: spy(async () => "webrtc"),
+      toggleWebRtcLeakProtection: spy(async () => "webrtc"), toggleTcpConcurrency: spy(async () => "tcp"),
     },
     applyEngineStatus: spy((status) => { state.engine = { ...state.engine, ...status }; }),
     loadEngineStatus: spy(async () => true),
@@ -37,6 +37,8 @@ test("runtime settings switches go to the runtime settings transaction", async (
   assert.equal(await applyToggle("mainlandChinaDirect", true), "cn");
   assert.equal(await applyToggle("dnsLeakProtection", true), "dns");
   assert.equal(await applyToggle("webrtcLeakProtection", true), "webrtc");
+  assert.equal(await applyToggle("tcpConcurrency", false), "tcp");
+  assert.deepEqual(d.runtimeSettingsUI.toggleTcpConcurrency.calls, [[false]]);
   await assert.rejects(() => applyToggle("teleport", true, "ui"), /Unknown setting switch/u);
 });
 

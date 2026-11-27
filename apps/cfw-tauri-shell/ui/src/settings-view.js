@@ -2,6 +2,7 @@ import { t, LANGUAGE_OPTIONS } from "./i18n.js";
 import { networkDiagnosticsView } from "./network-diagnostics.js";
 import { platformFontOptions } from "./font-preferences.js";
 import { UPDATE_INTERVAL_OPTIONS } from "./subscription-updates.js";
+import { networkSettingsKnown, networkSettingsReason } from "./reasons.js";
 // Settings and read-only network diagnostics rendering. Commands and
 // transactional settings dialogs own all mutations.
 export function createSettingsView({ state, defaultSettingsSnapshot, defaultSettings, engineIsOff, launchAtLoginPresentation, escapeHtml, renderToggle, THEME_OPTIONS, REASONS, engineStateLabel, serviceProxyLabel }) {
@@ -70,6 +71,9 @@ function renderSettings() {
   const engineOff = engineIsOff();
   const launchAtLogin = launchAtLoginPresentation();
   const settingsReason = state.settingsUnavailableReason;
+  const networkReason = networkSettingsReason(state);
+  // An engine switch that is held still shows a value that is known.
+  const networkSwitch = { reason: networkReason, valueKnown: networkSettingsKnown(state), disabled: state.engineMutationBusy };
   const listenAddress = projection.mixedPort
     ? `${projection.listenAddress ?? "127.0.0.1"}:${projection.mixedPort}`
     : t("unavailable");
@@ -105,14 +109,15 @@ function renderSettings() {
       ])}
 
       ${renderSettingsGroup(t("Engine"), [
-        renderSettingAction(t("Local proxy port"), state.runtimeSettings?.effective.mixed_port ?? listenAddress, t("Configure local port, log level, TUN MTU and LAN access."), "open-runtime-settings", t("Configure"), state.runtimeSettingsError),
+        renderSettingAction(t("Local proxy port"), state.runtimeSettings?.effective.mixed_port ?? listenAddress, t("Configure local port, log level, TUN MTU and LAN access."), "open-runtime-settings", t("Configure"), networkReason),
         renderSettingValue(t("Controller"), projection.controller ?? t("not running"), t("App-owned loopback controller of the running engine. Its secret is never shown.")),
         renderSettingValue(t("Engine state"), t("{state} · desired {desiredMode}", { state: engineStateLabel(engine), desiredMode: engine.desiredMode }), engine.availabilityReason ?? t("Live state of the Authority-mediated engine.")),
         renderSettingValue(t("Log level"), projection.logLevel ?? "info", REASONS.logLevel),
-        renderToggle("allowLan", t("Allow LAN"), REASONS.allowLan, { reason: state.runtimeSettingsError, disabled: state.engineMutationBusy }),
-        renderToggle("mainlandChinaDirect", t("Mainland China direct"), REASONS.mainlandChinaDirect, { reason: state.runtimeSettingsError, disabled: state.engineMutationBusy }),
-        renderToggle("dnsLeakProtection", t("DNS leak protection"), REASONS.dnsLeakProtection, { reason: state.runtimeSettingsError, disabled: state.engineMutationBusy }),
-        renderToggle("webrtcLeakProtection", t("WebRTC leak protection"), REASONS.webrtcLeakProtection, { reason: state.runtimeSettingsError, disabled: state.engineMutationBusy }),
+        renderToggle("allowLan", t("Allow LAN"), REASONS.allowLan, networkSwitch),
+        renderToggle("mainlandChinaDirect", t("Mainland China direct"), REASONS.mainlandChinaDirect, networkSwitch),
+        renderToggle("dnsLeakProtection", t("DNS leak protection"), REASONS.dnsLeakProtection, networkSwitch),
+        renderToggle("webrtcLeakProtection", t("WebRTC leak protection"), REASONS.webrtcLeakProtection, networkSwitch),
+        renderToggle("tcpConcurrency", t("TCP concurrency"), REASONS.tcpConcurrency, networkSwitch),
         renderToggle("mixin", t("Mixin"), "", { reason: REASONS.mixin }),
       ])}
 

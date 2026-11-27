@@ -669,10 +669,10 @@ index 0000000000000000000000000000000000000000..613441621141f7b23deb99d56633acf6
 +}
 diff --git a/experimental/libbox/profile_probe.go b/experimental/libbox/profile_probe.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..da081a36b10db17137e86fb5577a6afad42beb2d
+index 0000000000000000000000000000000000000000..cd6585e7e4d3ed2884875038f39b4e7ce1060394
 --- /dev/null
 +++ b/experimental/libbox/profile_probe.go
-@@ -0,0 +1,185 @@
+@@ -0,0 +1,198 @@
 +package libbox
 +
 +import (
@@ -777,8 +777,12 @@ index 0000000000000000000000000000000000000000..da081a36b10db17137e86fb5577a6afa
 +		if err := json.Unmarshal(data, &route); err != nil {
 +			return option.Options{}, errors.New("invalid profile probe resolver")
 +		}
++		// The resolver and the dialing option are how the running core reaches
++		// a node, so a probe measures with them, and the DNS rules a probe
++		// keeps may name rule sets, which it must then declare. None of the
++		// three routes a connection.
 +		for key := range route {
-+			if key != "default_domain_resolver" {
++			if key != "default_domain_resolver" && key != "tcp_concurrent" && key != "rule_set" {
 +				return option.Options{}, errors.New("profile probe cannot configure routes")
 +			}
 +		}
@@ -786,6 +790,15 @@ index 0000000000000000000000000000000000000000..da081a36b10db17137e86fb5577a6afa
 +	options, err := parseConfig(ctx, configuration)
 +	if err != nil {
 +		return option.Options{}, errors.New("profile probe configuration rejected")
++	}
++	// A probe reads no file and fetches nothing, so the sets it declares are
++	// inline ones.
++	if options.Route != nil {
++		for _, ruleSet := range options.Route.RuleSet {
++			if ruleSet.Type != C.RuleSetTypeInline {
++				return option.Options{}, errors.New("profile probe cannot load rule sets")
++			}
++		}
 +	}
 +	for _, endpoint := range options.Endpoints {
 +		wireguard, ok := endpoint.Options.(*option.WireGuardEndpointOptions)
@@ -860,10 +873,10 @@ index 0000000000000000000000000000000000000000..da081a36b10db17137e86fb5577a6afa
 +}
 diff --git a/experimental/libbox/profile_probe_test.go b/experimental/libbox/profile_probe_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..d2fe3654aa1e2501adb6b3c842e1220bf8bd258e
+index 0000000000000000000000000000000000000000..eefc741bbe1e99a74301420fd1462b1bbc128e61
 --- /dev/null
 +++ b/experimental/libbox/profile_probe_test.go
-@@ -0,0 +1,267 @@
+@@ -0,0 +1,349 @@
 +package libbox
 +
 +import (
@@ -948,6 +961,88 @@ index 0000000000000000000000000000000000000000..d2fe3654aa1e2501adb6b3c842e1220b
 +		}
 +		if _, err := profileProbeOptions(ctx, configuration); err == nil {
 +			t.Fatal("profile probe admitted an outbound that starts OS integration or a local process")
++		}
++	}
++}
++
++// A probe reaches a node as the running core does: it takes the core's
++// dialing option beside the resolver, and still no route.
++func TestProfileProbeTakesTheDialingOptionOfTheCore(t *testing.T) {
++	ctx := profileProbeContext()
++	document := func(route string) string {
++		return `{"outbounds":[{"type":"direct","tag":"node"}],"dns":{"servers":[{"type":"local","tag":"local"}]},"route":` + route + `}`
++	}
++	for _, test := range []struct {
++		route string
++		races bool
++	}{
++		{route: `{"default_domain_resolver":{"server":"local"},"tcp_concurrent":true}`, races: true},
++		{route: `{"default_domain_resolver":{"server":"local"}}`},
++		{route: `{"tcp_concurrent":true}`, races: true},
++		{route: `{"tcp_concurrent":false}`},
++		{route: `{}`},
++	} {
++		options, err := profileProbeOptions(ctx, document(test.route))
++		if err != nil {
++			t.Fatalf("route %s: %v", test.route, err)
++		}
++		if options.Route == nil || options.Route.TCPConcurrent != test.races {
++			t.Fatalf("route %s: the probe's options race addresses: %v", test.route, options.Route != nil && options.Route.TCPConcurrent)
++		}
++	}
++	for _, route := range []string{
++		`{"default_domain_resolver":{"server":"local"},"tcp_concurrent":true,"final":"node"}`,
++		`{"tcp_concurrent":true,"rules":[]}`,
++		`{"tcp_concurrent":"yes"}`,
++	} {
++		if _, err := profileProbeOptions(ctx, document(route)); err == nil {
++			t.Fatalf("route %s: the probe admitted more than the dialing option", route)
++		}
++	}
++}
++
++// The DNS rules a probe keeps may name inline rule sets, and sing-box refuses
++// a rule that names an undeclared set, so a probe declares them. A probe
++// still reads no file and fetches nothing.
++func TestProfileProbeDeclaresTheInlineRuleSetsItsDNSRulesName(t *testing.T) {
++	var connects atomic.Int32
++	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.Method == http.MethodConnect {
++			connects.Add(1)
++		}
++		w.WriteHeader(http.StatusBadGateway)
++	}))
++	defer proxy.Close()
++	host, portText, err := net.SplitHostPort(proxy.Listener.Addr().String())
++	if err != nil {
++		t.Fatal(err)
++	}
++	document := func(ruleSet string) string {
++		return `{"outbounds":[{"type":"http","tag":"node","server":"` + host + `","server_port":` + portText + `}],` +
++			`"dns":{"servers":[{"type":"udp","tag":"resolver","server":"127.0.0.1","server_port":53}],` +
++			`"rules":[{"rule_set":["sites"],"action":"route","server":"resolver"}]},` +
++			`"route":{"rule_set":[` + ruleSet + `]}}`
++	}
++	const inline = `{"type":"inline","tag":"sites","rules":[{"domain_suffix":["example.org"]}]}`
++	response, err := TestProfileProxies(document(inline), `["node"]`, 500)
++	if err != nil {
++		t.Fatalf("a probe that declares an inline rule set: %v", err)
++	}
++	results := decodeProbeResults(t, response)
++	if connects.Load() != 1 || len(results) != 1 || results[0].ErrorKind == nil || *results[0].ErrorKind != "probe_failed" {
++		t.Fatalf("the probe did not run through its node: %d connections, %+v", connects.Load(), results)
++	}
++	ctx := profileProbeContext()
++	for _, ruleSet := range []string{
++		`{"type":"remote","tag":"sites","format":"binary","url":"https://example.org/sites.srs"}`,
++		`{"type":"local","tag":"sites","format":"source","path":"sites.json"}`,
++		inline + `,{"type":"remote","tag":"more","format":"binary","url":"https://example.org/more.srs"}`,
++	} {
++		if _, err := parseConfig(ctx, document(ruleSet)); err != nil {
++			t.Fatalf("the rule-set fixture must parse before the admission check: %v", err)
++		}
++		if _, err := profileProbeOptions(ctx, document(ruleSet)); err == nil {
++			t.Fatalf("the probe admitted a rule set it would have to read or fetch: %s", ruleSet)
 +		}
 +	}
 +}

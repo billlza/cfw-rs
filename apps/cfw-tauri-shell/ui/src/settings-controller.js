@@ -8,7 +8,7 @@ import { appendLog } from "./app-log.js";
 import { FONT_OPTIONS, platformFontStyles } from "./font-preferences.js";
 import { normalizeSettingsSnapshot, normalizeLaunchAtLoginState } from "./settings-snapshot.js";
 
-export function createSettingsController({ windowGlass, renderPage, renderGlassOverlays, loadProfilesSnapshot, closeGlassDialog }) {
+export function createSettingsController({ windowGlass, renderPage, renderGlassOverlays, loadProfilesSnapshot, runtimeSettingsUI, closeGlassDialog }) {
   /// Applies a `SettingsSnapshot`. The preference store holds exactly seven
   /// renderer-owned fields; everything the 0.3.5 file used to carry now lives in
   /// the projected engine configuration and is read, never written, from there.
@@ -127,6 +127,27 @@ export function createSettingsController({ windowGlass, renderPage, renderGlassO
     if (["general", "settings"].includes(state.activePage)) renderPage();
   }
 
+  async function reloadPreferences() {
+    await loadSettingsSnapshot();
+    appendLog("info", "settings", t("Preferences reloaded from disk"));
+    renderPage();
+  }
+
+  // A failed read of the runtime network settings holds their controls, and
+  // this is how the user asks for them once more without reloading the whole
+  // dashboard. It is the read of an action: the page takes its answer as it
+  // takes any other, and the log gets the failure of this very read. The
+  // reason the page holds the controls for is not that: it may be an older
+  // failure, which a read that is still under way has yet to end.
+  async function reloadNetworkSettings() {
+    try {
+      await runtimeSettingsUI.loadForAction();
+    } catch (error) {
+      appendLog("error", "settings", t("{action} failed: {error}", { action: t("Network settings"), error: errorText(error) }));
+    }
+    renderPage();
+  }
+
   const actions = {
     "save-settings": async () => {
       if (state.settingsUnavailableReason) throw new Error(state.settingsUnavailableReason);
@@ -135,11 +156,13 @@ export function createSettingsController({ windowGlass, renderPage, renderGlassO
       appendLog("info", "settings", t("Preferences saved"));
       renderPage();
     },
-    "reload-settings": async () => {
-      await loadSettingsSnapshot();
-      appendLog("info", "settings", t("Preferences reloaded from disk"));
-      renderPage();
-    },
+    // Settings shows two stores, the preferences and the runtime network
+    // settings, and this reads both again, each for itself: neither read
+    // waits for the other, and the page is drawn again as each of them ends.
+    // The projected endpoint is not read here. Its answers are taken in the
+    // order they arrive, so one that arrives late would put an older port
+    // back over the port a change has shown since.
+    "reload-settings": () => Promise.all([reloadNetworkSettings(), reloadPreferences()]),
     "reset-settings": async () => {
       if (state.settingsUnavailableReason) throw new Error(state.settingsUnavailableReason);
       // WKWebView often swallows window.confirm — use in-app glass dialog.

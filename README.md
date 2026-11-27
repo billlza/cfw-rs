@@ -57,7 +57,10 @@ and, for a profile without its own DNS policy, encrypted DNS in mainland China
 for mainland names; it is off by default. Settings › Engine › DNS leak
 protection refuses, in TUN Mode, every connection to port 853 (DNS over TLS and
 DNS over QUIC), so no resolver an app carries itself passes names around the
-core's DNS; it is off by default. Persistent JSON contains canonical credential references,
+core's DNS; it is off by default. Settings › Engine › TCP concurrency makes the
+core dial the addresses of a name at once, instead of one after another, when
+it connects to a proxy server or a direct destination itself; it is on by
+default. Persistent JSON contains canonical credential references,
 never passwords, UUID values, private keys, or other secrets. TUIC keeps its
 UUID and password in two independently typed references. Projection emits only
 empty credential placeholders and closed injection slots. DNS outside the

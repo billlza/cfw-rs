@@ -470,7 +470,7 @@ private final class IntegrationHost: NSObject, NSApplicationDelegate, NSWindowDe
       snapshot["effective"] = [
         "mixed_port": settings["preferred_mixed_port"] as? Int ?? 7890,
         "log_level": settings["log_level"] ?? "info", "tunnel_mtu": settings["tunnel_mtu"] ?? 1500,
-        "ipv6_dns_enabled": settings["ipv6_dns_enabled"] ?? true,
+        "ipv6_dns_enabled": settings["ipv6_dns_enabled"] ?? true, "tcp_concurrency": settings["tcp_concurrency"] ?? true,
         "lan_proxy": settings["lan_proxy"] ?? NSNull(),
         "mainland_china_direct": settings["mainland_china_direct"] ?? false,
         "dns_leak_protection": settings["dns_leak_protection"] ?? false,

@@ -36,6 +36,9 @@ pub(crate) struct RuntimeSettingsEffective {
     /// The user's choice, always present. It applies in Tunnel mode only and
     /// outside Direct mode, which is the projection's to decide.
     webrtc_leak_protection: bool,
+    /// The user's choice, always present, although the stored preferences
+    /// omit it while it is on.
+    tcp_concurrency: bool,
 }
 
 impl RuntimeSettingsEffective {
@@ -50,6 +53,7 @@ impl RuntimeSettingsEffective {
             mainland_china_direct: value.mainland_china_direct,
             dns_leak_protection: value.dns_leak_protection,
             webrtc_leak_protection: value.webrtc_leak_protection,
+            tcp_concurrency: value.tcp_concurrency,
         }
     }
 }
@@ -206,5 +210,29 @@ mod tests {
         // Off is absent from the stored preferences, as for the other switches.
         let stored = serde_json::to_value(RuntimePreferences::default()).expect("preferences");
         assert!(stored.get("webrtc_leak_protection").is_none());
+    }
+
+    #[test]
+    fn the_effective_view_always_reports_tcp_concurrency() {
+        let profile = ValidatedSingBoxProfile::direct();
+        let view = |settings: EngineSettings| {
+            serde_json::to_value(RuntimeSettingsEffective::for_profile(settings, &profile))
+                .expect("effective view")
+        };
+        assert_eq!(
+            view(EngineSettings::default())["tcp_concurrency"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            view(EngineSettings {
+                tcp_concurrency: false,
+                ..EngineSettings::default()
+            })["tcp_concurrency"],
+            serde_json::json!(false)
+        );
+        // On is absent from the stored preferences, so the renderer must read
+        // an absent key there as on.
+        let stored = serde_json::to_value(RuntimePreferences::default()).expect("preferences");
+        assert!(stored.get("tcp_concurrency").is_none());
     }
 }

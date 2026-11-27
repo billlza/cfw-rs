@@ -7,6 +7,7 @@ import {
   invocationDetails, invoked, page, querySelectorAllElements, querySelectorElements, rejected,
   reloadButton, renderPage, responses, setEngine, state, streamEvent, waitForInvocation,
 } from "./support/render-harness.mjs";
+import { readRuntimeSettings, refuseRuntimeSettingsRead } from "./support/runtime-settings-reads.mjs";
 
 test("global Reload refreshes the active projection and controller rules", async () => {
   const originalProjection = responses.read_runtime_config_text;
@@ -361,5 +362,97 @@ test("Stop shows a node chosen on the running core as the profile's saved choice
     responses.engine_snapshot = originalEngine;
     await setEngine(originalEngine);
     await reloadButton.click();
+  }
+});
+
+test("Engine Off shows Allow LAN as it is saved", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalSettings = responses.read_runtime_settings_snapshot;
+  const lan = { listen: "0.0.0.0", port: 7898, allowed_source_cidrs: ["192.168.1.0/24"] };
+  const allowLan = (html) => html.match(/<input type="checkbox" data-toggle="allowLan"([^>]*)\/>/u)?.[1];
+  try {
+    responses.read_runtime_settings_snapshot = {
+      ...originalSettings,
+      settings: { ...originalSettings.settings, allow_lan: true, lan_proxy: lan },
+      effective: { ...originalSettings.effective, lan_proxy: lan },
+    };
+    // A reload with the core off reads the settings and then finds no controller.
+    await setEngine(OFF_ENGINE);
+    await reloadButton.click();
+    assert.equal(state.engine.active, false);
+    assert.equal(state.runtimeSettings.settings.allow_lan, true);
+    for (const name of ["general", "settings"]) {
+      const attributes = allowLan(await renderPage(name));
+      assert.match(attributes, /checked/u, `${name}: Allow LAN is on while the core is off`);
+      assert.doesNotMatch(attributes, /disabled/u, name);
+    }
+    // The row of the General page agrees with its switch.
+    assert.match(await renderPage("general"), /Bind: 0\.0\.0\.0:7898/u);
+  } finally {
+    responses.read_runtime_settings_snapshot = originalSettings;
+    await setEngine(originalEngine);
+    await reloadButton.click();
+  }
+});
+
+// A switch of the General page that does not know its setting is drawn off.
+// What the row says beside it follows: the bind address and how far the proxy
+// is shared, and whether IPv6 DNS is on.
+test("General shows what stands beside its network switches only while the settings are known", async () => {
+  await setEngine(RUNNING_ENGINE);
+  const original = responses.read_runtime_settings_snapshot;
+  const handoff = state.migrationHandoff;
+  const retirement = state.retirement;
+  const rowOf = (html, label) => {
+    const found = html.split('<div class="cfw-row">')
+      .filter((row) => new RegExp(`^\\s*<div class="cfw-row-left">(?:\\s*<span>)?${label}<`, "u").test(row));
+    assert.equal(found.length, 1, `one ${label} row`);
+    return found[0];
+  };
+  const shown = async () => {
+    const html = await renderPage("general");
+    const lan = rowOf(html, "Allow LAN");
+    return {
+      bind: lan.match(/<span class="cfw-link-value" title="[^"]*">([^<]*)<\/span>/u)?.[1],
+      shared: lan.match(/<small class="cfw-row-note" title="[^"]*">([^<]*)<\/small>/u)?.[1] ?? null,
+      ipv6: rowOf(html, "IPv6 DNS").match(/<span class="cfw-link-value">([^<]*)<\/span>/u)?.[1],
+    };
+  };
+  const sharing = { bind: "Bind: 0.0.0.0:7898", shared: "Trusted sources only", ipv6: "On" };
+  const local = { bind: "Bind: Off", shared: "Local devices only", ipv6: "Off" };
+  const unknown = { bind: "Bind: unavailable", shared: null, ipv6: "unavailable" };
+  const refused = "runtime settings unavailable";
+  try {
+    await readRuntimeSettings(original, { allowLan: true, ipv6Dns: true });
+    assert.deepEqual(await shown(), sharing);
+    // A failed reload keeps the settings it had, which may be stale by then.
+    await refuseRuntimeSettingsRead(refused);
+    assert.deepEqual(await shown(), unknown);
+    await readRuntimeSettings(original, { allowLan: false, ipv6Dns: false });
+    assert.deepEqual(await shown(), local);
+    await refuseRuntimeSettingsRead(refused);
+    assert.deepEqual(await shown(), unknown);
+
+    // The window of a migration only keeps settings that were read from
+    // being changed: the rows still show them, and not once a read fails.
+    await readRuntimeSettings(original, { allowLan: true, ipv6Dns: false });
+    state.migrationHandoff = true;
+    state.retirement = { state: "awaiting_confirmation" };
+    assert.deepEqual(await shown(), { ...sharing, ipv6: "Off" });
+    await refuseRuntimeSettingsRead(refused);
+    assert.deepEqual(await shown(), unknown);
+    state.migrationHandoff = handoff;
+    state.retirement = retirement;
+
+    // As at startup, before the first read: no settings at all.
+    state.runtimeSettings = null;
+    state.runtimeSettingsError = null;
+    assert.deepEqual(await shown(), unknown);
+  } finally {
+    responses.read_runtime_settings_snapshot = original;
+    state.migrationHandoff = handoff;
+    state.retirement = retirement;
+    state.runtimeSettingsError = null;
+    await emit("cfw://settings-changed", responses.read_settings_snapshot);
   }
 });

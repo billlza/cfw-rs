@@ -7,6 +7,28 @@
 - Migration/import utilities
 - Future notarization and helper health diagnostics
 
+## Engine › when its controls are held
+
+The switches of the Engine group and the Configure button of the local proxy
+port change the runtime network settings. They are disabled, each with the
+reason, until those settings have been read, after a read of them has failed,
+and in the window of a legacy maintenance session, which owns the network. A
+failed read is the page's own or the one that a click on a switch, on
+Configure or on Reload From Disk makes. When answers arrive out of order, the
+page shows settings only from the answer to the last thing it asked: it asks
+again because something may have changed, and a write that ended since has
+settings of its own. A failed read counts unless the answer to something the
+page asked later is already in, whether or not the page shows that answer,
+and it holds the controls until the page shows settings again. Reload From
+Disk reads the network settings again as well as the preferences, so controls
+that a failed read holds can be tried again without reloading the dashboard.
+A switch that is held in the window of a session still shows a setting that
+was read. Before the first read and after a failed one a switch is drawn off,
+because its value is not known, and the reason beside it says that, in the
+window of a maintenance session as well. The General page holds its controls
+of the same settings in the same way. The window that starts a maintenance
+session is not held: it closes once the session's window is ready.
+
 ## Engine › Mainland China direct
 
 Off by default. It is a runtime setting, saved in `cfw-runtime-settings.json`
@@ -194,6 +216,62 @@ What it does not cover:
 - release evidence projections, which never carry it;
 - an earlier build refuses a settings file saved with the switch on and does
   not start the core; turn the switch off before installing one.
+
+## Engine › TCP concurrency
+
+On by default. It is a runtime setting, saved and applied like WebRTC leak
+protection: through the network settings transaction, with the same rollback
+when a candidate core fails to start. It is the one switch that rests on:
+`cfw-runtime-settings.json` names it only while it is off.
+
+A name often has several addresses. Without the switch the core dials them
+one after another, and moves to the next address only when the one before it
+has failed; an address that never answers costs the whole connection timeout
+first. With the switch the core dials the addresses at once and keeps the
+first connection that opens. It cancels the other attempts and closes a
+connection that one of them still completes.
+
+It applies to the TCP connections the core opens itself, in every mode:
+
+- to a proxy server named by a domain;
+- to a destination that goes direct: in Direct mode, by a rule, or through a
+  group set to DIRECT. A System Proxy or Local Proxy connection names its
+  destination, which the core resolves. A Tunnel connection carries the one
+  address its app chose, unless the profile uses fake-IP, so there is nothing
+  to race;
+- to a DNS server of the profile that is named by a domain and reached
+  directly.
+
+A latency test, and the health check of an automatic group or of a provider,
+connect to a proxy server the same way, so they measure what a connection
+gets. That holds while the core is off as well: the test then runs in a
+separate engine, which takes the switch with the profile.
+
+What it leaves as it was:
+
+- the order of the address families. The family of the first address
+  starts, and the other follows when the first has failed or after 300 ms.
+  The switch races the addresses within a family, at most eight at a time;
+  a further address starts when one of the eight has failed. An address
+  that an answer or a hosts file names more than once is dialled once;
+- a connection carried through a proxy, which the proxy server opens, and
+  the connection to a node that is reached through another node;
+- UDP;
+- a DNS server reached through the selected route or the route rules, and
+  the app's own DNS servers, which are dialled by address;
+- a name with one address.
+
+What it costs: a server with several addresses sees an attempt on each of
+them where it saw one, and every attempt but one is dropped at once.
+
+Notes:
+
+- a Clash profile's own `tcp-concurrent` key is not read, like the other
+  top-level keys of the document that tune a client. The switch decides;
+- release evidence projections carry the switch like any other projection,
+  so release evidence is taken with the dialing the release ships;
+- an earlier build refuses a settings file saved with the switch off and
+  does not start the core; turn the switch on again before installing one.
 
 ## Background controls › Automatic subscription updates
 

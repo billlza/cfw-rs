@@ -44,6 +44,55 @@
   answered, as one does whenever the core changes state: the dialog did not
   open, and the switch and the log level went back to what they were, with
   `null` as the only message in the log.
+- Hold the switches of Settings › Engine until the network settings have
+  been read. For a moment after the window opened, Allow LAN, Mainland China
+  direct, DNS leak protection and WebRTC leak protection were offered and
+  drawn off whatever the setting was. They and the Configure button of the
+  local proxy port are now disabled with the reason until the settings are
+  read and in the window of a legacy maintenance session, as the controls of
+  the General page are. A switch held in that window keeps showing a setting
+  that was read, where the General page drew IPv6 DNS off; when the settings
+  could not be read it is off and says that instead, and the General page
+  shows the bind address and the IPv6 DNS state beside it as unavailable, no
+  longer as they last were. The same now follows a switch whose own read of
+  the settings fails when it is clicked, which used to leave the page showing
+  the values it had. The TUN MTU button of the General page shows the reason
+  too. Reload From Disk now reads the network settings again as well as the
+  preferences, so controls that a failed read holds can be tried again
+  without reloading the dashboard.
+- Show Allow LAN as it is saved while the core is off. The switch on the
+  General and Settings pages went back to off whenever the page found the
+  core stopped or could not read its controller, although LAN sharing stayed
+  saved and the General page named its address beside the switch. A click
+  on it then opened the dialog that turns LAN sharing on, not off.
+- Keep the macOS switches of the General page when a reason is long. A
+  switch that is held hands its reason to the macOS switch as help text,
+  and the app refused the switches when one of those texts was longer than
+  1,024 characters, as the message about a settings file that cannot be
+  read can be. General then reported `General failed: invalid native
+  General switches frame` and drew all six switches itself for as long as
+  the window stayed open, also after the settings had been read again. The
+  macOS switch now gets the beginning of such a text, and the tooltips of
+  the notes on the page still show all of it.
+
+### Network
+
+- Add Settings › Engine › TCP concurrency, on by default. When a name has
+  several addresses, the core connects to them at once and keeps the first
+  connection that opens. It used to try one address after another and move
+  on only when an address had failed, which for an address that never
+  answers took the whole connection timeout. It applies to the TCP
+  connections the core opens itself, in every mode, such as those to a proxy
+  server named by a domain and to a destination that goes direct. IPv4 and
+  IPv6 still start one after the other, at most eight addresses of a family
+  are dialled at a time, the attempts that lose are cancelled and a
+  connection one of them still completes is closed. A connection carried
+  through a proxy and UDP are unchanged, and a Clash profile's own
+  `tcp-concurrent` key is not read. A latency test connects to a server as a
+  connection does, whether the core runs or not. Release evidence
+  projections carry the switch like any other projection. Earlier builds
+  refuse a settings file saved with the switch off, so turn it on again
+  before installing one.
 
 ### Profiles
 
@@ -73,6 +122,13 @@
   value.
 - Read a block scalar without content lines (`key: |`) as the empty string
   instead of a line break.
+- Let a latency test of a stopped core run on a profile whose DNS policy
+  names a rule provider, as `rule-set:` does in a Clash `nameserver-policy`.
+  Since 0.5.1 the test declares the provider's rules as an inline rule set,
+  but the test's engine admitted no rule-set declaration, so every node of
+  such a profile still failed its test, on macOS and on Windows. The engine
+  now admits the inline sets a test declares and still refuses a set it would
+  have to read from a file or fetch.
 
 ### Security
 

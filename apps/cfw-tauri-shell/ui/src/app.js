@@ -158,7 +158,7 @@ const {
   cancelDelayTest, loadProvidersSnapshot, providerSelectionChanged, loadEngineStatus, loadRuntimeProjection,
 });
 const settings = createSettingsController({
-  windowGlass, renderPage, renderGlassOverlays, loadProfilesSnapshot, closeGlassDialog,
+  windowGlass, renderPage, renderGlassOverlays, loadProfilesSnapshot, runtimeSettingsUI, closeGlassDialog,
 });
 const {
   applyPersistedSettings, resetPersistedSettingsToSafeState, persistedSettingsFromUi, loadSettingsSnapshot,

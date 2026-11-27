@@ -331,7 +331,15 @@ fixed order, each at the path and digest its `SING_BOX_*_PATCH_PATH` and
    validates MTU/routing/GSO constraints, transfers descriptor ownership, and
    presents headerless IP datagrams to sing-tun.
 3. The DNS failover patch (`SING_BOX_DNS_FAILOVER_PATCH_PATH`) implements the bounded primary/fallback
-   resolver contract required by the closed product projection.
+   resolver contract required by the closed product projection. It also adds
+   `route.tcp_concurrent`, off unless a configuration sets it: a dialer that
+   opens its TCP connections itself, without a detour and without TCP Fast
+   Open, then dials the addresses of a name at once, at most eight at a time,
+   keeps the first connection that opens, cancels the other attempts and
+   closes a connection one of them still completes. The addresses are split
+   by family first, so the fallback delay between IPv4 and IPv6 holds; UDP
+   and a dial through another outbound are unchanged. The option lives in
+   this patch because it changes dialer files this patch already owns.
 4. The endpoint-conflict patch (`SING_BOX_ENDPOINT_CONFLICT_PATCH_PATH`) reports only exact mixed-listener
    and controller `EADDRINUSE` failures as structured conflicts while preserving
    ordinary startup and cleanup failures. On macOS it marks loopback TCP
@@ -345,7 +353,11 @@ fixed order, each at the path and digest its `SING_BOX_*_PATCH_PATH` and
    and the probe instance is closed once before it replies, its close failure
    reported even after a failed start: the probe starts it with the
    endpoint-conflict patch's `StartWithExternalCleanup`, which leaves a failed
-   start's close to the caller. It adds `CheckConfigClosingInstance`, which
+   start's close to the caller. A probe's `route` may name the default
+   domain resolver and `tcp_concurrent`, which decide how the core reaches a
+   node, and the inline rule sets its DNS rules name, and nothing else: no
+   rule set a probe would have to read from a file or fetch. It adds
+   `CheckConfigClosingInstance`, which
    checks a configuration as `CheckConfig` does but reports a failed close of
    the instance it built apart from a rejection, which `CheckConfig` drops; the
    platform stub's interface monitor, which a check never starts, closes

@@ -1,5 +1,6 @@
 import { t } from "./i18n.js";
 import { platformPresentation } from "./platform-presentation.js";
+import { networkSettingsKnown, networkSettingsReason } from "./reasons.js";
 // General page rendering has no native side effects. Runtime controls use the
 // same transaction commands as the settings page.
 export function createGeneralView({ state, escapeHtml, engineStateLabel, engineToggleCapability, launchAtLoginPresentation, modeHasTunnel, modeHasSystemProxy, renderMigrationBanner, renderRowReason, renderStartupRecoveryNotice, renderObservationRecheckNotice, renderCatLogo, generalIconButton, renderRowNote, renderInlineSwitch, tunnelValueLabel, systemProxyValueLabel, REASONS, RUNTIME_LOG_LEVELS }) {
@@ -14,12 +15,16 @@ export function createGeneralView({ state, escapeHtml, engineStateLabel, engineT
   const engine = state.engine;
   const projection = state.projection;
   const settingsView = state.runtimeSettings;
-  const settingsReason = state.migrationHandoff ? t("Finish migration before changing network settings") : state.runtimeSettingsError ?? (!settingsView ? t("Network settings are loading") : null);
+  const settingsReason = networkSettingsReason(state);
+  const settingsKnown = networkSettingsKnown(state);
   const statusDot = engine.active ? "cfw-status-dot on" : "cfw-status-dot";
   const localPort = projection.mixedPort ?? settingsView?.effective.mixed_port;
   const listenAddress = localPort ? `127.0.0.1:${localPort}` : null;
-  const lan = settingsView?.settings.allow_lan ? settingsView.settings.lan_proxy : null;
-  const bind = lan ? `${lan.listen}:${lan.port}` : t("Off");
+  // What a row says beside a switch of the runtime settings follows the
+  // switch, which is drawn off while its setting is not known.
+  const knownSettings = settingsKnown ? settingsView : null;
+  const lan = knownSettings?.settings.allow_lan ? knownSettings.settings.lan_proxy : null;
+  const bind = !knownSettings ? t("unavailable") : lan ? `${lan.listen}:${lan.port}` : t("Off");
   const logLevel = settingsView?.effective.log_level ?? projection.logLevel ?? state.logLevel ?? "info";
   // The running engine names itself in its version string ("sing-box 1.14.4").
   const engineLabel = state.controllerVersion?.version ?? `sing-box · ${engineStateLabel(engine)}`;
@@ -38,7 +43,7 @@ export function createGeneralView({ state, escapeHtml, engineStateLabel, engineT
   const countriesKnown = state.savedProfilePolicyError == null
     && (state.savedProfilePolicy != null || !state.profiles.some((profile) => profile.active));
   const countries = countriesKnown ? state.savedProfilePolicy?.geoipCountries.join(", ") ?? "" : "";
-  const mainlandChinaDirect = state.runtimeSettingsError == null ? settingsView?.effective.mainland_china_direct : undefined;
+  const mainlandChinaDirect = knownSettings?.effective.mainland_china_direct;
   const countryRules = mainlandChinaDirect === true
     ? (countries ? t("Mainland China direct · {countries}", { countries }) : t("Mainland China direct"))
     : countries || (mainlandChinaDirect === false && countriesKnown ? t("No country rules configured") : t("unavailable"));
@@ -109,8 +114,8 @@ export function createGeneralView({ state, escapeHtml, engineStateLabel, engineT
           </div>
           <div class="cfw-row-right">
             <span class="cfw-link-value" title="${escapeHtml(REASONS.bindAddress)}">${escapeHtml(t("Bind: {address}", { address: bind }))}</span>
-            ${renderRowNote(lan ? t("Trusted sources only") : t("Local devices only"), settingsReason ?? REASONS.allowLan)}
-            ${renderInlineSwitch("allowLan", t("Allow LAN"), { reason: settingsReason, disabled: state.engineMutationBusy })}
+            ${knownSettings ? renderRowNote(lan ? t("Trusted sources only") : t("Local devices only"), settingsReason ?? REASONS.allowLan) : ""}
+            ${renderInlineSwitch("allowLan", t("Allow LAN"), { reason: settingsReason, valueKnown: settingsKnown, disabled: state.engineMutationBusy })}
           </div>
         </div>
 
@@ -127,8 +132,8 @@ export function createGeneralView({ state, escapeHtml, engineStateLabel, engineT
         <div class="cfw-row">
           <div class="cfw-row-left">IPv6 DNS</div>
           <div class="cfw-row-right">
-            <span class="cfw-link-value">${settingsView?.effective.ipv6_dns_enabled === true ? t("On") : settingsView?.effective.ipv6_dns_enabled === false ? t("Off") : t("unavailable")}</span>
-            ${renderInlineSwitch("ipv6DNS", "IPv6 DNS", { reason: settingsReason, disabled: state.engineMutationBusy, title: t("Enable IPv6 address resolution. Changes are applied and saved; existing connections may reconnect.") })}
+            <span class="cfw-link-value">${knownSettings?.effective.ipv6_dns_enabled === true ? t("On") : knownSettings?.effective.ipv6_dns_enabled === false ? t("Off") : t("unavailable")}</span>
+            ${renderInlineSwitch("ipv6DNS", "IPv6 DNS", { reason: settingsReason, valueKnown: settingsKnown, disabled: state.engineMutationBusy, title: t("Enable IPv6 address resolution. Changes are applied and saved; existing connections may reconnect.") })}
           </div>
         </div>
 
@@ -153,7 +158,7 @@ export function createGeneralView({ state, escapeHtml, engineStateLabel, engineT
 
         <div class="cfw-row">
           <div class="cfw-row-left">TUN MTU</div>
-          <div class="cfw-row-right"><button type="button" class="cfw-text-button" data-action="open-runtime-settings"${settingsReason || state.engineMutationBusy ? " disabled" : ""}>${escapeHtml(String(settingsView?.effective.tunnel_mtu ?? t("unavailable")))}</button></div>
+          <div class="cfw-row-right"><button type="button" class="cfw-text-button" data-action="open-runtime-settings"${settingsReason || state.engineMutationBusy ? " disabled" : ""}${settingsReason ? ` title="${escapeHtml(settingsReason)}"` : ""}>${escapeHtml(String(settingsView?.effective.tunnel_mtu ?? t("unavailable")))}</button></div>
         </div>
 
         <div class="cfw-row">

@@ -3,13 +3,15 @@ import { state } from "./state.js";
 import { escapeHtml } from "./text-format.js";
 
 /// A switch row. `options.reason` marks the switch unavailable and states why,
-/// both in the row and in the control's own tooltip.
+/// both in the row and in the control's own tooltip. An unavailable switch is
+/// drawn off, unless `options.valueKnown` says that its value is known and only
+/// cannot be changed at the moment.
 export function renderToggle(key, label, hint, options = {}) {
   const reason = options.reason ?? null;
   const allowDisableWhenUnavailable = options.allowDisableWhenUnavailable === true;
   const checkedState = Boolean(state.toggles[key]);
   const disabled = options.disabled || (reason && !(allowDisableWhenUnavailable && checkedState));
-  const checked = (!reason || allowDisableWhenUnavailable) && checkedState ? "checked" : "";
+  const checked = (!reason || allowDisableWhenUnavailable || options.valueKnown === true) && checkedState ? "checked" : "";
   return `
     <label class="toggle-row ${disabled ? "disabled" : ""}">
       <span>
@@ -22,15 +24,21 @@ export function renderToggle(key, label, hint, options = {}) {
   `;
 }
 
+/// The switch at the end of a row. Its tooltip is the reason it cannot be
+/// used for, or a hint, and assistive technology is told the name and that
+/// text as one. `data-switch-name` is the name alone: the native layer of
+/// macOS draws General's switches from the name and the tooltip, and a reason
+/// can be as long as a diagnostic of the host, so the name is not looked for
+/// in a text that has the reason in it.
 export function renderInlineSwitch(key, label, options = {}) {
   const reason = options.reason ?? null;
   const allowDisableWhenUnavailable = options.allowDisableWhenUnavailable === true;
   const checkedState = Boolean(state.toggles[key]);
   const disabled = options.disabled || (reason && !(allowDisableWhenUnavailable && checkedState));
-  const checked = (!reason || allowDisableWhenUnavailable) && checkedState ? "checked" : "";
+  const checked = (!reason || allowDisableWhenUnavailable || options.valueKnown === true) && checkedState ? "checked" : "";
   const title = reason ?? options.title ?? null;
   return `
-    <label class="inline-switch ${disabled ? "disabled" : ""}" ${title ? `title="${escapeHtml(title)}"` : ""}>
+    <label class="inline-switch ${disabled ? "disabled" : ""}" data-switch-name="${escapeHtml(label)}" ${title ? `title="${escapeHtml(title)}"` : ""}>
       <span class="visually-hidden">${escapeHtml(label)}${title ? ` — ${escapeHtml(title)}` : ""}</span>
       <input type="checkbox" data-toggle="${escapeHtml(key)}" ${checked} ${disabled ? "disabled" : ""} />
       <i></i>

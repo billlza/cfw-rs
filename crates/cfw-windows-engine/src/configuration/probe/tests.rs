@@ -3,12 +3,16 @@ use cfw_singbox_config::{EngineSettings, ProjectionMode, ValidatedSingBoxProfile
 use serde_json::json;
 
 pub(crate) fn request() -> ProfileDelayTestRequest {
+    request_with(&EngineSettings::default())
+}
+
+fn request_with(settings: &EngineSettings) -> ProfileDelayTestRequest {
     let profile = ValidatedSingBoxProfile::direct();
     let probe = profile
         .project_proxy_probe(
             "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             ProjectionMode::LocalProxy,
-            &EngineSettings::default(),
+            settings,
         )
         .unwrap();
     ProfileDelayTestRequest {
@@ -60,12 +64,96 @@ fn probe_admission_rejects_runtime_effects_before_credential_resolution() {
         ("services", json!([])),
         ("log", json!({"output":"private-file"})),
         ("route", json!({"auto_detect_interface":true})),
+        ("route", json!({"tcp_concurrent":true,"final":"direct"})),
+        ("route", json!({"tcp_concurrent":false})),
+        ("route", json!({"tcp_concurrent":"true"})),
     ] {
         let mut value = request();
         let mut root: serde_json::Value = serde_json::from_str(&value.config_json).unwrap();
         root[key] = native;
         value.config_json = serde_json::to_string(&canonicalize_configuration_value(root)).unwrap();
         assert!(CheckedProbeConfiguration::new(value).is_err());
+    }
+}
+
+/// A probe reaches a node as the running core does: the shared projection
+/// hands it the core's dialing option, the admission takes it, and the digest
+/// binds it.
+#[test]
+fn probe_admission_takes_the_dialing_option_of_the_core() {
+    let route = |value: &ProfileDelayTestRequest| {
+        serde_json::from_str::<serde_json::Value>(&value.config_json).unwrap()["route"].clone()
+    };
+    let racing = request();
+    let serial = request_with(&EngineSettings {
+        tcp_concurrency: false,
+        ..EngineSettings::default()
+    });
+    assert_eq!(route(&racing)["tcp_concurrent"], true);
+    assert!(route(&serial).get("tcp_concurrent").is_none());
+    assert_ne!(
+        CheckedProbeConfiguration::new(racing).unwrap().digest,
+        CheckedProbeConfiguration::new(serial).unwrap().digest
+    );
+}
+
+/// The DNS rules a probe keeps may name the inline rule set of a rule
+/// provider, which the probe then declares: the shared projection of such a
+/// profile must pass. A set the probe would have to read or fetch must not.
+#[test]
+fn probe_admission_takes_the_inline_rule_sets_the_projection_declares() {
+    let profile = ValidatedSingBoxProfile::parse(
+        r#"{"outbounds":[{"type":"socks5","tag":"proxy","server":"node.example.com","server_port":1080},{"type":"direct","tag":"direct"}],
+        "route":{"final":"proxy"},
+        "providers":{"rules":[{"name":"sites","source":{"interval_seconds":86400},"format":"yaml","behavior":"classical",
+        "rules":[{"type":"domain_suffix","value":"example.org"}]}]},
+        "dns":{"servers":[{"type":"tcp","server":"1.1.1.1","server_port":53}],
+        "nameserver_policy":[{"domain":"rule-set:sites","servers":[{"type":"tcp","server":"223.6.6.6","server_port":53}]}]}}"#,
+    )
+    .unwrap();
+    let probe = profile
+        .project_proxy_probe(
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            ProjectionMode::LocalProxy,
+            &EngineSettings::default(),
+        )
+        .unwrap();
+    let mut value = request();
+    value.audience = probe.credential_audience().clone();
+    value.config_json = probe.as_json().into();
+    value.credential_slots = probe.credential_slots().to_vec();
+    value.proxies = vec!["proxy".into()];
+    let root: serde_json::Value = serde_json::from_str(&value.config_json).unwrap();
+    let declared = root["route"]["rule_set"].as_array().unwrap();
+    assert!(!declared.is_empty());
+    assert!(declared.iter().all(|set| set["type"] == "inline"));
+    CheckedProbeConfiguration::new(value.clone()).unwrap();
+    for (label, sets) in [
+        (
+            "remote",
+            json!([{"type":"remote","tag":"sites","format":"binary","url":"https://example.org/sites.srs"}]),
+        ),
+        (
+            "local",
+            json!([{"type":"local","tag":"sites","format":"source","path":"sites.json"}]),
+        ),
+        (
+            "inline beside remote",
+            json!([{"type":"inline","tag":"sites","rules":[]},
+                {"type":"remote","tag":"more","format":"binary","url":"https://example.org/more.srs"}]),
+        ),
+        ("untyped", json!([{"tag":"sites","rules":[]}])),
+        (
+            "not a list",
+            json!({"type":"inline","tag":"sites","rules":[]}),
+        ),
+    ] {
+        let mut altered = value.clone();
+        let mut root = root.clone();
+        root["route"]["rule_set"] = sets;
+        altered.config_json =
+            serde_json::to_string(&canonicalize_configuration_value(root)).unwrap();
+        assert!(CheckedProbeConfiguration::new(altered).is_err(), "{label}");
     }
 }
 

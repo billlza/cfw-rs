@@ -135,11 +135,11 @@ export function controllerSelectorFromSnapshot(snapshot, groupName) {
 }
 
 /// Nothing controller-backed survives an unreachable controller: an empty page
-/// is honest, stale proxy groups are not.
+/// is honest, stale proxy groups are not. LAN sharing is not controller-backed:
+/// it is a runtime setting, on or off whether a core runs or not.
 export function clearControllerBackedState() {
   state.mode = null;
   state.logLevel = null;
-  state.toggles.allowLan = false;
   state.proxyGroups = [];
   state.activeProxyGroup = null;
   state.proxyBlinkNode = null;

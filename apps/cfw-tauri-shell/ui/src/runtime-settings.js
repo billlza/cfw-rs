@@ -29,6 +29,8 @@ export function runtimeDraft(settings, effective = null) {
     mainlandChinaDirect: settings.mainland_china_direct === true,
     dnsLeakProtection: settings.dns_leak_protection === true,
     webrtcLeakProtection: settings.webrtc_leak_protection === true,
+    // On unless the stored settings say otherwise.
+    tcpConcurrency: settings.tcp_concurrency !== false,
   };
 }
 
@@ -46,7 +48,7 @@ export function preferencesFromRuntimeDraft(draft, mtuLimits) {
   if (!RUNTIME_LOG_LEVELS.includes(draft.level)) throw new Error(t("Choose a supported log level"));
   if (typeof draft.ipv6DNS !== "boolean") throw new Error(t("Choose whether to enable IPv6 DNS"));
   if (typeof draft.mainlandChinaDirect !== "boolean" || typeof draft.dnsLeakProtection !== "boolean"
-    || typeof draft.webrtcLeakProtection !== "boolean") {
+    || typeof draft.webrtcLeakProtection !== "boolean" || typeof draft.tcpConcurrency !== "boolean") {
     throw new TypeError("Runtime settings draft is invalid");
   }
   const sources = draft.lanSources.split(/[\n,]/u).map((value) => value.trim()).filter(Boolean);
@@ -72,6 +74,8 @@ export function preferencesFromRuntimeDraft(draft, mtuLimits) {
     ...(draft.mainlandChinaDirect ? { mainland_china_direct: true } : {}),
     ...(draft.dnsLeakProtection ? { dns_leak_protection: true } : {}),
     ...(draft.webrtcLeakProtection ? { webrtc_leak_protection: true } : {}),
+    // Absent means on here, for the same reason.
+    ...(draft.tcpConcurrency ? {} : { tcp_concurrency: false }),
   };
 }
 
@@ -88,7 +92,19 @@ export function acceptNativeRuntimeDraft(prior, value) {
 }
 
 export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, refreshRuntime, dismissOtherDialogs, nativeDialog }) {
+  // What this page asks about the settings is numbered as it is asked; a
+  // write is numbered when it ends, with the snapshot it returns. `answered`
+  // is the latest of them whose answer has arrived.
   let request = 0;
+  let answered = 0;
+  // Notes that the answer to the request `asked` has arrived, and says whether
+  // it still counts: it does not when the answer to something the page asked
+  // later is already in.
+  function arrived(asked) {
+    if (asked < answered) return false;
+    answered = asked;
+    return true;
+  }
   function validateSnapshot(snapshot) {
     if (!snapshot || typeof snapshot.settings !== "object" || typeof snapshot.effective !== "object"
       || !RUNTIME_LOG_LEVELS.includes(snapshot.settings.log_level)
@@ -101,6 +117,8 @@ export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, 
       || typeof snapshot.effective.dns_leak_protection !== "boolean"
       || (snapshot.settings.webrtc_leak_protection !== undefined && typeof snapshot.settings.webrtc_leak_protection !== "boolean")
       || typeof snapshot.effective.webrtc_leak_protection !== "boolean"
+      || (snapshot.settings.tcp_concurrency !== undefined && typeof snapshot.settings.tcp_concurrency !== "boolean")
+      || typeof snapshot.effective.tcp_concurrency !== "boolean"
       || !(snapshot.revision === null || typeof snapshot.revision === "string")) {
       throw new TypeError("Runtime settings response is invalid");
     }
@@ -115,40 +133,68 @@ export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, 
     state.toggles.mainlandChinaDirect = snapshot.effective.mainland_china_direct;
     state.toggles.dnsLeakProtection = snapshot.effective.dns_leak_protection;
     state.toggles.webrtcLeakProtection = snapshot.effective.webrtc_leak_protection;
+    state.toggles.tcpConcurrency = snapshot.effective.tcp_concurrency;
     state.logLevel = snapshot.effective.log_level;
   }
-  async function load() {
+  // One read of the settings, for a refresh or for an action, and what the
+  // page takes from its answer.
+  //
+  // Settings are shown only while they answer the last thing the page asked.
+  // It asks again because something may have changed, the selected profile
+  // for one, and a write ends with settings of its own, so an earlier snapshot
+  // may be from before a change and would be shown as what is in force now.
+  //
+  // A failure has no values that could be out of date. It counts unless the
+  // answer to something the page asked later is already in. Settings that
+  // were read are such an answer whether or not the page shows them: the read
+  // that failed is behind the page then, and so is its failure. A failure
+  // that counts holds the controls until the page shows settings again.
+  // Settings it does not show end no hold, because the page would go back to
+  // what it showed before the failure, and after a failed write that may be
+  // settings that were not kept.
+  //
+  // `snapshot` is there when the host answered with settings and `taken` says
+  // whether the page shows them; `error` is there when the host refused or
+  // answered with something that is no settings, which is a failed read
+  // wherever it stands in the order.
+  async function read() {
     const captured = ++request;
     try {
       const snapshot = await invoke("read_runtime_settings_snapshot");
-      if (captured !== request) return false;
-      accept(snapshot);
-      return true;
+      const taken = captured === request;
+      if (taken) accept(snapshot);
+      else validateSnapshot(snapshot);
+      arrived(captured);
+      return { snapshot, taken };
     } catch (error) {
-      if (captured === request) state.runtimeSettingsError = errorText(error);
-      return false;
+      if (arrived(captured)) state.runtimeSettingsError = errorText(error);
+      return { error };
     }
   }
-  // The settings read for one action of the user: opening the dialog, the
-  // Allow LAN switch, the log level. Unlike `load`, a background refresh that
-  // starts meanwhile takes nothing from this read: the action goes on with
-  // exactly the snapshot it read, and the backend enforces that snapshot's
-  // revision on a write. Reads that were already on their way no longer count.
+  // The page's own refresh: whether it now shows what this read returned.
+  async function load() {
+    return (await read()).taken === true;
+  }
+  // The settings read for one action of the user: opening the dialog, a
+  // switch, the log level, Reload From Disk. A request that begins meanwhile
+  // takes nothing from the action: it goes on with exactly the snapshot it
+  // read, the backend enforces that snapshot's revision on a write, and a
+  // read that fails is thrown to it.
   async function loadForAction() {
-    ++request;
-    try {
-      const snapshot = await invoke("read_runtime_settings_snapshot");
-      accept(snapshot);
-      return snapshot;
-    } catch (error) {
-      state.runtimeSettingsError = errorText(error);
-      return null;
-    }
+    const answer = await read();
+    if (!answer.snapshot) throw answer.error;
+    return answer.snapshot;
   }
   async function open(enableLAN = false) {
     if (state.engineMutationBusy || state.migrationHandoff) return;
-    const snapshot = await loadForAction();
-    if (!snapshot) { renderPage(); return; }
+    let snapshot;
+    try {
+      snapshot = await loadForAction();
+    } catch (error) {
+      appendLog("error", "settings", errorText(error));
+      renderPage();
+      return;
+    }
     dismissOtherDialogs();
     const draft = runtimeDraft(snapshot.settings, snapshot.effective);
     if (enableLAN) draft.allow = true;
@@ -167,7 +213,7 @@ export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, 
     let saved = false;
     try {
       const snapshot = await invoke("write_runtime_settings_snapshot", { settings, revision });
-      ++request;
+      answered = ++request;
       accept(snapshot);
       saved = true;
       if (state.runtimeSettingsDialog === dialog) state.runtimeSettingsDialog = null;
@@ -191,23 +237,23 @@ export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, 
   async function toggleLAN(enabled) {
     if (enabled) { await open(true); return false; }
     const snapshot = await loadForAction();
-    if (!snapshot) throw new Error(state.runtimeSettingsError);
     return save({ ...snapshot.settings, allow_lan: false }, snapshot.revision);
   }
   // One switch of the stored preferences. A background refresh cannot cancel
   // a user's choice: the write is bound to the exact snapshot read for this
-  // action, and the backend enforces its revision.
+  // action, and the backend enforces its revision. A read that fails ends the
+  // action with that failure.
   async function toggleSwitch(field, enabled) {
     if (typeof enabled !== "boolean") throw new TypeError(`${field} must be enabled or disabled`);
     if (state.engineMutationBusy || state.migrationHandoff) throw new Error(t("Another network operation is in progress"));
-    const snapshot = await invoke("read_runtime_settings_snapshot");
-    validateSnapshot(snapshot);
+    const snapshot = await loadForAction();
     return save({ ...snapshot.settings, [field]: enabled }, snapshot.revision);
   }
   const toggleIPv6DNS = (enabled) => toggleSwitch("ipv6_dns_enabled", enabled);
   const toggleMainlandChinaDirect = (enabled) => toggleSwitch("mainland_china_direct", enabled);
   const toggleDnsLeakProtection = (enabled) => toggleSwitch("dns_leak_protection", enabled);
   const toggleWebRtcLeakProtection = (enabled) => toggleSwitch("webrtc_leak_protection", enabled);
+  const toggleTcpConcurrency = (enabled) => toggleSwitch("tcp_concurrency", enabled);
   function renderDialog() {
     const dialog = state.runtimeSettingsDialog;
     if (!dialog) { nativeDialog?.sync(null); return ""; }
@@ -273,10 +319,9 @@ export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, 
       if (!RUNTIME_LOG_LEVELS.includes(level)) return;
       try {
         const snapshot = await loadForAction();
-        if (!snapshot) throw new Error(state.runtimeSettingsError);
         await save({ ...snapshot.settings, log_level: level }, snapshot.revision);
       } catch (error) { appendLog("error", "settings", errorText(error)); renderPage(); }
     }));
   }
-  return { load, open, close, save, toggleLAN, toggleIPv6DNS, toggleMainlandChinaDirect, toggleDnsLeakProtection, toggleWebRtcLeakProtection, renderDialog, bindDialog, bindPage };
+  return { load, loadForAction, open, close, save, toggleLAN, toggleIPv6DNS, toggleMainlandChinaDirect, toggleDnsLeakProtection, toggleWebRtcLeakProtection, toggleTcpConcurrency, renderDialog, bindDialog, bindPage };
 }

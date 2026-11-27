@@ -104,7 +104,8 @@
       "lan_proxy": null,
       "mainland_china_direct": false,
       "dns_leak_protection": false,
-      "webrtc_leak_protection": false
+      "webrtc_leak_protection": false,
+      "tcp_concurrency": true
     }
   },
   "profiles_snapshot": {

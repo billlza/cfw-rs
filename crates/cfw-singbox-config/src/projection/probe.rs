@@ -94,6 +94,11 @@ impl ProjectedConfig {
     /// normal projection remains the source of protocol/DNS/credential policy;
     /// listeners, system routes, persistence and autonomous tests are excluded.
     ///
+    /// A probe reaches a node as the running core does, so a test measures
+    /// what a connection gets: the route keeps the default resolver and the
+    /// dialing option (`tcp_concurrent`), and nothing that routes a
+    /// connection.
+    ///
     /// The probe has no rule-set cache, so a remote dataset would be fetched
     /// through the proxy under test before every measurement. DNS rules that
     /// name any rule set other than an inline one are therefore left out of
@@ -146,6 +151,9 @@ impl ProjectedConfig {
         let mut route = Map::new();
         if let Some(resolver) = original["route"].get_mut("default_domain_resolver") {
             route.insert("default_domain_resolver".into(), resolver.take());
+        }
+        if let Some(concurrent) = original["route"].get_mut("tcp_concurrent") {
+            route.insert("tcp_concurrent".into(), concurrent.take());
         }
         if !kept.is_empty() {
             route.insert("rule_set".into(), Value::Array(kept));

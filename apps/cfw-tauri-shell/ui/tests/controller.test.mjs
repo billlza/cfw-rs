@@ -269,7 +269,11 @@ test("clearing controller state forgets every controller-backed view", () => {
   state.connections = [{}];
   state.closingConnectionIds.add("a");
   state.connectionDetailId = "a";
+  state.toggles.allowLan = true;
   clearControllerBackedState();
+  // LAN sharing is a runtime setting: it is on or off whether a core runs or not.
+  assert.equal(state.toggles.allowLan, true);
+  state.toggles.allowLan = false;
   assert.equal(state.mode, null);
   assert.deepEqual(state.proxyGroups, []);
   assert.deepEqual(state.connections, []);

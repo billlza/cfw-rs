@@ -556,6 +556,13 @@ test("switch rows state why a switch is unavailable and keep an on switch remova
   html = renderToggle("silentStart", "Silent start", "hint", { reason: "unavailable", allowDisableWhenUnavailable: true });
   assert.match(html, /checked/u);
   assert.doesNotMatch(html, /disabled/u, "an on switch stays removable");
+  // A value that is known is still shown by a switch that cannot be changed.
+  for (const render of [renderToggle("silentStart", "Silent start", "hint", { reason: "held", valueKnown: true }),
+    renderInlineSwitch("silentStart", "Silent start", { reason: "held", valueKnown: true })]) {
+    assert.match(render, /checked/u);
+    assert.match(render, /disabled/u);
+    assert.match(render, /title="held"/u);
+  }
   html = renderToggle("silentStart", "Silent start", "hint", { disabled: true });
   assert.match(html, /disabled/u);
   html = renderInlineSwitch("silentStart", "Silent start", { title: "tip" });

@@ -18,3 +18,26 @@ export const REASONS = Object.freeze({
   get restoreDns() { return t(platformPresentation(state.payload.product.operating_system).systemDns); },
   get engineNotOff() { return t("Stop the core before credential maintenance or legacy migration."); },
 });
+
+/// Whether a switch of the runtime network settings shows a value that was
+/// read, in the dashboard state asked about. Before the first read and after
+/// a failed one, which keeps the previous snapshot beside its error, the
+/// value is not known and the switch is drawn off.
+export function networkSettingsKnown(dashboard) {
+  return dashboard.runtimeSettings != null && dashboard.runtimeSettingsError == null;
+}
+
+/// Why those settings cannot be changed at this moment, or null. Every
+/// control of them shows it and stays disabled meanwhile. What leaves the
+/// values unknown is said first, a failed read before settings that were not
+/// read yet: the reason then stands beside a switch that is off whatever the
+/// setting is. In a migration's own window the migration owns the network and
+/// holds known values too, which their switches still show.
+///
+/// The window that starts a migration is not held. It closes once the
+/// migration's window is ready, and holding it takes more than this reason:
+/// an action already under way and the native switches would have to follow.
+export function networkSettingsReason(dashboard) {
+  if (!networkSettingsKnown(dashboard)) return dashboard.runtimeSettingsError ?? t("Network settings are loading");
+  return dashboard.migrationHandoff ? t("Finish migration before changing network settings") : null;
+}

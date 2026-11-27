@@ -102,3 +102,10 @@ unavailable when there are none, instead of reporting that no country rules
 exist. While the selected profile's saved policy is loading or cannot be read,
 its countries are unknown: the row names only the switch when it is known to be
 on, and otherwise says unavailable.
+
+The Allow LAN and IPv6 DNS rows follow the same rule. While the runtime
+settings are not known, their switches are off and disabled with the reason,
+the bind address and the IPv6 DNS state beside them say unavailable, and the
+Allow LAN row leaves out how far the proxy is shared. The window of a legacy
+maintenance session only keeps settings that were read from being changed, so
+there the rows still show them.

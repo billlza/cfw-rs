@@ -7,6 +7,28 @@
 - Migration/import utilities
 - Future notarization and helper health diagnostics
 
+## Engine › when its controls are held
+
+The switches of the Engine group and the Configure button of the local proxy
+port change the runtime network settings. They are disabled, each with the
+reason, until those settings have been read, after a read of them has failed,
+and in the window of a legacy maintenance session, which owns the network. A
+failed read is the page's own or the one that a click on a switch, on
+Configure or on Reload From Disk makes. When answers arrive out of order, the
+page shows settings only from the answer to the last thing it asked: it asks
+again because something may have changed, and a write that ended since has
+settings of its own. A failed read counts unless the answer to something the
+page asked later is already in, whether or not the page shows that answer,
+and it holds the controls until the page shows settings again. Reload From
+Disk reads the network settings again as well as the preferences, so controls
+that a failed read holds can be tried again without reloading the dashboard.
+A switch that is held in the window of a session still shows a setting that
+was read. Before the first read and after a failed one a switch is drawn off,
+because its value is not known, and the reason beside it says that, in the
+window of a maintenance session as well. The General page holds its controls
+of the same settings in the same way. The window that starts a maintenance
+session is not held: it closes once the session's window is ready.
+
 ## Engine › Mainland China direct
 
 Off by default. It is a runtime setting, saved in `cfw-runtime-settings.json`

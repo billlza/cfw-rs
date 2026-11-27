@@ -3,13 +3,15 @@ import { state } from "./state.js";
 import { escapeHtml } from "./text-format.js";
 
 /// A switch row. `options.reason` marks the switch unavailable and states why,
-/// both in the row and in the control's own tooltip.
+/// both in the row and in the control's own tooltip. An unavailable switch is
+/// drawn off, unless `options.valueKnown` says that its value is known and only
+/// cannot be changed at the moment.
 export function renderToggle(key, label, hint, options = {}) {
   const reason = options.reason ?? null;
   const allowDisableWhenUnavailable = options.allowDisableWhenUnavailable === true;
   const checkedState = Boolean(state.toggles[key]);
   const disabled = options.disabled || (reason && !(allowDisableWhenUnavailable && checkedState));
-  const checked = (!reason || allowDisableWhenUnavailable) && checkedState ? "checked" : "";
+  const checked = (!reason || allowDisableWhenUnavailable || options.valueKnown === true) && checkedState ? "checked" : "";
   return `
     <label class="toggle-row ${disabled ? "disabled" : ""}">
       <span>
@@ -27,7 +29,7 @@ export function renderInlineSwitch(key, label, options = {}) {
   const allowDisableWhenUnavailable = options.allowDisableWhenUnavailable === true;
   const checkedState = Boolean(state.toggles[key]);
   const disabled = options.disabled || (reason && !(allowDisableWhenUnavailable && checkedState));
-  const checked = (!reason || allowDisableWhenUnavailable) && checkedState ? "checked" : "";
+  const checked = (!reason || allowDisableWhenUnavailable || options.valueKnown === true) && checkedState ? "checked" : "";
   const title = reason ?? options.title ?? null;
   return `
     <label class="inline-switch ${disabled ? "disabled" : ""}" ${title ? `title="${escapeHtml(title)}"` : ""}>

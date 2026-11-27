@@ -243,7 +243,7 @@ test("a background settings refresh does not keep the network settings from open
   resolveRead({ ...response(), revision: "read-for-the-dialog" });
   await opening;
   assert.equal(state.runtimeSettingsDialog?.revision, "read-for-the-dialog");
-  assert.equal(state.runtimeSettings.revision, "read-for-the-dialog", "the page shows what the dialog was filled from");
+  assert.equal(state.runtimeSettings.revision, null, "the page shows the refresh, which it asked for after the dialog's read");
   assert.equal(state.runtimeSettingsError, null);
 });
 
@@ -319,17 +319,28 @@ test("a read that was already on its way cannot take the settings back from an a
 test("an action on the network settings reports a read that failed and changes nothing", async () => {
   const state = {toggles:{},engineMutationBusy:false,migrationHandoff:false};
   const calls = [];
+  const logged = [];
   const ui = createRuntimeSettingsUI({state,invoke:async (command) => {
     calls.push(command);
     throw new Error("settings store is locked");
-  },appendLog(){},renderPage(){},refreshRuntime(){},dismissOtherDialogs(){assert.fail("no dialog without settings");}});
+  },appendLog(...entry){logged.push(entry);},renderPage(){},refreshRuntime(){},dismissOtherDialogs(){assert.fail("no dialog without settings");}});
   await ui.open();
   assert.equal(state.runtimeSettingsDialog, undefined);
   assert.equal(state.runtimeSettingsError, "settings store is locked");
+  assert.deepEqual(logged, [["error", "settings", "settings store is locked"]], "the click that opens the dialog says so in the log");
   state.runtimeSettingsError = null;
   await assert.rejects(ui.toggleLAN(false), /settings store is locked/u);
   assert.equal(state.runtimeSettingsError, "settings store is locked");
   assert.deepEqual(calls, ["read_runtime_settings_snapshot", "read_runtime_settings_snapshot"]);
+  // A stored switch reads the settings for its own action as well, and tells
+  // the page about a read that failed in the same way.
+  for (const [method, enabled] of [["toggleIPv6DNS", false], ...SWITCHES.map((sw) => [sw.method, !sw.resting])]) {
+    state.runtimeSettingsError = null;
+    calls.length = 0;
+    await assert.rejects(ui[method](enabled), /settings store is locked/u, method);
+    assert.equal(state.runtimeSettingsError, "settings store is locked", method);
+    assert.deepEqual(calls, ["read_runtime_settings_snapshot"], method);
+  }
 });
 
 test("IPv6 refuses concurrent mutations and restores observed state after a rejected save", async () => {

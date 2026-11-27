@@ -17,7 +17,8 @@ import {
 
 function controller(overrides = {}) {
   const windowGlass = { refresh: spy() };
-  const d = { windowGlass, renderPage: spy(), renderGlassOverlays: spy(), loadProfilesSnapshot: spy(async () => true), closeGlassDialog: spy(), ...overrides };
+  const d = { windowGlass, renderPage: spy(), renderGlassOverlays: spy(), loadProfilesSnapshot: spy(async () => true),
+    runtimeSettingsUI: { loadForAction: spy(async () => ({})) }, closeGlassDialog: spy(), ...overrides };
   return { d, settings: createSettingsController(d) };
 }
 
@@ -73,6 +74,76 @@ test("settings are saved, reloaded and reset through their actions", async () =>
   state.settingsUnavailableReason = "unverifiable";
   await assert.rejects(() => settings.actions["save-settings"](), /unverifiable/u);
   await assert.rejects(() => settings.actions["reset-settings"](), /unverifiable/u);
+});
+
+// Settings shows the runtime network settings beside the preferences, and a
+// failed read of them holds their controls. Reload From Disk is how the user
+// asks for them again.
+test("Reload From Disk reads the network settings again and says when that read failed", async () => {
+  // How the read of the network settings ends.
+  const network = { failure: null };
+  const loadForAction = spy(async () => { if (network.failure) throw new Error(network.failure); return {}; });
+  const { settings } = controller({ runtimeSettingsUI: { loadForAction } });
+  const latest = (count) => state.logs.slice(0, count).map(({ level, message }) => `${level}: ${message}`).toSorted();
+  try {
+    host.respond("read_settings_snapshot", snapshotOf());
+    await settings.actions["reload-settings"]();
+    assert.equal(loadForAction.count(), 1);
+    assert.deepEqual(messages(), ["Preferences reloaded from disk"]);
+    // The log gets the failure of this very read. The reason the page holds
+    // the controls for may be an older failure, which this read did not have.
+    state.runtimeSettingsError = "an older refusal";
+    await settings.actions["reload-settings"]();
+    assert.deepEqual(messages(), ["Preferences reloaded from disk", "Preferences reloaded from disk"]);
+    // A read that fails is said to have failed although the page holds
+    // nothing, as it does when the answer to a later read is already in.
+    state.runtimeSettingsError = null;
+    network.failure = "settings store is locked";
+    await settings.actions["reload-settings"]();
+    assert.deepEqual(latest(2), ["error: Network settings failed: settings store is locked", "info: Preferences reloaded from disk"]);
+    // They are asked for whatever the read of the preferences comes to.
+    host.respond("read_settings_snapshot", new Error("preferences are unreadable"));
+    await assert.rejects(() => settings.actions["reload-settings"](), /preferences are unreadable/u);
+    assert.equal(loadForAction.count(), 4);
+  } finally {
+    state.runtimeSettingsError = null;
+  }
+});
+
+test("Reload From Disk reads each store for itself and draws the page as each read ends", async () => {
+  const pending = () => {
+    const read = {};
+    read.promise = new Promise((answer, refuse) => Object.assign(read, { answer, refuse }));
+    return read;
+  };
+  const turns = async () => { for (let turn = 0; turn < 8; turn += 1) await new Promise((resolve) => setImmediate(resolve)); };
+  let network = pending();
+  const { d, settings } = controller({ runtimeSettingsUI: { loadForAction: () => network.promise } });
+  // The network settings are not answered yet: the preferences are read,
+  // reported and drawn without them.
+  host.respond("read_settings_snapshot", snapshotOf());
+  const first = settings.actions["reload-settings"]();
+  await turns();
+  assert.deepEqual(messages(), ["Preferences reloaded from disk"]);
+  assert.equal(d.renderPage.count(), 1);
+  network.refuse(new Error("settings store is locked"));
+  await first;
+  assert.equal(lastLog().message, "Network settings failed: settings store is locked");
+  assert.equal(d.renderPage.count(), 2);
+  // The preferences are not answered yet: what the read of the network
+  // settings came to is drawn without them.
+  network = pending();
+  const preferences = pending();
+  host.respond("read_settings_snapshot", () => preferences.promise);
+  const second = settings.actions["reload-settings"]();
+  network.answer({});
+  await turns();
+  assert.equal(d.renderPage.count(), 3);
+  assert.equal(messages().length, 2);
+  preferences.answer(snapshotOf());
+  await second;
+  assert.equal(lastLog().message, "Preferences reloaded from disk");
+  assert.equal(d.renderPage.count(), 4);
 });
 
 test("the reset dialog resets preferences once, keeps a refused dialog open and offers its prompt", async () => {

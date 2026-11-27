@@ -44,6 +44,22 @@
   answered, as one does whenever the core changes state: the dialog did not
   open, and the switch and the log level went back to what they were, with
   `null` as the only message in the log.
+- Hold the switches of Settings › Engine until the network settings have
+  been read. For a moment after the window opened, Allow LAN, Mainland China
+  direct, DNS leak protection and WebRTC leak protection were offered and
+  drawn off whatever the setting was. They and the Configure button of the
+  local proxy port are now disabled with the reason until the settings are
+  read and in the window of a legacy maintenance session, as the controls of
+  the General page are. A switch held in that window keeps showing a setting
+  that was read, where the General page drew IPv6 DNS off; when the settings
+  could not be read it is off and says that instead, and the General page
+  shows the bind address and the IPv6 DNS state beside it as unavailable, no
+  longer as they last were. The same now follows a switch whose own read of
+  the settings fails when it is clicked, which used to leave the page showing
+  the values it had. The TUN MTU button of the General page shows the reason
+  too. Reload From Disk now reads the network settings again as well as the
+  preferences, so controls that a failed read holds can be tried again
+  without reloading the dashboard.
 
 ### Network
 

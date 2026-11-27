@@ -8,6 +8,7 @@ import {
   querySelectorElements, renderPage, responses, runtime, setEngine, state, statusBarNodes,
   streamEvent,
 } from "./support/render-harness.mjs";
+import { readRuntimeSettings, refuseRuntimeSettingsRead } from "./support/runtime-settings-reads.mjs";
 
 test("status bar clock preserves changing values without rewriting unchanged DOM", async () => {
   const originalEngine = responses.engine_snapshot;
@@ -491,5 +492,99 @@ test("a failed runtime settings reload leaves the General country-rules row unkn
     state.runtimeSettings = settings;
     state.savedProfilePolicy = policy;
     state.profiles = originalProfiles;
+  }
+});
+
+test("General holds its runtime network controls until their settings are read and may change", async () => {
+  await setEngine(RUNNING_ENGINE);
+  const original = responses.read_runtime_settings_snapshot;
+  const handoff = state.migrationHandoff;
+  const handoffStatus = state.migrationHandoffStatus;
+  const retirement = state.retirement;
+  // Each control of the runtime network settings: the label of its row, the
+  // control, and how often the row states a reason, in the control's own
+  // tooltip, in the row's note, or in both: first with the settings known,
+  // then without. The note of the Allow LAN row says how far the proxy is
+  // shared, so the row has it only while that is known.
+  const CONTROLS = [
+    ["Port", /<button type="button" class="cfw-text-button" data-action="open-runtime-settings"([^>]*)>/u, 1, 1],
+    ["Allow LAN", /<input type="checkbox" data-toggle="allowLan"([^>]*)\/>/u, 2, 1],
+    ["Log Level", /<select class="cfw-select" data-runtime-log-level([^>]*)>/u, 1, 1],
+    ["IPv6 DNS", /<input type="checkbox" data-toggle="ipv6DNS"([^>]*)\/>/u, 1, 1],
+    ["TUN MTU", /<button type="button" class="cfw-text-button" data-action="open-runtime-settings"([^>]*)>/u, 1, 1],
+  ];
+  const rows = (html) => CONTROLS.map(([label, control, ...says]) => {
+    const found = html.split('<div class="cfw-row">')
+      .filter((row) => new RegExp(`^\\s*<div class="cfw-row-left">(?:\\s*<span>)?${label}<`, "u").test(row));
+    assert.equal(found.length, 1, `one ${label} row`);
+    const attributes = found[0].match(control)?.[1];
+    assert.equal(typeof attributes, "string", `the control of the ${label} row`);
+    return { label, row: found[0], attributes, says };
+  });
+  // The page reads settings that have the listed switches on.
+  const read = (on) => readRuntimeSettings(original, { allowLan: on.includes("Allow LAN"), ipv6Dns: on.includes("IPv6 DNS") });
+  // Every control is disabled and its own row says why. A switch shows that it
+  // is on only when it is listed: a value that was read is known although it
+  // cannot be changed, and one that was not read or may be stale is not shown.
+  const held = async (reason, on = []) => {
+    for (const { label, row, attributes, says } of rows(await renderPage("general"))) {
+      assert.match(attributes, /disabled/u, `${label} while: ${reason}`);
+      // Only a migration holds settings that are known.
+      assert.equal(row.split(`title="${reason}"`).length - 1, says[reason === migrating ? 0 : 1], `the ${label} row says: ${reason}`);
+      assert.equal(/checked/u.test(attributes), on.includes(label), `${label} while: ${reason}`);
+    }
+  };
+  const free = async (on) => {
+    for (const { label, attributes } of rows(await renderPage("general"))) {
+      assert.doesNotMatch(attributes, /disabled|title=/u, label);
+      assert.equal(/checked/u.test(attributes), on.includes(label), label);
+    }
+  };
+  const both = ["Allow LAN", "IPv6 DNS"];
+  const migrating = "Finish migration before changing network settings";
+  const refused = "runtime settings unavailable";
+  try {
+    await read(["IPv6 DNS"]);
+    await free(["IPv6 DNS"]);
+    await read(both);
+    await free(both);
+
+    // A failed reload keeps the snapshot it had beside the error, and the
+    // switches may be stale by then: none shows a value.
+    await refuseRuntimeSettingsRead(refused);
+    await held(refused);
+    // As at startup, before the first read: no snapshot.
+    state.runtimeSettings = null;
+    state.runtimeSettingsError = null;
+    await held("Network settings are loading");
+    // A first read that failed says why instead.
+    await refuseRuntimeSettingsRead(refused);
+    await held(refused);
+
+    // The window of a migration. What leaves the values unknown is still
+    // said first. Once they are read the migration holds them, and each
+    // switch shows its value.
+    state.migrationHandoff = true;
+    state.retirement = { state: "awaiting_confirmation" };
+    await held(refused);
+    state.runtimeSettingsError = null;
+    await held("Network settings are loading");
+    await read(both);
+    await held(migrating, both);
+    await read(["Allow LAN"]);
+    await held(migrating, ["Allow LAN"]);
+
+    // The window that starts a migration keeps its controls until it closes.
+    state.migrationHandoff = false;
+    state.retirement = retirement;
+    state.migrationHandoffStatus = { state: "in_progress" };
+    await free(["Allow LAN"]);
+  } finally {
+    responses.read_runtime_settings_snapshot = original;
+    state.migrationHandoff = handoff;
+    state.migrationHandoffStatus = handoffStatus;
+    state.retirement = retirement;
+    state.runtimeSettingsError = null;
+    await emit("cfw://settings-changed", responses.read_settings_snapshot);
   }
 });

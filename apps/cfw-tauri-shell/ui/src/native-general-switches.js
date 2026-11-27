@@ -1,6 +1,59 @@
 // Presentation only. These keys retain General's existing applyToggle use cases.
 export const GENERAL_SWITCH_KEYS = Object.freeze(["allowLan", "ipv6DNS", "tunMode", "mixin", "systemProxy", "startAtLogin"]);
 
+/// What the host takes of one frame: this many characters of a switch's name
+/// and of its help text, and this many bytes for the whole frame as JSON. It
+/// refuses a frame that is over one of them, and a refused frame ends the
+/// native switches for as long as the window lives.
+export const GENERAL_SWITCH_LABEL_LIMIT = 160;
+export const GENERAL_SWITCH_HELP_LIMIT = 1024;
+export const GENERAL_SWITCH_FRAME_LIMIT = 15_500;
+
+// The beginning of `text` in at most `limit` characters, the last of them an
+// ellipsis when something was left out. The host counts a character outside
+// the basic plane as one, so it is one here as well and is never cut in half.
+// A reason can be as long as a diagnostic of the host is, and the frame is
+// built again on every scroll, so no more of the text is looked at than the
+// characters that may stay and one after them.
+function shortened(text, limit) {
+  let kept = 0;
+  for (let index = 0, count = 0; index < text.length; count += 1) {
+    if (count === limit) return `${text.slice(0, kept)}…`;
+    if (count === limit - 1) kept = index;
+    index += text.codePointAt(index) > 0xFFFF ? 2 : 1;
+  }
+  return text;
+}
+
+/// The frame of `switches` as the host takes it. Of each switch `name` is
+/// what the page calls it and `title` the reason or hint of its tooltip. A
+/// reason may quote a diagnostic of the host, which is as long as it is, so
+/// the native switch gets the beginning of a text that is over the host's
+/// limit, and no such text is read through here. The whole text stays on the
+/// page, as the tooltip of its notes on the same settings, and a refused
+/// click writes it to the log.
+///
+/// The host bounds the whole frame as well, and long reasons on several
+/// switches can be over that bound while each is within its own, so while the
+/// frame is too large the longest help text loses its second half. The host
+/// measures the frame as it writes it: with the two counters the transport
+/// adds and with a fraction on every whole number, which together stay under
+/// the bytes set aside here. A frame that is too large without any help text
+/// is left to the host to refuse.
+export function generalSwitchFrame(base, switches) {
+  const items = switches.map(({ key, name, title, checked, enabled, rect }) => ({ key,
+    label: shortened(name, GENERAL_SWITCH_LABEL_LIMIT), help: shortened(title, GENERAL_SWITCH_HELP_LIMIT), checked, enabled, rect }));
+  const frame = { ...base, items };
+  const size = () => new TextEncoder().encode(JSON.stringify(frame)).length + 256;
+  while (size() > GENERAL_SWITCH_FRAME_LIMIT) {
+    const longest = items.reduce((a, b) => (b.help.length > a.help.length ? b : a));
+    const length = Array.from(longest.help).length;
+    if (length === 0) break;
+    longest.help = length > 1 ? shortened(longest.help, length >> 1) : "";
+  }
+  return frame;
+}
+
 export function resolvedGeneralAppearance(value) {
   // Boot loads the user's appearance asynchronously. Preserve the existing DOM
   // until that authoritative setting arrives, rather than inventing a theme.
@@ -247,15 +300,13 @@ export function createNativeGeneralSwitches({ enabled, visible, isGeneral, local
         clip = intersection(clip, rectangle(parent));
       }
     }
-    const items = inputs().map((input) => {
+    const switches = inputs().map((input) => {
       const label = input.closest(".inline-switch"), key = GENERAL_SWITCH_KEYS.indexOf(input.dataset.toggle) + 1;
       if (key < 1) throw new Error("Unknown General switch cannot be presented natively");
-      const text = label.querySelector(".visually-hidden")?.textContent.trim();
-      const help = label.title ?? "";
-      const name = help && text?.endsWith(` — ${help}`) ? text.slice(0, -(help.length + 3)) : text;
-      return { key, label: name, help, checked: input.checked, enabled: !input.disabled, rect: rectangle(label) };
+      return { key, name: label.dataset.switchName, title: label.title,
+        checked: input.checked, enabled: !input.disabled, rect: rectangle(label) };
     });
-    return { ...empty, clip, items };
+    return generalSwitchFrame({ ...empty, clip }, switches);
   }
   function refresh(force = false) {
     if (!enabled() || failed) return;

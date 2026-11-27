@@ -24,6 +24,12 @@ export function renderToggle(key, label, hint, options = {}) {
   `;
 }
 
+/// The switch at the end of a row. Its tooltip is the reason it cannot be
+/// used for, or a hint, and assistive technology is told the name and that
+/// text as one. `data-switch-name` is the name alone: the native layer of
+/// macOS draws General's switches from the name and the tooltip, and a reason
+/// can be as long as a diagnostic of the host, so the name is not looked for
+/// in a text that has the reason in it.
 export function renderInlineSwitch(key, label, options = {}) {
   const reason = options.reason ?? null;
   const allowDisableWhenUnavailable = options.allowDisableWhenUnavailable === true;
@@ -32,7 +38,7 @@ export function renderInlineSwitch(key, label, options = {}) {
   const checked = (!reason || allowDisableWhenUnavailable || options.valueKnown === true) && checkedState ? "checked" : "";
   const title = reason ?? options.title ?? null;
   return `
-    <label class="inline-switch ${disabled ? "disabled" : ""}" ${title ? `title="${escapeHtml(title)}"` : ""}>
+    <label class="inline-switch ${disabled ? "disabled" : ""}" data-switch-name="${escapeHtml(label)}" ${title ? `title="${escapeHtml(title)}"` : ""}>
       <span class="visually-hidden">${escapeHtml(label)}${title ? ` — ${escapeHtml(title)}` : ""}</span>
       <input type="checkbox" data-toggle="${escapeHtml(key)}" ${checked} ${disabled ? "disabled" : ""} />
       <i></i>

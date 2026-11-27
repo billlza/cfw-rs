@@ -65,6 +65,15 @@
   core stopped or could not read its controller, although LAN sharing stayed
   saved and the General page named its address beside the switch. A click
   on it then opened the dialog that turns LAN sharing on, not off.
+- Keep the macOS switches of the General page when a reason is long. A
+  switch that is held hands its reason to the macOS switch as help text,
+  and the app refused the switches when one of those texts was longer than
+  1,024 characters, as the message about a settings file that cannot be
+  read can be. General then reported `General failed: invalid native
+  General switches frame` and drew all six switches itself for as long as
+  the window stayed open, also after the settings had been read again. The
+  macOS switch now gets the beginning of such a text, and the tooltips of
+  the notes on the page still show all of it.
 
 ### Network
 

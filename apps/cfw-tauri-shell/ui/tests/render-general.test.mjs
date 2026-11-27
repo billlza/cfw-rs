@@ -191,7 +191,7 @@ test("overlay-only General dialogs hide native switches and restore fresh geomet
     label.setAttribute = (name, value) => attributes.set(name, value);
     label.removeAttribute = (name) => attributes.delete(name);
     label.getAttribute = (name) => attributes.get(name) ?? null;
-    label.querySelector = () => ({ textContent: key });
+    Object.assign(label, { title: "" }).dataset.switchName = key;
     label.getBoundingClientRect = () => ({ x: 790, y: top + index * 40, width: 34, height: 20 });
     input.dataset.toggle = key;
     input.disabled = index === 5;

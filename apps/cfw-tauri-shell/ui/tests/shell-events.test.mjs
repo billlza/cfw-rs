@@ -568,6 +568,7 @@ test("switch rows state why a switch is unavailable and keep an on switch remova
   html = renderInlineSwitch("silentStart", "Silent start", { title: "tip" });
   assert.match(html, /title="tip"/u);
   assert.match(html, /Silent start — tip/u);
+  assert.match(renderInlineSwitch("silentStart", 'The "silent" start', { title: "tip" }), / data-switch-name="The &quot;silent&quot; start" title="tip">/u);
   html = renderInlineSwitch("silentStart", "Silent start", { reason: "no", allowDisableWhenUnavailable: true });
   assert.match(html, /checked/u);
   html = renderInlineSwitch("silentStart", "Silent start");

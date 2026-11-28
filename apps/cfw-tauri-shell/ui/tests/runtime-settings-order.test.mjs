@@ -1,5 +1,6 @@
 // What the page takes from the answers about the runtime settings. An action
-// always goes on with its own read, or ends with that read's failure. The
+// goes on with its own read, or ends with that read's failure; where the
+// page's hold ends one is in runtime-settings-press-order.test.mjs. The
 // page, whether a refresh or an action asked:
 // - takes a snapshot only while it answers the last thing the page asked. It
 //   asks again because something may have changed, the selected profile for
@@ -14,13 +15,15 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createRuntimeSettingsUI } from "../src/runtime-settings.js";
 
+const IN_FORCE = Object.freeze({ in_force: true, saved_ipv6_dns_enabled: true });
+
 // A snapshot as the host serializes it: a switch that rests off is stored
 // only while it is on. `effective` changes what is in force without a write,
 // as a profile does for the IPv6 DNS setting it hands down.
 function snapshot(revision, on = {}, effective = {}) {
   return {
     tunnel_mtu_limits: { minimum: 1280, maximum: 1500 },
-    revision,
+    revision, in_force: true, saved_ipv6_dns_enabled: on.ipv6_dns_enabled ?? effective.ipv6_dns_enabled ?? true,
     settings: { preferred_mixed_port: null, log_level: "info", tunnel_mtu: 1500, allow_lan: false, lan_proxy: null, ...on },
     effective: { mixed_port: 7890, log_level: "info", tunnel_mtu: 1500, ipv6_dns_enabled: true, lan_proxy: null,
       mainland_china_direct: false, dns_leak_protection: false, webrtc_leak_protection: false, tcp_concurrency: true,
@@ -85,7 +88,7 @@ test("settings a switch read before another switch was saved do not replace what
   calls[1].answer(snapshot("before"));
   await turn();
   assert.deepEqual(calls.map((call) => call.command), [READ, READ, WRITE]);
-  assert.deepEqual(calls[2].args, { settings: snapshot("before", dnsOn).settings, revision: "before" });
+  assert.deepEqual(calls[2].args, { settings: snapshot("before", dnsOn).settings, revision: "before", basis: IN_FORCE });
   calls[2].answer(snapshot("after", dnsOn));
   await turn();
   assert.equal(state.runtimeSettings.revision, "after");
@@ -190,7 +193,7 @@ test("a write from settings that a save overtook is left to the backend, which r
   calls[0].answer(snapshot("before"));
   await turn();
   assert.equal(state.runtimeSettings.revision, "after", "the page does not go back while the write is on its way");
-  assert.deepEqual(calls[3].args, { settings: { ...snapshot("before").settings, mainland_china_direct: true }, revision: "before" });
+  assert.deepEqual(calls[3].args, { settings: { ...snapshot("before").settings, mainland_china_direct: true }, revision: "before", basis: IN_FORCE });
   calls[3].refuse("runtime settings changed while the update was prepared");
   await turn();
   calls[4].answer(snapshot("after", dnsOn));
@@ -306,7 +309,7 @@ test("settings an action read are not shown while the answer to a later read is 
   assert.equal(state.toggles.ipv6DNS, true);
   // The click goes on with what it read.
   assert.deepEqual(calls.map((call) => call.command), [READ, READ, READ, WRITE]);
-  assert.deepEqual(calls[3].args, { settings: snapshot("read for the click", dnsOn).settings, revision: "read for the click" });
+  assert.deepEqual(calls[3].args, { settings: snapshot("read for the click", dnsOn).settings, revision: "read for the click", basis: { ...IN_FORCE, saved_ipv6_dns_enabled: false } });
   calls[2].answer(snapshot("refreshed"));
   assert.equal(await done(refresh), true);
   assert.equal(state.runtimeSettings.revision, "refreshed");

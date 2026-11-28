@@ -100,6 +100,8 @@ test("streamed rows keep their sort position and receive working actions once", 
     added.buttons.detail.listeners[0]({ currentTarget: added.buttons.detail });
     assert.equal(state.connectionDetailId, "new");
     assert.equal(renders, 1);
+    // Connection Info is a dialog of the app: a dialog that is still reading opens nothing over it.
+    assert.equal(state.dialogRequests, 1);
     added.buttons.close.listeners[0]({ currentTarget: added.buttons.close });
     assert.deepEqual(attempts, ["Closing connection new"]);
   } finally {

@@ -96,6 +96,8 @@
       "lan_proxy": null
     },
     "revision": "fixture-runtime-0",
+    "in_force": true,
+    "saved_ipv6_dns_enabled": true,
     "effective": {
       "mixed_port": 7890,
       "log_level": "info",

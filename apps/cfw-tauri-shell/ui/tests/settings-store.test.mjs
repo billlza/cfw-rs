@@ -18,7 +18,7 @@ import {
 function controller(overrides = {}) {
   const windowGlass = { refresh: spy() };
   const d = { windowGlass, renderPage: spy(), renderGlassOverlays: spy(), loadProfilesSnapshot: spy(async () => true),
-    runtimeSettingsUI: { loadForAction: spy(async () => ({})) }, closeGlassDialog: spy(), ...overrides };
+    runtimeSettingsUI: { reload: spy(async () => false) }, closeGlassDialog: spy(), ...overrides };
   return { d, settings: createSettingsController(d) };
 }
 
@@ -82,13 +82,13 @@ test("settings are saved, reloaded and reset through their actions", async () =>
 test("Reload From Disk reads the network settings again and says when that read failed", async () => {
   // How the read of the network settings ends.
   const network = { failure: null };
-  const loadForAction = spy(async () => { if (network.failure) throw new Error(network.failure); return {}; });
-  const { settings } = controller({ runtimeSettingsUI: { loadForAction } });
+  const reload = spy(async () => { if (network.failure) throw new Error(network.failure); return false; });
+  const { settings } = controller({ runtimeSettingsUI: { reload } });
   const latest = (count) => state.logs.slice(0, count).map(({ level, message }) => `${level}: ${message}`).toSorted();
   try {
     host.respond("read_settings_snapshot", snapshotOf());
     await settings.actions["reload-settings"]();
-    assert.equal(loadForAction.count(), 1);
+    assert.equal(reload.count(), 1);
     assert.deepEqual(messages(), ["Preferences reloaded from disk"]);
     // The log gets the failure of this very read. The reason the page holds
     // the controls for may be an older failure, which this read did not have.
@@ -104,7 +104,7 @@ test("Reload From Disk reads the network settings again and says when that read 
     // They are asked for whatever the read of the preferences comes to.
     host.respond("read_settings_snapshot", new Error("preferences are unreadable"));
     await assert.rejects(() => settings.actions["reload-settings"](), /preferences are unreadable/u);
-    assert.equal(loadForAction.count(), 4);
+    assert.equal(reload.count(), 4);
   } finally {
     state.runtimeSettingsError = null;
   }
@@ -118,7 +118,7 @@ test("Reload From Disk reads each store for itself and draws the page as each re
   };
   const turns = async () => { for (let turn = 0; turn < 8; turn += 1) await new Promise((resolve) => setImmediate(resolve)); };
   let network = pending();
-  const { d, settings } = controller({ runtimeSettingsUI: { loadForAction: () => network.promise } });
+  const { d, settings } = controller({ runtimeSettingsUI: { reload: () => network.promise } });
   // The network settings are not answered yet: the preferences are read,
   // reported and drawn without them.
   host.respond("read_settings_snapshot", snapshotOf());
@@ -322,10 +322,10 @@ test("the platform design and network settings are read or their failure reporte
   assert.equal(state.platform, null, "a design for another platform is refused");
   assert.equal(lastLog().message, "Unable to read the platform design: host startup strategy is invalid");
   host.respond("network_diagnostics", { services: [] });
-  await loadNetworkDiagnostics();
+  assert.equal(await loadNetworkDiagnostics(), true, "it says that it read them");
   assert.deepEqual(state.networkDiagnostics, { services: [] });
   host.respond("network_diagnostics", new Error("SystemConfiguration denied"));
-  await loadNetworkDiagnostics();
+  assert.equal(await loadNetworkDiagnostics(), false, "and that it did not");
   assert.equal(state.networkDiagnostics, null);
   assert.equal(lastLog().message, "Unable to inspect network settings: SystemConfiguration denied");
 });

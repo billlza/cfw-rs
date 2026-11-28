@@ -7,6 +7,7 @@ import { appendLog } from "./app-log.js";
 import { normalizeLegacyProfileMigrationOutcome, normalizeLegacyProfileMigrationPreview } from "./migration.js";
 import { engineIsOff } from "./engine-identity.js";
 import { REASONS } from "./reasons.js";
+import { askForDialog } from "./dialog-requests.js";
 
 export function createLegacyMigrationDialog({
   renderPage, renderGlassOverlays, closeGlassOverlays, loadProfilesSnapshot, applyActiveProfile,
@@ -62,19 +63,24 @@ export function createLegacyMigrationDialog({
             `${t(committed ? "Migrated profile staging failed" : "Legacy profile migration failed")}: ${message}`,
           );
           state.legacyProfileMigrationPreview = null;
-          state.glassDialog = {
-            kind: "info",
-            payload: committed
-              ? {
-                title: t("Profile migrated; activation failed"),
-                body: t("{message} Reload Profiles and review the selected staged profile; do not resubmit the consumed preview.", { message: message }),
-              }
-              : {
-                title: t("Legacy migration failed"),
-                body: t("{message} The one-shot preview is no longer trusted; preview the legacy profile again before retrying.", { message: message }),
-              },
-          };
-          renderGlassOverlays();
+          // The failure is said in the dialog it was confirmed in while that one
+          // is open. Once it was dismissed the log says it, and nothing opens
+          // over what the user opened since.
+          if (state.glassDialog === dialog) {
+            state.glassDialog = {
+              kind: "info",
+              payload: committed
+                ? {
+                  title: t("Profile migrated; activation failed"),
+                  body: t("{message} Reload Profiles and review the selected staged profile; do not resubmit the consumed preview.", { message: message }),
+                }
+                : {
+                  title: t("Legacy migration failed"),
+                  body: t("{message} The one-shot preview is no longer trusted; preview the legacy profile again before retrying.", { message: message }),
+                },
+            };
+            renderGlassOverlays();
+          }
         }
         renderPage();
       });
@@ -93,10 +99,16 @@ export function createLegacyMigrationDialog({
         renderPage();
         return;
       }
+      // The preview is read before its dialog opens, so the dialog is asked
+      // for here and opens only while it is the one that was asked for last.
+      // A preview that is overtaken is not kept; the host forgets it after a
+      // while.
+      const latest = askForDialog(state);
       try {
         const preview = normalizeLegacyProfileMigrationPreview(
           await invoke("preview_legacy_cfw_profile_migration"),
         );
+        if (!latest()) return;
         state.legacyProfileMigrationPreview = preview.status === "ready" ? preview : null;
         if (preview.status === "ready") {
           state.glassDialog = { kind: "legacy-profile-migration", payload: preview, busy: false, error: null };
@@ -116,6 +128,7 @@ export function createLegacyMigrationDialog({
       } catch (error) {
         const message = errorText(error);
         appendLog("error", "migration", t("Legacy profile preview failed: {message}", { message: message }));
+        if (!latest()) return;
         state.glassDialog = { kind: "info", payload: { title: t("Legacy migration failed"), body: message } };
         renderGlassOverlays();
         return;

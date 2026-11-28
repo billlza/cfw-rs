@@ -8,15 +8,16 @@ mod desktop_endpoints;
 use cfw_singbox_config::{DEFAULT_CLASH_API_PORT, EngineSettings};
 use desktop_endpoints::{
     CANDIDATE_COUNT, EndpointCandidateCursor, EndpointRole, EndpointSelectionError,
-    select_configured_engine_settings,
+    observe_reserved_ports, select_configured_engine_settings,
 };
 
 #[test]
 fn desktop_selector_reads_native_settings_and_retains_bounded_retry_state() {
     let (selected, cursor) =
-        select_configured_engine_settings(EngineSettings::default(), None).unwrap();
+        select_configured_engine_settings(EngineSettings::default(), None, observe_reserved_ports)
+            .unwrap();
     let (unchanged, _) = cursor
-        .with_runtime_preferences(selected.clone(), None)
+        .with_runtime_preferences(selected.clone(), None, observe_reserved_ports)
         .unwrap();
     assert_eq!(unchanged, selected);
     let recovered = EndpointCandidateCursor::from_persisted(selected.clone()).unwrap();
@@ -39,4 +40,25 @@ fn desktop_selector_reads_native_settings_and_retains_bounded_retry_state() {
         }
         Err(error) => panic!("desktop retry observation failed: {error}"),
     }
+}
+
+/// The cursor says which port preference it was selected with: none for a
+/// port it chose itself, and the port it keeps for one that is named.
+#[test]
+fn desktop_cursor_says_which_port_preference_it_keeps() {
+    let (selected, automatic) =
+        select_configured_engine_settings(EngineSettings::default(), None, observe_reserved_ports)
+            .unwrap();
+    assert!(automatic.has_port_preference(None));
+    assert!(!automatic.has_port_preference(Some(selected.mixed_port)));
+    let (kept, named) = automatic
+        .with_runtime_preferences(
+            selected.clone(),
+            Some(selected.mixed_port),
+            observe_reserved_ports,
+        )
+        .unwrap();
+    assert_eq!(kept, selected);
+    assert!(named.has_port_preference(Some(selected.mixed_port)));
+    assert!(!named.has_port_preference(None));
 }

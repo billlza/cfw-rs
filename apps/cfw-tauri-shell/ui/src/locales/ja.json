@@ -979,6 +979,8 @@
   "Configured nodes": "設定済みのノード",
   "Finish migration before changing network settings": "ネットワーク設定を変更する前に移行を完了してください",
   "Network settings are loading": "ネットワーク設定を読み込み中です",
+  "The saved network settings are not the ones in use. Reload From Disk in Settings shows them, and Apply puts them in use.": "保存されているネットワーク設定は、現在使用中の設定ではありません。「設定」の「ディスクから再読み込み」で表示され、「適用」で使用されます。",
+  "These saved settings are not in use. Apply puts them in use; switches not shown here stay as they are. Connections may reconnect.": "保存済みの設定は未適用です。「適用」で使用され、ここにないスイッチは変わりません。接続は再接続される場合があります。",
   "The signed maintenance session is starting. This dashboard closes after the new window is ready and the current CFM engine is safely Off.": "署名済みのメンテナンスセッションを起動しています。新しいウインドウの準備ができ、現在の CFM コアが安全にオフになると、この画面は閉じます。",
   "Review and resume the previous legacy CFM operation in its signed maintenance session.": "署名済みのメンテナンスセッションで、前回の旧 CFM の処理を確認して再開してください。",
   "Import and select a replacement profile on Profiles before retiring older CFM components. Normal networking uses the System Proxy and TUN switches.": "旧 CFM のコンポーネントを廃止する前に、プロファイル画面で代わりのプロファイルをインポートして選択してください。通常の通信にはシステムプロキシと TUN のスイッチを使用します。",

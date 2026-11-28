@@ -300,3 +300,64 @@ fn apply_to_always_assigns_mainland_china_direct() {
         .unwrap();
     assert!(!applied.mainland_china_direct);
 }
+
+/// The endpoints are selected once the preferences are applied, away from the
+/// LAN listener: a port the preferences leave to the engine, and the port of
+/// the controller. Applied ahead of that, they keep the ports of the settings,
+/// which the listener may take; only a port they name is checked against the
+/// listener at once, as `apply_to` checks it against every endpoint the
+/// settings keep.
+#[test]
+fn applied_ahead_of_endpoint_selection_the_lan_listener_is_checked_only_beside_a_named_port() {
+    let engine = EngineSettings {
+        mixed_port: 8888,
+        ..EngineSettings::default()
+    };
+    let sharing = |port| RuntimePreferences {
+        allow_lan: true,
+        lan_proxy: Some(LanProxySettings {
+            port,
+            ..settings().lan_proxy.unwrap()
+        }),
+        ..RuntimePreferences::default()
+    };
+    let automatic = sharing(engine.mixed_port);
+    let applied = automatic
+        .apply_before_endpoint_selection(engine.clone())
+        .unwrap();
+    assert_eq!(applied.mixed_port, engine.mixed_port);
+    assert_eq!(applied.lan_proxy, automatic.lan_proxy);
+    assert!(applied.validate_listener_settings().is_err());
+    assert!(automatic.apply_to(engine.clone()).is_err());
+    for (named, port) in [(8888, 8888), (8890, 8890)] {
+        let error = RuntimePreferences {
+            preferred_mixed_port: Some(named),
+            ..sharing(port)
+        }
+        .apply_before_endpoint_selection(engine.clone())
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("must be distinct"),
+            "{named} beside {port}: {error}"
+        );
+    }
+    let beside_controller = RuntimePreferences {
+        preferred_mixed_port: Some(8890),
+        ..sharing(engine.controller_port)
+    };
+    let applied = beside_controller
+        .apply_before_endpoint_selection(engine.clone())
+        .expect("the port of the controller is selected later");
+    assert_eq!(applied.mixed_port, 8890);
+    assert_eq!(applied.lan_proxy, beside_controller.lan_proxy);
+    assert!(applied.validate_listener_settings().is_err());
+    let unconfigured = RuntimePreferences {
+        allow_lan: true,
+        ..RuntimePreferences::default()
+    };
+    assert!(
+        unconfigured
+            .apply_before_endpoint_selection(engine)
+            .is_err()
+    );
+}

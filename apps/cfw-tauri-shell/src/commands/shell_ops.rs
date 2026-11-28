@@ -23,6 +23,9 @@ use crate::settings_store;
 #[path = "network_diagnostics.rs"]
 mod diagnostics;
 use diagnostics::NetworkDiagnostics;
+#[path = "network_diagnostics_gate.rs"]
+mod diagnostics_gate;
+pub(crate) use diagnostics_gate::NetworkDiagnosticsGate;
 
 /// The operating system's own opener. It is referenced by absolute path and
 /// never through a shell or a PATH lookup.
@@ -166,49 +169,18 @@ pub(crate) fn parse_deep_links(urls: Vec<String>) -> Result<Vec<DeepLinkParseOut
     Ok(urls.into_iter().map(parse_one_deep_link).collect())
 }
 
-#[derive(Default)]
-pub(crate) struct NetworkDiagnosticsGate {
-    active: std::sync::Arc<std::sync::atomic::AtomicBool>,
-}
-
-struct NetworkDiagnosticsActivity(std::sync::Arc<std::sync::atomic::AtomicBool>);
-
-impl Drop for NetworkDiagnosticsActivity {
-    fn drop(&mut self) {
-        self.0.store(false, std::sync::atomic::Ordering::Release);
-    }
-}
-
+/// The network settings as the system reports them: an observation that began
+/// after this request did, one at a time (see [`NetworkDiagnosticsGate`]).
 #[tauri::command]
 pub(crate) async fn network_diagnostics(
     gate: tauri::State<'_, NetworkDiagnosticsGate>,
 ) -> Result<NetworkDiagnostics, String> {
-    if gate
-        .active
-        .compare_exchange(
-            false,
-            true,
-            std::sync::atomic::Ordering::AcqRel,
-            std::sync::atomic::Ordering::Acquire,
-        )
-        .is_err()
-    {
-        return Err("network diagnostics are already in progress".into());
-    }
-
-    let active = std::sync::Arc::clone(&gate.active);
-    let task = tauri::async_runtime::spawn_blocking(move || {
-        let _activity = NetworkDiagnosticsActivity(active);
-        diagnostics::collect()
-    });
-    match tokio::time::timeout(std::time::Duration::from_secs(5), task).await {
-        Ok(result) => result
-            .map_err(|error| format!("network diagnostics task failed: {error}"))?,
-        Err(_) => Err(
-            "network diagnostics timed out after 5 seconds; the isolated probe will not be duplicated while it is still running"
-                .into(),
-        ),
-    }
+    gate.observe(
+        diagnostics_gate::PROBE_WAIT,
+        diagnostics_gate::PROBE_LIMIT,
+        diagnostics::collect,
+    )
+    .await
 }
 
 fn parse_one_deep_link(raw: String) -> DeepLinkParseOutcome {

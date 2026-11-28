@@ -172,12 +172,14 @@ pub(super) fn stage_endpoint_rebind(
         .map_err(|error| error.to_string())?;
     let controller = EngineControllerAccess::resolve(settings)
         .map_err(|error| format!("replacement engine settings are unusable: {error}"))?;
+    let preference_writes = expected.preference_writes;
     Ok(StagedEndpointRebind {
         expected,
         replacement: EngineEndpointBinding {
             controller,
             cursor,
             active: None,
+            preference_writes,
         },
     })
 }

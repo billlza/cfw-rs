@@ -1,5 +1,6 @@
 import pageDefinitions from "./pages.json" with { type: "json" };
 import { IDLE_UPDATE_INSTALL } from "./update-install.js";
+import { trackPageVisits } from "./page-visits.js";
 
 // Dashboard pages. 0.3.5 received this list from `boot_payload`; the 0.4.0
 // payload carries product identity only, so the renderer imports the shared
@@ -109,7 +110,6 @@ export const state = {
   // projection could not be read, never a placeholder port or endpoint.
   projection: { mixedPort: null, controller: null, logLevel: null, error: null },
   networkDiagnostics: null,
-  activePage: "general",
   mode: "Rule",
   logLevel: null,
   runtimeSettings: null,
@@ -212,6 +212,9 @@ export const state = {
   providerActions: new Set(),
   providerBulkActions: new Set(),
 };
+// The app opens on General. `trackPageVisits` keeps the page shown and
+// counts its visits.
+trackPageVisits(state, "general");
 
 export const navInitials = {
   general: "G",

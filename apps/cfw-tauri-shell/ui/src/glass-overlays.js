@@ -7,6 +7,7 @@ import { escapeHtml, errorText, redactDiagnosticText } from "./text-format.js";
 import { t } from "./i18n.js";
 import { appendLog } from "./app-log.js";
 import { promptDialogFrame } from "./native-prompt-dialog.js";
+import { openOverlays } from "./dialog-requests.js";
 
 export function createGlassOverlays({
   nativeGeneralSwitches, nativePromptDialog, runtimeSettingsUI, automationSettingsUI, replaceOverlayMarkup,
@@ -45,7 +46,7 @@ export function createGlassOverlays({
   }
 
   function overlayOpen() {
-    return Boolean(state.profileContextMenu || state.glassDialog || state.runtimeSettingsDialog || state.automationDialog);
+    return openOverlays(state).length > 0;
   }
 
   function closeGlassOverlays() {

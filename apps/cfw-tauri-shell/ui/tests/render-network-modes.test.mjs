@@ -5,8 +5,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   OFF_ENGINE, WINDOWS_PLATFORM_DESIGN, appModule, dispatchDocumentEvent, interactiveElement,
-  invocationDetails, invoked, page, querySelectorAllElements, rejected, reloadButton, renderPage,
-  responses, runtime, setEngine, state,
+  invocationDetails, invoked, page, querySelectorAllElements, querySelectorElements, rejected,
+  reloadButton, renderPage, responses, runtime, setEngine, state,
 } from "./support/render-harness.mjs";
 
 test("unavailable network capabilities block every enable path but never trap an enabled request", async () => {
@@ -393,5 +393,43 @@ test("proxy modes stay discoverable while Off and emit no controller mutation", 
     responses.engine_snapshot = originalEngine;
     await setEngine(originalEngine);
     await reloadButton.click();
+  }
+});
+
+test("a failure to observe the network settings after System Proxy is pressed on Logs is drawn there", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const commands = ["set_system_proxy_enabled", "network_diagnostics"];
+  const originalResponses = new Map(commands.map((command) => [command, responses[command]]));
+  const presentResponses = new Set(commands.filter((command) => Object.hasOwn(responses, command)));
+  const original = { filter: state.logFilter, search: state.logSearch };
+  const stream = interactiveElement("section");
+  try {
+    await setEngine(OFF_ENGINE);
+    responses.set_system_proxy_enabled = {
+      snapshot: { desired_mode: "system_proxy", generation: 1, config_digest: null,
+        state: { state: "proxy_starting", generation: 1 } },
+      capabilities: { system_proxy: true, tunnel: true, tunnel_system_proxy: true },
+      unavailable_reason: null,
+    };
+    responses.network_diagnostics = () => { throw new Error("SystemConfiguration denied"); };
+    Object.assign(state, { logFilter: "all", logSearch: "" });
+    querySelectorElements.set(".log-stream", stream);
+    await renderPage("logs");
+    stream.innerHTML = "";
+    await dispatchDocumentEvent("keydown", { key: "p", metaKey: true, ctrlKey: false, altKey: false });
+    for (let attempt = 0; attempt < 50 && !stream.innerHTML.includes("Unable to inspect"); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.ok(invocationDetails.some((entry) => entry.command === "set_system_proxy_enabled"), "the shortcut pressed System Proxy");
+    assert.match(stream.innerHTML, /Unable to inspect network settings: SystemConfiguration denied/u,
+      "the failure, logged once the press had ended, is drawn on the open Logs page");
+  } finally {
+    querySelectorElements.delete(".log-stream");
+    for (const command of commands) {
+      if (presentResponses.has(command)) responses[command] = originalResponses.get(command);
+      else delete responses[command];
+    }
+    Object.assign(state, { logFilter: original.filter, logSearch: original.search });
+    await setEngine(originalEngine);
   }
 });

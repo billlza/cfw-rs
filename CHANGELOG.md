@@ -65,6 +65,85 @@
   core stopped or could not read its controller, although LAN sharing stayed
   saved and the General page named its address beside the switch. A click
   on it then opened the dialog that turns LAN sharing on, not off.
+- Keep a click on one network setting from changing another. The switches of
+  Settings › Engine and of the General page show what the core runs with, and
+  a click wrote all of the saved settings back with its one change. Once
+  anything else had changed `cfw-runtime-settings.json` while the app ran, a
+  file that was restored or removed for one, the two were no longer the same:
+  a page could show DNS leak protection on, and turning on Mainland China
+  direct then turned the protection off, unasked. The app now tells whether
+  the saved settings are the ones the core runs with. While they are not,
+  both pages hold these controls with the reason and keep showing what the
+  core runs with, Allow LAN and its address included, and a click made before
+  the page has read the changed file is refused and writes nothing, as is one
+  whose read ends once the page holds the controls. Reload
+  From Disk shows the saved settings in the network settings form, where
+  they are applied as they are or corrected first, and the controls are free
+  again once they are in use. The switches that the form does not show stay
+  as the core runs them.
+- Open the dialog that was asked for last when several are asked for while one
+  still reads. The network settings form, the shortcuts and network rules, the
+  review of unused credentials, the network interfaces, the configuration
+  preview, the migration of a legacy profile and the subscription URL of an
+  invalid profile read before they open, and each opened when its own answer
+  came: a late answer took the place of a dialog opened since, with what had
+  been entered in it, or opened beside it. A second press of the button of the
+  network settings form replaced the form that the first press had opened. A
+  dialog that opens at once, the DNS query for one, keeps its place while it
+  is open, and dismissing one no longer keeps the shortcuts and network rules
+  from opening once their read ends. Connection Info counts among the dialogs
+  opened since, also when its page shows it again, and a second press of the
+  review of unused credentials while
+  it reads joins that read. The app makes one observation of the network
+  settings at a time and refused a second meanwhile: the network interfaces
+  pressed while one was under way opened nothing, and Settings showed the
+  network settings unavailable when its own read came then. Each now waits for
+  the next observation, which every read asked for meanwhile shares, and one
+  that runs out of time keeps the next waiting until it ends, five seconds at
+  most, where the next was refused. Settings shows what the last one found,
+  and that the network settings could not be read when that one failed, also
+  when only the network interfaces asked for it. A change of System Proxy
+  observes them again once it has ended and does not wait for that
+  observation, so the switches of the modes, the native switches of General
+  on macOS among them, are free while it waits, where they were held until it
+  ended.
+- Keep what is typed in the DNS query, in the copy and the information of a
+  profile and in the dialog of credentials when the page is drawn again while
+  they are open. Each render of the page drew them again from what they were
+  opened with: what was being typed was lost when the core changed state, for
+  one, and the name and URL of a profile when their save failed. The secrets
+  typed in the dialog of credentials are put back each into the field of its
+  own reference, of the profile it was typed for, and are still kept out of
+  the state of the page; they are let go once the dialog is closed or another
+  takes its place. A read of the network interfaces or of the configuration
+  preview draws only the pages that show what it came to, and no longer takes
+  what was typed in the editor of a profile.
+- Show what an open dialog reads for itself only in that dialog, while it is
+  open. The answer of a DNS query, a check for updates and the failure of a
+  migration of a legacy profile opened their dialog again when they came once
+  it was closed, over what the user had opened since, and what the vault said
+  a profile was missing was shown in the dialog of credentials of another
+  profile opened meanwhile.
+- Join a check for updates that is asked for on the page while one is under
+  way, the automatic check at startup included. The app makes one check at a
+  time, and the About dialog asked for meanwhile said that its check had
+  failed, as one was already in progress, until the first one ended. The check
+  of the app menu is not one of those. An opening of the download page that
+  ends once a later check has begun no longer withdraws the update that check
+  found, whose download could not be opened then. One that ends once a check
+  of the app menu has ended checks again, and the app offers what that finds:
+  the app hears of that check only as it ends, and cannot tell whether the
+  opening took the update it found.
+- Start the core, and apply a change, with a LAN listener at a port the core
+  would take otherwise. A start checked the LAN listener against the first
+  ports the core tries, 7890 for the proxy and 9090 for the controller, before
+  it selected them, and refused saved settings that share at 9090, or at 7890
+  with an automatic proxy port, which a change saves while the core listens on
+  other ports. A change that leaves the proxy port to the core where the saved
+  settings named one was refused for the port it gives up, and one that names
+  another proxy port for the port of the controller, which it moves. Both now
+  select the ports clear of the LAN listener, and check the listener against
+  the ports the core will use.
 - Keep the macOS switches of the General page when a reason is long. A
   switch that is held hands its reason to the macOS switch as help text,
   and the app refused the switches when one of those texts was longer than

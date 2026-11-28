@@ -23,7 +23,13 @@ export function createGeneralView({ state, escapeHtml, engineStateLabel, engineT
   // What a row says beside a switch of the runtime settings follows the
   // switch, which is drawn off while its setting is not known.
   const knownSettings = settingsKnown ? settingsView : null;
-  const lan = knownSettings?.settings.allow_lan ? knownSettings.settings.lan_proxy : null;
+  // Whether the engine chose its port or keeps one is known from the saved
+  // settings, which say it of the engine only while they are known and in
+  // force. The row names no policy otherwise, and its button says why it is
+  // held where the note would have.
+  const portPolicy = !knownSettings?.in_force ? null
+    : knownSettings.settings.preferred_mixed_port === null ? t("Automatic port") : t("Configured port");
+  const lan = knownSettings?.effective.lan_proxy ?? null;
   const bind = !knownSettings ? t("unavailable") : lan ? `${lan.listen}:${lan.port}` : t("Off");
   const logLevel = settingsView?.effective.log_level ?? projection.logLevel ?? state.logLevel ?? "info";
   // The running engine names itself in its version string ("sing-box 1.14.4").
@@ -98,8 +104,8 @@ export function createGeneralView({ state, escapeHtml, engineStateLabel, engineT
             </span>
           </div>
           <div class="cfw-row-right">
-            <button type="button" class="cfw-text-button" data-action="open-runtime-settings"${settingsReason || state.engineMutationBusy ? " disabled" : ""}>${escapeHtml(listenAddress ?? t("unavailable"))}</button>
-            ${renderRowNote(settingsView?.settings.preferred_mixed_port === null ? t("Automatic port") : t("Configured port"), settingsReason ?? t("Click to change the local proxy port, log level, MTU or LAN sharing."))}
+            <button type="button" class="cfw-text-button" data-action="open-runtime-settings"${settingsReason || state.engineMutationBusy ? " disabled" : ""}${settingsReason && !portPolicy ? ` title="${escapeHtml(settingsReason)}"` : ""}>${escapeHtml(listenAddress ?? t("unavailable"))}</button>
+            ${portPolicy ? renderRowNote(portPolicy, settingsReason ?? t("Click to change the local proxy port, log level, MTU or LAN sharing.")) : ""}
 
           </div>
         </div>

@@ -1,43 +1,98 @@
 //! Runtime preference changes reuse the profile transaction actor: validate,
 //! replace, commit, and restore the previous runtime on failure.
-use cfw_application::{EngineControllerAccess, EngineCoordinatorError, ProfileChange};
+mod admission;
+mod registered;
+mod saved;
+
+use std::sync::{Arc, RwLock};
+
+use cfw_application::{EngineCoordinatorError, ProfileChange};
 use cfw_core::{RuntimeSettingsSnapshot, SettingsStore, SettingsStoreError};
-use cfw_engine_api::EngineMode;
-use cfw_profiles::{LockedCredentialProfileMutation, StoredProfile};
+use cfw_engine_api::{EngineMode, TunnelMtuLimits};
+use cfw_profiles::{LockedCredentialProfileMutation, ProfileRepository, StoredProfile};
 use cfw_singbox_config::{EngineSettings, RuntimePreferences, ValidatedSingBoxProfile};
 
 use super::{EngineEndpointBinding, ManagedEngine, record_endpoint_runtime};
 use crate::{
     commands::ManagedProfiles, platform_maintenance::PlatformMaintenanceGate, settings_store,
 };
+pub(super) use admission::admit_requested_change;
+pub(crate) use admission::{
+    AdmissibleChange, PreferencesBasis, RequestedChange, SAVED_PREFERENCES_NOT_IN_FORCE,
+    ipv6_dns_enabled_of,
+};
+#[cfg(test)]
+pub(super) use admission::{PROFILE_IPV6_DNS_CHANGED, admit_change};
+use admission::{SettledChange, settle_change};
+pub(crate) use registered::{RegisteredChange, admit_runtime_preferences_change};
+pub(crate) use saved::SavedRuntimePreferences;
+pub(super) use saved::read_saved_runtime_preferences;
 
-struct PreparedRuntimeSettings {
-    previous: RuntimeSettingsSnapshot<RuntimePreferences>,
-    expected: EngineEndpointBinding,
-    replacement: EngineEndpointBinding,
-    settings: EngineSettings,
-    guard: LockedCredentialProfileMutation,
-    selected: Option<StoredProfile>,
-    store: SettingsStore,
-    preferences: RuntimePreferences,
+/// What a change found where it had its turn among the mode changes, and
+/// what it commits in place of that. The guard keeps the selected profile as
+/// it was found until the commit.
+pub(super) struct PreparedRuntimeSettings {
+    pub(super) previous: RuntimeSettingsSnapshot<RuntimePreferences>,
+    pub(super) expected: EngineEndpointBinding,
+    pub(super) replacement: EngineEndpointBinding,
+    pub(super) settings: EngineSettings,
+    pub(super) guard: LockedCredentialProfileMutation,
+    pub(super) selected: Option<StoredProfile>,
+    pub(super) store: SettingsStore,
+    pub(super) preferences: RuntimePreferences,
+}
+
+/// Reads [`SavedRuntimePreferences`], and admits a change of them on the
+/// platform of the engine, with the TUN MTU that platform takes. It owns
+/// what it reads from, so the read of the file can leave the async runtime.
+pub(crate) struct SavedRuntimePreferencesReader {
+    endpoints: Arc<RwLock<EngineEndpointBinding>>,
+    tunnel_mtu: TunnelMtuLimits,
+}
+
+impl ManagedEngine {
+    pub(crate) fn saved_runtime_preferences(&self) -> SavedRuntimePreferencesReader {
+        SavedRuntimePreferencesReader {
+            endpoints: self.endpoints.clone(),
+            tunnel_mtu: self.coordinator.runtime_platform().tunnel_mtu_limits(),
+        }
+    }
+}
+
+impl SavedRuntimePreferencesReader {
+    pub(crate) fn read(&self, store: &SettingsStore) -> Result<SavedRuntimePreferences, String> {
+        read_saved_runtime_preferences(&self.endpoints, || store.runtime_settings())
+    }
+
+    /// [`admit_requested_change`] of what this reads, beside the profile that
+    /// `repository` has selected.
+    pub(crate) fn admit(
+        &self,
+        store: &SettingsStore,
+        repository: &ProfileRepository,
+        request: impl FnOnce(&SavedRuntimePreferences) -> Result<RequestedChange, String>,
+    ) -> Result<AdmissibleChange, String> {
+        admit_requested_change(
+            &self.endpoints,
+            store,
+            self.tunnel_mtu,
+            || repository.load_selected(),
+            request,
+        )
+    }
 }
 
 pub(crate) async fn change_runtime_preferences(
     engine: &ManagedEngine,
     retirement: &PlatformMaintenanceGate,
     profiles: &ManagedProfiles,
-    preferences: RuntimePreferences,
-    expected_revision: Option<String>,
+    change: RegisteredChange,
 ) -> Result<(), String> {
-    preferences.validate().map_err(|error| error.to_string())?;
-    engine
-        .coordinator
-        .runtime_platform()
-        .tunnel_mtu_limits()
-        .validate(preferences.tunnel_mtu)
-        .map_err(|error| error.to_string())?;
-    let (mode, lease) = engine
-        .begin_current_mode_change()
+    // The change was settled with the TUN MTU this platform takes when it was
+    // admitted, and is settled with it again where it has its turn.
+    let tunnel_mtu = engine.coordinator.runtime_platform().tunnel_mtu_limits();
+    let (mode, lease, change) = change
+        .begin(engine)
         .await
         .map_err(|error| error.to_string())?;
     let store = settings_store()?;
@@ -56,52 +111,14 @@ pub(crate) async fn change_runtime_preferences(
         .run_to_completion(async move {
             let preparation_endpoints = endpoints.clone();
             let prepared = tauri::async_runtime::spawn_blocking(move || {
-                let previous: RuntimeSettingsSnapshot<RuntimePreferences> = store
-                    .runtime_settings()
-                    .map_err(|error| error.to_string())?;
-                if previous.revision != expected_revision {
-                    return Err(SettingsStoreError::RuntimeSettingsChanged.to_string());
-                }
-                let expected = preparation_endpoints
-                    .read()
-                    .map_err(|_| "engine endpoint lock is poisoned")?
-                    .clone();
-                let settings = preferences
-                    .apply_to(expected.controller.settings().clone())
-                    .map_err(|error| error.to_string())?;
-                let (settings, cursor) = expected
-                    .cursor
-                    .with_runtime_preferences(settings, preferences.preferred_mixed_port)
-                    .map_err(|error| error.to_string())?;
-                let controller = EngineControllerAccess::resolve(settings.clone())
-                    .map_err(|error| error.to_string())?;
-                let guard = repository
-                    .begin_credential_profile_mutation()
-                    .map_err(|error| error.to_string())?;
-                // The settings view returned after the change derives effective DNS
-                // from the selected document, so an invalid selection is refused
-                // before anything is committed, even with the engine Off.
-                let selected = guard
-                    .selected_profile()
-                    .and_then(cfw_profiles::ProfileSelectionState::into_loaded)
-                    .map_err(|error| error.to_string())?;
-                if mode != EngineMode::Off && selected.is_none() {
-                    return Err("a running engine has no selected profile".into());
-                }
-                Ok(PreparedRuntimeSettings {
-                    previous,
-                    expected,
-                    replacement: EngineEndpointBinding {
-                        controller,
-                        cursor,
-                        active: None,
-                    },
-                    settings,
-                    guard,
-                    selected,
+                prepare_runtime_settings(
                     store,
-                    preferences,
-                })
+                    &preparation_endpoints,
+                    &repository,
+                    tunnel_mtu,
+                    mode,
+                    change,
+                )
             })
             .await
             .map_err(|error| format!("runtime settings preparation failed: {error}"))??;
@@ -179,8 +196,84 @@ pub(crate) async fn change_runtime_preferences(
     result
 }
 
+/// Prepares `change` where it has its turn in the queue of mode changes, for
+/// an engine in `mode` on a platform that takes the TUN MTU within
+/// `tunnel_mtu`: reads what it finds there and settles the change of
+/// that once more, which is what it commits. Nothing is written, and the
+/// profiles are held only for a change that nothing else refuses.
+pub(super) fn prepare_runtime_settings(
+    store: SettingsStore,
+    endpoints: &RwLock<EngineEndpointBinding>,
+    repository: &ProfileRepository,
+    tunnel_mtu: TunnelMtuLimits,
+    mode: EngineMode,
+    change: RequestedChange,
+) -> Result<PreparedRuntimeSettings, String> {
+    let previous: RuntimeSettingsSnapshot<RuntimePreferences> = store
+        .runtime_settings()
+        .map_err(|error| error.to_string())?;
+    let expected = endpoints
+        .read()
+        .map_err(|_| "engine endpoint lock is poisoned")?
+        .clone();
+    // The file and the binding were read inside this change's place in the
+    // queue of mode changes, and its commit requires both unchanged.
+    let found = expected.beside(previous);
+    // What the change is refused for without the profiles is asked before
+    // they are held. An update of a subscription may hold them, and a change
+    // that is refused for something else would keep the queue waiting for
+    // them, to be refused with the words of the repository.
+    let unprofiled = settle_change(&expected, &found, tunnel_mtu, change)?;
+    let guard = repository
+        .begin_credential_profile_mutation()
+        .map_err(|error| error.to_string())?;
+    // The settings view returned after the change derives effective DNS from
+    // the selected document, so an invalid selection is refused before
+    // anything is committed, even with the engine Off.
+    let selected = guard
+        .selected_profile()
+        .and_then(cfw_profiles::ProfileSelectionState::into_loaded)
+        .map_err(|error| error.to_string())?;
+    if mode != EngineMode::Off && selected.is_none() {
+        return Err("a running engine has no selected profile".into());
+    }
+    // The profile is the selected one, which the guard keeps as it is until
+    // the commit.
+    let direct;
+    let profile = match &selected {
+        Some(stored) => &stored.profile,
+        None => {
+            direct = ValidatedSingBoxProfile::direct();
+            &direct
+        }
+    };
+    let SettledChange {
+        preferences,
+        settings,
+        cursor,
+        controller,
+    } = unprofiled.with_profile(&found, profile)?;
+    // The commit counts its write, on the binding it replaces.
+    let preference_writes = expected.preference_writes;
+    Ok(PreparedRuntimeSettings {
+        previous: found.saved,
+        expected,
+        replacement: EngineEndpointBinding {
+            controller,
+            cursor,
+            active: None,
+            preference_writes,
+        },
+        settings,
+        guard,
+        selected,
+        store,
+        preferences,
+    })
+}
+
 pub(super) fn commit_runtime_settings(
-    endpoints: &std::sync::RwLock<EngineEndpointBinding>,
+    endpoints: &RwLock<EngineEndpointBinding>,
     expected: &EngineEndpointBinding,
     replacement: EngineEndpointBinding,
     store: &SettingsStore,
@@ -194,10 +287,16 @@ pub(super) fn commit_runtime_settings(
         return Err("runtime settings changed before the transaction committed".into());
     }
     crate::platform_maintenance::require_runtime_preferences_changeable(&store.paths().app_home)?;
+    // Counted whatever becomes of the write. One that fails may have been
+    // the file for a moment: its document is taken back when the directory
+    // could not be synced, and a reader may have read it in between.
+    let preference_writes = current.preference_writes.wrapping_add(1);
+    current.preference_writes = preference_writes;
     commit_preferences(store, previous, preferences)?;
     let active = current.active.clone();
     *current = EngineEndpointBinding {
         active,
+        preference_writes,
         ..replacement
     };
     Ok(())

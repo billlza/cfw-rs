@@ -1,6 +1,7 @@
 import { state } from "./state.js";
 import { t } from "./i18n.js";
 import { platformPresentation } from "./platform-presentation.js";
+import { savedSettingsHeldFor } from "./runtime-settings.js";
 
 /// Reasons the dashboard shows next to a control the 0.4.0 backend refuses.
 /// Each one states what the product does instead, so a disabled switch is never
@@ -32,12 +33,18 @@ export function networkSettingsKnown(dashboard) {
 /// values unknown is said first, a failed read before settings that were not
 /// read yet: the reason then stands beside a switch that is off whatever the
 /// setting is. In a migration's own window the migration owns the network and
-/// holds known values too, which their switches still show.
+/// holds known values too, which their switches still show. Settings that
+/// are saved but not the ones the engine runs with are held as well, and
+/// their switches show what it runs with: a change of one of them is written
+/// with the rest of the saved ones, and would apply each of those unasked.
+/// Where no change of them can be made at all, as while a legacy cleanup is
+/// pending, that is said in place of the advice to apply them.
 ///
 /// The window that starts a migration is not held. It closes once the
 /// migration's window is ready, and holding it takes more than this reason:
 /// an action already under way and the native switches would have to follow.
 export function networkSettingsReason(dashboard) {
   if (!networkSettingsKnown(dashboard)) return dashboard.runtimeSettingsError ?? t("Network settings are loading");
-  return dashboard.migrationHandoff ? t("Finish migration before changing network settings") : null;
+  if (dashboard.migrationHandoff) return t("Finish migration before changing network settings");
+  return dashboard.runtimeSettings.in_force ? null : savedSettingsHeldFor(dashboard.runtimeSettings);
 }

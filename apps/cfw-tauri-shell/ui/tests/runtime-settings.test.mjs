@@ -5,7 +5,8 @@ import { acceptNativeRuntimeDraft, createRuntimeSettingsUI, preferencesFromRunti
 
 const preferences = { preferred_mixed_port:null, log_level:"info", tunnel_mtu:1500, allow_lan:false, lan_proxy:null };
 const mtuLimits = { minimum: 1280, maximum: 1500 };
-const response = () => ({ tunnel_mtu_limits: { ...mtuLimits }, settings:structuredClone(preferences), revision:null, effective:{mixed_port:7890,log_level:"info",tunnel_mtu:1500,ipv6_dns_enabled:true,lan_proxy:null,mainland_china_direct:false,dns_leak_protection:false,webrtc_leak_protection:false,tcp_concurrency:true} });
+const IN_FORCE = Object.freeze({ in_force: true, saved_ipv6_dns_enabled: true });
+const response = () => ({ tunnel_mtu_limits: { ...mtuLimits }, settings:structuredClone(preferences), revision:null, in_force:true, saved_ipv6_dns_enabled:true, effective:{mixed_port:7890,log_level:"info",tunnel_mtu:1500,ipv6_dns_enabled:true,lan_proxy:null,mainland_china_direct:false,dns_leak_protection:false,webrtc_leak_protection:false,tcp_concurrency:true} });
 
 test("runtime MTU validation follows the backend bounds and preserves legacy values for editing", () => {
   const draft = runtimeDraft({ ...preferences, tunnel_mtu: 9000 });
@@ -138,6 +139,10 @@ test("runtime drafts require an explicit LAN scope and preserve automatic port s
   assert.throws(() => preferencesFromRuntimeDraft(draft, mtuLimits), /Proxy port/u);
   draft.port = "7898";
   assert.throws(() => preferencesFromRuntimeDraft(draft, mtuLimits), /must be different/u);
+  // A listener that is kept for later opens no port and may have that number.
+  draft.allow = false;
+  assert.deepEqual([preferencesFromRuntimeDraft(draft, mtuLimits).preferred_mixed_port, preferencesFromRuntimeDraft(draft, mtuLimits).lan_proxy.port], [7898, 7898]);
+  draft.allow = true;
   draft.port = "8890"; draft.mtu = "99999";
   assert.throws(() => preferencesFromRuntimeDraft(draft, mtuLimits), /MTU/u);
 });
@@ -177,7 +182,7 @@ test("unrelated settings preserve inherited DNS while an explicit IPv6 choice is
 test("IPv6 uses one settings transaction without a dialog and displays On only after success", async () => {
   const state = {toggles:{ipv6DNS:false},engineMutationBusy:false,migrationHandoff:false};
   let snapshot = response();
-  snapshot.effective.ipv6_dns_enabled = false;
+  snapshot.effective.ipv6_dns_enabled = snapshot.saved_ipv6_dns_enabled = false;
   snapshot.revision = "current-settings";
   const calls = [];
   let signalWrite;
@@ -189,14 +194,14 @@ test("IPv6 uses one settings transaction without a dialog and displays On only a
     assert.equal(command, "write_runtime_settings_snapshot");
     signalWrite();
     await new Promise((resolve) => { finishWrite = resolve; });
-    snapshot = { ...snapshot, settings:args.settings, revision:"updated-settings", effective:{...snapshot.effective,ipv6_dns_enabled:args.settings.ipv6_dns_enabled} };
+    snapshot = { ...snapshot, settings:args.settings, revision:"updated-settings", saved_ipv6_dns_enabled:args.settings.ipv6_dns_enabled, effective:{...snapshot.effective,ipv6_dns_enabled:args.settings.ipv6_dns_enabled} };
     return structuredClone(snapshot);
   },appendLog(){},renderPage(){},refreshRuntime(){},dismissOtherDialogs(){assert.fail("IPv6 does not open a dialog");}});
   const changing = ui.toggleIPv6DNS(true);
   await writeStarted;
   assert.equal(state.toggles.ipv6DNS, false);
   assert.equal(state.engineMutationBusy, true);
-  assert.deepEqual(calls[1].args, { settings:{...preferences,ipv6_dns_enabled:true}, revision:"current-settings" });
+  assert.deepEqual(calls[1].args, { settings:{...preferences,ipv6_dns_enabled:true}, revision:"current-settings", basis:{...IN_FORCE,saved_ipv6_dns_enabled:false} });
   finishWrite();
   assert.equal(await changing, true);
   assert.equal(state.toggles.ipv6DNS, true);
@@ -207,7 +212,7 @@ test("IPv6 uses one settings transaction without a dialog and displays On only a
 
 test("a background settings refresh does not cancel a pending IPv6 choice", async () => {
   const state = {toggles:{ipv6DNS:false},engineMutationBusy:false,migrationHandoff:false};
-  const before = response(); before.effective.ipv6_dns_enabled = false;
+  const before = response(); before.effective.ipv6_dns_enabled = before.saved_ipv6_dns_enabled = false;
   let resolveRead;
   const pendingRead = new Promise((resolve) => { resolveRead = resolve; });
   let reads = 0;
@@ -216,7 +221,7 @@ test("a background settings refresh does not cancel a pending IPv6 choice", asyn
     if (command === "read_runtime_settings_snapshot") return ++reads === 1 ? pendingRead : before;
     assert.equal(command, "write_runtime_settings_snapshot");
     writes++;
-    return { ...before, settings:args.settings, effective:{...before.effective,ipv6_dns_enabled:true} };
+    return { ...before, settings:args.settings, saved_ipv6_dns_enabled:true, effective:{...before.effective,ipv6_dns_enabled:true} };
   },appendLog(){},renderPage(){},refreshRuntime(){},dismissOtherDialogs(){}});
   const changing = ui.toggleIPv6DNS(true);
   await ui.load();
@@ -250,7 +255,7 @@ test("a background settings refresh does not keep the network settings from open
 test("a background settings refresh does not cancel turning LAN sharing off", async () => {
   const state = {toggles:{},engineMutationBusy:false,migrationHandoff:false};
   const lan = { listen: "0.0.0.0", port: 7898, allowed_source_cidrs: ["192.168.1.0/24"] };
-  const shared = { ...response(), settings: { ...preferences, allow_lan: true, lan_proxy: lan }, revision: "shared" };
+  const shared = { ...response(), settings: { ...preferences, allow_lan: true, lan_proxy: lan }, revision: "shared", effective: { ...response().effective, lan_proxy: lan } };
   let resolveRead;
   const pendingRead = new Promise((resolve) => { resolveRead = resolve; });
   let reads = 0;
@@ -259,13 +264,13 @@ test("a background settings refresh does not cancel turning LAN sharing off", as
     if (command === "read_runtime_settings_snapshot") return ++reads === 1 ? pendingRead : structuredClone(shared);
     assert.equal(command, "write_runtime_settings_snapshot");
     writes.push(args);
-    return { ...shared, settings: args.settings, revision: "unshared" };
+    return { ...shared, settings: args.settings, revision: "unshared", effective: response().effective };
   },appendLog(){},renderPage(){},refreshRuntime(){},dismissOtherDialogs(){assert.fail("turning sharing off opens no dialog");}});
   const changing = ui.toggleLAN(false);
   assert.equal(await ui.load(), true);
   resolveRead(structuredClone(shared));
   assert.equal(await changing, true);
-  assert.deepEqual(writes, [{ settings: { ...preferences, allow_lan: false, lan_proxy: lan }, revision: "shared" }]);
+  assert.deepEqual(writes, [{ settings: { ...preferences, allow_lan: false, lan_proxy: lan }, revision: "shared", basis: IN_FORCE }]);
   assert.equal(state.toggles.allowLan, false);
 });
 
@@ -296,7 +301,7 @@ test("a background settings refresh does not cancel a chosen log level", async (
     if (originalDocument === undefined) delete globalThis.document;
     else globalThis.document = originalDocument;
   }
-  assert.deepEqual(writes, [{ settings: { ...preferences, log_level: "debug" }, revision: null }]);
+  assert.deepEqual(writes, [{ settings: { ...preferences, log_level: "debug" }, revision: null, basis: IN_FORCE }]);
   assert.equal(state.logLevel, "debug");
   assert.deepEqual(messages.filter(([level]) => level === "error"), []);
 });
@@ -346,7 +351,7 @@ test("an action on the network settings reports a read that failed and changes n
 test("IPv6 refuses concurrent mutations and restores observed state after a rejected save", async () => {
   const state = {toggles:{},engineMutationBusy:true,migrationHandoff:false};
   const calls = [];
-  const snapshot = response(); snapshot.effective.ipv6_dns_enabled = false;
+  const snapshot = response(); snapshot.effective.ipv6_dns_enabled = snapshot.saved_ipv6_dns_enabled = false;
   const messages = [];
   const ui = createRuntimeSettingsUI({state,invoke:async (command) => {
     calls.push(command);
@@ -381,7 +386,7 @@ test("a rejected settings transaction retains the saved values and refreshes act
   await ui.open();
   const dialog = state.runtimeSettingsDialog;
   dialog.draft.level = "debug";
-  assert.equal(await ui.save(preferencesFromRuntimeDraft(dialog.draft, mtuLimits), "old-revision", dialog), false);
+  assert.equal(await ui.save(preferencesFromRuntimeDraft(dialog.draft, mtuLimits), "old-revision", true, dialog), false);
   assert.equal(submitted.revision, "old-revision");
   assert.equal(state.runtimeSettings.settings.log_level, "info");
   assert.equal(dialog.draft.level, "debug", "a failed save preserves the editable draft");
@@ -447,7 +452,7 @@ for (const sw of SWITCHES) {
     await writeStarted;
     assert.equal(state.toggles[sw.toggle], sw.resting);
     assert.equal(state.engineMutationBusy, true);
-    assert.deepEqual(calls[1].args, { settings:{...preferences,[sw.key]:!sw.resting}, revision:"current-settings" });
+    assert.deepEqual(calls[1].args, { settings:{...preferences,[sw.key]:!sw.resting}, revision:"current-settings", basis:IN_FORCE });
     finishWrite();
     assert.equal(await changing, true);
     assert.equal(state.toggles[sw.toggle], !sw.resting);
@@ -510,7 +515,7 @@ for (const sw of SWITCHES) {
         const dialog = state.runtimeSettingsDialog;
         if (path === "web dialog") {
           dialog.draft.level = "debug";
-          assert.equal(await ui.save(preferencesFromRuntimeDraft(dialog.draft, mtuLimits), dialog.revision, dialog), true);
+          assert.equal(await ui.save(preferencesFromRuntimeDraft(dialog.draft, mtuLimits), dialog.revision, dialog.basis, dialog), true);
         } else {
           ui.renderDialog();
           await callbacks.onSubmit(nativeDraft(dialog.draft, { level: "debug" }));
@@ -530,7 +535,7 @@ test("the native settings draft stays closed to the runtime switches", async () 
   assert.equal(draft.dnsLeakProtection, true);
   assert.equal(draft.webrtcLeakProtection, true);
   assert.equal(draft.tcpConcurrency, false);
-  assert.deepEqual(Object.keys(runtimeDialogFrame({ draft, mtuLimits, saving:false, error:null }).draft).sort(),
+  assert.deepEqual(Object.keys(runtimeDialogFrame({ draft, mtuLimits, basis:IN_FORCE, saving:false, error:null }).draft).sort(),
     ["allow", "ipv6DNS", "ipv6DNSEdited", "lanAddress", "lanPort", "lanSources", "level", "mtu", "port"]);
   for (const extra of [{ mainlandChinaDirect: false }, { dnsLeakProtection: false }, { webrtcLeakProtection: false }, { tcpConcurrency: true }]) {
     assert.throws(() => acceptNativeRuntimeDraft(draft, { ...nativeDraft(draft), ...extra }), /draft is invalid/u);
@@ -566,6 +571,11 @@ test("the component integration harness serves runtime snapshots the renderer ac
   const rebuilt = host.match(/case "write_runtime_settings_snapshot":[\s\S]*?snapshot\["effective"\] = \[([\s\S]*?)\n\s*\]/u)?.[1];
   assert.ok(rebuilt, "the harness write handler rebuilds the effective view");
   assert.deepEqual([...rebuilt.matchAll(/"([a-z0-9_]+)":/gu)].map((match) => match[1]).sort(), Object.keys(fixture.effective).sort());
+  // The listener the engine runs with is none while sharing is off, though
+  // the saved one is kept for later: the pages show the effective one.
+  assert.match(rebuilt, /"lan_proxy": \(settings\["allow_lan"\] as\? Bool == true \? settings\["lan_proxy"\] : nil\)\s*\?\? NSNull\(\),/u);
+  // What IPv6 DNS the saved settings give follows the write with them.
+  assert.match(host, /snapshot\["settings"\] = settings\n\s*snapshot\["saved_ipv6_dns_enabled"\] = settings\["ipv6_dns_enabled"\] \?\? true\n/u);
   // Both match the fields the Rust command returns.
   const command = await readFile(new URL("../../src/commands/runtime_settings.rs", import.meta.url), "utf8");
   const declared = command.match(/pub\(crate\) struct RuntimeSettingsEffective \{([\s\S]*?)\n\}/u)?.[1];

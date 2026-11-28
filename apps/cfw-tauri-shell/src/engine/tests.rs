@@ -233,11 +233,30 @@ fn endpoint_binding(settings: EngineSettings) -> EngineEndpointBinding {
         controller: EngineControllerAccess::resolve(settings.clone()).expect("controller"),
         cursor: EndpointCandidateCursor::from_persisted(settings).expect("cursor"),
         active: None,
+        preference_writes: 0,
     }
 }
 
 #[path = "tests/runtime_settings.rs"]
 mod runtime_settings;
+
+#[path = "tests/saved_preferences.rs"]
+mod saved_preferences;
+
+#[path = "tests/admitted_change.rs"]
+mod admitted_change;
+
+#[path = "tests/prepared_change.rs"]
+mod prepared_change;
+
+#[path = "tests/settled_change.rs"]
+mod settled_change;
+
+#[path = "tests/selected_profile.rs"]
+mod selected_profile;
+
+#[path = "tests/pressed_change.rs"]
+mod pressed_change;
 
 #[path = "tests/ticket_retry.rs"]
 mod ticket_retry;
